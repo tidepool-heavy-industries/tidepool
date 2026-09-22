@@ -705,6 +705,8 @@ pub(super) unsafe extern "C" fn prepared_encode_json(
             ids,
             ancestors: ValueAncestors::default(),
             steps: 0,
+            #[cfg(test)]
+            identity_comparisons: 0,
         }
         .write_value(input, RuntimeRep::LiftedRef, 0, &mut bytes)?;
         let payload = builder.bytes(&bytes)?;
@@ -808,6 +810,8 @@ struct JsonEncoder<'a, 'b> {
     ids: EncoderIds,
     ancestors: ValueAncestors,
     steps: usize,
+    #[cfg(test)]
+    identity_comparisons: usize,
 }
 
 enum MapAction {
@@ -825,9 +829,18 @@ struct ValueAncestors {
 }
 
 impl ValueAncestors {
-    fn enter(&mut self, core: &ConstructionCore, node: IntrinsicNode) -> Result<(), RuntimeError> {
+    fn enter(
+        &mut self,
+        core: &ConstructionCore,
+        node: IntrinsicNode,
+        #[cfg(test)] identity_comparisons: &mut usize,
+    ) -> Result<(), RuntimeError> {
         let identity = core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7;
         for ancestor in self.nodes.iter().rev() {
+            #[cfg(test)]
+            {
+                *identity_comparisons += 1;
+            }
             if core.word(*ancestor).map_err(|_| RuntimeError::BadPointer)? & !7 == identity {
                 return Err(RuntimeError::BlackHole);
             }
@@ -1109,7 +1122,12 @@ impl JsonEncoder<'_, '_> {
         if depth > MAX_JSON_VALUE_DEPTH {
             return Err(RuntimeError::StackOverflow.into());
         }
-        self.ancestors.enter(&self.builder.core, node)?;
+        self.ancestors.enter(
+            &self.builder.core,
+            node,
+            #[cfg(test)]
+            &mut self.identity_comparisons,
+        )?;
         let result = (|| {
             let (id, fields) = self.constructor(node, rep)?;
             let result = (|| {
@@ -1168,6 +1186,10 @@ impl JsonEncoder<'_, '_> {
         let cleanup = cycle
             .finish(&mut self.builder.core, self.builder.machine)
             .map_err(EncodeFailure::from);
+        #[cfg(test)]
+        {
+            self.identity_comparisons += cycle.metrics().identity_comparisons;
+        }
         match result {
             Err(error) => Err(error),
             Ok(value) => cleanup.map(|()| value),
@@ -1964,6 +1986,13 @@ impl<'a> IntrinsicBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine_state::MachineDisposition;
+    use crate::prepared_program::safepoint::NativeStackBounds;
+    use crate::prepared_program::{ActiveIntrinsicScope, DescriptorMeaning};
+    use tidepool_repr::execution_schema::{
+        link_program, testing, CheckedLayout, ConstructorDecl, FieldLayout, MachineImports,
+        StorageLayout,
+    };
 
     fn rooted_words(
         roots: &mut ConstructionCore,
@@ -1978,6 +2007,201 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    fn constructor(identity: &str, host_id: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
+        let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
+        ConstructorDecl {
+            identity: testing::identity("JsonTraversal", identity),
+            family: testing::identity("JsonTraversal", &format!("{identity}Family")),
+            host_id: DataConId(host_id),
+            result_rep: RuntimeRep::LiftedRef,
+            strict_fields: vec![false; fields.len()],
+            field_reps: fields,
+            layout: CheckedLayout {
+                fields: layout
+                    .fields()
+                    .iter()
+                    .map(|field| FieldLayout {
+                        rep: field.rep(),
+                        offset: field.offset(),
+                    })
+                    .collect(),
+                alignment: layout.alignment(),
+                payload_size: layout.payload_size(),
+                root_mask: layout
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    })
+                    .collect(),
+            },
+            tag: 1,
+            family_size: 1,
+        }
+    }
+
+    fn traversal_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.constructors.extend([
+            constructor("Array", 10_000, vec![RuntimeRep::LiftedRef]),
+            constructor("Null", 10_001, vec![]),
+            constructor(
+                "Cons",
+                10_002,
+                vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            ),
+            constructor("Nil", 10_003, vec![]),
+        ]);
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        CompiledProgram::compile(&linked).unwrap()
+    }
+
+    fn descriptor(program: &CompiledProgram, id: DataConId) -> Arc<ObjectDescriptor> {
+        program
+            .descriptor_registry
+            .values()
+            .find_map(|metadata| match &metadata.meaning {
+                DescriptorMeaning::Constructor(observation) if observation.identity == id => {
+                    Some(Arc::clone(&metadata.descriptor))
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn encode_null_array(
+        width: usize,
+        cancel_at: Option<usize>,
+        corrupt_head: bool,
+    ) -> (
+        Result<String, CallStatus>,
+        super::super::construction::RootOperationMetrics,
+        usize,
+        MachineDisposition,
+    ) {
+        let program = traversal_program();
+        let machine = MachineState::new();
+        machine.register_prepared_entries(
+            std::iter::empty(),
+            program
+                .thunk_entries
+                .iter()
+                .map(|&(header, function)| (header, program.pipeline.get_function_ptr(function))),
+        );
+        machine.set_stack_map_registry(&program.pipeline.stack_maps);
+        let statics = Arc::new(program.statics.instantiate().unwrap());
+        let mut static_catalog = tidepool_heap::static_region::StaticRegionCatalog::new();
+        static_catalog.insert(Arc::clone(&statics)).unwrap();
+        machine
+            .install_prepared_buffer_with_static_region(
+                vec![0_u64; 1 << 18],
+                program.descriptors.clone(),
+                Some(Arc::clone(&statics)),
+            )
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
+        vmctx.machine_state = (&machine as *const MachineState).cast_mut();
+        vmctx.prepared_stack_limit = NativeStackBounds::current()
+            .unwrap()
+            .limit_with_frame_reserve(program.pipeline.native_frame_maximum())
+            .unwrap();
+        let old_space = crate::old_space::OldSpace::new();
+        unsafe { machine.install_prepared_old_space(&old_space) };
+        let _active = ActiveIntrinsicScope::new(
+            &machine,
+            &program,
+            &static_catalog,
+            &program.descriptor_registry,
+        )
+        .unwrap();
+        let mut builder = unsafe { IntrinsicBuilder::active(&machine, &mut vmctx) }.unwrap();
+        let array = descriptor(&program, DataConId(10_000));
+        let null = descriptor(&program, DataConId(10_001));
+        let cons = descriptor(&program, DataConId(10_002));
+        let nil = descriptor(&program, DataConId(10_003));
+        let mut tail = builder.constructor(&nil, &[]).unwrap();
+        for _ in 0..width {
+            let value = builder.constructor(&null, &[]).unwrap();
+            tail = builder
+                .constructor(
+                    &cons,
+                    &[IntrinsicField::Node(value), IntrinsicField::Node(tail)],
+                )
+                .unwrap();
+        }
+        let list_word = builder.word(tail).unwrap();
+        let value = builder
+            .constructor(&array, &[IntrinsicField::Node(tail)])
+            .unwrap();
+        if corrupt_head {
+            let list = list_word & !7;
+            let stored = cons.payload().logical_to_stored()[0].unwrap() as usize;
+            let offset = cons.payload().fields()[stored].offset() as usize;
+            unsafe {
+                (list as *mut u8)
+                    .add(cons.payload_base() as usize + offset)
+                    .cast::<usize>()
+                    .write_unaligned(usize::MAX);
+            }
+        }
+        if let Some(count) = cancel_at {
+            machine.fail_prepared_at(
+                crate::prepared_control::PreparedSafepoint::Backedge,
+                count,
+                RuntimeError::Cancelled,
+            );
+        }
+        builder.core.reset_root_operation_metrics();
+        let mut output = Vec::new();
+        let mut encoder = JsonEncoder {
+            builder: &mut builder,
+            ids: EncoderIds {
+                object: DataConId(u64::MAX),
+                array: DataConId(10_000),
+                string: DataConId(u64::MAX),
+                number: DataConId(u64::MAX),
+                bool_: DataConId(u64::MAX),
+                null: DataConId(10_001),
+                bin: DataConId(u64::MAX),
+                tip: DataConId(u64::MAX),
+                true_: DataConId(u64::MAX),
+                false_: DataConId(u64::MAX),
+                cons: DataConId(10_002),
+                nil: DataConId(10_003),
+                scientific: DataConId(u64::MAX),
+                is: DataConId(u64::MAX),
+                ip: DataConId(u64::MAX),
+                in_: DataConId(u64::MAX),
+                text: DataConId(u64::MAX),
+                i_hash: DataConId(u64::MAX),
+            },
+            ancestors: ValueAncestors::default(),
+            steps: 0,
+            identity_comparisons: 0,
+        };
+        let result = encoder.write_value(value, RuntimeRep::LiftedRef, 0, &mut output);
+        let comparisons = encoder.identity_comparisons;
+        let metrics = encoder.builder.core.root_operation_metrics();
+        drop(encoder);
+        builder.release_node(value).unwrap();
+        assert_eq!(machine.rust_roots_len(), 0);
+        if corrupt_head {
+            let Err(EncodeFailure::Status(status)) = &result else {
+                panic!("corrupt managed child must return an integrity status")
+            };
+            let _ = super::super::run::runtime_error_for_status(&machine, *status);
+        }
+        let disposition = machine.disposition();
+        let output = match result {
+            Ok(()) => Ok(String::from_utf8(output).unwrap()),
+            Err(EncodeFailure::Status(status)) => Err(status),
+            Err(EncodeFailure::Runtime(error)) => panic!("unexpected encoder error: {error:?}"),
+        };
+        (output, metrics, comparisons, disposition)
     }
 
     #[test]
@@ -2030,15 +2254,16 @@ mod tests {
         let mut roots = ConstructionCore::new(1);
         let nodes = rooted_words(&mut roots, &machine, [0x1000, 0x2000, 0x1000]);
         let mut ancestors = ValueAncestors::default();
-        ancestors.enter(&roots, nodes[0]).unwrap();
-        ancestors.enter(&roots, nodes[1]).unwrap();
+        let mut comparisons = 0;
+        ancestors.enter(&roots, nodes[0], &mut comparisons).unwrap();
+        ancestors.enter(&roots, nodes[1], &mut comparisons).unwrap();
         assert!(matches!(
-            ancestors.enter(&roots, nodes[2]),
+            ancestors.enter(&roots, nodes[2], &mut comparisons),
             Err(RuntimeError::BlackHole)
         ));
         ancestors.leave(nodes[1]).unwrap();
         ancestors.leave(nodes[0]).unwrap();
-        ancestors.enter(&roots, nodes[2]).unwrap();
+        ancestors.enter(&roots, nodes[2], &mut comparisons).unwrap();
         ancestors.leave(nodes[2]).unwrap();
         for node in nodes {
             roots.consume(&machine, node).unwrap();
@@ -2120,6 +2345,43 @@ mod tests {
             }
             assert_eq!(machine.rust_roots_len(), 0);
         }
+    }
+
+    #[test]
+    fn encoder_root_and_identity_work_stays_bounded_across_wide_arrays() {
+        for width in [16_usize, 256, 4096] {
+            let (encoded, roots, identity_comparisons, disposition) =
+                encode_null_array(width, None, false);
+            let encoded = encoded.unwrap();
+            assert_eq!(disposition, MachineDisposition::Reusable);
+            assert_eq!(encoded.len(), 1 + width * 4 + width.saturating_sub(1) + 1);
+            assert!(encoded.starts_with('[') && encoded.ends_with(']'));
+            assert_eq!(identity_comparisons, width * 2);
+            assert_eq!(roots.registrations, roots.releases);
+            assert_eq!(roots.active, 1, "the caller's input root remains owned");
+            assert_eq!(roots.peak_active, 6, "width={width}");
+            let checkpoint_roots = 1 + (width + 1).ilog2() as usize;
+            assert_eq!(roots.registrations, 1 + 2 * width + checkpoint_roots);
+        }
+    }
+
+    #[test]
+    fn encoder_cancellation_releases_the_active_traversal_frontier() {
+        let (result, roots, _, disposition) = encode_null_array(4096, Some(2), false);
+        assert_eq!(result, Err(CallStatus::Cancelled));
+        assert_eq!(disposition, MachineDisposition::Reusable);
+        assert_eq!(roots.registrations, roots.releases);
+        assert_eq!(roots.active, 1, "only the caller-owned input remains");
+        assert_eq!(roots.peak_active, 6);
+    }
+
+    #[test]
+    fn malformed_managed_pointer_makes_the_encoder_machine_unavailable() {
+        let (result, roots, _, disposition) = encode_null_array(1, None, true);
+        assert_eq!(result, Err(CallStatus::IntegrityFailure));
+        assert_eq!(disposition, MachineDisposition::Unavailable);
+        assert_eq!(roots.registrations, roots.releases);
+        assert_eq!(roots.active, 1, "only the caller-owned input remains");
     }
 
     #[test]

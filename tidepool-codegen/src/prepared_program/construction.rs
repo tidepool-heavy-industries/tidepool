@@ -55,6 +55,8 @@ pub(super) const ROOT_CHUNK_WORDS: usize = 64;
 pub(super) struct RootOperationMetrics {
     pub(super) registrations: usize,
     pub(super) releases: usize,
+    pub(super) active: usize,
+    pub(super) peak_active: usize,
 }
 
 struct RootChunk {
@@ -186,6 +188,11 @@ impl ConstructionCore {
         #[cfg(test)]
         {
             self.root_operations.registrations += 1;
+            self.root_operations.active += 1;
+            self.root_operations.peak_active = self
+                .root_operations
+                .peak_active
+                .max(self.root_operations.active);
         }
         Ok(PreparedRoot {
             node: ConstructionNode {
@@ -258,6 +265,7 @@ impl ConstructionCore {
         #[cfg(test)]
         {
             self.root_operations.releases += 1;
+            self.root_operations.active -= 1;
         }
         Ok(())
     }
@@ -276,6 +284,16 @@ impl ConstructionCore {
     #[cfg(test)]
     pub(super) fn root_operation_metrics(&self) -> RootOperationMetrics {
         self.root_operations
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_root_operation_metrics(&mut self) {
+        let active = self.root_metrics().1;
+        self.root_operations = RootOperationMetrics {
+            active,
+            peak_active: active,
+            ..RootOperationMetrics::default()
+        };
     }
 
     #[cfg(test)]
