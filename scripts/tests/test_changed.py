@@ -37,13 +37,42 @@ class Selection(unittest.TestCase):
 
     def test_production_change_checks_transitive_consumers_but_runs_owner_once(self):
         selection, checks, _, _ = self.select("a/src/lib.rs", "a/src/other.rs")
-        self.assertEqual(checks, {"a", "b", "c"})
+        self.assertEqual(checks, {
+            "a": changed.CheckObligation.PRODUCTION,
+            "b": changed.CheckObligation.PRODUCTION,
+            "c": changed.CheckObligation.PRODUCTION,
+        })
         self.assertEqual(selection, {"a": {("lib", ""), ("test", "suite")}})
 
-    def test_test_support_change_checks_dev_consumers(self):
+    def test_test_support_change_checks_dev_consumers_without_propagating_them(self):
         self.packages[1]["dependencies"][0]["kind"] = "dev"
         _, checks, _, _ = self.select("a/src/lib.rs")
-        self.assertEqual(checks, {"a", "b", "c"})
+        self.assertEqual(checks, {
+            "a": changed.CheckObligation.PRODUCTION,
+            "b": changed.CheckObligation.DEVELOPMENT,
+        })
+
+    def test_production_path_upgrades_a_dev_obligation(self):
+        self.packages[1]["dependencies"][0]["kind"] = "dev"
+        self.packages[2]["dependencies"].append(dict(name="a", kind=None))
+        _, checks, _, _ = self.select("a/src/lib.rs")
+        self.assertEqual(checks["c"], changed.CheckObligation.PRODUCTION)
+
+    def test_build_dependencies_propagate_production_checks(self):
+        self.packages[1]["dependencies"][0]["kind"] = "build"
+        _, checks, _, _ = self.select("a/src/lib.rs")
+        self.assertEqual(checks, {
+            "a": changed.CheckObligation.PRODUCTION,
+            "b": changed.CheckObligation.PRODUCTION,
+            "c": changed.CheckObligation.PRODUCTION,
+        })
+
+    def test_compiler_daemon_tracks_execution_not_cargo_checks(self):
+        checks = changed.commands({}, {"a": changed.CheckObligation.PRODUCTION}, set())
+        self.assertFalse(changed.requires_compiler(checks, set()))
+        self.assertTrue(changed.requires_compiler(
+            [["scripts/battery.sh", "-p", "tidepool-runtime"]], set()))
+        self.assertTrue(changed.requires_compiler([], {"fixture:containers-contract"}))
 
     def test_suite_leaf_does_not_rebuild_unrelated_test_targets(self):
         source = self.root / "a/tests/suite.rs"
@@ -51,13 +80,13 @@ class Selection(unittest.TestCase):
         source.write_text('#[path = "cases/a.rs"]\nmod a;\n')
         selection, checks, _, _ = self.select("a/tests/cases/a.rs")
         self.assertEqual(selection, {"a": {("test", "suite")}})
-        self.assertEqual(checks, set())
+        self.assertEqual(checks, {})
 
     def test_shared_fixture_selects_all_owning_tests(self):
         selection, checks, actions, _ = self.select("a/tests/fixtures/input.hs")
         self.assertEqual(selection["a"], {("lib", ""), ("test", "suite")})
         self.assertIn("registration", actions)
-        self.assertFalse(checks)
+        self.assertEqual(checks, {})
 
     def test_shared_build_change_requires_explicit_integration(self):
         _, _, _, reasons = self.select("Cargo.lock", "scripts/battery.sh")
@@ -150,7 +179,7 @@ class Selection(unittest.TestCase):
         self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
 
     def test_documentation_only_is_explicit_empty_selection(self):
-        self.assertEqual(self.select("a/README.md", "docs/GUIDE.md"), ({}, set(), set(), set()))
+        self.assertEqual(self.select("a/README.md", "docs/GUIDE.md"), ({}, {}, set(), set()))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Choose affected Cargo targets from Cargo's workspace graph."""
 import argparse
+from enum import IntEnum
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,19 @@ EXTRACTOR_FREE = (
     "tidepool-bridge", "tidepool-bridge-derive", "tidepool-bridge-effects",
     "tidepool-codegen",
 )
+
+
+class CheckObligation(IntEnum):
+    """How a changed package reaches a Cargo consumer.
+
+    A normal or build dependency changes the consumer's production build and
+    therefore propagates to that consumer's own production users. A dev
+    dependency only changes that package's test/build obligation; it must be
+    checked, but must not turn its users into downstream production consumers.
+    """
+
+    DEVELOPMENT = 1
+    PRODUCTION = 2
 
 
 def cabal_components(root, changed):
@@ -131,24 +145,40 @@ def select(metadata, changed, root):
             actions.remove("fixtures")
             actions.update("fixture:" + cohort for cohort in cohorts)
 
-    downstream = set(production)
+    obligations = {name: CheckObligation.PRODUCTION for name in production}
     while True:
-        consumers = {name for name, p in packages.items() if any(
-            dep["name"] in downstream
-            for dep in p["dependencies"])}
-        expanded = downstream | consumers
-        if expanded == downstream:
+        updated = False
+        for name, package in packages.items():
+            required = None
+            for dependency in package["dependencies"]:
+                upstream = obligations.get(dependency["name"])
+                # A development obligation ends at its direct consumer. Its
+                # users consume that package's production surface, which did
+                # not change merely because a test-only dependency did.
+                if upstream is not CheckObligation.PRODUCTION:
+                    continue
+                # Cargo's metadata uses null for a normal dependency. A build
+                # dependency changes the consumer's production build too;
+                # dev-dependencies only require this consumer's all-target
+                # check and deliberately do not propagate further.
+                edge = (CheckObligation.DEVELOPMENT
+                        if dependency.get("kind") == "dev"
+                        else CheckObligation.PRODUCTION)
+                required = edge if required is None else max(required, edge)
+            if required is not None and required > obligations.get(name, 0):
+                obligations[name] = required
+                updated = True
+        if not updated:
             break
-        downstream = expanded
-    return selections, downstream, actions, reasons
+    return selections, obligations, actions, reasons
 
 
-def commands(selections, downstream, actions, components=None):
+def commands(selections, obligations, actions, components=None):
     result = []
     if selections:
         result.append(["cargo", "fmt", *[arg for name in sorted(selections) for arg in ("-p", name)], "--", "--check"])
-    if downstream:
-        result.append(["cargo", "check", "--all-targets", *[arg for name in sorted(downstream) for arg in ("-p", name)]])
+    if obligations:
+        result.append(["cargo", "check", "--all-targets", *[arg for name in sorted(obligations) for arg in ("-p", name)]])
     if "registration" in actions:
         result.append(["scripts/test-suite-check.sh"])
     if "haskell" in actions:
@@ -169,6 +199,13 @@ def commands(selections, downstream, actions, components=None):
     return result
 
 
+def requires_compiler(work, actions):
+    """Whether this selected work will actually invoke extractor-backed code."""
+    return bool(actions.intersection({"haskell", "fixtures"})
+                or any(action.startswith("fixture:") for action in actions)
+                or any(command[0] == "scripts/battery.sh" for command in work))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", nargs="?", default="HEAD")
@@ -185,18 +222,17 @@ def main():
     paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
     changed = sorted({p.decode() for p in paths if p})
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
-    selections, downstream, actions, reasons = select(metadata, changed, root)
+    selections, obligations, actions, reasons = select(metadata, changed, root)
     if reasons:
         print("Shared build or unmapped executable inputs changed; run just verify at integration:\n  " + "\n  ".join(sorted(reasons)), file=sys.stderr)
         return 2
-    work = commands(selections, downstream, actions, cabal_components(root, changed))
+    work = commands(selections, obligations, actions, cabal_components(root, changed))
     if not work:
         print("No executable checks selected (clean tree or documentation-only changes).")
         return 0
     # One owner keeps the daemon alive across every selected target. Nested
     # battery wrappers inherit its endpoint and do not retire it themselves.
-    needs_compiler = bool(downstream or actions.intersection({"haskell", "fixtures"}) or any(action.startswith("fixture:") for action in actions)) or any(
-        command[0] == "scripts/battery.sh" for command in work)
+    needs_compiler = requires_compiler(work, actions)
     if not args.list and not args.in_compiler_run and needs_compiler:
         return subprocess.run([
             "bash", "-c",
