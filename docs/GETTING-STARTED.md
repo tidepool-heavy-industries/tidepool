@@ -174,6 +174,8 @@ predecessor and successor identities, lost live state, and a bounded resource
 service snapshot with retained allocations and cleanup failures. It also
 samples run-directory storage through a bounded walk and reports when that
 sample was truncated.
+Runs created before hosted-operation ownership journals existed remain
+inspectable, but their conversations are not resumed automatically.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
 

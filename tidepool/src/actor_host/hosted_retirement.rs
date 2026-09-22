@@ -180,10 +180,11 @@ fn start_endpoint(
         #[cfg(test)]
         EndpointSource::Untrusted(endpoint) => endpoint.clone(),
     };
+    let require_operation_journal = expected_resume.is_some();
     let mut server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?
         .with_command_resources(resources);
     if let Some(path) = operation_journal {
-        server = server.with_operation_journal(path)?;
+        server = server.with_operation_journal(path, require_operation_journal)?;
     }
     let mut entry = slot.lock();
     if entry.is_some() {

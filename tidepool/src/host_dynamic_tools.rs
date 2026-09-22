@@ -31,6 +31,12 @@ use tokio::sync::Mutex;
 
 mod operation_journal;
 
+pub(crate) fn validate_operation_recovery(path: PathBuf) -> Result<(), String> {
+    operation_journal::OperationJournal::open_existing(path)
+        .map(|_| ())
+        .map_err(|error| format!("hosted-operation recovery evidence is unavailable: {error}"))
+}
+
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 const DESCRIPTION_LIMIT: usize = 1024;
@@ -255,9 +261,17 @@ impl HostDynamicToolService {
         })
     }
 
-    pub(crate) fn with_operation_journal(mut self, path: PathBuf) -> Result<Self, String> {
-        let journal = operation_journal::OperationJournal::open(path)
-            .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
+    pub(crate) fn with_operation_journal(
+        mut self,
+        path: PathBuf,
+        require_existing: bool,
+    ) -> Result<Self, String> {
+        let journal = if require_existing {
+            operation_journal::OperationJournal::open_existing(path)
+        } else {
+            operation_journal::OperationJournal::open(path)
+        }
+        .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
         self.state.boundaries = Arc::new(Mutex::new(
             journal
                 .settled_boundaries()
@@ -1836,7 +1850,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap()
-        .with_operation_journal(journal.clone())
+        .with_operation_journal(journal.clone(), false)
         .unwrap()
         .state;
         bind_test_thread(&first).await;
@@ -1851,7 +1865,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap()
-        .with_operation_journal(journal)
+        .with_operation_journal(journal, true)
         .unwrap()
         .state;
         bind_test_thread(&recovered).await;
@@ -1878,7 +1892,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap()
-        .with_operation_journal(journal_path)
+        .with_operation_journal(journal_path, true)
         .unwrap()
         .state;
         bind_test_thread(&recovered).await;

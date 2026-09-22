@@ -36,6 +36,7 @@ pub(super) struct BoundaryKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum Event {
+    Created,
     Accepted {
         key: OperationKey,
         request_digest: String,
@@ -74,13 +75,29 @@ pub(super) struct OperationJournal {
     next_sequence: u64,
     records: BTreeMap<OperationKey, Record>,
     settled_boundaries: BTreeSet<BoundaryKey>,
+    created: bool,
     uncertain: bool,
 }
 
 impl OperationJournal {
     pub(super) fn open(path: PathBuf) -> std::io::Result<Self> {
+        Self::open_with_mode(path, false)
+    }
+
+    pub(super) fn open_existing(path: PathBuf) -> std::io::Result<Self> {
+        Self::open_with_mode(path, true)
+    }
+
+    fn open_with_mode(path: PathBuf, require_existing: bool) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             tidepool_atomic_write::create_dir_all_durable(parent).map_err(std::io::Error::from)?;
+        }
+        let existed = path.try_exists()?;
+        if require_existing && !existed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "resumed conversation has no hosted-operation ownership journal",
+            ));
         }
         let (rows, torn) = tidepool_repr::jsonl::read_tail(
             &path,
@@ -97,6 +114,7 @@ impl OperationJournal {
             next_sequence: 1,
             records: BTreeMap::new(),
             settled_boundaries: BTreeSet::new(),
+            created: false,
             uncertain: false,
         };
         for row in rows {
@@ -108,6 +126,15 @@ impl OperationJournal {
             }
             journal.next_sequence += 1;
             journal.apply(row.event)?;
+        }
+        if existed && !journal.created {
+            return Err(std::io::Error::other(
+                "hosted-operation journal lacks a durable creation marker",
+            ));
+        }
+        if !existed {
+            journal.append(Event::Created)?;
+            journal.created = true;
         }
         Ok(journal)
     }
@@ -196,6 +223,14 @@ impl OperationJournal {
 
     fn apply(&mut self, event: Event) -> std::io::Result<()> {
         match event {
+            Event::Created => {
+                if self.created {
+                    return Err(std::io::Error::other(
+                        "duplicate hosted-operation journal creation marker",
+                    ));
+                }
+                self.created = true;
+            }
             Event::Accepted {
                 key,
                 request_digest,
@@ -339,5 +374,30 @@ mod tests {
             journal.settled_boundaries().collect::<Vec<_>>(),
             vec![&boundary]
         );
+    }
+
+    #[test]
+    fn resumed_conversation_requires_a_durable_creation_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.jsonl");
+        assert_eq!(
+            OperationJournal::open_existing(missing)
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        let empty = directory.path().join("empty.jsonl");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(OperationJournal::open_existing(empty)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("creation marker"));
+
+        let initialized = directory.path().join("initialized.jsonl");
+        drop(OperationJournal::open(initialized.clone()).unwrap());
+        OperationJournal::open_existing(initialized).unwrap();
     }
 }

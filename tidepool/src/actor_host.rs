@@ -509,6 +509,12 @@ pub struct ActorHostConfig {
 
 const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
 
+fn hosted_operation_journal(run_root: &Path, actor: tidepool_actor::ActorId) -> PathBuf {
+    run_root
+        .join("hosted-operations")
+        .join(format!("{}.v1.jsonl", actor.0))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessRecoveryRecord {
@@ -717,6 +723,7 @@ fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::erro
 
 fn durable_root_identity(
     records: &[tidepool_actor::DurableActorRecord],
+    accepted_source: Option<&str>,
 ) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
     records
         .iter()
@@ -727,11 +734,27 @@ fn durable_root_identity(
                 && record.admission.context_parent.is_none()
         })
         .max_by_key(|record| record.admission.actor.incarnation)
+        .filter(|record| {
+            record.terminal.is_none()
+                && record.application.as_ref().is_some_and(|application| {
+                    application.conversation.is_some()
+                        && application.accepted_source.as_deref() == accepted_source
+                })
+        })
         .map(|record| {
             next_actor_incarnation(record.admission.actor)
                 .map(|successor| (record.admission.actor, successor))
         })
         .transpose()
+}
+
+fn contains_durable_root_admission(records: &[tidepool_actor::DurableActorRecord]) -> bool {
+    records.iter().any(|record| {
+        record.admission.role == "root"
+            && record.admission.creator.is_none()
+            && record.admission.supervisor_parent.is_none()
+            && record.admission.context_parent.is_none()
+    })
 }
 
 fn latest_recoverable_actor_records(
@@ -823,6 +846,13 @@ async fn recover_prior_actors(
             {
                 tracing::warn!(actor = %durable.actor,
                     "durable actor resources are not independently recoverable");
+                continue;
+            }
+            if let Err(error) = crate::host_dynamic_tools::validate_operation_recovery(
+                hosted_operation_journal(run_root, durable.actor.id),
+            ) {
+                tracing::warn!(actor = %durable.actor, %error,
+                    "durable actor operation ownership cannot be verified");
                 continue;
             }
             let thread = match read_interactive_binding(&application.binding_path).await {
@@ -2004,8 +2034,24 @@ pub(crate) async fn run(
     }
     forest.track_resource_release();
     let forest = Arc::new(forest);
-    let recovered_root = durable_root_identity(&prior_actor_records)?;
+    let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
+    if contains_durable_root_admission(&prior_actor_records) && recovered_root.is_none() {
+        return Err(runtime_error(
+            "host recovery cannot adopt a root without complete durable actor, source, and conversation evidence",
+        ));
+    }
     let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
+    if let Some(predecessor) = recovered_root_predecessor {
+        crate::host_dynamic_tools::validate_operation_recovery(hosted_operation_journal(
+            &run_root,
+            predecessor.id,
+        ))
+        .map_err(|error| {
+            runtime_error(format!(
+                "root actor {predecessor} cannot be recovered without hosted-operation evidence: {error}"
+            ))
+        })?;
+    }
     forest
         .fence_recovery_identities(
             prior_actor_records
@@ -4493,9 +4539,7 @@ async fn launch_prepared_interactive_application(
                 format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0),
             )
         }),
-        run_root
-            .join("hosted-operations")
-            .join(format!("{}.v1.jsonl", actor_identity.id.0)),
+        hosted_operation_journal(&run_root, actor_identity.id),
     )
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
@@ -7037,7 +7081,14 @@ mod tests {
                 launch_worktrees: Vec::new(),
                 source_layer: Vec::new(),
             },
-            application: None,
+            application: Some(tidepool_actor::DurableActorApplication {
+                binding_path: std::path::PathBuf::from(format!(
+                    "binding-{}-{}.json",
+                    actor.id.0, actor.incarnation.0
+                )),
+                conversation: Some(format!("conversation-{}", actor.id.0)),
+                accepted_source: Some("source-revision".into()),
+            }),
             terminal: None,
         }
     }
@@ -7116,7 +7167,7 @@ mod tests {
         };
         let records = vec![durable_root(first), durable_root(second)];
         assert_eq!(
-            durable_root_identity(&records).unwrap(),
+            durable_root_identity(&records, Some("source-revision")).unwrap(),
             Some((
                 second,
                 ActorRef {
@@ -7124,6 +7175,51 @@ mod tests {
                     incarnation: tidepool_actor::Incarnation(3),
                 }
             ))
+        );
+    }
+
+    #[test]
+    fn root_recovery_does_not_fall_back_past_incomplete_latest_evidence() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let mut latest = durable_root(second);
+        latest.application.as_mut().unwrap().accepted_source = Some("different-source".into());
+
+        assert_eq!(
+            durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let mut latest = durable_root(second);
+        latest.terminal = Some(tidepool_actor::DurableActorTerminal {
+            kind: tidepool_actor::ActorExitKind::Completed,
+            summary: "retired".into(),
+        });
+
+        assert_eq!(
+            durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn crash_before_root_admission_has_no_identity_to_adopt() {
+        let records = Vec::new();
+        assert!(!contains_durable_root_admission(&records));
+        assert_eq!(
+            durable_root_identity(&records, Some("source-revision")).unwrap(),
+            None
         );
     }
 
