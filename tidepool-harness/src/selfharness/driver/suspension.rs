@@ -234,13 +234,9 @@ impl SelfHarnessDriver {
                     let submission = self
                         .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
                         .await?;
-                    let answer = engine::json_answer_to_value(&submission, &compiled.table)
-                        .map_err(|e| {
-                            DriverError::Session(format!("outer askUser submission decode: {e}"))
-                        })?;
                     let sid = self.outer_sid()?;
                     self.agent
-                        .with_session(sid, |s| s.resume(hole, answer))
+                        .with_session(sid, |s| s.resume(hole, submission))
                         .map_err(|e| DriverError::Session(e.to_string()))?
                         .map_err(|e| {
                             DriverError::Session(format!("outer askUser resume failed: {e}"))
@@ -248,13 +244,9 @@ impl SelfHarnessDriver {
                 }
                 SuspensionRouting::Note { text } => {
                     self.announce_note(FormSource::OuterLoop, &text);
-                    use tidepool_bridge::ToHaskell;
-                    let answer = ().to_value(&compiled.table).map_err(|e| {
-                        DriverError::Session(format!("bridge unit note-answer to Value: {e}"))
-                    })?;
                     let sid = self.outer_sid()?;
                     self.agent
-                        .with_session(sid, |s| s.resume(hole, answer))
+                        .with_session(sid, |s| s.resume(hole, ()))
                         .map_err(|e| DriverError::Session(e.to_string()))?
                         .map_err(|e| {
                             DriverError::Session(format!("outer note resume failed: {e}"))

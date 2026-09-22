@@ -1,86 +1,10 @@
-//! Filesystem caching for compiled artifacts.
+//! One recipe-keyed, atomically published artifact bundle per compilation.
 
-use std::ffi::{OsStr, OsString};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// A content-addressed cache key: the blake3 hex digest of a compilation
-/// request. A newtype so a raw string can't be mistaken for a computed key at
-/// the [`cache_load`]/[`cache_store`] boundary (the digest also names the
-/// on-disk artifact files).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CacheKey(String);
-
-impl std::fmt::Display for CacheKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Test-only convenience for a cacheable, unsalted eval request.
-#[cfg(test)]
-pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> CacheKey {
-    let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
-    eval_cache_key(source, target, &include, None, b"test-endpoint")
-        .expect("test fixture must be cacheable")
-}
-
-/// Test-only salted convenience for cacheable requests.
-#[cfg(test)]
-fn cache_key_salted(source: &str, target: &str, include: &[&Path], salt: Option<&str>) -> CacheKey {
-    let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
-    eval_cache_key(source, target, &include, salt, b"test-endpoint")
-        .expect("test fixture must be cacheable")
-}
-
-/// The single production eval-cache decision. Returns `None` when the target
-/// or any dependency uses CPP side inputs the dependency manifest cannot key;
-/// callers must use this one decision for both lookup and eventual store.
-///
-/// Sessions pass `Some("session:<id>:gen:<g>")` so two sessions' identical-text
-/// `Lib.G<g>` modules never share an entry and a generation bump invalidates
-/// correctly. `None` preserves the existing unsalted digest bytes.
-pub(crate) fn eval_cache_key(
-    source: &str,
-    target: &str,
-    include: &[PathBuf],
-    salt: Option<&str>,
-    endpoint_identity: &[u8],
-) -> Option<CacheKey> {
-    if source_has_untracked_cpp_inputs(source) {
-        return None;
-    }
-    let mut hasher = blake3::Hasher::new();
-    // Length-prefixed framing: NUL separators alone let a NUL embedded in one
-    // field shift bytes across the boundary (key("a\0b","c") == key("a","b\0c")),
-    // serving the wrong artifact.
-    frame(&mut hasher, source.as_bytes());
-    frame(&mut hasher, target.as_bytes());
-    // Salt is framed only when present, so a None call hashes identically to the
-    // pre-salt key (no mass cache invalidation for ordinary evals).
-    if let Some(s) = salt {
-        frame(&mut hasher, b"session-salt");
-        frame(&mut hasher, s.as_bytes());
-    }
-
-    // Fingerprint include directories in their ORIGINAL order: GHC receives
-    // `--include` flags in argument order, and search-path order decides
-    // module shadowing — [A,B] and [B,A] are different compilations and must
-    // not share a key.
-    frame(&mut hasher, &(include.len() as u64).to_le_bytes());
-    for root in include {
-        frame(&mut hasher, root.as_os_str().as_encoded_bytes());
-        let manifest = dependency_source_manifest(root);
-        if !manifest.cacheable {
-            return None;
-        }
-        manifest.fingerprint(root, &mut hasher);
-    }
-
-    frame(&mut hasher, endpoint_identity);
-
-    Some(CacheKey(hasher.finalize().to_hex().to_string()))
-}
 
 /// Hash a length-prefixed field: unambiguous framing regardless of content.
 fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -88,10 +12,9 @@ fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-/// One read of each dependency supplies both cacheability and content identity.
+/// Source snapshot identity, independent from compiler dependency selection.
 struct DependencyManifest {
     files: Vec<(PathBuf, Vec<u8>)>,
-    cacheable: bool,
 }
 
 impl DependencyManifest {
@@ -115,17 +38,14 @@ impl DependencyManifest {
 /// descending breaks the cycle (and, as a side effect, a diamond of two
 /// symlinks to the same real directory is only hashed once).
 fn dependency_source_manifest(root: &Path) -> DependencyManifest {
-    let mut manifest = DependencyManifest {
-        files: Vec::new(),
-        cacheable: true,
-    };
+    let mut manifest = DependencyManifest { files: Vec::new() };
     let mut visited = std::collections::HashSet::new();
     collect_dependency_sources(root, root, &mut manifest, &mut visited);
     manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
     manifest
 }
 
-/// The same per-file content manifest a compiled artifact is keyed by, as
+/// The per-file content manifest used for source revision identities, as
 /// readable data: each Haskell home-module source under `root`, by its path
 /// RELATIVE to `root`, paired with the hex digest of its bytes. Unreadable
 /// files carry an empty digest, exactly as they contribute an absent-marker to
@@ -151,7 +71,7 @@ pub fn source_root_manifest(root: &Path) -> Vec<(PathBuf, String)> {
 }
 
 /// One content identity for an ORDERED set of source roots, framed exactly as
-/// [`invocation_key`] frames its `--include` list: root count, then each root's
+/// root count, then each root's
 /// relative-path manifest in argument order. `domain` separates one caller's
 /// identities from another's.
 ///
@@ -164,7 +84,7 @@ pub fn source_roots_identity(domain: &[u8], roots: &[PathBuf]) -> String {
     frame(&mut hasher, domain);
     frame(&mut hasher, &(roots.len() as u64).to_le_bytes());
     for root in roots {
-        fingerprint_dir_relative(root, &mut hasher);
+        dependency_source_manifest(root).fingerprint(Path::new(""), &mut hasher);
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -207,16 +127,11 @@ fn collect_dependency_sources(
         // `fs::read` follows source symlinks, matching what GHC compiles.
         let digest = match fs::read(&path) {
             Ok(bytes) => {
-                out.cacheable &= std::str::from_utf8(&bytes)
-                    .is_ok_and(|source| !source_has_untracked_cpp_inputs(source));
                 let mut digest = vec![1];
                 digest.extend_from_slice(blake3::hash(&bytes).as_bytes());
                 digest
             }
-            Err(_) => {
-                out.cacheable = false;
-                vec![0]
-            }
+            Err(_) => vec![0],
         };
         out.files.push((rel, digest));
     }
@@ -231,150 +146,119 @@ fn is_haskell_dependency_source(path: &Path) -> bool {
         .any(|suffix| name.as_encoded_bytes().ends_with(suffix))
 }
 
-/// CPP can read arbitrary files named by `#include` (including paths outside
-/// every GHC import root), so directory manifests cannot honestly key it.
-/// Any preprocessor directive makes the compile cold. This deliberately
-/// favors false misses over false hits; ordinary Haskell operators do not
-/// begin a line with `#` in the accepted dialect.
-fn source_has_untracked_cpp_inputs(source: &str) -> bool {
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with('#')
-            || line
-                .strip_prefix('>')
-                .is_some_and(|bird| bird.trim_start().starts_with('#'))
-    })
+/// The worker's consumed source and import-resolution evidence. Completeness
+/// for cache reuse is independent from completeness for test selection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyEvidence {
+    pub version: u32,
+    pub cache_safe: bool,
+    pub selection_complete: bool,
+    pub sources: Vec<SourceEvidence>,
+    pub resolutions: Vec<ResolutionEvidence>,
+    pub packages: Vec<String>,
 }
 
-/// Sentinel payload: blake3(meta_bytes) || blake3(asks_bytes) ||
-/// blake3(prepared_bytes), 96 raw bytes.
-/// Anything else (missing, empty, wrong length — an old-format entry from
-/// before this checksum existed) is treated as absent, forcing a MISS.
-const SENTINEL_LEN: usize = 96;
-
-/// Cached extractor outputs in `(metadata, asks, prepared)` order.
-type CachedArtifactParts = (Vec<u8>, Vec<u8>, Vec<u8>);
-
-/// Attempts to load metadata, typed sites, and the prepared program.
-/// Beyond mere sentinel existence, the sentinel's three blake3
-/// digests are recomputed over the loaded bytes and compared: a bit-flip that
-/// still decodes as valid CBOR would otherwise be served as a different
-/// program, so a checksum mismatch falls through to a MISS/recompile instead.
-pub(crate) fn cache_load(key: &CacheKey) -> Option<CachedArtifactParts> {
-    let dir = crate::paths::compile_cache_dir();
-    let sentinel_path = dir.join(format!("{}.ok", key));
-    let sentinel = fs::read(&sentinel_path).ok()?;
-    if sentinel.len() != SENTINEL_LEN {
-        return None;
-    }
-
-    let meta_path = dir.join(format!("{}.meta.cbor", key));
-    let asks_path = dir.join(format!("{}.asks.json", key));
-    let prepared_path = dir.join(format!("{}.prepared.cbor", key));
-
-    let meta = fs::read(&meta_path).ok()?;
-    let asks = fs::read(&asks_path).ok()?;
-    let prepared = fs::read(&prepared_path).ok()?;
-
-    if blake3::hash(&meta).as_bytes() != &sentinel[0..32]
-        || blake3::hash(&asks).as_bytes() != &sentinel[32..64]
-        || blake3::hash(&prepared).as_bytes() != &sentinel[64..96]
-    {
-        return None;
-    }
-
-    Some((meta, asks, prepared))
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEvidence {
+    pub path: PathBuf,
+    pub sha256: String,
 }
 
-/// Stores the compilation results in the cache. Each file is replaced atomically
-/// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
-/// complete — `cache_load` checks for this before reading. The sentinel body is
-/// blake3(meta_bytes) || blake3(asks_bytes) || blake3(prepared_bytes), letting
-/// `cache_load` detect a bit-flip that still decodes as plausible data.
-pub(crate) fn cache_store(
-    key: &CacheKey,
-    meta_bytes: &[u8],
-    asks_bytes: &[u8],
-    prepared_bytes: &[u8],
-) {
-    let dir = crate::paths::compile_cache_dir();
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-
-    use std::io::Write;
-
-    let Ok(mut tmp_meta) = tempfile::NamedTempFile::new_in(&dir) else {
-        return;
-    };
-    let Ok(mut tmp_asks) = tempfile::NamedTempFile::new_in(&dir) else {
-        return;
-    };
-    let Ok(mut tmp_prepared) = tempfile::NamedTempFile::new_in(&dir) else {
-        return;
-    };
-
-    if tmp_meta.write_all(meta_bytes).is_err() {
-        return;
-    }
-    if tmp_asks.write_all(asks_bytes).is_err() {
-        return;
-    }
-    if tmp_prepared.write_all(prepared_bytes).is_err() {
-        return;
-    }
-
-    let final_meta = dir.join(format!("{}.meta.cbor", key));
-    let final_asks = dir.join(format!("{}.asks.json", key));
-    let final_prepared = dir.join(format!("{}.prepared.cbor", key));
-    let sentinel = dir.join(format!("{}.ok", key));
-
-    // Remove sentinel first — marks the entry as incomplete during update.
-    let _ = fs::remove_file(&sentinel);
-
-    if tmp_meta.persist(&final_meta).is_err() {
-        return;
-    }
-    if tmp_asks.persist(&final_asks).is_err() {
-        return;
-    }
-    if tmp_prepared.persist(&final_prepared).is_err() {
-        return;
-    }
-
-    // Sentinel written last — entry is only valid when this exists. Its body
-    // binds the checksums, not just completeness.
-    let mut checksum = [0u8; SENTINEL_LEN];
-    checksum[0..32].copy_from_slice(blake3::hash(meta_bytes).as_bytes());
-    checksum[32..64].copy_from_slice(blake3::hash(asks_bytes).as_bytes());
-    checksum[64..96].copy_from_slice(blake3::hash(prepared_bytes).as_bytes());
-    let _ = fs::write(&sentinel, checksum);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionEvidence {
+    pub module: String,
+    pub selected: Option<PathBuf>,
+    pub candidates: Vec<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
-// Invocation-keyed artifact sets
-//
-// The second consumer of this module. `eval_cache_key` above memoizes ONE
-// eval compile as a fixed artifact set keyed by (source, target,
-// includes-by-path, binary). `crate::artifacts::compile_targets` needs a
-// memo for a whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
-// (per-target prepared programs, one shared meta, an asks sidecar whose filename
-// depends on the target count), and a key that survives the same content
-// appearing under a different absolute path. Rather than fork the fingerprint/
-// staleness discipline solved above, that shape is expressed here, over the
-// same primitives.
-// ---------------------------------------------------------------------------
+const GENERATED_SOURCE: &str = "@generated-source";
 
-/// Leads an [`InvocationKey`]'s hash, so an invocation key can never collide
-/// with an eval [`CacheKey`] — the two name DIFFERENT artifact sets under the
-/// same `<key>.*` filenames, and a collision would serve one caller the
-/// other's bytes. The eval key's own bytes are untouched by this module: no
-/// mass invalidation of anyone's `~/.cache/tidepool`.
-const INVOCATION_NAMESPACE: &[u8] = b"tidepool-invocation-artifacts-v1";
+impl DependencyEvidence {
+    /// Replace the request-local path only after checking the bytes the worker
+    /// says it consumed. Authored dependencies retain their path identity.
+    pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
+        let mut evidence: Self = serde_json::from_slice(bytes).ok()?;
+        let input = fs::canonicalize(input).ok()?;
+        for item in &mut evidence.sources {
+            if fs::canonicalize(&item.path).ok().as_ref() == Some(&input) {
+                item.path = GENERATED_SOURCE.into();
+            }
+        }
+        evidence.valid(source).then_some(evidence)
+    }
 
-/// A content-addressed key for a COMPLETE `tidepool-extract` invocation.
-/// A newtype for the same reason [`CacheKey`] is one — it also names the
-/// on-disk artifact files.
+    /// Validate contents and negative witnesses. IO errors are misses, including
+    /// inaccessible candidates: absence must be known, not guessed.
+    pub fn valid(&self, source: &str) -> bool {
+        if self.version != 1 || !self.cache_safe || self.sources.is_empty() {
+            return false;
+        }
+        let mut paths = std::collections::HashSet::new();
+        let mut target = false;
+        for item in &self.sources {
+            if !paths.insert(&item.path) || item.sha256.len() != 64 {
+                return false;
+            }
+            let digest = if item.path == Path::new(GENERATED_SOURCE) {
+                target = true;
+                hex_digest(&Sha256::digest(source.as_bytes()))
+            } else {
+                if !item.path.is_absolute() {
+                    return false;
+                }
+                let Ok(bytes) = fs::read(&item.path) else {
+                    return false;
+                };
+                hex_digest(&Sha256::digest(bytes))
+            };
+            if digest != item.sha256 {
+                return false;
+            }
+        }
+        if !target {
+            return false;
+        }
+        for resolution in &self.resolutions {
+            if resolution.module.is_empty() || resolution.candidates.is_empty() {
+                return false;
+            }
+            if let Some(selected) = &resolution.selected {
+                if resolution.candidates.last() != Some(selected) || !paths.contains(selected) {
+                    return false;
+                }
+            }
+            for candidate in &resolution.candidates {
+                if !candidate.is_absolute() {
+                    return false;
+                }
+                if Some(candidate) == resolution.selected.as_ref() {
+                    continue;
+                }
+                match fs::metadata(candidate) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+}
+
+/// A recipe names the source and the complete ordered compiler invocation.
+/// Dependency contents are validated from worker evidence, not directory scans.
+/// Unknown options and mutable session inputs cannot form a cache recipe.
+pub struct Invocation<'a> {
+    pub source: &'a str,
+    pub argv: &'a [OsString],
+    pub input_path: &'a Path,
+    pub include: &'a [PathBuf],
+    pub endpoint_identity: &'a [u8],
+    pub stable_val: Option<tidepool_repr::SessionModule>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvocationKey(String);
 
@@ -384,1008 +268,363 @@ impl std::fmt::Display for InvocationKey {
     }
 }
 
-/// Everything about a `tidepool-extract` invocation that can reach its output
-/// bytes. Built by the caller from the very `ExtractCmd` it is about to run,
-/// so the key describes the invocation that actually happens.
-pub struct Invocation<'a> {
-    /// The module source, by CONTENT. Never the path — the on-disk
-    /// `<Module>.hs` lives in a per-invocation tempdir.
-    pub source: &'a str,
-    /// The built argv, exactly as `ExtractCmd::argv()` returns it. Walked
-    /// against an allowlist (see [`invocation_key`]).
-    pub argv: &'a [OsString],
-    /// The positional input path in `argv`, so the walk can recognize (and
-    /// drop) it rather than treating it as an unknown argument.
-    pub input_path: &'a Path,
-    /// `--include` roots in ORIGINAL order. Fingerprinted by CONTENT, with
-    /// paths RELATIVE to each root — the absolute location is deliberately not
-    /// keyed.
-    pub include: &'a [PathBuf],
-    /// Identity reported by the bound endpoint that will execute a miss.
-    pub endpoint_identity: &'a [u8],
-    /// A single session `Val` module permitted as a CACHEABLE `--inject-val`
-    /// target, despite `--session-root`/`--inject-val` otherwise making an
-    /// invocation uncacheable (see [`invocation_key`]'s doc). This is the
-    /// harness driver's ONE stable, never-rotating "harness context" module:
-    /// its NAME and TYPE never
-    /// change turn to turn — only the heap value a later run resolves it to
-    /// does, and the iface never encodes a value — so the compiled artifact
-    /// really is independent of which turn produced it, which is what makes
-    /// this safe to memoize.
-    ///
-    /// `None` (the default) means every `--inject-val`/`--session-root` in
-    /// `argv` still makes the invocation uncacheable, exactly as before this
-    /// field existed. When `Some`, the walk accepts `--session-root <dir>`
-    /// unconditionally (like `--output-dir`) and `--inject-val <module>` ONLY
-    /// when its value equals this module's name — any OTHER `--inject-val`
-    /// value (a real, generation-numbered `Val.G<g>` session bind) still
-    /// makes the invocation uncacheable. The accepted `--session-root`'s
-    /// VALUE, read out of `argv` itself (never supplied separately), locates
-    /// the `.hi` iface this module's CONTENT is fingerprinted from — so the
-    /// fingerprinted path can never drift from what the invocation actually
-    /// reads.
-    pub stable_val: Option<tidepool_repr::SessionModule>,
-}
-
-/// Compute the key for an invocation, or `None` when the invocation is
-/// **uncacheable** and must be compiled cold.
-///
-/// The argv walk is an ALLOWLIST, and that is the point: it makes "the key
-/// covers every input that affects the output" a structural property instead
-/// of a standing obligation to remember. Recognized elements are
-///
-/// - `--output-dir <dir>` — dropped. Per-invocation; where the bytes are
-///   written cannot change what they are.
-/// - `--build-products-dir <dir>` — dropped, same reasoning as `--output-dir`:
-///   it only ever points GHC's OWN `hiDir`/`objectDir` at a warm-cache
-///   location so `checkOldIface` can skip an unchanged home module — a
-///   directory whose CONTENT never changes what the extract PRODUCES, only
-///   how much frontend work it redoes to produce it (spike-verified: a
-///   cold-dir and a warm-dir
-///   compile of the same source/argv/include/endpoint are asserted
-///   byte-identical by `build_products_dir_is_deterministic` below). Its
-///   mutable CONTENTS are therefore never hashed into the key either — doing
-///   so would cost a walk of the whole warm dir for a property this
-///   determinism argument already gives for free.
-/// - `--include <dir>` — dropped HERE and content-fingerprinted below.
-/// - `--target <name>` / `--targets <a,b>` — keyed verbatim, in order. The
-///   target list decides what is compiled, and (via `targets.len() > 1`)
-///   which asks-sidecar shape the extract writes.
-/// - the positional input, iff it equals `input_path` — dropped (its CONTENT
-///   is keyed as `source`).
-///
-/// **Anything else makes the invocation uncacheable.** A flag added to
-/// `ExtractCmd` tomorrow and threaded into a calling site does not ride along
-/// unkeyed; it goes cold until someone classifies it. The failure direction is
-/// a miss, never a false hit. This is also how session-scope compiles
-/// (`--inject-val`/`--session-root`, which read per-session
-/// MUTABLE directories nothing here fingerprints) are excluded: not by a
-/// comment, but because those flags are not on the list.
-///
-/// The caller must supply the identity of an already-bound compiler endpoint;
-/// there is no empty or guessed compiler fingerprint state.
-///
-/// A caller carrying [`Invocation::stable_val`] additionally accepts
-/// `--session-root <dir>` (dropped, like `--output-dir`) and one matching
-/// `--inject-val <module>` (dropped, and separately CONTENT-fingerprinted —
-/// see that field's doc) — every other `--inject-val`/`--session-root` still
-/// falls through to the default-deny arm below.
 pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
-    // Walk first, so an uncacheable invocation costs no hashing.
-    let mut fields: Vec<&OsStr> = Vec::new();
-    let mut stable_session_root: Option<&OsStr> = None;
-    let mut args = inv.argv.iter();
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--output-dir" | "--include" | "--build-products-dir") => {
-                args.next()?;
-            }
-            Some(flag @ ("--target" | "--targets")) => {
-                let value = args.next()?;
-                fields.push(OsStr::new(flag));
-                fields.push(value);
-            }
-            Some("--session-root") if inv.stable_val.is_some() => {
-                stable_session_root = Some(args.next()?.as_os_str());
-            }
-            Some("--inject-val") => {
-                let value = args.next()?;
-                match inv.stable_val {
-                    Some(sv) if value.to_str() == Some(sv.module_name().as_str()) => {}
-                    _ => return None,
-                }
-            }
-            _ if arg.as_os_str() == inv.input_path.as_os_str() => {}
-            _ => return None,
-        }
-    }
-    // A caller supplying `stable_val` must have actually put both matching
-    // argv elements there — an invocation that half-carries the flags (a
-    // caller bug) is uncacheable rather than fingerprinted from a stale or
-    // guessed location.
-    if inv.stable_val.is_some() && stable_session_root.is_none() {
-        return None;
-    }
-
-    if source_has_untracked_cpp_inputs(inv.source) {
+    if inv.stable_val.is_some() || inv.endpoint_identity.is_empty() {
         return None;
     }
     let mut hasher = blake3::Hasher::new();
-    frame(&mut hasher, INVOCATION_NAMESPACE);
+    // This version deliberately invalidates both former cache layouts.
+    frame(&mut hasher, b"tidepool-compile-recipe-v2");
     frame(&mut hasher, inv.source.as_bytes());
-
-    frame(&mut hasher, &(fields.len() as u64).to_le_bytes());
-    for field in fields {
-        frame(&mut hasher, field.as_encoded_bytes());
+    frame(&mut hasher, inv.input_path.file_name()?.as_encoded_bytes());
+    let mut args = inv.argv.iter();
+    let mut includes = Vec::new();
+    let mut input_seen = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--output-dir") => {
+                args.next()?;
+            }
+            Some("--build-products-dir") => {
+                frame(&mut hasher, b"--build-products-dir");
+                let path = std::path::absolute(PathBuf::from(args.next()?)).ok()?;
+                frame(&mut hasher, path.as_os_str().as_encoded_bytes());
+            }
+            Some("--include") => {
+                includes.push(PathBuf::from(args.next()?));
+            }
+            Some(flag @ ("--target" | "--targets")) => {
+                frame(&mut hasher, flag.as_bytes());
+                frame(&mut hasher, args.next()?.as_encoded_bytes());
+            }
+            _ if arg.as_os_str() == inv.input_path.as_os_str() && !input_seen => {
+                input_seen = true;
+            }
+            _ => return None,
+        }
     }
-
-    // ORIGINAL order: GHC receives `--include` in argument order and
-    // search-path order decides module shadowing, so [A,B] and [B,A] are
-    // different compilations and must not share a key.
+    if !input_seen || includes != inv.include {
+        return None;
+    }
     frame(&mut hasher, &(inv.include.len() as u64).to_le_bytes());
     for root in inv.include {
-        let manifest = dependency_source_manifest(root);
-        if !manifest.cacheable {
-            return None;
-        }
-        manifest.fingerprint(Path::new(""), &mut hasher);
+        let absolute = std::path::absolute(root).ok()?;
+        frame(&mut hasher, absolute.as_os_str().as_encoded_bytes());
     }
-
-    if let (Some(sv), Some(root)) = (inv.stable_val, stable_session_root) {
-        let hi_path = Path::new(root).join(sv.relative_hi_path());
-        fingerprint_stable_val_iface(&hi_path, &mut hasher);
-    }
-
     frame(&mut hasher, inv.endpoint_identity);
-
     Some(InvocationKey(hasher.finalize().to_hex().to_string()))
 }
 
-/// Fingerprint a stable `--inject-val` module's `.hi` iface by CONTENT. It uses
-/// the dependency manifest's tagged-content discipline, so a missing/unreadable
-/// iface still yields a stable (if uncacheable-in-practice) key rather than
-/// panicking.
-fn fingerprint_stable_val_iface(hi_path: &Path, hasher: &mut blake3::Hasher) {
-    match fs::read(hi_path) {
-        Ok(bytes) => {
-            frame(hasher, &[1u8]);
-            frame(hasher, blake3::hash(&bytes).as_bytes());
-        }
-        Err(_) => frame(hasher, &[0u8]),
-    }
+fn take_frame<'a>(remaining: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let (length, rest) = remaining.split_at_checked(8)?;
+    let length = usize::try_from(u64::from_le_bytes(length.try_into().ok()?)).ok()?;
+    let (value, rest) = rest.split_at_checked(length)?;
+    *remaining = rest;
+    Some(value)
 }
 
-/// Fingerprints an include root by CONTENT, keyed by each file's path
-/// RELATIVE to that root.
-///
-/// Relative paths let identical relocated source trees share a key. Absolute
-/// source locations do not enter the prepared execution program.
-fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
-    dependency_source_manifest(root).fingerprint(Path::new(""), hasher);
+fn append_frame(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
 }
 
-/// Load a cached invocation's FULL artifact set, in the order `names` requests
-/// it. `Some(v)` only when the stored manifest names exactly `names`, in
-/// order, and every present artifact's bytes still hash to what the manifest
-/// recorded — a crash mid-store, a slot-set mismatch, or a bit-flip that would
-/// still decode as plausible CBOR all read as a MISS.
-///
-/// An entry is `None` when the extract did not write that artifact at all.
-/// That is distinct from empty bytes and must stay so: an extract predating
-/// the asks pass writes no `asks.json`, and the caller's "no file" branch
-/// yields an empty sidecar rather than parsing `[]`.
-pub fn artifacts_load(key: &InvocationKey, names: &[&str]) -> Option<Vec<Option<Vec<u8>>>> {
-    let dir = crate::paths::compile_cache_dir();
-    let manifest = fs::read(dir.join(format!("{key}.ok"))).ok()?;
-    let manifest =
-        tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(&manifest).ok()?;
-    let entries = manifest.entries();
-    if entries.len() != names.len() {
+/// Read one immutable bundle; the evidence participates in the same integrity
+/// manifest as every named artifact. Old layouts and malformed bundles miss.
+pub(crate) fn artifacts_load(
+    key: &InvocationKey,
+    names: &[&str],
+    source: &str,
+) -> Option<Vec<Option<Vec<u8>>>> {
+    let bytes = fs::read(crate::paths::compile_cache_dir().join(format!("{key}.bundle"))).ok()?;
+    decode_bundle(&bytes, names, source)
+}
+
+fn decode_bundle(bytes: &[u8], names: &[&str], source: &str) -> Option<Vec<Option<Vec<u8>>>> {
+    let mut remaining = bytes;
+    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
+        take_frame(&mut remaining)?,
+    )
+    .ok()?;
+    if manifest.entries().len() != names.len() + 1 {
         return None;
     }
-
     let mut out = Vec::with_capacity(names.len());
-    for (i, (expected, entry)) in names.iter().zip(entries.iter()).enumerate() {
-        if entry.name() != *expected {
+    for (name, entry) in names
+        .iter()
+        .copied()
+        .chain(std::iter::once("dependencies.json"))
+        .zip(manifest.entries())
+    {
+        if name != entry.name() || entry.digest().is_none() {
             return None;
         }
-        if entry.digest().is_none() {
-            out.push(None);
-            continue;
-        }
-        let bytes = fs::read(dir.join(format!("{key}.a{i}"))).ok()?;
-        if !entry.matches(&bytes) {
+        let value = take_frame(&mut remaining)?;
+        if !entry.matches(value) {
             return None;
         }
-        out.push(Some(bytes));
+        if name == "dependencies.json" {
+            let evidence: DependencyEvidence = serde_json::from_slice(value).ok()?;
+            if !evidence.valid(source) {
+                return None;
+            }
+        } else {
+            out.push(Some(value.to_vec()));
+        }
     }
-    Some(out)
+    remaining.is_empty().then_some(out)
 }
 
-/// Store an invocation's full artifact set. Each present artifact is replaced
-/// atomically via rename; the `{key}.ok` manifest is REMOVED first (marking
-/// the entry incomplete) and rewritten LAST, so [`artifacts_load`] never reads
-/// a half-written set. Best-effort throughout — a cache that cannot be written
-/// degrades to recompiling, never to failing the compile.
-pub fn artifacts_store(key: &InvocationKey, artifacts: &[(&str, Option<&[u8]>)]) {
-    let dir = crate::paths::compile_cache_dir();
-    if fs::create_dir_all(&dir).is_err() {
+pub(crate) fn artifacts_store(
+    key: &InvocationKey,
+    artifacts: &[(&str, Option<&[u8]>)],
+    evidence: &DependencyEvidence,
+    source: &str,
+) {
+    if !evidence.valid(source)
+        || artifacts
+            .iter()
+            .any(|(name, bytes)| *name == "dependencies.json" || bytes.is_none())
+    {
         return;
     }
-    let sentinel = dir.join(format!("{key}.ok"));
-    let _ = fs::remove_file(&sentinel);
-
-    for (i, (_, bytes)) in artifacts.iter().enumerate() {
-        if let Some(bytes) = bytes {
-            use std::io::Write;
-            let Ok(mut tmp) = tempfile::NamedTempFile::new_in(&dir) else {
-                return;
-            };
-            if tmp.write_all(bytes).is_err() {
-                return;
-            }
-            if tmp.persist(dir.join(format!("{key}.a{i}"))).is_err() {
-                return;
-            }
-        }
-    }
+    let Ok(dependencies) = serde_json::to_vec(evidence) else {
+        return;
+    };
+    let mut artifacts = artifacts.to_vec();
+    artifacts.push(("dependencies.json", Some(&dependencies)));
     let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
-        artifacts.iter().map(|(name, bytes)| (*name, *bytes)),
+        artifacts.iter().copied(),
     );
-    let _ = tidepool_atomic_write::write_best_effort(&sentinel, &manifest.encode());
+    let mut bundle = Vec::new();
+    append_frame(&mut bundle, &manifest.encode());
+    for (_, bytes) in artifacts {
+        append_frame(&mut bundle, bytes.unwrap());
+    }
+    let dir = crate::paths::compile_cache_dir();
+    if fs::create_dir_all(&dir).is_err() || !evidence.valid(source) {
+        return;
+    }
+    let _ = tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-    use tempfile::TempDir;
 
-    const TEST_ENDPOINT: &[u8] = b"test-compiler-endpoint";
-
-    /// RAII guard to safely set and restore environment variables in tests.
-    struct EnvGuard {
-        key: &'static str,
-        old_value: Option<std::ffi::OsString>,
+    fn digest(bytes: &[u8]) -> String {
+        hex_digest(&Sha256::digest(bytes))
     }
 
-    impl EnvGuard {
-        fn new(key: &'static str, new_value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let old_value = std::env::var_os(key);
-            std::env::set_var(key, new_value);
-            Self { key, old_value }
+    fn evidence(root: &Path) -> DependencyEvidence {
+        let selected = root.join("later/Library.hs");
+        fs::create_dir_all(selected.parent().unwrap()).unwrap();
+        fs::create_dir_all(root.join("first")).unwrap();
+        fs::write(&selected, "library = 1").unwrap();
+        DependencyEvidence {
+            version: 1,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![
+                SourceEvidence {
+                    path: GENERATED_SOURCE.into(),
+                    sha256: digest(b"target"),
+                },
+                SourceEvidence {
+                    path: selected.clone(),
+                    sha256: digest(b"library = 1"),
+                },
+            ],
+            resolutions: vec![ResolutionEvidence {
+                module: "Library".into(),
+                selected: Some(selected.clone()),
+                candidates: vec![root.join("first/Library.hs"), selected],
+            }],
+            packages: vec!["base".into()],
         }
     }
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(ref old) = self.old_value {
-                std::env::set_var(self.key, old);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
+    #[test]
+    fn evidence_tracks_consumed_bytes_and_shadowing_not_unrelated_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let evidence = evidence(root.path());
+        assert!(evidence.valid("target"));
+        fs::write(root.path().join("later/Unrelated.hs"), "anything").unwrap();
+        assert!(evidence.valid("target"));
+        let shadow = root.path().join("first/Library.hs");
+        fs::write(&shadow, "library = 1").unwrap();
+        assert!(!evidence.valid("target"));
+        fs::remove_file(shadow).unwrap();
+        assert!(evidence.valid("target"));
+        fs::write(root.path().join("later/Library.hs"), "library = 2").unwrap();
+        assert!(!evidence.valid("target"));
     }
 
     #[test]
-    #[serial]
-    fn test_cache_key_determinism() {
-        let source = "main = print 42";
-        let target = "main";
-        let k1 = cache_key(source, target, &[]);
-        let k2 = cache_key(source, target, &[]);
-        assert_eq!(k1, k2);
-
-        let k3 = cache_key("main = print 43", target, &[]);
-        assert_ne!(k1, k3);
+    fn incomplete_incompatible_or_malformed_evidence_cannot_hit() {
+        let root = tempfile::tempdir().unwrap();
+        let good = evidence(root.path());
+        assert!(!good.valid("changed target"));
+        let mut bad = good.clone();
+        bad.cache_safe = false;
+        assert!(!bad.valid("target"));
+        bad = good.clone();
+        bad.version += 1;
+        assert!(!bad.valid("target"));
+        bad = good.clone();
+        bad.sources.remove(0);
+        assert!(!bad.valid("target"));
+        bad = good.clone();
+        bad.sources.push(bad.sources[0].clone());
+        assert!(!bad.valid("target"));
+        bad = good.clone();
+        bad.resolutions[0].selected = Some(root.path().join("untracked.hs"));
+        assert!(!bad.valid("target"));
+        bad = good;
+        bad.selection_complete = false;
+        assert!(bad.valid("target"), "selection completeness is independent");
     }
 
     #[test]
-    #[serial]
-    fn test_cache_key_salt_isolates_sessions_and_gens() {
-        let (src, tgt) = ("import Tidepool.Session.Lib.G1\nr = 1", "r");
-        // No salt reproduces the unsalted key exactly (no mass invalidation).
-        assert_eq!(
-            cache_key(src, tgt, &[]),
-            cache_key_salted(src, tgt, &[], None)
-        );
-        // Distinct (session, gen) salts never collide — even on identical text.
-        let a = cache_key_salted(src, tgt, &[], Some("session:1:gen:1"));
-        let b = cache_key_salted(src, tgt, &[], Some("session:2:gen:1"));
-        let c = cache_key_salted(src, tgt, &[], Some("session:1:gen:2"));
-        assert_ne!(a, b, "different sessions must not share a key");
-        assert_ne!(a, c, "a generation bump must invalidate");
-        // A salt always diverges from the unsalted key.
-        assert_ne!(a, cache_key(src, tgt, &[]));
+    fn package_selection_tracks_absent_home_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let mut evidence = evidence(root.path());
+        let candidate = root.path().join("first/Package.hs");
+        evidence.resolutions.push(ResolutionEvidence {
+            module: "Package".into(),
+            selected: None,
+            candidates: vec![candidate.clone()],
+        });
+        assert!(evidence.valid("target"));
+        fs::write(candidate, "module Package where").unwrap();
+        assert!(!evidence.valid("target"));
     }
 
     #[test]
-    #[serial]
-    fn test_cache_roundtrip() {
-        let temp_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
-
-        let key = CacheKey("test-key".to_string());
-        let meta = b"meta-data";
-        let asks = b"[]";
-        let prepared = b"prepared-data";
-
-        // Before store, load should miss.
-        assert!(cache_load(&key).is_none());
-
-        cache_store(&key, meta, asks, prepared);
-
-        // Sentinel must exist after store.
-        let sentinel = temp_dir.path().join("tidepool").join(format!("{}.ok", key));
-        assert!(sentinel.exists(), "sentinel file should exist after store");
-
-        let loaded = cache_load(&key).expect("cache should load after store");
-        assert_eq!(loaded.0, meta);
-        assert_eq!(loaded.1, asks);
-        assert_eq!(loaded.2, prepared);
-    }
-
-    #[test]
-    #[serial]
-    fn test_cache_load_fails_without_sentinel() {
-        let temp_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
-
-        let key = CacheKey("no-sentinel".to_string());
-        let dir = temp_dir.path().join("tidepool");
-        fs::create_dir_all(&dir).unwrap();
-
-        // Write cbor files but no sentinel — simulates a crash mid-store.
-        fs::write(dir.join(format!("{}.cbor", key)), b"expr").unwrap();
-        fs::write(dir.join(format!("{}.meta.cbor", key)), b"meta").unwrap();
-
-        assert!(
-            cache_load(&key).is_none(),
-            "cache_load should return None without sentinel"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn legacy_cache_sentinel_misses_after_prepared_cutover() {
-        let temp_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
-        let key = CacheKey("legacy-sentinel".to_string());
-        let dir = temp_dir.path().join("tidepool");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(format!("{}.ok", key)), [0; 96]).unwrap();
-
-        assert!(cache_load(&key).is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn test_cache_key_include_fingerprint() {
-        let include_dir = TempDir::new().unwrap();
-        let hs_file = include_dir.path().join("Lib.hs");
-        fs::write(&hs_file, "module Lib where").unwrap();
-
-        let source = "import Lib\nmain = print 42";
-        let target = "main";
-        let includes = [include_dir.path()];
-
-        let k1 = cache_key(source, target, &includes);
-
-        // Wait a bit to ensure mtime changes if we overwrite (though some filesystems have low precision)
-        // or just write different content/size.
-        fs::write(&hs_file, "module Lib where\nfoo = 1").unwrap();
-        let k2 = cache_key(source, target, &includes);
-
-        assert_ne!(
-            k1, k2,
-            "Cache key should change when dependency file changes"
-        );
-    }
-
-    /// Both cache generations consume the same dependency manifest. In
-    /// particular, an imported literate module must invalidate both the eval
-    /// key and the relocatable invocation key when its content changes.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn imported_literate_module_changes_both_cache_keys() {
-        let temp = TempDir::new().unwrap();
-        let include = temp.path().join("include");
-        fs::create_dir_all(&include).unwrap();
-        let literate = include.join("Lit.lhs");
-        fs::write(&literate, "> module Lit where\n> value = 1\n").unwrap();
-
-        let source = "module Expr where\nimport Lit\nresult = value\n";
-        let input = temp.path().join("Expr.hs");
-        let output = temp.path().join("out");
-        fs::write(&input, source).unwrap();
-        let includes = [include.as_path()];
-        let include_owned = [include.clone()];
-        let argv = turn_argv(&input, &output, "result", &includes);
-
-        let eval_before = cache_key(source, "result", &includes);
-        let invocation_before = invocation_key(&Invocation {
-            source,
-            argv: &argv,
-            input_path: &input,
-            include: &include_owned,
-            endpoint_identity: TEST_ENDPOINT,
-            stable_val: None,
-        })
+    fn generated_source_identity_is_stable_and_publication_detects_races() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("Generated.hs");
+        fs::write(&input, "target").unwrap();
+        let mut evidence = evidence(root.path());
+        evidence.sources[0].path = input.clone();
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let normalized = DependencyEvidence::from_worker(&bytes, &input, "target").unwrap();
+        assert_eq!(normalized.sources[0].path, Path::new(GENERATED_SOURCE));
+        fs::write(
+            root.path().join("later/Library.hs"),
+            "changed during compile",
+        )
         .unwrap();
-
-        fs::write(&literate, "> module Lit where\n> value = 2\n").unwrap();
-
-        assert_ne!(eval_before, cache_key(source, "result", &includes));
-        assert_ne!(
-            invocation_before,
-            invocation_key(&Invocation {
-                source,
-                argv: &argv,
-                input_path: &input,
-                include: &include_owned,
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: None,
-            })
-            .unwrap()
-        );
+        assert!(DependencyEvidence::from_worker(&bytes, &input, "target").is_none());
     }
 
-    #[test]
-    fn dependency_manifest_covers_every_supported_haskell_source_form() {
-        let temp = TempDir::new().unwrap();
-        for name in ["A.hs", "B.hs-boot", "C.lhs", "D.lhs-boot"] {
-            fs::write(temp.path().join(name), name).unwrap();
-        }
-        fs::write(temp.path().join("ignored.h"), "header").unwrap();
-
-        let names: Vec<_> = dependency_source_manifest(temp.path())
-            .files
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect();
-        assert_eq!(
-            names,
-            ["A.hs", "B.hs-boot", "C.lhs", "D.lhs-boot"]
-                .into_iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn test_cache_key_handles_symlink_cycle_in_include_dir() {
-        use std::os::unix::fs::symlink;
-
-        let include_dir = TempDir::new().unwrap();
-        let hs_file = include_dir.path().join("Lib.hs");
-        fs::write(&hs_file, "module Lib where").unwrap();
-
-        // A cyclic directory symlink: `include_dir/loop` points straight back
-        // at `include_dir` itself. `path.is_dir()` follows symlinks, so a
-        // naive recursive walk would descend into `loop`, find `loop` again
-        // inside it, and never terminate.
-        let loop_link = include_dir.path().join("loop");
-        symlink(include_dir.path(), &loop_link).unwrap();
-
-        let source = "import Lib\nmain = print 42";
-        let target = "main";
-        let includes = [include_dir.path()];
-
-        // Must return promptly (the cycle guard breaks the recursion) rather
-        // than hang the process.
-        let _key = cache_key(source, target, &includes);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn eval_key_changes_with_bound_endpoint_identity() {
-        let a = eval_cache_key("source", "target", &[], None, b"endpoint-a").unwrap();
-        let b = eval_cache_key("source", "target", &[], None, b"endpoint-b").unwrap();
-        assert_ne!(a, b);
-    }
-
-    // -----------------------------------------------------------------------
-    // Invocation keying — adversarial.
-    //
-    // A keying bug here poisons every downstream consumer SILENTLY: a false
-    // hit serves one compilation's Core for another and nothing fails loudly.
-    // So the discipline is one test per DIMENSION, each varying exactly one
-    // thing and asserting a MISS, plus the one dimension that must NOT change
-    // the key (absolute include path — the property that makes the memo
-    // shareable across processes).
-    // -----------------------------------------------------------------------
-
-    /// The argv `crate::artifacts::compile_targets` builds.
-    fn turn_argv(input: &Path, out: &Path, targets: &str, includes: &[&Path]) -> Vec<OsString> {
+    fn key(source: &str, input: &Path, roots: &[PathBuf], endpoint: &[u8]) -> InvocationKey {
         let mut argv = vec![
-            input.as_os_str().to_os_string(),
-            OsString::from("--output-dir"),
-            out.as_os_str().to_os_string(),
-            OsString::from("--targets"),
-            OsString::from(targets),
+            input.as_os_str().to_owned(),
+            "--target".into(),
+            "result".into(),
         ];
-        for inc in includes {
-            argv.push(OsString::from("--include"));
-            argv.push(inc.as_os_str().to_os_string());
+        for root in roots {
+            argv.extend(["--include".into(), root.as_os_str().to_owned()]);
         }
-        argv
-    }
-
-    /// Writes `Lib.hs` with the given body under a fresh subdir of `root`.
-    fn include_dir(root: &Path, name: &str, body: &str) -> PathBuf {
-        let dir = root.join(name);
-        fs::create_dir_all(dir.join("Nested")).unwrap();
-        fs::write(dir.join("Lib.hs"), body).unwrap();
-        fs::write(
-            dir.join("Nested").join("Deep.hs"),
-            "module Nested.Deep where",
-        )
-        .unwrap();
-        dir
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_misses_on_every_input_dimension() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-        let out = tmp.path().join("out");
-        let inc_a = include_dir(tmp.path(), "a", "module Lib where\nx = 1");
-        let inc_b = include_dir(tmp.path(), "b", "module Other where\ny = 2");
-
-        let key = |source: &str, targets: &str, includes: &[&Path]| {
-            let argv = turn_argv(&input, &out, targets, includes);
-            let include: Vec<PathBuf> = includes.iter().map(|p| p.to_path_buf()).collect();
-            invocation_key(&Invocation {
-                source,
-                argv: &argv,
-                input_path: &input,
-                include: &include,
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: None,
-            })
-            .expect("this invocation is cacheable")
-        };
-
-        let base = key("main = pure ()", "result", &[&inc_a, &inc_b]);
-        assert_eq!(
-            base,
-            key("main = pure ()", "result", &[&inc_a, &inc_b]),
-            "the key must be deterministic"
-        );
-
-        // Source content.
-        assert_ne!(base, key("main = pure 1", "result", &[&inc_a, &inc_b]));
-        // A target NAME (an argv field).
-        assert_ne!(base, key("main = pure ()", "other", &[&inc_a, &inc_b]));
-        // Target ORDER: `--targets a,b` and `--targets b,a` are different
-        // invocations (and for >1 they select the per-target asks shape).
-        assert_ne!(
-            key("main = pure ()", "a,b", &[&inc_a]),
-            key("main = pure ()", "b,a", &[&inc_a])
-        );
-        // Include ORDER: search-path order decides module shadowing.
-        assert_ne!(base, key("main = pure ()", "result", &[&inc_b, &inc_a]));
-        // Include SET.
-        assert_ne!(base, key("main = pure ()", "result", &[&inc_a]));
-
-        // Include CONTENT — one byte in one file under one include root.
-        fs::write(inc_a.join("Lib.hs"), "module Lib where\nx = 2").unwrap();
-        let after_edit = key("main = pure ()", "result", &[&inc_a, &inc_b]);
-        assert_ne!(base, after_edit, "an include-content edit must miss");
-
-        // A NEW file under an include root (a module that was not there).
-        fs::write(inc_a.join("Extra.hs"), "module Extra where").unwrap();
-        assert_ne!(
-            after_edit,
-            key("main = pure ()", "result", &[&inc_a, &inc_b])
-        );
-    }
-
-    /// A producer or daemon-epoch change must move the invocation key.
-    #[test]
-    fn invocation_key_misses_on_endpoint_identity() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        let key = |identity: &[u8]| {
-            invocation_key(&Invocation {
-                source: "main = pure ()",
-                argv: &argv,
-                input_path: &input,
-                include: &[],
-                endpoint_identity: identity,
-                stable_val: None,
-            })
-            .unwrap()
-        };
-        assert_ne!(key(b"endpoint-a"), key(b"endpoint-b"));
-    }
-
-    /// The property the shared test memo rests on: identical CONTENT at
-    /// different absolute paths is the same compilation and keys identically.
-    /// If this ever flips, every harness test process misses and the suite
-    /// silently returns to its cold cost.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_is_independent_of_absolute_paths() {
-        let body = "module Lib where\nx = 1";
-
-        let key_at = |root: &Path| {
-            let input = root.join("Expr.hs");
-            fs::write(&input, "module Expr where").unwrap();
-            let inc = include_dir(root, "inc", body);
-            let argv = turn_argv(&input, &root.join("out"), "result", &[&inc]);
-            invocation_key(&Invocation {
-                source: "main = pure ()",
-                argv: &argv,
-                input_path: &input,
-                include: std::slice::from_ref(&inc),
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: None,
-            })
-            .unwrap()
-        };
-
-        let one = TempDir::new().unwrap();
-        let two = TempDir::new().unwrap();
-        assert_eq!(
-            key_at(one.path()),
-            key_at(two.path()),
-            "identical content at different absolute paths must share a key"
-        );
-    }
-
-    /// `--build-products-dir <dir>` is DROPPED, same bucket as `--output-dir`:
-    /// the invocation stays cacheable, and the key is blind to the flag's
-    /// value entirely (two otherwise-identical invocations pointing it at
-    /// different paths — the realistic case, since the dir is
-    /// content-addressed per toolchain fingerprint — must still share a key).
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_drops_build_products_dir() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-
-        let key = |bp: Option<&str>| {
-            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-            if let Some(dir) = bp {
-                argv.push(OsString::from("--build-products-dir"));
-                argv.push(OsString::from(dir));
-            }
-            invocation_key(&Invocation {
-                source: "main = pure ()",
-                argv: &argv,
-                input_path: &input,
-                include: &[],
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: None,
-            })
-        };
-
-        let without = key(None).expect("cacheable without the flag");
-        let with_a = key(Some("/tmp/bp-a")).expect("cacheable with the flag");
-        let with_b = key(Some("/tmp/bp-b")).expect("cacheable with a different path");
-        assert_eq!(without, with_a, "the flag must not change the key");
-        assert_eq!(with_a, with_b, "the key must be blind to the dir's path");
-    }
-
-    /// Default-deny: an argv element the allowlist does not classify makes the
-    /// invocation UNCACHEABLE rather than silently unkeyed. This is how
-    /// session-scope compiles (which read per-session MUTABLE dirs nothing
-    /// here fingerprints) stay out, and how a flag added tomorrow goes cold
-    /// instead of wrong.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_refuses_unclassified_and_session_scoped_flags() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-
-        let key = |extra: &[&str]| {
-            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-            argv.extend(extra.iter().map(OsString::from));
-            invocation_key(&Invocation {
-                source: "main = pure ()",
-                argv: &argv,
-                input_path: &input,
-                include: &[],
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: None,
-            })
-        };
-
-        assert!(key(&[]).is_some(), "the plain turn invocation is cacheable");
-        for flags in [
-            &["--session-root", "/tmp/sessions"][..],
-            &["--inject-val", "Tidepool.Session.Val.G1"][..],
-            &["--bind-gen", "2"][..],
-            &["--turn"][..],
-            &["--classify"][..],
-            &["--some-future-flag", "v"][..],
-        ] {
-            assert!(
-                key(flags).is_none(),
-                "{flags:?} must make the invocation uncacheable"
-            );
-        }
-        // A dangling flag (no value) is likewise uncacheable, not a panic.
-        assert!(key(&["--target"]).is_none());
-    }
-
-    /// `LANGUAGE CPP` is accepted by GHC, but `#include` may name a file
-    /// outside every import root. Such a source is explicitly cold rather
-    /// than pretending the directory manifest covers that side input.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn cpp_include_invocation_is_uncacheable() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        let include = tmp.path().join("include");
-        fs::create_dir_all(&include).unwrap();
-        fs::write(
-            include.join("CppDep.hs"),
-            "{-# LANGUAGE CPP #-}\n#include \"value.h\"\nmodule CppDep where\nvalue = VALUE\n",
-        )
-        .unwrap();
-        fs::write(include.join("value.h"), "#define VALUE 1\n").unwrap();
-        let source = "module Expr where\nimport CppDep\nresult = value\n";
-        fs::write(&input, source).unwrap();
-        let include_owned = [include.clone()];
-        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
-
-        assert!(eval_cache_key(source, "result", &include_owned, None, TEST_ENDPOINT).is_none());
-        assert!(invocation_key(&Invocation {
+        invocation_key(&Invocation {
             source,
             argv: &argv,
-            input_path: &input,
-            include: &include_owned,
-            endpoint_identity: TEST_ENDPOINT,
+            input_path: input,
+            include: roots,
+            endpoint_identity: endpoint,
             stable_val: None,
         })
-        .is_none());
-        assert!(!source_has_untracked_cpp_inputs(
-            "module Expr where\nresult = 1 # 2\n"
-        ));
+        .unwrap()
     }
 
-    /// A dependency manifest entry that cannot be read is conservatively
-    /// uncacheable in both generations; neither may mint a key from the
-    /// unreadable sentinel while overlooking possible CPP side inputs.
-    #[cfg(unix)]
     #[test]
-    #[serial]
-    fn unreadable_dependency_source_is_uncacheable() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        let include = tmp.path().join("include");
-        fs::create_dir_all(&include).unwrap();
-        symlink("missing-target", include.join("Broken.hs")).unwrap();
-        let source = "module Expr where\nresult = 1\n";
-        fs::write(&input, source).unwrap();
-        let include_owned = [include.clone()];
-        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
-
-        assert!(eval_cache_key(source, "result", &include_owned, None, TEST_ENDPOINT).is_none());
-        assert!(invocation_key(&Invocation {
-            source,
-            argv: &argv,
-            input_path: &input,
-            include: &include_owned,
-            endpoint_identity: TEST_ENDPOINT,
-            stable_val: None,
-        })
-        .is_none());
-    }
-
-    /// A caller carrying `stable_val` DOES make an otherwise-uncacheable
-    /// `--session-root`/`--inject-val` pair cacheable, keyed by the iface
-    /// FILE's content — path-independent (two different `--session-root`
-    /// locations with byte-identical iface content share a key), content-
-    /// sensitive (editing the iface's bytes misses), and still refuses any
-    /// OTHER `--inject-val` value (a real, generation-numbered session bind)
-    /// even with `stable_val` set.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_accepts_matching_stable_val_inject() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
-
-        let key_at = |session_root: &Path, iface_bytes: &[u8]| {
-            let hi_path = session_root.join(module.relative_hi_path());
-            fs::create_dir_all(hi_path.parent().unwrap()).unwrap();
-            fs::write(&hi_path, iface_bytes).unwrap();
-            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-            argv.push(OsString::from("--session-root"));
-            argv.push(session_root.as_os_str().to_os_string());
-            argv.push(OsString::from("--inject-val"));
-            argv.push(OsString::from(module.module_name()));
-            invocation_key(&Invocation {
-                source: "main = pure ()",
-                argv: &argv,
-                input_path: &input,
-                include: &[],
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: Some(module),
-            })
-        };
-
-        let root_a = tmp.path().join("session-a");
-        let root_b = tmp.path().join("session-b");
-        fs::create_dir_all(&root_a).unwrap();
-        fs::create_dir_all(&root_b).unwrap();
-
-        let base = key_at(&root_a, b"iface-v1").expect("stable-val invocation is cacheable");
-        assert_eq!(
-            base,
-            key_at(&root_a, b"iface-v1").expect("deterministic"),
-            "the key must be deterministic"
+    fn recipe_binds_source_logical_location_order_and_endpoint() {
+        let a = key(
+            "target",
+            Path::new("/scratch/a/Generated.hs"),
+            &[],
+            b"endpoint",
         );
         assert_eq!(
-            base,
-            key_at(&root_b, b"iface-v1").expect("cacheable at a different root"),
-            "identical iface CONTENT at a different --session-root must share a key"
+            a,
+            key(
+                "target",
+                Path::new("/scratch/b/Generated.hs"),
+                &[],
+                b"endpoint"
+            )
         );
         assert_ne!(
-            base,
-            key_at(&root_a, b"iface-v2").expect("still cacheable"),
-            "an iface content edit must miss"
+            a,
+            key("target", Path::new("/scratch/a/Other.hs"), &[], b"endpoint")
         );
+        assert_ne!(
+            a,
+            key(
+                "changed",
+                Path::new("/scratch/a/Generated.hs"),
+                &[],
+                b"endpoint"
+            )
+        );
+        assert_ne!(
+            a,
+            key(
+                "target",
+                Path::new("/scratch/a/Generated.hs"),
+                &[],
+                b"rebound"
+            )
+        );
+        let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        assert_ne!(
+            key("target", Path::new("Generated.hs"), &roots, b"endpoint"),
+            key(
+                "target",
+                Path::new("Generated.hs"),
+                &roots.into_iter().rev().collect::<Vec<_>>(),
+                b"endpoint"
+            )
+        );
+    }
 
-        // Even with `stable_val` set, a DIFFERENT --inject-val value (a real
-        // Val.G<g> session bind, g != 0) stays uncacheable — hazard (b) is
-        // preserved for everything except the one named stable module.
-        let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        argv.push(OsString::from("--session-root"));
-        argv.push(root_a.as_os_str().to_os_string());
-        argv.push(OsString::from("--inject-val"));
-        argv.push(OsString::from("Tidepool.Session.Val.G7"));
-        assert!(
-            invocation_key(&Invocation {
-                source: "main = pure ()",
+    #[test]
+    fn unknown_options_and_session_requests_are_uncacheable() {
+        for option in ["--session-root", "--inject-val", "--future-transform"] {
+            let argv = vec!["Generated.hs".into(), option.into(), "value".into()];
+            assert!(invocation_key(&Invocation {
+                source: "target",
                 argv: &argv,
-                input_path: &input,
+                input_path: Path::new("Generated.hs"),
                 include: &[],
-                endpoint_identity: TEST_ENDPOINT,
-                stable_val: Some(module),
+                endpoint_identity: b"endpoint",
+                stable_val: None
             })
-            .is_none(),
-            "a non-stable --inject-val value must stay uncacheable"
-        );
-    }
-
-    /// A caller that sets `stable_val` but the argv it actually built never
-    /// carries a `--session-root` (a caller bug, or an `--inject-val` with no
-    /// paired root) is uncacheable rather than fingerprinted from a
-    /// guessed/absent location — the guard reads the root out of argv itself,
-    /// never out of `stable_val`.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_stable_val_without_matching_argv_is_uncacheable() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
-
-        // --inject-val without a --session-root: uncacheable (the walk never
-        // saw a session root to fingerprint from).
-        let mut argv_no_root = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        argv_no_root.push(OsString::from("--inject-val"));
-        argv_no_root.push(OsString::from(module.module_name()));
-        assert!(invocation_key(&Invocation {
-            source: "main = pure ()",
-            argv: &argv_no_root,
-            input_path: &input,
-            include: &[],
-            endpoint_identity: TEST_ENDPOINT,
-            stable_val: Some(module),
-        })
-        .is_none());
-    }
-
-    /// An invocation key can never name the same on-disk entry as an eval
-    /// key — the two store DIFFERENT artifact sets under `<key>.*`.
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn invocation_key_is_namespaced_away_from_eval_keys() {
-        let tmp = TempDir::new().unwrap();
-        let input = tmp.path().join("Expr.hs");
-        fs::write(&input, "module Expr where").unwrap();
-        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        let inv = invocation_key(&Invocation {
-            source: "main = pure ()",
-            argv: &argv,
-            input_path: &input,
-            include: &[],
-            endpoint_identity: TEST_ENDPOINT,
-            stable_val: None,
-        })
-        .unwrap();
-        assert_ne!(
-            inv.to_string(),
-            cache_key("main = pure ()", "result", &[]).to_string()
-        );
+            .is_none());
+        }
     }
 
     #[test]
-    #[serial]
-    fn artifacts_roundtrip_present_and_absent() {
-        let tmp = TempDir::new().unwrap();
-        let _guard = EnvGuard::new("XDG_CACHE_HOME", tmp.path());
-        let key = InvocationKey("artifacts-roundtrip".to_string());
-        let names = ["meta.cbor", "result.cbor", "asks.json"];
-
-        assert!(artifacts_load(&key, &names).is_none(), "empty cache misses");
-
-        // The asks sidecar is ABSENT — an extract predating that pass writes
-        // no file at all, and `None` must survive as `None`.
-        artifacts_store(
-            &key,
-            &[
-                ("meta.cbor", Some(b"meta".as_slice())),
-                ("result.cbor", Some(b"expr".as_slice())),
-                ("asks.json", None),
-            ],
-        );
-
-        let loaded = artifacts_load(&key, &names).expect("stored set must load");
-        assert_eq!(loaded[0].as_deref(), Some(b"meta".as_slice()));
-        assert_eq!(loaded[1].as_deref(), Some(b"expr".as_slice()));
-        assert_eq!(loaded[2], None, "absent must not become empty");
-
-        // A DIFFERENT expected name set is a miss, not a silent mismatch.
-        assert!(artifacts_load(&key, &["meta.cbor", "other.cbor", "asks.json"]).is_none());
-        assert!(artifacts_load(&key, &["meta.cbor", "result.cbor"]).is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn artifacts_load_misses_on_missing_sentinel_or_corrupt_bytes() {
-        let tmp = TempDir::new().unwrap();
-        let _guard = EnvGuard::new("XDG_CACHE_HOME", tmp.path());
-        let dir = tmp.path().join("tidepool");
-        let key = InvocationKey("artifacts-corrupt".to_string());
-        let names = ["meta.cbor", "result.cbor"];
-        artifacts_store(
-            &key,
-            &[
-                ("meta.cbor", Some(b"meta".as_slice())),
-                ("result.cbor", Some(b"expr".as_slice())),
-            ],
-        );
-        assert!(artifacts_load(&key, &names).is_some());
-
-        // A bit-flip that would still decode as plausible CBOR: the manifest's
-        // recorded digest no longer matches, so the entry reads as a MISS.
-        fs::write(dir.join(format!("{key}.a1")), b"EXPR").unwrap();
-        assert!(artifacts_load(&key, &names).is_none());
-
-        // A crash mid-store leaves artifacts with no sentinel.
-        fs::write(dir.join(format!("{key}.a1")), b"expr").unwrap();
-        assert!(artifacts_load(&key, &names).is_some());
-        fs::remove_file(dir.join(format!("{key}.ok"))).unwrap();
-        assert!(artifacts_load(&key, &names).is_none());
-
-        // A truncated/foreign manifest is a miss, never a panic.
-        fs::write(dir.join(format!("{key}.ok")), b"not-a-manifest").unwrap();
-        assert!(artifacts_load(&key, &names).is_none());
+    fn bundle_integrity_binds_evidence_and_exact_named_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let evidence = serde_json::to_vec(&evidence(root.path())).unwrap();
+        let artifacts = [
+            ("meta.cbor", Some(b"meta".as_slice())),
+            ("dependencies.json", Some(evidence.as_slice())),
+        ];
+        let manifest =
+            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(artifacts);
+        let mut bytes = Vec::new();
+        append_frame(&mut bytes, &manifest.encode());
+        for (_, value) in artifacts {
+            append_frame(&mut bytes, value.unwrap());
+        }
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "target").is_some());
+        assert!(decode_bundle(&bytes, &["other.cbor"], "target").is_none());
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "other source").is_none());
+        let end = bytes.len() - 1;
+        bytes[end] ^= 1;
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "target").is_none());
+        assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target").is_none());
     }
 }

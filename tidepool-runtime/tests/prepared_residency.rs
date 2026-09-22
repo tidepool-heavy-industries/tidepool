@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, BoundBinder, ModuleEnv, ResidentOutcome,
+    resident_workbench_templates, run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentOutcome,
     ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
@@ -34,8 +34,6 @@ use tidepool_testing::eval_harness;
 
 /// The minimal parts of `prepared_turn.rs`'s own `Notebook` this file needs:
 /// one resident session, its compile plumbing, and expression/bind turns.
-/// Copied rather than shared so this file never has to touch
-/// `prepared_turn.rs`.
 struct Notebook {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
     preamble: String,
@@ -48,8 +46,12 @@ struct Notebook {
 
 impl Notebook {
     fn new() -> Self {
+        Self::with_effects(&[])
+    }
+
+    fn with_effects(decls: &[tidepool_mcp::EffectDecl]) -> Self {
         eval_harness::require_extract();
-        let effects = TestEffectSurface::minimal(&[]).expect("materialize effect surface");
+        let effects = TestEffectSurface::minimal(decls).expect("materialize effect surface");
         let preamble = effects.preamble().to_owned();
         let effect_stack = effects.row().to_owned();
         let mut include = effects.include_paths().to_vec();
@@ -115,18 +117,62 @@ impl Notebook {
         })
     }
 
-    /// Run an expression turn to completion; the value itself is not needed.
-    fn expression(&mut self, text: &str) {
+    fn prepare_expression(&mut self, text: &str) -> CompiledTurn {
         let TurnResult::Expr { compiled, .. } = self.compile(text) else {
             panic!("{text:?} did not classify as an expression");
         };
+        compiled
+    }
+
+    /// Compile against the session's current source view while giving the
+    /// extractor every still-live value interface needed to link retained
+    /// closures. Shadowed generations stay injected but are not imported
+    /// unqualified, so a rebound name remains unambiguous to new source.
+    fn compile_in_current_value_view(&mut self, text: &str) -> TurnResult {
+        self.generation += 1;
+        let imports = self
+            .session
+            .current_val_modules()
+            .into_iter()
+            .map(|module| format!("{module}\n"))
+            .collect::<String>();
+        let templates = resident_workbench_templates(&self.preamble, &self.effect_stack, &imports);
+        let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
+        let injected = self.session.inject_val_modules();
+        let retained = self.session.prepared_retained();
+        run_turn(TurnRequest {
+            turn_text: text,
+            templates: &templates,
+            include: &include,
+            session_root: self.root.path(),
+            inject_modules: &injected,
+            gen: self.generation,
+            verdict: None,
+            target: None,
+            retained_imports: &retained,
+        })
+        .unwrap_or_else(|failure| {
+            panic!(
+                "{text:?} failed to compile: {}\n{}",
+                tidepool_runtime::classify_compile(&failure.error).message,
+                failure
+                    .attempted_source
+                    .as_deref()
+                    .unwrap_or("<no attempted source>")
+            )
+        })
+    }
+
+    /// Install the immutable artifact afresh on every turn. Compilation is
+    /// shared; mutable heap state and program retirement are still exercised.
+    fn expression(&mut self, compiled: &CompiledTurn) {
         let outcome = self
             .session
             .run_with_sites("residency_expression", compiled.code())
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+            .expect("prepared expression runs");
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
-            "{text:?} did not complete: {outcome:?}"
+            "{outcome:?}"
         );
     }
 
@@ -158,6 +204,142 @@ impl Notebook {
     }
 }
 
+#[test]
+fn structural_resume_classifies_rejection_and_consumed_failure() {
+    use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
+    use tidepool_repr::DataConTable;
+    use tidepool_runtime::session::{PreparedRuntimeError, ResidentError, ResidentResumeError};
+
+    struct MalformedAnswer;
+    impl tidepool_bridge::sealed::ToHaskellSealed for MalformedAnswer {}
+    impl ToHaskell for MalformedAnswer {
+        fn visit(
+            &self,
+            table: &DataConTable,
+            visitor: &mut dyn HaskellVisitor,
+        ) -> Result<(), BridgeError> {
+            let unit = tidepool_bridge::get_qualified(table, "GHC.Tuple.()", 0)
+                .ok_or_else(|| BridgeError::UnknownDataConName("GHC.Tuple.()".into()))?;
+            visitor.begin_constructor(unit, 0)?;
+            Err(BridgeError::UnknownDataConName(
+                "missing response metadata".into(),
+            ))
+        }
+    }
+
+    let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
+    let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("response_rejection", success.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend");
+    };
+    let roots = notebook.session.persistent_roots_count();
+    let error = notebook
+        .session
+        .resume_classified(hole.clone(), MalformedAnswer)
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Rejected(ResidentError::Prepared(
+        PreparedRuntimeError::AnswerRejected { source: BridgeError::UnknownDataConName(ref name), .. }
+    )) if name == "missing response metadata"),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+    assert_eq!(notebook.session.persistent_roots_count(), roots);
+    assert!(matches!(
+        notebook.session.resume_classified(hole, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert!(notebook.session.parked_holes().is_empty());
+
+    let failure =
+        notebook.prepare_expression("say \"pause\" >> (error \"after response\" :: M Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("consumed_response", failure.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend before its failure");
+    };
+    let error = notebook.session.resume_classified(hole, ()).unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Consumed(_)),
+        "{error:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty());
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("after_consumed_failure", success.code())
+        .unwrap()
+    else {
+        panic!("the session must remain usable after a consumed failure");
+    };
+    assert!(matches!(
+        notebook.session.resume_classified(hole, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+}
+
+#[test]
+fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
+    use tidepool_runtime::session::ResidentResumeError;
+
+    let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
+    notebook.bind("held <- pure ()");
+    let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("framed_rejection", success.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend");
+    };
+    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let error = notebook
+        .session
+        .resume_framed_custody_classified(
+            hole.clone(),
+            &held,
+            tidepool_repr::DataConId(u64::MAX),
+            Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Rejected(_)),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+    assert!(matches!(
+        notebook
+            .session
+            .resume_handle_classified(hole, held)
+            .unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+
+    let failure = notebook.prepare_expression("say \"pause\" >> (error \"after handle\" :: M Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("consumed_handle", failure.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend before its failure");
+    };
+    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let error = notebook
+        .session
+        .resume_handle_classified(hole, held)
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Consumed(_)),
+        "{error:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty());
+}
+
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
 /// (`tidepool-runtime/src/session/prepared.rs`) -- see the module doc for
 /// why this file cannot read the real constant.
@@ -181,7 +363,7 @@ fn assert_counts_flat(
     );
 }
 
-/// Twenty `1 + <i>` expression turns on the prepared route, each installing
+/// Twenty installations of one prepared constant expression on the prepared route, each installing
 /// exactly one program: `quiesce_and_collect` only actually collects every
 /// `N`th install (see the module doc), so `programs` is checked against the
 /// amortized bound every turn, and exact flatness across every counter --
@@ -209,8 +391,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
     let mut boundaries_seen = 0;
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
     for i in 0..TOTAL {
-        notebook.expression(&format!("1 + {i}"));
+        notebook.expression(&expression);
         let counts = notebook
             .session
             .residency()
@@ -257,8 +440,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
     let mut boundaries_seen = 0;
+    let expression = notebook.prepare_expression("x + (2 :: Int)");
     for i in 0..POST_BIND {
-        notebook.expression(&format!("x + {i}"));
+        notebook.expression(&expression);
         let counts = notebook
             .session
             .residency()
@@ -318,8 +502,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
 fn prepared_session_large_promotion_triggers_an_early_major_collection() {
     let mut notebook = Notebook::new();
 
-    for i in 0..N {
-        notebook.expression(&format!("1 + {i}"));
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
+    for _ in 0..N {
+        notebook.expression(&expression);
     }
     let old_bytes_before = notebook
         .session
@@ -330,7 +515,7 @@ fn prepared_session_large_promotion_triggers_an_early_major_collection() {
 
     let mut collected_within = None;
     for i in 0..2 {
-        notebook.expression(&format!("2 + {i}"));
+        notebook.expression(&expression);
         let old_bytes_now = notebook
             .session
             .old_bytes()
@@ -347,4 +532,83 @@ fn prepared_session_large_promotion_triggers_an_early_major_collection() {
          trigger in `PreparedEngine::major_collection_due` should fire well before the next \
          install-count boundary at N={N}"
     );
+}
+
+#[test]
+fn fresh_host_binders_preserve_prior_request_input_for_captured_closures() {
+    use tidepool_codegen::scope::ScopeId;
+
+    let mut notebook = Notebook::new();
+    let mount = |notebook: &mut Notebook, payload: serde_json::Value| {
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = notebook.compile_in_current_value_view(
+            "input <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]])",
+        )
+        else {
+            panic!("input interface must compile as a bind");
+        };
+        let [binder] = bound.as_slice() else {
+            panic!("input interface must produce exactly one binder");
+        };
+        let constructors = compiled
+            .table
+            .iter()
+            .filter_map(|con| con.qualified_name.clone())
+            .collect::<Vec<_>>();
+        notebook
+            .session
+            .mount_json_binding_in(
+                ScopeId::ROOT,
+                binder,
+                Generation(notebook.generation),
+                compiled.into_code(),
+                &payload,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "mount compiler-authenticated JSON input ({binder:?}; {constructors:?}): {error}"
+                )
+            });
+    };
+
+    mount(&mut notebook, serde_json::json!({"request": "A"}));
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile_in_current_value_view(
+        "fromA <- pure (\\() -> case input of { Aeson.Object fields -> if Map.member \"request\" fields then 11 :: Int else 0; _ -> 0 })",
+    )
+    else {
+        panic!("request-A closure must compile as a bind");
+    };
+    let [from_a] = bound.as_slice() else {
+        panic!("request-A closure must produce exactly one binder");
+    };
+    let outcome = notebook
+        .session
+        .run_bind_with_sites(
+            "request_a_capture",
+            compiled.into_code(),
+            from_a,
+            Generation(notebook.generation),
+        )
+        .expect("capture request-A input in closure");
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+
+    mount(&mut notebook, serde_json::json!({"request": "B"}));
+    assert_eq!(notebook.session.val_gen(), Generation(notebook.generation));
+
+    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view("fromA ()")
+    else {
+        panic!("request-A closure invocation must compile as an expression");
+    };
+    let outcome = notebook
+        .session
+        .run_with_sites("request_a_snapshot", compiled.into_code())
+        .expect("request-A closure remains runnable after request-B mount");
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("request-A closure invocation did not complete: {outcome:?}");
+    };
+    assert_eq!(result.to_json(), serde_json::json!([11, "11"]));
 }

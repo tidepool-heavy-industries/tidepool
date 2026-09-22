@@ -88,7 +88,7 @@ outcome separately from whether it matches the baseline expectation.
 Select the owning target and exact nextest test name, not only a substring:
 
 ```sh
-just test-lib tidepool-agent 'test(=backend::codex::active_update::tests::only_the_exact_persisted_user_message_confirms_presentation)'
+just test-lib tidepool-agent 'test(=backend::codex::input_control_tests::lost_submit_acknowledgment_is_queried_without_resubmission)'
 # For an integration test, substitute the actual package, file target and full name:
 just test-target PACKAGE TARGET 'test(=FULL_TEST_NAME)'
 ```

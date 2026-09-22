@@ -105,7 +105,7 @@ projectProjectionContract modules = do
         other -> ioError (userError ("empty program did not produce typed rejection: " <> show other))
       pure program
   where
-    context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "M3Vertical" "value" "result" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+    context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "M3Vertical" "value" "result" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
 
     selectedEntry program = case
       [ heapBindingId binding
@@ -154,7 +154,7 @@ verifyWiredInErrorProjection = do
       SymbolIdentity "main" "WiredInErrorProjection" "value" occurrence parent
 
     projectEntry modules label identity = case projectPreparedTarget
-      (ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = identity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing })
+      (ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = identity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing })
       modules of
         Left failure -> ioError (userError
           ("wired-in error projection failed for " <> Text.unpack label
@@ -300,7 +300,7 @@ verifyNullaryWorkerProjection = do
     (root </> "test-prepared-stg" </> "NullaryWorkers.hs")
     [root </> "test-prepared-stg"]
   assertNullaryWorkerReferences prepared
-  let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "NullaryWorkers" "value" "result" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+  let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "NullaryWorkers" "value" "result" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
   program <- case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError ("nullary worker projection failed: " <> show failure))
     Right value -> pure value
@@ -632,7 +632,7 @@ verifyMissingHomeTop context modules = case projectPrepared context stripped of
 verifySuiteCollisionRegression :: IO ()
 verifySuiteCollisionRegression = do
   prepared <- runPipelineSelected PreparedStg "test/Suite.hs" ["lib", "test"]
-  let context targetIdentity = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = targetIdentity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+  let context targetIdentity = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = targetIdentity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       identity = SymbolIdentity "main" "Suite" "value" "ho_myany" Nothing
   case projectPreparedTarget (context identity) (pprModules prepared) of
     Left failure -> ioError (userError ("Suite collision repro changed: " <> show failure))
@@ -700,7 +700,7 @@ verifyRintDoubleStateToken = do
   prepared <- runPipelineSelected PreparedStg
     "test-prepared-stg/RintDouble.hs" ["test-prepared-stg"]
   let identity = SymbolIdentity "main" "RintDouble" "value" "roundSimpleUp" Nothing
-      context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = identity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = identity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
   case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError
       ("state-bearing rintDouble projection failed: " <> show failure))
@@ -723,7 +723,7 @@ verifyCStringLengthProjection :: IO ()
 verifyCStringLengthProjection = do
   prepared <- runPipelineSelected PreparedStg
     "test-prepared-stg/CStringLengthProjection.hs" ["test-prepared-stg"]
-  let context entry = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "CStringLengthProjection" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+  let context entry = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "CStringLengthProjection" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
   case projectPreparedTarget (context "lengthOf") (pprModules prepared) of
     Left failure -> ioError (userError
       ("GHC.CString strlen projection failed: " <> show failure))
@@ -755,6 +755,7 @@ verifyTextMemchrProjection = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = authority
         }
   case projectPreparedTarget (context textAuthority "commaIndices") (pprModules prepared) of
@@ -812,7 +813,7 @@ verifyBottomingSentinelContracts = do
     ]
   where
     verify prepared (entryName, operationName) = do
-      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "RaiseContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "RaiseContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("bottoming sentinel projection failed: " <> show (entryName, failure)))
@@ -874,7 +875,7 @@ verifySmallArrayOperationContracts = do
     ]
   where
     verify prepared (entryName, operationName, expected) = do
-      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "ArrayContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "ArrayContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("small-array projection failed: " <> show (entryName, failure)))
@@ -901,7 +902,7 @@ verifyPreparedFormatting = do
   authority <- resolveFormattingAuthority (prHscEnv (pprPipelineResult prepared))
   unless (authority /= Nothing)
     (ioError (userError "W5_FORMATTING: shipped module was not resolved"))
-  let context entry = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "FormattingContract" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = authority, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+  let context entry = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "FormattingContract" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = authority, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       cases =
         [ ("formatValue", ["prepared_render_double_bytes"])
         , ("continuation", ["prepared_render_double_bytes"])
@@ -1025,7 +1026,7 @@ verifyFormattingDependencyShadow = do
             _ -> False
         _ -> False)
         (ioError (userError "W5_FORMATTING shipped wrapper did not retain package Text"))
-      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "FormattingDependencyShadow" "value" "trusted" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = (Just trusted), projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "FormattingDependencyShadow" "value" "trusted" Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = (Just trusted), projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       program <- either
         (\failure -> ioError (userError
           ("W5_FORMATTING dependency shadow projection failed: " <> show failure)))
@@ -1055,6 +1056,7 @@ verifyPreparedTime = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = authority
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   forM_ ["directUtc", "higherOrder"] $ \entry -> do
@@ -1114,6 +1116,7 @@ verifyTimeDependencyShadow = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = authority
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   case (authority, homeShadows, parsers) of
@@ -1153,7 +1156,7 @@ verifyTagToEnumProjection = do
     ]
   where
     verify prepared (entry, family, expected) = do
-      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "EnumContract" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "EnumContract" "value" entry Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       program <- either
         (\failure -> ioError (userError ("tagToEnum projection failed: " <> show (entry, failure))))
         pure (projectPreparedTarget context (pprModules prepared))
@@ -1215,7 +1218,7 @@ verifyByteArrayOperationContracts = do
     ]
   where
     verify prepared (entryName, operationName, expected) = do
-      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "ByteArrayContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing }
+      let context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = (SymbolIdentity "main" "ByteArrayContract" "value" entryName Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("byte-array projection failed: " <> show (entryName, failure)))
@@ -1264,6 +1267,7 @@ verifyRetainedImportProjection = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   -- map empty -> current behavior: both producer bindings are recovered
@@ -1337,8 +1341,8 @@ verifyRetainedImportProjection = do
 -- above already covers for the NOINLINE-pragma stand-in):
 --
 --   * retained set empty at compile time -> today's plain-GHC behavior:
---     both bindings are recovered locally (their exact occurrence names
---     appear as recovered tops), and neither is declared a 'GlobalDecl'.
+--     the static value is recovered, while the function can be optimized
+--     into its consumer; neither is declared a 'GlobalDecl'.
 --   * retained set populated at compile time -> the pass withholds both
 --     unfoldings before GHC's simplifier ever runs, so 'consumerResult'
 --     keeps plain, unexpanded 'Var' references to both -- exactly the shape
@@ -1371,6 +1375,7 @@ verifyRetainedImportProjectionExposed = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
       recoveredOccurrences program = Set.fromList
@@ -1382,8 +1387,8 @@ verifyRetainedImportProjectionExposed = do
       groupItems (NonRecursive item) = [item]
       groupItems (Recursive items) = items
   -- Compiled with the pass gated OFF (empty retained set): plain GHC
-  -- behavior -- both bindings are recovered locally, and neither is
-  -- declared as a global.
+  -- behavior -- the static value is recovered, the function is optimized
+  -- into its consumer, and neither is declared as a global.
   baselineModules <- runPipelineSelectedRetaining PreparedStg Set.empty
     (fixtureDir </> "ImportConsumerExposed.hs") [fixtureDir]
   case projectPreparedTarget (contextFor Map.empty) (pprModules baselineModules) of
@@ -1393,9 +1398,9 @@ verifyRetainedImportProjectionExposed = do
       unless (Set.member "producerValue" (recoveredOccurrences program))
         (ioError (userError
           "retained-import-exposed baseline omitted producerValue's recovered body"))
-      unless (Set.member "producerFn" (recoveredOccurrences program))
+      unless (not (Set.member "producerFn" (recoveredOccurrences program)))
         (ioError (userError
-          "retained-import-exposed baseline omitted producerFn's recovered body"))
+          "retained-import-exposed baseline unexpectedly retained producerFn's body"))
       unless (all ((/= producerValueId) . globalIdentity) (programGlobals program))
         (ioError (userError
           "retained-import-exposed baseline declared producerValue a global"))
@@ -1493,6 +1498,7 @@ verifyHierarchicalTargetModule = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   case projectPreparedTarget context modules of

@@ -3,6 +3,10 @@ name:          tidepool-extract
 version:       0.1.0.0
 build-type:    Simple
 extra-source-files:
+  lib/Tidepool/Aeson/Scientific.hs
+  lib/Tidepool/Aeson/Value.hs
+  lib/Tidepool/Command/Types.hs
+  lib/Tidepool/Data/Time.hs
   lib/Tidepool/Double.hs
   test-prepared-stg/site-fixtures/*.hs
   test-prepared-stg/RepPoly.hs
@@ -20,6 +24,7 @@ library tidepool-extract-internal
   exposed-modules:
     Tidepool.Binders
     Tidepool.CborEncode
+    Tidepool.DependencyEvidence
     Tidepool.WorkerServer
     Tidepool.DiagJson
     Tidepool.EffectSchema
@@ -27,6 +32,7 @@ library tidepool-extract-internal
     Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.HostBindingAuthority
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata
@@ -37,6 +43,7 @@ library tidepool-extract-internal
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
     Tidepool.PreparedTime
+    Tidepool.PreparedJson
     Tidepool.SiteClassifier
     Tidepool.PreparedSites
     Tidepool.RetainedUnfoldings
@@ -63,6 +70,7 @@ library tidepool-extract-internal
     template-haskell,
     text,
     cborg,
+    cryptohash-sha256,
     mtl,
     syb,
     lens,
@@ -243,29 +251,6 @@ test-suite swarm-spec-test
     DeriveFunctor
     DeriveFoldable
     DeriveTraversable
-  ghc-options:      -Wall
-
--- Unit coverage for 'Tidepool.Aeson.Value.eitherDecodeValue''s hand-written
--- RFC 8259 parser used by prepared-STG answer decoding. Plain-GHC business
--- logic, so — like swarm-spec-test — this reaches `lib` directly
--- and costs no extract compile.
--- Run: cabal test aeson-value-spec-test  (needs the nix with-packages GHC on PATH).
-test-suite aeson-value-spec-test
-  type:             exitcode-stdio-1.0
-  main-is:          AesonValueSpecTest.hs
-  hs-source-dirs:   lib, test-aeson
-  other-modules:
-    Tidepool.Aeson.Value
-    Tidepool.Aeson.Scientific
-    Tidepool.Data.Text
-    Tidepool.Double
-  build-depends:
-    base       >= 4.20 && < 5,
-    containers,
-    text
-  default-language: GHC2024
-  default-extensions:
-    OverloadedStrings
   ghc-options:      -Wall
 
 test-suite fat-iface-exact-test

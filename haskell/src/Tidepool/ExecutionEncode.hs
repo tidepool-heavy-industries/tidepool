@@ -33,6 +33,9 @@ encodeWireProgram program = toStrictByteString $ array
   , list encodeTypeNode (programTypes program)
   , list encodeSiteRow (programSites program)
   , list encodeVerbSite (programVerbSites program)
+  , case programJsonLayout program of
+      Nothing -> tag 0
+      Just layout -> tagged 1 [encodeJsonLayout layout]
   ]
  where
   envelope = programEnvelope program
@@ -132,8 +135,19 @@ encodeOperation operation = array
       IntrinsicIdentity symbol CCall -> tagged 1 [encodeString symbol, tag 0]
       CapabilityIdentity name -> tagged 2 [encodeString name]
       WiredInErrorIdentity kind -> tagged 3 [encodeWord (fromIntegral (fromEnum kind))]
+      JsonDecodeIdentity left right -> tagged 4
+        [encodeConstructorId left, encodeConstructorId right]
+      JsonEncodeIdentity -> tag 5
   , encodeSignatureId (operationSignature operation)
   ]
+
+encodeJsonLayout :: JsonLayout ConstructorId -> Encoding
+encodeJsonLayout layout = array (map encodeConstructorId
+  [ jsonObject layout, jsonArray layout, jsonString layout, jsonNumber layout
+  , jsonBool layout, jsonNull layout, jsonMapBin layout, jsonMapTip layout
+  , jsonTrue layout, jsonFalse layout, jsonCons layout, jsonNil layout
+  , jsonScientific layout, jsonIntegerSmall layout, jsonIntegerPositive layout
+  , jsonIntegerNegative layout, jsonText layout, jsonInt layout ])
 
 encodeTypeNode :: TypeNode -> Encoding
 encodeTypeNode node = case node of

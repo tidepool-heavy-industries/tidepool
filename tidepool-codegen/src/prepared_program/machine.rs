@@ -56,6 +56,7 @@ use super::{
     CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, Unsupported,
 };
 use crate::context::VMContext;
+use crate::descriptor_bridge::{DescriptorMarshalError, DescriptorValue};
 use crate::host_fns::{prepared_gc_trigger, RuntimeError};
 use crate::machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
@@ -65,6 +66,7 @@ use crate::resource_ledger::{
     ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -72,7 +74,6 @@ use std::sync::Arc;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
 use tidepool_repr::{DataConId, PrincipalId};
@@ -114,7 +115,6 @@ struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
-    callable_headers: Vec<usize>,
 }
 
 /// Proof that the machine is at a quiescent point: no generated frame is
@@ -174,6 +174,10 @@ pub struct PreparedMachine<'code> {
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
+    /// The next incremental managed-construction owner. Nodes carry this
+    /// identity so a completed node from an ended builder cannot alias the
+    /// same root index in a later builder.
+    next_builder: u64,
     /// Programs a caller holds live regardless of reachability
     /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
     pins: BTreeSet<ProgramId>,
@@ -190,13 +194,10 @@ pub struct PreparedMachine<'code> {
     machine: Rc<MachineState>,
     vmctx: VMContext,
     old_space: Box<OldSpace>,
-    /// Every installed program's instantiated static image, kept alive for
-    /// the machine's lifetime. Unioned into `machine`'s descriptor space at
-    /// install time (`extend_prepared_descriptors`); observation reads this
-    /// slice directly (see `descriptor_region`/`observe.rs`) rather than one
-    /// program's own region, so a cross-program static field resolves
-    /// through whichever region actually admits it (T4).
-    statics: Vec<Arc<StaticRegion>>,
+    /// The descriptor space's one immutable static-region owner. It is set
+    /// after the first successful installation and is then shared directly
+    /// by collection and non-moving observation.
+    static_catalog: Option<Rc<RefCell<tidepool_heap::static_region::StaticRegionCatalog>>>,
     /// Union of every installed program's pinned descriptor layouts, passed
     /// to `retain_prepared`/`promote_prepared` so a promoted value's
     /// transitive graph is covered no matter which program produced the
@@ -227,13 +228,10 @@ pub struct PreparedMachine<'code> {
     /// delta every time.
     compiled_functions: u64,
     compiled_code_bytes: u64,
-    /// Each installed program's static region paired with its owner, in
-    /// install order, for [`Self::mark_live_programs`]'s
-    /// `observation_heap_and_starts` call: a `Traced::Static { region }` hit is an
-    /// index into this same list, so it names the owning program directly.
-    /// [`Self::install`] pushes; [`Self::retire`] removes the retired
-    /// program's entry.
-    region_owners: Vec<(ProgramId, Arc<StaticRegion>)>,
+    /// Static allocation starts mapped to their installed program. The
+    /// catalog owns the regions; this is only the reverse owner lookup for a
+    /// validated observation hit.
+    region_owners: HashMap<usize, ProgramId>,
 }
 
 /// Immutable capacity selected when a prepared machine is created. Root
@@ -254,6 +252,295 @@ pub struct PreparedCallOptions {
 pub struct PreparedHandle {
     raw: ValueHandle,
     rep: RuntimeRep,
+}
+
+/// One completed object owned by an active [`ManagedBuilder`]. The index is
+/// meaningful only to that builder and never escapes as a heap address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagedNode {
+    node: super::construction::ConstructionNode,
+}
+
+/// One logical constructor field for incremental managed construction.
+#[derive(Clone, Copy, Debug)]
+pub enum ManagedField {
+    /// Reusable child reference. Use this for a DAG edge whose source remains
+    /// available to later fields or parents.
+    Node(ManagedNode),
+    /// Transfer a completed tree child into this parent. The child remains
+    /// rooted through capacity collection and publication, then becomes
+    /// invalid and stops contributing a temporary collector root.
+    Consume(ManagedNode),
+    Scalar([u8; 16]),
+    Handle(PreparedHandle),
+}
+
+/// Incremental descriptor-authenticated construction under fixed temporary
+/// roots. Each completed object is rooted before another collection can run.
+pub struct ManagedBuilder<'machine, 'code> {
+    machine: &'machine mut PreparedMachine<'code>,
+    core: super::construction::ConstructionCore,
+}
+
+impl Drop for ManagedBuilder<'_, '_> {
+    fn drop(&mut self) {
+        self.core.release(&self.machine.machine);
+    }
+}
+
+impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
+    fn new(machine: &'machine mut PreparedMachine<'code>) -> Result<Self, ExecutionError> {
+        machine.ensure_handle_access()?;
+        machine
+            .handles
+            .try_reserve_handles(1)
+            .map_err(|_| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
+        if unsafe { machine.machine.prepared_old_space() }.is_some() {
+            return Err(runtime_error(&machine.machine, RuntimeError::BadPointer));
+        }
+        let owner = machine.next_builder;
+        machine.next_builder = machine
+            .next_builder
+            .checked_add(1)
+            .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
+        let core = super::construction::ConstructionCore::new(owner);
+        Ok(Self { machine, core })
+    }
+
+    pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode, ExecutionError> {
+        let descriptor = Arc::clone(
+            &self
+                .machine
+                .interner
+                .shared_externals()
+                .ok_or(ExecutionError::Invariant(
+                    "managed builder: no shared byte-array descriptor",
+                ))?
+                .bytes_array,
+        );
+        let machine = &self.machine.machine;
+        let old_space = &self.machine.old_space;
+        let node = self
+            .core
+            .bytes(
+                machine,
+                &mut self.machine.vmctx,
+                &descriptor,
+                bytes,
+                |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
+            )
+            .map_err(|error| match error {
+                super::construction::ConstructionError::Runtime(cause) => {
+                    runtime_error(machine, cause)
+                }
+                super::construction::ConstructionError::Operation(error) => error,
+                super::construction::ConstructionError::TooLarge(extent) => {
+                    super::answer::AnswerBuildError::TooLarge(extent).into()
+                }
+                super::construction::ConstructionError::Marshal(error) => {
+                    super::answer::AnswerBuildError::Wrapper(error).into()
+                }
+                super::construction::ConstructionError::Storage(error) => {
+                    super::answer::AnswerBuildError::Storage(error).into()
+                }
+            })?;
+        Ok(ManagedNode { node })
+    }
+
+    pub fn constructor(
+        &mut self,
+        host_id: DataConId,
+        fields: &[ManagedField],
+    ) -> Result<ManagedNode, ExecutionError> {
+        let descriptor = Arc::clone(
+            self.machine
+                .interner
+                .by_host(host_id)
+                .map(|(_, descriptor)| descriptor)
+                .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?,
+        );
+        let expected = descriptor.payload().logical_to_stored().len();
+        if fields.len() != expected {
+            return Err(super::answer::AnswerBuildError::FieldCount {
+                host_id,
+                expected,
+                actual: fields.len(),
+            }
+            .into());
+        }
+        if descriptor.allocation_alignment() as usize > 8 {
+            return Err(super::answer::AnswerBuildError::Alignment {
+                host_id,
+                required: descriptor.allocation_alignment(),
+            }
+            .into());
+        }
+        let machine = &self.machine.machine;
+        let old_space = &self.machine.old_space;
+        let handles = &self.machine.handles;
+        let mut consumed = Vec::new();
+        consumed
+            .try_reserve_exact(fields.len())
+            .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
+        for field in fields {
+            if let ManagedField::Consume(node) = field {
+                if consumed.contains(&node.node) {
+                    return Err(runtime_error(machine, RuntimeError::BadPointer));
+                }
+                self.core.word(node.node).map_err(|error| match error {
+                    super::construction::NodeAccessError::Foreign => {
+                        super::answer::AnswerBuildError::ForeignNode.into()
+                    }
+                    super::construction::NodeAccessError::Invalid => {
+                        runtime_error(machine, RuntimeError::BadPointer)
+                    }
+                })?;
+                consumed.push(node.node);
+            }
+        }
+        let node = self
+            .core
+            .constructor(
+                machine,
+                &mut self.machine.vmctx,
+                &descriptor,
+                fields.len(),
+                &consumed,
+                |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
+                |core, values| {
+                    for (index, field) in fields.iter().enumerate() {
+                        values[index] = match field {
+                            ManagedField::Node(node) | ManagedField::Consume(node) => core
+                                .word(node.node)
+                                .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                .map_err(|error| match error {
+                                    super::construction::NodeAccessError::Foreign => {
+                                        super::answer::AnswerBuildError::ForeignNode.into()
+                                    }
+                                    super::construction::NodeAccessError::Invalid => {
+                                        runtime_error(machine, RuntimeError::BadPointer)
+                                    }
+                                })?,
+                            ManagedField::Scalar(bits) => DescriptorValue::Bits(*bits),
+                            ManagedField::Handle(handle) => handles
+                                .handle(handle.raw)
+                                .map(|entry| unsafe { entry.slot.current() } as usize)
+                                .filter(|word| *word != 0)
+                                .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                .ok_or_else(|| {
+                                    ExecutionError::from(
+                                        super::answer::AnswerBuildError::UnknownHandle,
+                                    )
+                                })?,
+                        };
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                super::construction::ConstructionError::Runtime(cause) => {
+                    runtime_error(machine, cause)
+                }
+                super::construction::ConstructionError::Operation(error) => error,
+                super::construction::ConstructionError::TooLarge(extent) => {
+                    super::answer::AnswerBuildError::TooLarge(extent).into()
+                }
+                super::construction::ConstructionError::Marshal(error) => {
+                    super::answer::AnswerBuildError::Field {
+                        host_id,
+                        index: match &error {
+                            DescriptorMarshalError::Representation { index, .. }
+                            | DescriptorMarshalError::ManagedReference { index } => *index,
+                            _ => 0,
+                        },
+                        error,
+                    }
+                    .into()
+                }
+                super::construction::ConstructionError::Storage(error) => {
+                    super::answer::AnswerBuildError::Storage(error).into()
+                }
+            })?;
+        Ok(ManagedNode { node })
+    }
+
+    /// The worker representation for one authenticated field. Structural
+    /// encoders query only the field they are about to emit, avoiding a
+    /// per-node shape allocation for large values.
+    pub fn constructor_field_rep(
+        &self,
+        host_id: DataConId,
+        logical_index: usize,
+    ) -> Result<Option<RuntimeRep>, ExecutionError> {
+        let descriptor = self
+            .machine
+            .interner
+            .by_host(host_id)
+            .map(|(_, descriptor)| descriptor)
+            .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?;
+        Ok(descriptor
+            .payload()
+            .logical_to_stored()
+            .get(logical_index)
+            .map(|stored| {
+                stored
+                    .and_then(|index| descriptor.payload().fields().get(index as usize))
+                    .map_or(RuntimeRep::Void, |field| field.rep())
+            }))
+    }
+
+    #[cfg(test)]
+    fn temporary_root_metrics(&self) -> (usize, usize) {
+        self.core.root_metrics()
+    }
+
+    pub fn finish(
+        self,
+        realm: RealmId,
+        root: ManagedNode,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        let source = self.core.slot(root.node).map_err(|error| match error {
+            super::construction::NodeAccessError::Foreign => {
+                super::answer::AnswerBuildError::ForeignNode.into()
+            }
+            super::construction::NodeAccessError::Invalid => {
+                runtime_error(&self.machine.machine, RuntimeError::BadPointer)
+            }
+        })?;
+        let source = source.cast::<*mut u8>();
+        unsafe {
+            self.machine
+                .machine
+                .install_prepared_old_space(&self.machine.old_space)
+        };
+        let retained = unsafe {
+            self.machine.old_space.retain_prepared(
+                &self.machine.machine,
+                &mut self.machine.vmctx,
+                &[source],
+                &self.machine.descriptors,
+            )
+        };
+        self.machine.machine.clear_prepared_old_space();
+        let mut retained = retained.map_err(|cause| runtime_error(&self.machine.machine, cause))?;
+        let Some(root) = retained.pop().filter(|_| retained.is_empty()) else {
+            for root in retained {
+                self.machine.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(runtime_error(
+                &self.machine.machine,
+                RuntimeError::BadPointer,
+            ));
+        };
+        let raw = self
+            .machine
+            .handles
+            .insert_handle(root, realm, RuntimeRep::LiftedRef);
+        Ok(PreparedHandle {
+            raw,
+            rep: RuntimeRep::LiftedRef,
+        })
+    }
 }
 
 impl PreparedHandle {
@@ -431,6 +718,7 @@ impl<'code> PreparedMachine<'code> {
         Ok(Self {
             programs: BTreeMap::new(),
             next_program: 0,
+            next_builder: 0,
             pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
             handles: ResourceLedger::default(),
@@ -441,12 +729,12 @@ impl<'code> PreparedMachine<'code> {
             machine: Rc::new(MachineState::new()),
             vmctx: VMContext::new(std::ptr::null_mut(), std::ptr::null()),
             old_space: Box::new(OldSpace::new()),
-            statics: Vec::new(),
+            static_catalog: None,
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
             interner: super::DescriptorInterner::default(),
             header_owners: HashMap::new(),
-            region_owners: Vec::new(),
+            region_owners: HashMap::new(),
             compiled_functions: 0,
             compiled_code_bytes: 0,
         })
@@ -541,11 +829,27 @@ impl<'code> PreparedMachine<'code> {
             committed: false,
         };
         let staged = transaction.machine.install_staged(program.get(), imports);
-        transaction.committed = staged.is_ok();
+        // Acquire the shared owner while the install transaction can still
+        // roll descriptors and the candidate static region back. A failed
+        // borrow must never commit metadata whose program custody will drop.
+        let catalog = if staged.is_ok() && transaction.machine.static_catalog.is_none() {
+            transaction
+                .machine
+                .machine
+                .prepared_static_catalog()
+                .map(Some)
+                .map_err(|error| runtime_error(&transaction.machine.machine, error))
+        } else {
+            Ok(None)
+        };
+        transaction.committed = staged.is_ok() && catalog.is_ok();
         // Rollback (if any) deregisters the candidate block's roots while
         // `program` still owns the block.
         drop(transaction);
         let statics = staged?;
+        if let Some(catalog) = catalog? {
+            self.static_catalog = Some(catalog);
+        }
         let compiled = program.get();
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
@@ -561,25 +865,21 @@ impl<'code> PreparedMachine<'code> {
             .map(|descriptor| descriptor.initial_header_word())
             .filter(|header| !shared.contains(header))
             .collect();
-        let callable_headers = compiled
-            .callables
-            .iter()
-            .map(|callable| callable.header)
-            .collect();
         self.compiled_functions += compiled.pipeline.functions_defined();
         self.compiled_code_bytes += compiled.pipeline.code_bytes();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
         self.header_owners
             .extend(owned_headers.iter().map(|&header| (header, id)));
-        self.region_owners.push((id, Arc::clone(&statics)));
+        if !statics.is_empty() {
+            self.region_owners.insert(statics.address_range().start, id);
+        }
         self.programs.insert(
             id,
             InstalledProgram {
                 program,
                 statics,
                 owned_headers,
-                callable_headers,
             },
         );
         Ok(id)
@@ -870,7 +1170,6 @@ impl<'code> PreparedMachine<'code> {
         // program's own heap tops initialized -- see the per-branch comments
         // above), so there is nothing left to publish here.
 
-        self.statics.push(Arc::clone(&statics));
         // Interned constructor layouts are shared by every program that
         // declares them and are never retired, so union by header identity:
         // a plain extend would grow this list by each install's shared
@@ -918,9 +1217,9 @@ impl<'code> PreparedMachine<'code> {
                 )
             }),
             compiled
-                .enter_owned_headers
+                .thunk_entries
                 .iter()
-                .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
+                .map(|&(header, function)| (header, compiled.pipeline.get_function_ptr(function))),
         );
 
         self.interner.commit_absorb(&compiled.interned_constructors);
@@ -1000,7 +1299,10 @@ impl<'code> PreparedMachine<'code> {
             code_exports: self.handles.counts().code_exports,
             parked: self.parked_count(),
             stack_map_links: self.machine.stack_map_link_count(),
-            static_regions: self.statics.len(),
+            static_regions: self
+                .static_catalog
+                .as_ref()
+                .map_or(0, |catalog| catalog.borrow().len()),
             descriptor_rows: self.descriptor_registry.len(),
             callable_rows,
             enter_rows,
@@ -1146,12 +1448,7 @@ impl<'code> PreparedMachine<'code> {
         &self,
         from_nursery: bool,
     ) -> Result<BTreeSet<ProgramId>, ExecutionError> {
-        let regions: Vec<Arc<StaticRegion>> = self
-            .region_owners
-            .iter()
-            .map(|(_, region)| Arc::clone(region))
-            .collect();
-        let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts(&regions)?;
+        let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts()?;
 
         let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
         // One worklist of program ids still needing their root block
@@ -1198,8 +1495,8 @@ impl<'code> PreparedMachine<'code> {
                 continue;
             }
             let reached = match heap.trace_step(word)? {
-                super::observe::Traced::Static { region } => {
-                    Some(self.region_owners.get(region).map(|(id, _)| *id).ok_or(
+                super::observe::Traced::Static { region_start } => {
+                    Some(self.region_owners.get(&region_start).copied().ok_or(
                         ExecutionError::Invariant(
                             "mark_live_programs: a static hit named a region index outside the \
                              observation heap's own region list",
@@ -1263,7 +1560,7 @@ impl<'code> PreparedMachine<'code> {
         let block = &compiled.root_block;
         // 2. Call and enter rows.
         self.machine
-            .retire_prepared_entries(&installed.callable_headers, &compiled.enter_owned_headers);
+            .retire_prepared_entries(&compiled.dispatch_owned_headers);
         // 3. Descriptor rows and the descriptor space: only what this program
         //    owned; interned constructors stay shared.
         let owned: HashSet<usize> = installed.owned_headers.iter().copied().collect();
@@ -1286,9 +1583,8 @@ impl<'code> PreparedMachine<'code> {
         //    another still-installed program's code may share the same
         //    address and, unlike a static region, an interned literal
         //    cannot be proven ownerless by header identity alone.
-        self.statics
-            .retain(|region| !Arc::ptr_eq(region, &installed.statics));
-        self.region_owners.retain(|(owner, _)| *owner != id);
+        self.region_owners
+            .remove(&installed.statics.address_range().start);
         // 6-8. The block, the receipt entry and the code go with `installed`.
         block.len()
     }
@@ -1698,7 +1994,7 @@ impl<'code> PreparedMachine<'code> {
         for &(field_index, _) in &managed {
             selected.push(unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() });
         }
-        let mark = self.machine.rust_roots_len();
+        let mark = self.machine.rust_roots_mark();
         for &(field_index, _) in &managed {
             let slot = unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() };
             self.machine.register_rust_root(slot);
@@ -1757,19 +2053,15 @@ impl<'code> PreparedMachine<'code> {
     /// installed); [`Self::install`] only reaches this after a declared
     /// import's handle has resolved, which itself requires a live heap.
     fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
-        self.observation_heap_and_starts(&self.statics)
-            .map(|(heap, _, _)| heap)
+        self.observation_heap_and_starts().map(|(heap, _, _)| heap)
     }
 
-    /// [`Self::observation_heap`] admitting exactly `statics` (in that
-    /// order), so a caller that maps static hits back to programs supplies
-    /// the regions in the order it indexes them. Also returns the nursery
-    /// base address and its exact-start bitmap (bit `i` is the word at
-    /// `base + 8 * i`).
-    fn observation_heap_and_starts<'s>(
-        &'s self,
-        statics: &'s [Arc<StaticRegion>],
-    ) -> Result<(super::observe::ObservationHeap<'s>, usize, Vec<u64>), ExecutionError> {
+    /// [`Self::observation_heap`] over the descriptor space's one static
+    /// catalog. Also returns the nursery base address and its exact-start
+    /// bitmap (bit `i` is the word at `base + 8 * i`).
+    fn observation_heap_and_starts(
+        &self,
+    ) -> Result<(super::observe::ObservationHeap<'_>, usize, Vec<u64>), ExecutionError> {
         let (start, size) = self
             .machine
             .gc_active_range()
@@ -1789,9 +2081,14 @@ impl<'code> PreparedMachine<'code> {
             &mut starts,
             &mut scanned_words,
         )?;
+        let catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("observation: no static catalog"))?
+            .borrow();
         let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
-            statics,
+            catalog,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
@@ -1942,7 +2239,7 @@ impl<'code> PreparedMachine<'code> {
         let words = RootWords::new(1)?;
         words.write(0, word)?;
         let source = words.as_mut_ptr().cast::<*mut u8>();
-        let mark = self.machine.rust_roots_len();
+        let mark = self.machine.rust_roots_mark();
         self.machine.register_rust_root(source);
         let _roots = TemporaryRoots {
             machine: &self.machine,
@@ -1986,154 +2283,10 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
-    /// Build a host answer from a validated plan and retain it under `realm`.
-    ///
-    /// Every constructor resolves through the machine interner, so the built
-    /// cells carry exactly the descriptors installed code dispatches on. The
-    /// whole tree is sized first; the nursery is collected once only when it
-    /// cannot hold it; the objects are then written children-first into the
-    /// span beyond the allocation cursor with no allocating call in between,
-    /// and only after every write succeeds does the cursor advance and the
-    /// root get promoted and rooted as a handle. A failure at any step leaves
-    /// the cursor, the ledger and every root count unchanged.
-    ///
-    /// Byte arrays in the plan are allocated in the machine's external
-    /// ledger before any object is written and released again if anything
-    /// later fails; their wrapper objects use the machine-shared `ByteArray#`
-    /// descriptor every installed program reads with.
-    pub fn build_answer(
-        &mut self,
-        realm: RealmId,
-        plan: &super::answer::AnswerPlan,
-    ) -> Result<PreparedHandle, ExecutionError> {
-        self.ensure_handle_access()?;
-        let bytes_descriptor = Arc::clone(
-            &self
-                .interner
-                .shared_externals()
-                .ok_or(ExecutionError::Invariant(
-                    "build_answer: no program has installed the shared external wrapper \
-                     descriptors yet",
-                ))?
-                .bytes_array,
-        );
-        let flattened = super::answer::FlattenedAnswer::resolve(
-            plan,
-            &|id| self.interner.by_host(id).map(|(_, descriptor)| descriptor),
-            &bytes_descriptor,
-        )?;
-        let free = |vmctx: &VMContext| {
-            (vmctx.alloc_limit as usize).saturating_sub(vmctx.alloc_ptr as usize)
-        };
-        if free(&self.vmctx) < flattened.extent {
-            collect_on(
-                &self.machine,
-                &mut self.vmctx,
-                &self.old_space,
-                flattened.extent,
-            )?;
-            if free(&self.vmctx) < flattened.extent {
-                return Err(super::answer::AnswerBuildError::TooLarge(flattened.extent).into());
-            }
-        }
-        self.handles
-            .try_reserve_handles(1)
-            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
-        if unsafe { self.machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
-        }
-        // Byte payloads first: ledger allocations that touch neither the
-        // nursery nor any root, so a failure here or below unwinds to exactly
-        // the ledger the caller saw.
-        let mut payloads: Vec<*mut u8> = Vec::new();
-        // No wrapper naming a payload is ever published on a failed build, so
-        // the payload is released outright rather than revoked for a sweep.
-        let revoke = |machine: &MachineState, payloads: &[*mut u8]| {
-            for &payload in payloads {
-                if !machine.release_external_storage(payload) {
-                    return Err(runtime_error(machine, RuntimeError::BadPointer));
-                }
-            }
-            Ok(())
-        };
-        for bytes in flattened.byte_arrays() {
-            let allocated = self
-                .machine
-                .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
-                .and_then(|payload| {
-                    self.machine
-                        .store_external_bytes(payload, 0, bytes)
-                        .map(|()| payload)
-                });
-            match allocated {
-                Ok(payload) => payloads.push(payload),
-                Err(error) => {
-                    revoke(&self.machine, &payloads)?;
-                    return Err(super::answer::AnswerBuildError::Storage(error).into());
-                }
-            }
-        }
-        // Borrowed handles' tagged words, resolved now (after any collection
-        // the sizing pass above triggered) rather than at `visit` time — the
-        // same reason byte payloads are allocated after sizing rather than
-        // during it: a compacting collection can move what a handle roots,
-        // and only the ledger's own slot is updated by that move, never a
-        // copy taken earlier.
-        let mut handle_words: Vec<usize> = Vec::with_capacity(flattened.handles().count());
-        for handle in flattened.handles() {
-            let word = self
-                .handles
-                .handle(handle.raw)
-                .map(|entry| unsafe { entry.slot.current() } as usize)
-                .filter(|word| *word != 0)
-                .ok_or(super::answer::AnswerBuildError::UnknownHandle)?;
-            handle_words.push(word);
-        }
-        let span = self.vmctx.alloc_ptr;
-        // SAFETY: `span..span + extent` lies inside the live nursery beyond
-        // the allocation cursor (checked above), so nothing reaches it until
-        // the cursor advances below.
-        let root = match unsafe { flattened.write(span, &payloads, &handle_words) } {
-            Ok(root) => root,
-            Err(error) => {
-                revoke(&self.machine, &payloads)?;
-                return Err(error.into());
-            }
-        };
-        self.vmctx.alloc_ptr = unsafe { span.add(flattened.extent) };
-        let words = RootWords::new(1)?;
-        words.write(0, root as u64)?;
-        let source = words.as_mut_ptr().cast::<*mut u8>();
-        let mark = self.machine.rust_roots_len();
-        self.machine.register_rust_root(source);
-        let _roots = TemporaryRoots {
-            machine: &self.machine,
-            mark,
-        };
-        unsafe { self.machine.install_prepared_old_space(&self.old_space) };
-        let retained = unsafe {
-            self.old_space.retain_prepared(
-                &self.machine,
-                &mut self.vmctx,
-                &[source],
-                &self.descriptors,
-            )
-        };
-        self.machine.clear_prepared_old_space();
-        let mut roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
-        let Some(root) = roots.pop().filter(|_| roots.is_empty()) else {
-            for root in roots {
-                self.machine.deregister_persistent_root(root.addr());
-            }
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
-        };
-        let raw = self
-            .handles
-            .insert_handle(root, realm, RuntimeRep::LiftedRef);
-        Ok(PreparedHandle {
-            raw,
-            rep: RuntimeRep::LiftedRef,
-        })
+    /// Start one incremental managed construction operation. Dropping the
+    /// builder publishes no handle and releases all temporary root ownership.
+    pub fn managed_builder(&mut self) -> Result<ManagedBuilder<'_, 'code>, ExecutionError> {
+        ManagedBuilder::new(self)
     }
 
     /// The persistent root slot behind a retained handle, for an owner that
@@ -2269,6 +2422,11 @@ impl<'code> PreparedMachine<'code> {
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
         self.machine.set_cancel_flag(cancel);
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("observe: no static catalog"))?
+            .borrow();
         let observed = {
             let _cancel = CancelScope(&self.machine);
             let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
@@ -2276,7 +2434,7 @@ impl<'code> PreparedMachine<'code> {
                 &self.machine,
                 program,
                 &mut self.vmctx,
-                &self.statics,
+                &static_catalog,
                 &self.descriptor_registry,
                 &self.old_space,
                 &[super::observe::ObservationSeed {
@@ -2348,18 +2506,13 @@ impl<'code> PreparedMachine<'code> {
         if word == 0 {
             return None;
         }
-        let regions: Vec<Arc<StaticRegion>> = self
-            .region_owners
-            .iter()
-            .map(|(_, region)| Arc::clone(region))
-            .collect();
-        let (heap, _, _) = self.observation_heap_and_starts(&regions).ok()?;
+        let (heap, _, _) = self.observation_heap_and_starts().ok()?;
         match heap.trace_step(word).ok()? {
             super::observe::Traced::Object { header, .. } => {
                 self.header_owners.get(&header).copied()
             }
-            super::observe::Traced::Static { region } => {
-                self.region_owners.get(region).map(|(id, _)| *id)
+            super::observe::Traced::Static { region_start } => {
+                self.region_owners.get(&region_start).copied()
             }
         }
     }
@@ -2408,6 +2561,11 @@ impl<'code> PreparedMachine<'code> {
         realm: RealmId,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let cancel = self.handles.cancel_flag(realm);
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("run: no static catalog"))?
+            .borrow();
         let program = self
             .programs
             .get(&id)
@@ -2423,7 +2581,7 @@ impl<'code> PreparedMachine<'code> {
             &mut self.old_space,
             &self.descriptors,
             &mut self.handles,
-            &self.statics,
+            &static_catalog,
             &self.descriptor_registry,
         );
         // The call's outcome is in `result`; nothing of it outlives the call.
@@ -2461,6 +2619,11 @@ impl<'code> PreparedMachine<'code> {
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("run: no static catalog"))?
+            .borrow();
         let program = self
             .programs
             .get(&id)
@@ -2473,7 +2636,7 @@ impl<'code> PreparedMachine<'code> {
             &self.machine,
             &mut self.vmctx,
             &self.old_space,
-            &self.statics,
+            &static_catalog,
             &self.descriptor_registry,
         );
         self.machine.end_prepared_call();
@@ -2527,7 +2690,7 @@ impl<'code> InstalledProgram<'code> {
         old_space: &mut OldSpace,
         descriptors: &[Arc<ObjectDescriptor>],
         handles: &mut ResourceLedger,
-        statics: &[Arc<StaticRegion>],
+        statics: &tidepool_heap::static_region::StaticRegionCatalog,
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let (adapter, reps, result_contract, result_layout) = {
@@ -2594,7 +2757,7 @@ impl<'code> InstalledProgram<'code> {
             };
             argument_area.write(argument_index, word)?;
         }
-        let argument_mark = machine.rust_roots_len();
+        let argument_mark = machine.rust_roots_mark();
         for argument_index in managed_arguments {
             let slot = unsafe {
                 argument_area
@@ -2630,6 +2793,12 @@ impl<'code> InstalledProgram<'code> {
         let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw = {
+            let _intrinsic = super::ActiveIntrinsicScope::new(
+                machine,
+                self.program.get(),
+                statics,
+                descriptor_registry,
+            )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
@@ -2653,7 +2822,7 @@ impl<'code> InstalledProgram<'code> {
         let result_reps = result_contract
             .returned_reps()
             .ok_or_else(|| runtime_error(machine, RuntimeError::NoSuccessReturned))?;
-        let mark = machine.rust_roots_len();
+        let mark = machine.rust_roots_mark();
         register_result_roots(machine, &results, &result_layout);
         let _results = TemporaryRoots { machine, mark };
         if options.collect_before_observation {
@@ -2742,7 +2911,7 @@ impl<'code> InstalledProgram<'code> {
         machine: &MachineState,
         vmctx: &mut VMContext,
         old_space: &OldSpace,
-        statics: &[Arc<StaticRegion>],
+        statics: &tidepool_heap::static_region::StaticRegionCatalog,
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
@@ -2800,6 +2969,12 @@ impl<'code> InstalledProgram<'code> {
         let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw_status = {
+            let _intrinsic = super::ActiveIntrinsicScope::new(
+                machine,
+                self.program.get(),
+                statics,
+                descriptor_registry,
+            )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
@@ -2832,7 +3007,7 @@ impl<'code> InstalledProgram<'code> {
             return Err(runtime_error(machine, RuntimeError::NoSuccessReturned));
         }
 
-        let root_mark = machine.rust_roots_len();
+        let root_mark = machine.rust_roots_mark();
         register_result_roots(machine, &results, &result_layout);
         let _roots = TemporaryRoots {
             machine,
@@ -3249,6 +3424,38 @@ mod tests {
         };
         let prepared = testing::prepare(wire).expect("base_program fixture");
         link_program(prepared, &MachineImports::default()).expect("base_program fixture links")
+    }
+
+    fn empty_static_program(mut program: CompiledProgram) -> CompiledProgram {
+        program.statics =
+            tidepool_heap::static_region::StaticImage::new(vec![], vec![], BTreeMap::new(), [])
+                .expect("empty static image validates");
+        // The fixture is installed only to exercise static ownership and
+        // retirement. Its generated entry is intentionally never invoked.
+        program.top_slots.clear();
+        program.heap_top_specs.clear();
+        program
+    }
+
+    #[test]
+    fn empty_static_programs_share_no_catalog_entry_and_retire() {
+        let first = empty_static_program(first(&base_program(12_001)));
+        let (mut machine, first_id) =
+            PreparedMachine::new(first, PreparedMachineOptions { nursery_bytes: 128 })
+                .expect("first empty static program installs");
+        let second = machine
+            .compile_for_install(&base_program(12_002))
+            .expect("second empty static program compiles");
+        let second_id = machine
+            .install_program(empty_static_program(second), ImportBindings::new())
+            .expect("second empty static program installs");
+        assert_eq!(machine.residency().static_regions, 0);
+
+        let receipt = machine
+            .collect_major(machine.quiesce().expect("quiescent"))
+            .expect("empty static programs retire");
+        assert_eq!(receipt.programs, vec![first_id, second_id]);
+        assert_eq!(machine.residency().static_regions, 0);
     }
 
     #[test]
@@ -4308,8 +4515,7 @@ mod tests {
     ///
     /// X2 closes it: `apply.rs::emit_dispatchers`' terminal fallback now
     /// calls the host fn `prepared_resolve_call(vmctx, header, demand)`,
-    /// and `PreparedMachine::install` fills the machine-wide
-    /// `prepared_callables`/`prepared_enters` maps via
+    /// and `PreparedMachine::install` publishes machine-wide dispatch records via
     /// `MachineState::register_prepared_entries` as its LAST step, so a
     /// foreign callee this machine actually owns resolves and its code runs
     /// with the caller's frame live. Only a genuine signature mismatch or an
@@ -6860,55 +7066,44 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    /// A host answer builds through the interner into a realm-owned handle
-    /// that observes to the planned value; a plan naming an undeclared
-    /// constructor is refused with the allocation cursor, the handle ledger
-    /// and the root counts untouched.
+    /// Managed construction resolves constructors through the interner and
+    /// publishes only a completed root. Unknown constructors and wrong arity
+    /// leave the allocation cursor, handle ledger and root counts untouched.
     #[test]
-    fn a_host_answer_builds_through_the_interner_or_leaves_the_heap_untouched() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn managed_construction_builds_through_the_interner_or_leaves_the_heap_untouched() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = machine();
         let realm = RealmId::fresh();
         let handles_before = machine.handle_count();
         let roots_before = machine.total_persistent_roots();
         let cursor_before = machine.vmctx.alloc_ptr;
 
-        let unknown = AnswerPlan::Constructor {
-            host_id: DataConId(4242),
-            fields: Vec::new(),
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &unknown),
-            Err(ExecutionError::Answer(
-                AnswerBuildError::UnknownConstructor(DataConId(4242))
-            ))
-        ));
-        let wrong_arity = AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: vec![AnswerPlan::Scalar {
-                rep: RuntimeRep::Int(64),
-                bits: [0; 16],
-            }],
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &wrong_arity),
-            Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
-                expected: 0,
-                actual: 1,
-                ..
-            }))
-        ));
+        {
+            let mut builder = machine.managed_builder().expect("managed builder");
+            assert!(matches!(
+                builder.constructor(DataConId(4242), &[]),
+                Err(ExecutionError::Answer(
+                    AnswerBuildError::UnknownConstructor(DataConId(4242))
+                ))
+            ));
+            assert!(matches!(
+                builder.constructor(DataConId(900), &[ManagedField::Scalar([0; 16])]),
+                Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
+                    expected: 0,
+                    actual: 1,
+                    ..
+                }))
+            ));
+        }
         assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.total_persistent_roots(), roots_before);
 
-        let unit = AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: Vec::new(),
-        };
-        let handle = machine
-            .build_answer(realm, &unit)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let unit = builder
+            .constructor(DataConId(900), &[])
             .expect("the CAF program's Unit constructor builds");
+        let handle = builder.finish(realm, unit).expect("Unit is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -6937,20 +7132,88 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    /// A host answer for a constructor with a scalar field builds through the
-    /// interner and observes the field back as the declared representation;
-    /// a plan that nests an object where the field expects a scalar (a
-    /// representation-category mismatch `marshal_descriptor_object` catches
-    /// at the leaf) is refused with `AnswerBuildError::Field` and leaves the
-    /// allocation cursor, the handle ledger and the root counts untouched.
-    ///
-    /// (`AnswerPlan::Scalar::rep` is not itself cross-checked against the
-    /// constructor's declared field representation -- only `bits` reaches
-    /// the write path, and `Int`/`Word`/`Float` all marshal as raw bytes -- so
-    /// the genuine mismatch this test exercises is shape, not width.)
+    /// A managed node is meaningful only to the builder that minted it. A
+    /// later builder can reuse the same root-vector index, so accepting an
+    /// earlier node would silently publish or embed the wrong object.
     #[test]
-    fn a_host_answer_with_scalar_fields_builds_and_a_bad_field_rolls_back() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn a_managed_node_cannot_cross_builder_ownership() {
+        use crate::prepared_program::AnswerBuildError;
+
+        let (mut machine, _) = machine();
+        let stale = {
+            let mut builder = machine.managed_builder().expect("first builder");
+            builder
+                .constructor(DataConId(900), &[])
+                .expect("first builder constructs Unit")
+        };
+
+        let mut builder = machine.managed_builder().expect("second builder");
+        let fresh = builder
+            .constructor(DataConId(900), &[])
+            .expect("second builder constructs Unit at the same local index");
+        assert_ne!(stale, fresh);
+        assert!(matches!(
+            builder.finish(RealmId::ROOT, stale),
+            Err(ExecutionError::Answer(AnswerBuildError::ForeignNode))
+        ));
+
+        let mut builder = machine.managed_builder().expect("third builder");
+        let unit = builder
+            .constructor(DataConId(900), &[])
+            .expect("third builder constructs Unit");
+        let handle = builder
+            .finish(RealmId::ROOT, unit)
+            .expect("the rejected cross-builder node leaves the machine reusable");
+        assert!(machine.release(handle));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn active_intrinsic_program_refuses_nesting_and_clears_on_scope_exit() {
+        let (machine, program) = machine();
+        let compiled = machine.programs[&program].program.get();
+        let statics = machine
+            .static_catalog
+            .as_ref()
+            .expect("installed machine has a static catalog")
+            .borrow();
+        {
+            let _active = crate::prepared_program::ActiveIntrinsicScope::new(
+                &machine.machine,
+                compiled,
+                &statics,
+                &machine.descriptor_registry,
+            )
+            .expect("first intrinsic operation owns the invocation scope");
+            assert!(matches!(
+                crate::prepared_program::ActiveIntrinsicScope::new(
+                    &machine.machine,
+                    compiled,
+                    &statics,
+                    &machine.descriptor_registry,
+                ),
+                Err(ExecutionError::Invariant(
+                    "a nested managed intrinsic operation is already active"
+                ))
+            ));
+            assert!(unsafe { machine.machine.active_intrinsic_program() }.is_some());
+        }
+        assert!(unsafe { machine.machine.active_intrinsic_program() }.is_none());
+        crate::prepared_program::ActiveIntrinsicScope::new(
+            &machine.machine,
+            compiled,
+            &statics,
+            &machine.descriptor_registry,
+        )
+        .expect("scope cleanup permits later intrinsic construction");
+    }
+
+    /// A constructor with a scalar field observes the field back as its
+    /// declared representation. Supplying a node for that scalar field is a
+    /// typed reusable failure and publishes no partial result.
+    #[test]
+    fn managed_scalar_fields_build_and_a_bad_field_remains_reusable() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = PreparedMachine::new(
             field_constructor_program(910),
             PreparedMachineOptions {
@@ -6963,16 +7226,11 @@ mod tests {
 
         let mut bits = [0u8; 16];
         bits[..8].copy_from_slice(&42_i64.to_ne_bytes());
-        let good = AnswerPlan::Constructor {
-            host_id: DataConId(910),
-            fields: vec![AnswerPlan::Scalar {
-                rep: RuntimeRep::Int(64),
-                bits,
-            }],
-        };
-        let handle = machine
-            .build_answer(realm, &good)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let good = builder
+            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
             .expect("the Field constructor builds with its Int(64) field");
+        let handle = builder.finish(realm, good).expect("Field is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -6989,28 +7247,20 @@ mod tests {
         let handles_after_good = machine.handle_count();
         let roots_after_good = machine.total_persistent_roots();
 
-        // The field expects a scalar; nesting an object there is a
-        // representation-category mismatch caught by the same leaf
-        // validation `marshal_descriptor_object` runs for every field.
-        let bad = AnswerPlan::Constructor {
-            host_id: DataConId(910),
-            fields: vec![AnswerPlan::Constructor {
-                host_id: DataConId(910),
-                fields: vec![AnswerPlan::Scalar {
-                    rep: RuntimeRep::Int(64),
-                    bits,
-                }],
-            }],
-        };
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let inner = builder
+            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
+            .expect("inner Field builds");
         assert!(matches!(
-            machine.build_answer(realm, &bad),
+            builder.constructor(DataConId(910), &[ManagedField::Node(inner)]),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(910),
                 index: 0,
                 ..
             }))
         ));
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_after_good);
+        drop(builder);
+        assert!(machine.vmctx.alloc_ptr > cursor_after_good);
         assert_eq!(machine.handle_count(), handles_after_good);
         assert_eq!(machine.total_persistent_roots(), roots_after_good);
 
@@ -7021,7 +7271,7 @@ mod tests {
 
     /// A program declaring a `Text`-shaped constructor (`ByteArray#`, `Int#`
     /// offset, `Int#` length) beside a nullary `Unit` its CAF returns, so a
-    /// host answer can exercise the byte-backed leaf without the program ever
+    /// managed construction can exercise the byte-backed leaf without the program ever
     /// constructing one itself.
     fn text_shaped_program(unit_id: u64, text_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
@@ -7094,14 +7344,13 @@ mod tests {
         CompiledProgram::compile(&linked).expect("text_shaped_program fixture compiles")
     }
 
-    /// A byte-backed host answer (the `Text` shape) allocates its payload in
-    /// the external ledger, wraps it with the owner's `ByteArray#` descriptor
-    /// and observes back as the bytes it was given, surviving a collection;
-    /// a plan whose later field fails releases the payload again, leaving the
-    /// ledger, the cursor and every count exactly as before.
+    /// A byte-backed managed value allocates its payload only after wrapper
+    /// capacity is available and observes back as the bytes it was given. If
+    /// a later field fails, the initialized wrapper is unreachable and the
+    /// next collection reclaims its payload; the machine remains reusable.
     #[test]
-    fn a_byte_backed_host_answer_builds_or_releases_its_payload() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn byte_backed_managed_construction_builds_and_failure_is_collectable() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = PreparedMachine::new(
             text_shaped_program(920, 921),
             PreparedMachineOptions {
@@ -7120,51 +7369,68 @@ mod tests {
             bits[..8].copy_from_slice(&value.to_ne_bytes());
             bits
         };
-        let scalar = |value: i64| AnswerPlan::Scalar {
-            rep: RuntimeRep::Int(64),
-            bits: int_bits(value),
-        };
-
-        // A failing later field: the payload allocated for field 0 is
-        // released again, not left revoked in the ledger.
-        let bad = AnswerPlan::Constructor {
-            host_id: DataConId(921),
-            fields: vec![
-                AnswerPlan::Bytes(text.clone()),
-                scalar(0),
-                AnswerPlan::Constructor {
-                    host_id: DataConId(920),
-                    fields: vec![],
-                },
-            ],
-        };
+        // A failing later field leaves the initialized byte wrapper
+        // unreachable. It publishes no result root; normal collection owns
+        // reclamation rather than pretending to roll the nursery cursor back.
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let bytes = builder.bytes(&text).expect("byte wrapper builds");
+        let unit = builder
+            .constructor(DataConId(920), &[])
+            .expect("Unit builds");
         assert!(matches!(
-            machine.build_answer(realm, &bad),
+            builder.constructor(
+                DataConId(921),
+                &[
+                    ManagedField::Node(bytes),
+                    ManagedField::Scalar(int_bits(0)),
+                    ManagedField::Node(unit),
+                ],
+            ),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(921),
                 index: 2,
                 ..
             }))
         ));
+        drop(builder);
+        assert_eq!(
+            machine.machine.external_storage_stats().live_objects,
+            ledger_before.live_objects + 1
+        );
+        assert!(machine.vmctx.alloc_ptr > cursor_before);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+
+        machine
+            .run_entry(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                realm,
+            )
+            .expect("the machine remains usable and collects the refused wrapper");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects
         );
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
-        assert_eq!(machine.handle_count(), handles_before);
-        assert_eq!(machine.total_persistent_roots(), roots_before);
 
-        let good = AnswerPlan::Constructor {
-            host_id: DataConId(921),
-            fields: vec![
-                AnswerPlan::Bytes(text.clone()),
-                scalar(0),
-                scalar(text.len() as i64),
-            ],
-        };
-        let handle = machine
-            .build_answer(realm, &good)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let bytes = builder.bytes(&text).expect("byte wrapper builds");
+        let root = builder
+            .constructor(
+                DataConId(921),
+                &[
+                    ManagedField::Node(bytes),
+                    ManagedField::Scalar(int_bits(0)),
+                    ManagedField::Scalar(int_bits(text.len() as i64)),
+                ],
+            )
             .expect("the Text-shaped constructor builds over its byte array");
+        let handle = builder.finish(realm, root).expect("Text is published");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects + 1
@@ -7209,45 +7475,6 @@ mod tests {
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-    }
-
-    /// A plan whose root is a bare `Scalar` (no constructor to root) is
-    /// refused as `UnboxedRoot` before anything is sized or allocated: the
-    /// cursor, handle count, persistent-root count and external ledger are
-    /// all exactly as they were.
-    #[test]
-    fn a_scalar_root_is_refused_with_nothing_allocated() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
-        let (mut machine, _program) = PreparedMachine::new(
-            text_shaped_program(920, 921),
-            PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
-            },
-        )
-        .expect("prepared machine");
-        let realm = RealmId::fresh();
-        let handles_before = machine.handle_count();
-        let roots_before = machine.total_persistent_roots();
-        let ledger_before = machine.machine.external_storage_stats();
-        let cursor_before = machine.vmctx.alloc_ptr;
-
-        let mut bits = [0u8; 16];
-        bits[..8].copy_from_slice(&42i64.to_ne_bytes());
-        let plan = AnswerPlan::Scalar {
-            rep: RuntimeRep::Int(64),
-            bits,
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &plan),
-            Err(ExecutionError::Answer(AnswerBuildError::UnboxedRoot))
-        ));
-        assert_eq!(
-            machine.machine.external_storage_stats().live_objects,
-            ledger_before.live_objects
-        );
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
-        assert_eq!(machine.handle_count(), handles_before);
-        assert_eq!(machine.total_persistent_roots(), roots_before);
     }
 
     /// Compile a fixture as the first program of a fresh machine
@@ -7344,10 +7571,6 @@ mod tests {
         // figure is the same after warm-up as every other counter.
         let mut baseline: Option<(ResidencyCounts, usize)> = None;
         let mut old_bytes: Option<usize> = None;
-        let unit_answer = crate::prepared_program::AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: Vec::new(),
-        };
         let mut answer_handle: Option<PreparedHandle> = None;
         for iteration in 0..iterations {
             let compiled = machine
@@ -7366,9 +7589,13 @@ mod tests {
             previous = handle;
             // One heap value retained per turn, the previous turn's released:
             // without compaction its promotion arena would accumulate.
-            let answer = machine
-                .build_answer(RealmId::ROOT, &unit_answer)
-                .expect("a Unit answer builds");
+            let mut builder = machine.managed_builder().expect("managed builder");
+            let unit = builder
+                .constructor(DataConId(900), &[])
+                .expect("a Unit value builds");
+            let answer = builder
+                .finish(RealmId::ROOT, unit)
+                .expect("the Unit value is retained");
             if let Some(stale) = answer_handle.replace(answer) {
                 assert!(machine.release(stale));
             }
@@ -7661,7 +7888,7 @@ mod tests {
     }
 
     /// A program declaring a nullary `Unit` (its CAF's result) and a
-    /// one-field `Box a`, so a host answer can build a nested value graph.
+    /// one-field `Box a`, so managed construction can build a nested value graph.
     fn boxed_shape_program(unit_id: u64, box_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -7700,6 +7927,31 @@ mod tests {
                 root_mask: vec![true],
             },
         });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineCompaction", "Pair"),
+            family: testing::identity("MachineCompaction", "Pair"),
+            host_id: DataConId(932),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            strict_fields: vec![false, false],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, true],
+            },
+        });
         wire.expressions.nodes[0] = ExprFrame::Construct {
             constructor: ConstructorId(0),
             fields: vec![],
@@ -7719,18 +7971,84 @@ mod tests {
         CompiledProgram::compile(&linked).expect("boxed_shape_program fixture compiles")
     }
 
-    fn boxed(depth: usize, unit_id: u64, box_id: u64) -> crate::prepared_program::AnswerPlan {
-        use crate::prepared_program::AnswerPlan;
-        (0..depth).fold(
-            AnswerPlan::Constructor {
-                host_id: DataConId(unit_id),
-                fields: Vec::new(),
-            },
-            |inner, _| AnswerPlan::Constructor {
-                host_id: DataConId(box_id),
-                fields: vec![inner],
-            },
+    fn build_boxed(
+        machine: &mut PreparedMachine<'_>,
+        realm: RealmId,
+        depth: usize,
+        unit_id: u64,
+        box_id: u64,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        let mut builder = machine.managed_builder()?;
+        let mut node = builder.constructor(DataConId(unit_id), &[])?;
+        for _ in 0..depth {
+            node = builder.constructor(DataConId(box_id), &[ManagedField::Consume(node)])?;
+        }
+        builder.finish(realm, node)
+    }
+
+    #[test]
+    fn consuming_tree_fields_keep_only_the_live_frontier_rooted() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
         )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let mut node = builder.constructor(DataConId(930), &[]).expect("leaf");
+        for _ in 0..200 {
+            node = builder
+                .constructor(DataConId(931), &[ManagedField::Consume(node)])
+                .expect("parent");
+        }
+        let (chunks, active) = builder.temporary_root_metrics();
+        assert_eq!(active, 1, "consumed children leave the active root set");
+        assert_eq!(chunks, 1, "one stable chunk serves the whole tree");
+        drop(builder);
+        assert_eq!(machine.machine.rust_roots_len(), 0);
+    }
+
+    #[test]
+    fn duplicate_consuming_field_rejects_before_parent_publication() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let child = builder.constructor(DataConId(930), &[]).expect("leaf");
+        let roots_before = builder.temporary_root_metrics();
+        assert!(builder
+            .constructor(
+                DataConId(932),
+                &[ManagedField::Consume(child), ManagedField::Consume(child)],
+            )
+            .is_err());
+        assert_eq!(builder.temporary_root_metrics(), roots_before);
+        assert!(
+            builder.core.word(child.node).is_ok(),
+            "failed parent preserves child"
+        );
+    }
+
+    #[test]
+    fn consumed_node_does_not_alias_a_reused_root_slot() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let child = builder.constructor(DataConId(930), &[]).expect("child");
+        let _parent = builder
+            .constructor(DataConId(931), &[ManagedField::Consume(child)])
+            .expect("parent consumes child");
+        let replacement = builder
+            .constructor(DataConId(930), &[])
+            .expect("the consumed root slot is reusable");
+        assert!(builder
+            .constructor(DataConId(931), &[ManagedField::Node(child)])
+            .is_err());
+        assert!(builder.core.word(replacement.node).is_ok());
     }
 
     /// The nesting depth of an observed `boxed` value, `None` for any other
@@ -7748,8 +8066,60 @@ mod tests {
         }
     }
 
+    /// Incremental managed construction roots each completed child before it
+    /// asks the collector for the next object's space. The complete graph is
+    /// deliberately much larger than this nursery; the old contiguous-span
+    /// builder refused it as `TooLarge`.
+    #[test]
+    fn a_managed_value_larger_than_the_nursery_builds_across_collections() {
+        let (mut machine, program) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let realm = RealmId::fresh();
+        let handle = build_boxed(&mut machine, realm, 100, 930, 931)
+            .expect("incremental construction spans nursery collections");
+        let observed = machine
+            .observe_handle(program, handle, 1_000)
+            .expect("the incrementally built answer observes");
+        assert_eq!(boxed_depth(&observed, 930, 931), Some(100));
+        assert!(machine.release(handle));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn a_stale_handle_field_is_rejected_without_publishing_a_root() {
+        use crate::prepared_program::AnswerBuildError;
+
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let stale = build_boxed(&mut machine, RealmId::ROOT, 0, 930, 931).expect("Unit builds");
+        assert!(machine.release(stale));
+        let handles_before = machine.handle_count();
+
+        let mut builder = machine.managed_builder().expect("managed builder");
+        assert!(matches!(
+            builder.constructor(DataConId(931), &[ManagedField::Handle(stale)]),
+            Err(ExecutionError::Answer(AnswerBuildError::UnknownHandle))
+        ));
+        assert_eq!(
+            builder.temporary_root_metrics().1,
+            0,
+            "failed publication releases its temporary root"
+        );
+        drop(builder);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
     /// `old_bytes_live` reads live promoted bytes without needing a major
-    /// collection first: `build_answer` retains its result straight into old
+    /// collection first: `ManagedBuilder::finish` retains its result in old
     /// space, so the accessor grows between two builds with no
     /// `collect_major` in between -- the property `PreparedEngine`'s
     /// amortization trigger (`tidepool-runtime/src/session/prepared.rs`,
@@ -7770,16 +8140,12 @@ mod tests {
         assert_eq!(machine.old_bytes_live(), 0, "nothing retained yet");
 
         let realm = RealmId::fresh();
-        let small = machine
-            .build_answer(realm, &boxed(1, 930, 931))
-            .expect("small graph builds");
+        let small = build_boxed(&mut machine, realm, 1, 930, 931).expect("small graph builds");
         let after_small = machine.old_bytes_live();
         assert!(after_small > 0, "the retained graph is live old-space");
         assert_eq!(after_small, machine.old_space.prepared_bytes_used());
 
-        let large = machine
-            .build_answer(realm, &boxed(5, 930, 931))
-            .expect("larger graph builds");
+        let large = build_boxed(&mut machine, realm, 5, 930, 931).expect("larger graph builds");
         let after_large = machine.old_bytes_live();
         assert!(
             after_large > after_small,
@@ -7816,14 +8182,11 @@ mod tests {
         // the observations below force through.
         machine.pin(program).expect("installed");
         let realm = RealmId::fresh();
-        let outer = machine
-            .build_answer(realm, &boxed(3, 930, 931))
-            .expect("the shared graph builds");
+        let outer = build_boxed(&mut machine, realm, 3, 930, 931).expect("the shared graph builds");
         let one_copy = machine.old_space.prepared_bytes_used();
         assert!(one_copy > 0, "the built graph is retained in old space");
-        let garbage = machine
-            .build_answer(realm, &boxed(2, 930, 931))
-            .expect("the discarded graph builds");
+        let garbage =
+            build_boxed(&mut machine, realm, 2, 930, 931).expect("the discarded graph builds");
         assert!(machine.release(garbage));
         let PreparedOuter::Constructor { fields, .. } = machine
             .inspect_outer(outer, realm)
@@ -7927,15 +8290,13 @@ mod tests {
         };
         let f = *f;
         // A released host value is old-space garbage for compaction.
-        let garbage = machine
-            .build_answer(
-                realm,
-                &crate::prepared_program::AnswerPlan::Constructor {
-                    host_id: DataConId(1_301),
-                    fields: Vec::new(),
-                },
-            )
-            .expect("a Ready answer builds");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let ready = builder
+            .constructor(DataConId(1_301), &[])
+            .expect("a Ready value builds");
+        let garbage = builder
+            .finish(realm, ready)
+            .expect("the Ready value is retained");
         assert!(machine.release(garbage));
         let address = |machine: &PreparedMachine<'_>, handle| {
             tidepool_heap::managed_reference::untag(unsafe {

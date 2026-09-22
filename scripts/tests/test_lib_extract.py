@@ -68,8 +68,16 @@ class ExtractHelpers(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "haskell").mkdir()
         (self.root / "bin").mkdir()
-        for directory in ("haskell/src", "haskell/app", "tidepool-extract-cmd/src"):
+        for directory in ("haskell/src", "haskell/app", "haskell/lib/Tidepool/Aeson",
+                          "haskell/lib/Tidepool/Command", "haskell/lib/Tidepool/Data",
+                          "tidepool-extract-cmd/src"):
             (self.root / directory).mkdir(parents=True)
+        for source in ("haskell/lib/Tidepool/Aeson/Scientific.hs",
+                       "haskell/lib/Tidepool/Aeson/Value.hs",
+                       "haskell/lib/Tidepool/Command/Types.hs",
+                       "haskell/lib/Tidepool/Data/Time.hs",
+                       "haskell/lib/Tidepool/Double.hs"):
+            (self.root / source).touch()
         for manifest in ("haskell/tidepool-extract.cabal", "tidepool-extract-cmd/Cargo.toml"):
             (self.root / manifest).touch()
         self.frontend = self.executable("frontend", FRONTEND)
@@ -125,6 +133,16 @@ class ExtractHelpers(unittest.TestCase):
         self.run_shell("resolve_tidepool_extract", success=False,
                        TIDEPOOL_EXTRACT=str(self.frontend), TIDEPOOL_EXTRACT_WORKER="/missing")
         self.run_shell("resolve_tidepool_extract", success=False, TIDEPOOL_EXTRACT=str(self.worker))
+
+    def test_preset_worker_rejects_newer_embedded_authority_source(self):
+        authority = self.root / "haskell/lib/Tidepool/Aeson/Value.hs"
+        os.utime(self.worker, (1_700_000_000, 1_700_000_000))
+        os.utime(authority, (1_700_000_100, 1_700_000_100))
+        result = self.run_shell(
+            "unset TIDEPOOL_ALLOW_STALE_EXTRACT\nresolve_tidepool_extract",
+            success=False, TIDEPOOL_EXTRACT=str(self.frontend),
+            TIDEPOOL_EXTRACT_WORKER=str(self.worker))
+        self.assertIn("older than Haskell worker sources", result.stderr)
 
     def test_successful_start_and_teardown(self):
         self.run_shell('trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'

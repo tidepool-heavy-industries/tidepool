@@ -14,7 +14,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # ghc-heavy bounds their compiler concurrency independently. Package selection
 # intersects this filter.
 #
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests)))))'
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))))'
 
 # The battery scripts (`just verify`, `just test-target`, `just suite`) run
 # every registered tier.
@@ -32,5 +32,5 @@ max-threads = 4
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn).
 [[profile.default.overrides]]
-filter = 'not (package(tidepool-repr) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !binary(shoal_action_surface) & !(test(actor_host::) | test(host_dynamic_tools::drain_tests::actual_seal) | test(operator::tests::unix_http_live_workbench_and_graph))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test) & !test(resident_interactive::lifecycle_tests))))'
+filter = 'not (package(tidepool-repr) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | (package(tidepool) & !binary(shoal_action_surface) & !(test(actor_host::) | test(host_dynamic_tools::drain_tests::actual_seal) | test(operator::tests::unix_http_live_workbench_and_graph))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-actor) & !kind(test) & !test(resident_interactive::lifecycle_tests)))'
 test-group = 'ghc-heavy'

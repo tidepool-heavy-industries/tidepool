@@ -9,7 +9,7 @@ import Tidepool.Effects.Core (CommandSpec (..), CommandInput (..))
 
 -- Internal constructors; Tidepool.Command exposes descriptions and opaque jobs.
 newtype Command = Command CommandSpec deriving (Eq, Show)
-newtype Job = Job Text deriving (Eq, Show)
+data Job = Job !Text deriving (Eq, Show)
 data Memory = MiB Int | GiB Int deriving (Eq, Show)
 
 argv :: [Text] -> Command

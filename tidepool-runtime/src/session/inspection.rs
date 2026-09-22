@@ -17,6 +17,7 @@ pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
     TypeSearch(String),
+    ScopeBrowse,
     Browse {
         module: String,
         expanded: bool,
@@ -161,6 +162,7 @@ pub struct InfoEntry {
     pub kind: String,
     pub display: String,
     pub availability: InspectionAvailability,
+    pub references: Vec<IdentifierRef>,
 }
 
 /// Whether a callable's required effects fit the inspecting actor's row.
@@ -201,6 +203,7 @@ pub struct TypeMatch {
     pub signature: String,
     pub quality: TypeMatchQuality,
     pub availability: InspectionAvailability,
+    pub references: Vec<IdentifierRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +418,7 @@ fn run_inspections_with_policy(
         let shares_environment = matches!(
             query,
             InspectionQuery::Info(_)
+                | InspectionQuery::ScopeBrowse
                 | InspectionQuery::Browse { .. }
                 | InspectionQuery::StructuredInfo { .. }
                 | InspectionQuery::StructuredType { .. }
@@ -430,6 +434,7 @@ fn run_inspections_with_policy(
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
             InspectionQuery::Info(_)
             | InspectionQuery::TypeSearch(_)
+            | InspectionQuery::ScopeBrowse
             | InspectionQuery::Browse { .. }
             | InspectionQuery::StructuredInfo { .. }
             | InspectionQuery::StructuredType { .. } => &[],
@@ -456,6 +461,9 @@ fn run_inspections_with_policy(
             }
             InspectionQuery::TypeSearch(query) => {
                 command.inspect_search(query);
+            }
+            InspectionQuery::ScopeBrowse => {
+                command.inspect_scope_browse();
             }
             InspectionQuery::Browse { module, expanded } => {
                 command.inspect_browse(module, *expanded);
@@ -557,7 +565,7 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP005" {
+    if text(&root[0], "version")? != "TPINSP006" {
         return Err(invalid("unsupported receipt version"));
     }
     array(&root[1], "results")?
@@ -913,7 +921,7 @@ fn unsigned(value: &CborValue, what: &str) -> Result<u64, CompileError> {
 }
 
 fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
-    let fields = array_len(value, 5, "TypeMatch")?;
+    let fields = array_len(value, 6, "TypeMatch")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "TypeMatch module")?.into()),
@@ -929,6 +937,10 @@ fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
         signature: text(&fields[2], "TypeMatch signature")?.into(),
         quality,
         availability: InspectionAvailability::decode(&fields[4], "TypeMatch availability")?,
+        references: array(&fields[5], "TypeMatch references")?
+            .iter()
+            .map(decode_identifier_ref)
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -940,7 +952,7 @@ fn boolean(value: &CborValue, what: &str) -> Result<bool, CompileError> {
 }
 
 fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
-    let fields = array_len(value, 5, "Info entry")?;
+    let fields = array_len(value, 6, "Info entry")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "Info module")?.into()),
@@ -951,6 +963,10 @@ fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
         kind: text(&fields[2], "Info kind")?.into(),
         display: text(&fields[3], "Info display")?.into(),
         availability: InspectionAvailability::decode(&fields[4], "Info availability")?,
+        references: array(&fields[5], "Info references")?
+            .iter()
+            .map(decode_identifier_ref)
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -1001,7 +1017,7 @@ mod tests {
     #[test]
     fn decodes_every_result_shape() {
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP005".into()),
+            CborValue::Text("TPINSP006".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("Type".into()),
@@ -1018,6 +1034,11 @@ mod tests {
                         CborValue::Text("type".into()),
                         CborValue::Text("data Maybe a = Nothing | Just a".into()),
                         CborValue::Text("Unknown".into()),
+                        CborValue::Array(vec![CborValue::Array(vec![
+                            CborValue::Text("GHC.Internal.Maybe".into()),
+                            CborValue::Text("Just".into()),
+                            CborValue::Text("Constructor".into()),
+                        ])]),
                     ])]),
                 ]),
                 CborValue::Array(vec![
@@ -1046,7 +1067,12 @@ mod tests {
             }
         ));
         assert!(
-            matches!(decoded[1], InspectionResult::Info { ref entries, .. } if entries[0].availability == InspectionAvailability::Unknown)
+            matches!(decoded[1], InspectionResult::Info { ref entries, .. }
+            if entries[0].availability == InspectionAvailability::Unknown
+                && entries[0].references == [IdentifierRef {
+                    module: "GHC.Internal.Maybe".into(), name: "Just".into(),
+                    namespace: IdentifierNamespace::Constructor,
+                }])
         );
         assert_eq!(
             decoded[2],
@@ -1094,7 +1120,7 @@ mod tests {
             CborValue::Text("scope-abc".into()),
         ]);
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP005".into()),
+            CborValue::Text("TPINSP006".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("StructuredTypeOk".into()),
@@ -1129,7 +1155,7 @@ mod tests {
     fn rejects_version_shape_and_unknown_tag() {
         for value in [
             CborValue::Array(vec![
-                CborValue::Text("TPINSP000".into()),
+                CborValue::Text("TPINSP005".into()),
                 CborValue::Array(vec![]),
             ]),
             CborValue::Array(vec![
@@ -1142,7 +1168,7 @@ mod tests {
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP005".into()),
+            CborValue::Text("TPINSP006".into()),
             CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
@@ -1156,7 +1182,7 @@ mod tests {
     fn decodes_row_availability_and_rejects_unknown_values() {
         let receipt = |availability: &str| {
             CborValue::Array(vec![
-                CborValue::Text("TPINSP005".into()),
+                CborValue::Text("TPINSP006".into()),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Text("TypeMatches".into()),
                     CborValue::Text("Eff effects ()".into()),
@@ -1166,6 +1192,7 @@ mod tests {
                         CborValue::Text("Eff effects ()".into()),
                         CborValue::Text("Usable".into()),
                         CborValue::Text(availability.into()),
+                        CborValue::Array(vec![]),
                     ])]),
                 ])]),
             ])
@@ -1352,6 +1379,7 @@ mod tests {
         queries.push(InspectionQuery::TypeSearch("Public".into()));
         queries.push(InspectionQuery::TypeSearch("Public ->".into()));
         queries.push(InspectionQuery::TypeSearch("Public -> _".into()));
+        queries.push(InspectionQuery::ScopeBrowse);
         let results = run_inspections(InspectionRequest {
             preamble,
             imports: "",
@@ -1364,6 +1392,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(results.len(), queries.len());
+        let InspectionResult::Browse {
+            module, entries, ..
+        } = &results[22]
+        else {
+            panic!("expected current-scope browse");
+        };
+        assert!(module.is_empty());
+        assert!(entries.iter().any(|entry| entry.name == "exportedValue"));
+        assert!(entries.iter().any(|entry| entry.name == "recordField"));
+        assert!(!entries.iter().any(|entry| entry.name == "Hidden"));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.name.starts_with("__tidepool_")));
+
         assert!(results[0].render().contains("exportedValue :: Int"));
         assert!(results[1].render().contains("data Public"));
         assert!(matches!(results[2], InspectionResult::Rejected { .. }));
@@ -1418,7 +1460,43 @@ mod tests {
         );
         // A constructor the module does export still renders in place.
         assert!(grouped.contains("First"), "{grouped}");
+        let InspectionResult::Browse { entries, .. } = &results[5] else {
+            panic!("expected expanded browse");
+        };
+        let references = |name: &str| {
+            &entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .references
+        };
+        assert!(references("constrained")
+            .iter()
+            .any(|reference| reference.name == "Eq"));
+        assert!(references("Alias")
+            .iter()
+            .any(|reference| reference.name == "Maybe"));
+        assert!(references("recordField")
+            .iter()
+            .any(|reference| reference.name == "Record"
+                && reference.namespace == IdentifierNamespace::Type));
+        assert!(references("Record")
+            .iter()
+            .any(|reference| reference.name == "recordField"
+                && reference.namespace == IdentifierNamespace::Field));
+        assert!(references("Abstract").is_empty());
+        assert!(references("Opaque").is_empty());
+        assert!(references("First")
+            .iter()
+            .any(|reference| reference.name == "Public"));
         let expanded = results[5].render();
+        assert!(!expanded.contains("Hidden"), "{expanded}");
+        assert!(
+            !expanded.lines().any(|line| line.contains("newtype Opaque")
+                && line.contains('=')
+                && !line.contains("...")),
+            "{expanded}"
+        );
         assert!(expanded.contains("First :: Public"), "{expanded}");
         assert!(expanded.contains("service ::"), "{expanded}");
         assert!(expanded.contains("data Maybe"), "{expanded}");
@@ -1504,6 +1582,32 @@ mod tests {
     }
 
     #[test]
+    fn info_lookup_with_effect_row_uses_the_checked_row_sentinel() {
+        eval_harness::require_extract();
+        let session = tempfile::tempdir().unwrap();
+        let results = run_inspections(InspectionRequest {
+            preamble: concat!(
+                "{-# LANGUAGE NoImplicitPrelude, DataKinds #-}\n",
+                "module Expr where\n",
+                "import Prelude\n",
+            ),
+            imports: "",
+            include: &[],
+            session_root: session.path(),
+            inject_modules: &[],
+            queries: &[InspectionQuery::Info("map".into())],
+            effects: Some("'[]"),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            results.as_slice(),
+            [InspectionResult::Info { query, entries }]
+                if query == "map" && !entries.is_empty()
+        ));
+    }
+
+    #[test]
     fn type_probe_batch_preserves_independent_types_and_rejected_siblings() {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();
@@ -1539,7 +1643,7 @@ mod tests {
         assert!(matches!(
             &valid[0],
             InspectionResult::Type { expression, display, .. }
-                if expression == "id" && display.contains("->")
+                if expression == "id" && display == "a -> a"
         ));
         assert!(matches!(
             &valid[1],
@@ -1549,7 +1653,7 @@ mod tests {
         assert!(matches!(
             &valid[2],
             InspectionResult::Type { expression, display, .. }
-                if expression == "const" && display.contains("->")
+                if expression == "const" && display == "a -> b -> a"
         ));
 
         let invalid_queries = [

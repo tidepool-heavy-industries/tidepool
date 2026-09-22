@@ -4,6 +4,7 @@
 //! marshalling across the Haskell-Rust boundary.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+pub mod decimal;
 pub mod error;
 pub mod impls;
 pub mod json;
@@ -14,7 +15,7 @@ pub mod traits;
 pub mod value;
 
 pub use error::*;
-pub use impls::{field_decode_error, get_resilient, type_mismatch};
+pub use impls::{field_decode_error, get_qualified, type_mismatch};
 pub use record::*;
 pub use traits::*;
 pub use value::{HaskellValue, HaskellValueFrame, SharedByteArray};

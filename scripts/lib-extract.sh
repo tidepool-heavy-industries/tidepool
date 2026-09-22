@@ -22,6 +22,23 @@ extract_has_usage_banner() {
   grep -q '^Usage:' <<<"$output"
 }
 
+# Print the worktree source inputs compiled into tidepool-extract-bin. The five
+# library modules are embedded by Template Haskell in the internal library;
+# ordinary haskell/lib modules are loaded later by the worker and must not make
+# the binary permanently appear stale. Keep both freshness callers on this one
+# boundary.
+tidepool_extract_worker_sources() {
+  printf '%s\n' \
+    "$PWD/haskell/src" \
+    "$PWD/haskell/app" \
+    "$PWD/haskell/tidepool-extract.cabal" \
+    "$PWD/haskell/lib/Tidepool/Aeson/Scientific.hs" \
+    "$PWD/haskell/lib/Tidepool/Aeson/Value.hs" \
+    "$PWD/haskell/lib/Tidepool/Command/Types.hs" \
+    "$PWD/haskell/lib/Tidepool/Data/Time.hs" \
+    "$PWD/haskell/lib/Tidepool/Double.hs"
+}
+
 resolve_tidepool_extract() {
   # Captured BEFORE the build-if-unset branch below: the staleness check
   # after it only applies to a caller-SUPPLIED TIDEPOOL_EXTRACT — a binary
@@ -98,7 +115,8 @@ resolve_tidepool_extract() {
       # stdlib-only edit permanently "stale": Cabal correctly declines to
       # rebuild the unaffected executable, so its mtime can never catch up.
       # Keep this boundary identical to scripts/toolchain-doctor.sh.
-      _newest_haskell="$(find "$PWD/haskell/src" "$PWD/haskell/app" "$PWD/haskell/tidepool-extract.cabal" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+      mapfile -t _worker_sources < <(tidepool_extract_worker_sources)
+      _newest_haskell="$(find "${_worker_sources[@]}" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
       if [ "$_worker_mtime" -lt "${_newest_haskell:-0}" ] && [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" != "1" ]; then
         echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is older than Haskell worker sources" >&2
         exit 1

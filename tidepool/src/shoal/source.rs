@@ -193,15 +193,59 @@ impl SourceLayer {
     }
 
     fn read_record(&self) -> Result<Option<ActiveRecord>> {
-        if !self.active_link().exists() {
-            return Ok(None);
-        }
-        let record = match std::fs::read(self.active_record()) {
-            Ok(bytes) => bytes,
+        let target = match std::fs::read_link(self.active_link()) {
+            Ok(target) => target,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        Ok(Some(serde_json::from_slice(&record)?))
+        let mut components = target.components();
+        let valid = matches!(components.next(), Some(std::path::Component::Normal(part)) if part == "revisions");
+        let identity = match components.next() {
+            Some(std::path::Component::Normal(identity)) if components.next().is_none() => {
+                identity.to_str().filter(|identity| {
+                    identity.len() == 64 && identity.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            }
+            _ => None,
+        }
+        .ok_or("active source link has an invalid revision target")?
+        .to_owned();
+        if !valid {
+            return Err("active source link escapes the revision store".into());
+        }
+        let revision = self.revisions().join(&identity);
+        if !revision.is_dir() {
+            return Err("active source revision directory is missing".into());
+        }
+        let roots = revision_root_count(&revision)?;
+        let recorded = match std::fs::read(self.active_record()) {
+            Ok(bytes) => Some(serde_json::from_slice::<ActiveRecord>(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(record) = recorded.as_ref() {
+            if record.identity == identity {
+                if record.roots != roots {
+                    return Err(
+                        "active source record root count does not match its revision".into(),
+                    );
+                }
+                return Ok(recorded);
+            }
+        }
+        // The link is the publication point. A stale or absent side record is
+        // the bounded crash window after its rename; reconstruct it from the
+        // exact immutable target before admitting another compile.
+        let record = ActiveRecord {
+            identity,
+            generation: recorded.map_or(1, |record| record.generation.saturating_add(1)),
+            roots,
+        };
+        tidepool_atomic_write::write_durable(
+            &self.active_record(),
+            &serde_json::to_vec_pretty(&record)?,
+        )?;
+        Ok(Some(record))
     }
 
     /// The revision currently on the search path, or `None` before the first
@@ -322,6 +366,7 @@ impl SourceLayer {
             std::fs::remove_dir_all(&pending)?;
         } else {
             std::fs::rename(&pending, &directory)?;
+            tidepool_atomic_write::sync_parent_directory(&directory)?;
         }
         Ok(PendingRevision {
             directory,
@@ -338,25 +383,17 @@ impl SourceLayer {
     pub(crate) fn publish(&self, pending: PendingRevision) -> Result<SourceRevision> {
         let previous = self.read_active()?;
         let generation = previous.map_or(1, |previous| previous.generation + 1);
-        let roots = pending
-            .directory
-            .read_dir()?
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.parse::<usize>().is_ok())
-            })
-            .count();
+        let roots = revision_root_count(&pending.directory)?;
         let staged = self
             .directory
             .join(format!(".active-{}", uuid::Uuid::new_v4()));
+        sync_revision_tree(&pending.directory)?;
         std::os::unix::fs::symlink(
             Path::new("revisions").join(&pending.revision.identity),
             &staged,
         )?;
         std::fs::rename(&staged, self.active_link())?;
+        tidepool_atomic_write::sync_parent_directory(&self.active_link())?;
         tidepool_atomic_write::write_durable(
             &self.active_record(),
             &serde_json::to_vec_pretty(&ActiveRecord {
@@ -379,6 +416,49 @@ impl SourceLayer {
     ) -> Vec<String> {
         candidate.changed_since(active)
     }
+}
+
+fn sync_revision_tree(root: &Path) -> Result<()> {
+    fn sync(directory: &Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                sync(&entry.path())?;
+            } else if kind.is_file() {
+                std::fs::File::open(entry.path())?.sync_all()?;
+            } else {
+                return Err(std::io::Error::other(
+                    "source revision contains a non-file entry",
+                ));
+            }
+        }
+        std::fs::File::open(directory)?.sync_all()
+    }
+    sync(root).map_err(Into::into)
+}
+
+fn revision_root_count(directory: &Path) -> Result<usize> {
+    let mut indices = Vec::new();
+    for entry in directory.read_dir()? {
+        let entry = entry?;
+        let Some(index) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() {
+            return Err("source revision root is not a directory".into());
+        }
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    if indices.iter().copied().ne(0..indices.len()) {
+        return Err("source revision root indexes are not contiguous".into());
+    }
+    Ok(indices.len())
 }
 
 /// One checkout's source layer, and the checkout it is read from.
@@ -1060,6 +1140,61 @@ mod tests {
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
     }
 
+    #[test]
+    fn missing_active_record_is_reconciled_from_the_published_link() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = SourceLayer::new(run.path());
+        let published = layer.ensure_active(&frozen).unwrap();
+        std::fs::remove_file(layer.active_record()).unwrap();
+
+        assert_eq!(layer.read_active().unwrap(), Some(published));
+        assert!(layer.active_record().is_file());
+    }
+
+    #[test]
+    fn corrupt_published_root_indexes_remain_visibly_unavailable() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = SourceLayer::new(run.path());
+        let published = layer.ensure_active(&frozen).unwrap();
+        let revision = layer.revisions().join(published.identity);
+        std::fs::rename(revision.join("0"), revision.join("1")).unwrap();
+
+        assert!(layer
+            .read_active()
+            .unwrap_err()
+            .to_string()
+            .contains("contiguous"));
+    }
+
+    #[test]
+    fn stale_active_record_is_reconciled_without_republishing_source() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = SourceLayer::new(run.path());
+        let first = layer.ensure_active(&frozen).unwrap();
+        let old_record = std::fs::read(layer.active_record()).unwrap();
+        std::fs::write(
+            project.path().join(".shoal/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        let second = layer
+            .publish(
+                layer
+                    .capture_from_workspace(&frozen, project.path())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_ne!(first.identity, second.identity);
+
+        // Simulate a crash after the atomic link switch but before its side
+        // record became durable.
+        std::fs::write(layer.active_record(), old_record).unwrap();
+        assert_eq!(layer.read_active().unwrap(), Some(second));
+    }
+
     /// A checkout's layer is the run's layer's equal in every way but two:
     /// where it lives, and who sees it. Materializing one leaves the run's
     /// exactly where it was, and a checkout with no authored source of its own
@@ -1163,23 +1298,10 @@ mod tests {
         .unwrap();
     }
 
-    /// The compiled-artifact key an extract over these include roots would
-    /// get. The include VECTOR is identical before and after a reload, so this
-    /// is the honest question "would a later compile be served the previous
-    /// artifact?".
+    /// Source-revision identity; artifact reuse additionally validates the
+    /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        let input = PathBuf::from("Turn.hs");
-        let argv = vec![std::ffi::OsString::from("Turn.hs")];
-        tidepool_runtime::cache::invocation_key(&tidepool_runtime::cache::Invocation {
-            source: "module Turn where",
-            argv: &argv,
-            input_path: &input,
-            include,
-            endpoint_identity: b"source-reload-test",
-            stable_val: None,
-        })
-        .expect("an include-only invocation is cacheable")
-        .to_string()
+        tidepool_runtime::cache::source_roots_identity(b"source-revision-test", include)
     }
 
     /// Two cooperating files edited together are one transaction, and what a

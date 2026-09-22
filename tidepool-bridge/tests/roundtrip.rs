@@ -20,7 +20,7 @@ fn get_table() -> &'static DataConTable {
             tag: 1,
             rep_arity: 3,
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: None,
+            qualified_name: Some("GHC.Tuple.(,,)".into()),
             type_name: String::new(),
         });
         table.insert(DataCon {
@@ -29,7 +29,7 @@ fn get_table() -> &'static DataConTable {
             tag: 2,
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
+            qualified_name: Some("Data.Either.Right".into()),
             type_name: String::new(),
         });
         table.insert(DataCon {
@@ -38,7 +38,7 @@ fn get_table() -> &'static DataConTable {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
+            qualified_name: Some("Data.Either.Left".into()),
             type_name: String::new(),
         });
         table

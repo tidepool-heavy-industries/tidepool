@@ -1,6 +1,6 @@
 # Read your own recent conversation
 
-`reflect n` returns your own last `n` completed turns, oldest first. Each turn
+`reflect n` returns your own latest `n` turns including the active turn, oldest first. Each turn
 carries what happened inside it in order: the messages, the tool calls, and the
 tool results. A call and its result are separate items sharing one call
 identity, so you can rejoin the pair.
@@ -20,9 +20,9 @@ data ReflectError = ReflectUnbound | ReflectUnreadable Text
 It reads only your own conversation. There is no argument naming another actor
 or a file. `Left ReflectUnbound` means this context has no conversation of its
 own — an operator proxy is one — and no other conversation is returned in its
-place. The turn you are executing has not completed and is never included.
-Fewer than `n` completed turns returns the ones that exist; `n <= 0` returns
-none.
+place. The active turn has `turnCompletedAt = Nothing` and includes only messages
+and tool activity already recorded; a pending tool result is never fabricated.
+Fewer than `n` turns returns the ones that exist; `n <= 0` returns none.
 
 Because it is an ordinary effect, a question you ask later — a Jev evaluation
 among them — gets your recent context without you spending a turn restating it.

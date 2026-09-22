@@ -1,0 +1,64 @@
+{
+  "schema": {
+    "magic": "TPSTG",
+    "version_source": "tidepool-repr/src/execution_schema.rs"
+  },
+  "artifacts": [
+    {
+      "path": "haskell/test-prepared-stg/fixtures/m3-vertical.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-repr/tests/execution_schema_contract.rs",
+        "tidepool-toolchain/src/prepared_artifact.rs",
+        "tidepool-prepared-corpus/src/bin/prepared-corpus.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-prepared-stg/fixtures/freer-resume.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-codegen/src/prepared_program/foreign_apply_tests.rs",
+        "tidepool-runtime/tests/prepared_execution.rs",
+        "tidepool-runtime/tests/prepared_resident_composite.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-prepared-stg/fixtures/freer-retention.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-codegen/src/prepared_program/machine.rs",
+        "tidepool-runtime/tests/prepared_execution.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-prepared-stg/fixtures/import-producer.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-runtime/tests/prepared_execution.rs",
+        "tidepool-runtime/tests/prepared_resident_composite.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-prepared-stg/fixtures/import-consumer.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-runtime/tests/prepared_execution.rs",
+        "tidepool-runtime/tests/prepared_resident_composite.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-prepared-stg/fixtures/import-consumer-result.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-runtime/tests/prepared_execution.rs"
+      ]
+    },
+    {
+      "path": "haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
+      "consumers": [
+        "tidepool-repr/tests/execution_schema_contract.rs"
+      ]
+    }
+  ]
+}

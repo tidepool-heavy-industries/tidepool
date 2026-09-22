@@ -1,5 +1,5 @@
 use tidepool_bridge::HaskellValue;
-use tidepool_bridge::{BridgeError, ToHaskell};
+use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
@@ -194,268 +194,246 @@ pub(crate) fn watch_id(raw: i64) -> Result<WatchId, BridgeError> {
         .map_err(|_| BridgeError::UnsupportedType(format!("invalid watch id {raw}")))
 }
 
-pub(crate) fn reply_error_value(
-    error: ReplyError,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let name = match error {
+fn reply_error_name(error: ReplyError) -> &'static str {
+    match error {
         ReplyError::UpdatePending => "ReplyUpdatePending",
         ReplyError::Stale => "ReplyStale",
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, Vec::new())
-}
-
-pub(crate) fn rejected_reply_value(
-    error: ReplyError,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let error = reply_error_value(error, table)?;
-    let constructor = tidepool_bridge::get_resilient(table, "Left", 1)
-        .ok_or_else(|| BridgeError::UnknownDataConName("Left".into()))?;
-    Ok(HaskellValue::Con(constructor, vec![error]))
-}
-
-pub(crate) fn response_observation_value(
-    observation: Result<ResponseObservation, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    match observation {
-        Ok(ResponseObservation::Pending) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponsePending",
-            Vec::new(),
-        ),
-        Ok(ResponseObservation::CancellationPending(reason)) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponseCancellationPending",
-            vec![cancellation_reason_value(reason, table)?],
-        ),
-        Ok(ResponseObservation::Ready) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponseReady",
-            Vec::new(),
-        ),
-        Ok(ResponseObservation::Unavailable(failure)) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponseUnavailable",
-            vec![response_failure_value(failure, table)?],
-        ),
-        Ok(ResponseObservation::Starting(detail)) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponseStarting",
-            vec![detail.to_value(table)?],
-        ),
-        Err(error) => constructor(
-            table,
-            "Tidepool.Agent.Reply.Internal",
-            "RawResponseRejected",
-            vec![reply_error_value(error, table)?],
-        ),
     }
 }
 
-pub(crate) fn cancel_request_value(
-    outcome: Result<crate::CancelRequestOutcome, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match outcome {
-        Ok(crate::CancelRequestOutcome::Requested) => ("CancellationRequested", Vec::new()),
-        Ok(crate::CancelRequestOutcome::AlreadyRequested) => {
-            ("CancellationAlreadyRequested", Vec::new())
+/// An actor reply whose successful payload is emitted directly into the
+/// resident managed builder.
+pub(crate) struct ReplyResult<T>(pub Result<T, ReplyError>);
+
+impl<T> tidepool_bridge::sealed::ToHaskellSealed for ReplyResult<T> {}
+
+impl<T: ToHaskell> ToHaskell for ReplyResult<T> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match &self.0 {
+            Ok(value) => {
+                let right = tidepool_bridge::get_qualified(table, "Data.Either.Right", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Right".into()))?;
+                visitor.begin_constructor(right, 1)?;
+                value.visit(table, visitor)?;
+                visitor.end_constructor()
+            }
+            Err(error) => {
+                let left = tidepool_bridge::get_qualified(table, "Data.Either.Left", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Left".into()))?;
+                visitor.begin_constructor(left, 1)?;
+                error.visit(table, visitor)?;
+                visitor.end_constructor()
+            }
         }
-        Ok(crate::CancelRequestOutcome::AlreadyTerminal) => {
-            ("CancellationAlreadyTerminal", Vec::new())
-        }
-        Err(error) => (
-            "CancellationRejected",
-            vec![reply_error_value(error, table)?],
-        ),
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
-}
-
-pub(crate) fn abandon_response_value(
-    outcome: Result<crate::AbandonResponseOutcome, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match outcome {
-        Ok(crate::AbandonResponseOutcome::AbandonedNow) => ("ResponseAbandonedNow", Vec::new()),
-        Ok(crate::AbandonResponseOutcome::AlreadyAbandoned) => {
-            ("ResponseAlreadyAbandoned", Vec::new())
-        }
-        Ok(crate::AbandonResponseOutcome::AlreadyTerminal) => {
-            ("ResponseAlreadyTerminal", Vec::new())
-        }
-        Err(error) => (
-            "ResponseAbandonRejected",
-            vec![reply_error_value(error, table)?],
-        ),
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
-}
-
-pub(crate) fn forget_response_value(
-    outcome: Result<crate::ForgetResponseOutcome, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match outcome {
-        Ok(crate::ForgetResponseOutcome::Forgotten) => ("ResponseForgotten", Vec::new()),
-        Ok(crate::ForgetResponseOutcome::StillPending) => ("ResponseForgetPending", Vec::new()),
-        Ok(crate::ForgetResponseOutcome::TargetStillActive) => {
-            ("ResponseForgetTargetActive", Vec::new())
-        }
-        Ok(crate::ForgetResponseOutcome::RetainedByWatches(watches)) => (
-            "ResponseRetainedByWatches",
-            vec![watches
-                .into_iter()
-                .map(|watch| {
-                    i64::try_from(watch.0)
-                        .map_err(|_| BridgeError::UnsupportedType("watch id exceeds Int".into()))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .to_value(table)?],
-        ),
-        Err(error) => (
-            "ResponseForgetRejected",
-            vec![reply_error_value(error, table)?],
-        ),
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
-}
-
-pub(crate) fn forget_watch_value(
-    outcome: Result<crate::ForgetWatchOutcome, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match outcome {
-        Ok(crate::ForgetWatchOutcome::Forgotten) => ("WatchForgotten", Vec::new()),
-        Ok(crate::ForgetWatchOutcome::StillPending) => ("WatchForgetPending", Vec::new()),
-        Err(error) => (
-            "WatchForgetRejected",
-            vec![reply_error_value(error, table)?],
-        ),
-    };
-    constructor(table, "Tidepool.Agent.Watch.Internal", name, fields)
-}
-
-pub(crate) fn reply_observation_value(
-    observation: Result<ReplyObservation, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match observation {
-        Ok(ReplyObservation::Open) => ("RawReplyOpen", Vec::new()),
-        Ok(ReplyObservation::CancellationRequested(reason)) => (
-            "RawReplyCancellationRequested",
-            vec![cancellation_reason_value(reason, table)?],
-        ),
-        Ok(ReplyObservation::Closed) => ("RawReplyClosed", Vec::new()),
-        Err(error) => ("RawReplyRejected", vec![reply_error_value(error, table)?]),
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
-}
-
-fn cancellation_reason_value(
-    reason: CancellationReason,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let name = match reason {
-        CancellationReason::RequesterCancelled => "CancelledByRequester",
-        CancellationReason::DeadlineExpired => "DeadlineExpired",
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, Vec::new())
-}
-
-pub(crate) fn watch_observation_value(
-    observation: Result<WatchObservation, ReplyError>,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    match observation {
-        Ok(WatchObservation::Pending) => constructor(
-            table,
-            "Tidepool.Agent.Watch.Internal",
-            "RawWatchPending",
-            Vec::new(),
-        ),
-        Ok(WatchObservation::Ready(failures)) => constructor(
-            table,
-            "Tidepool.Agent.Watch.Internal",
-            "RawWatchReady",
-            vec![failures
-                .into_iter()
-                .map(|(request, failure)| {
-                    Ok((
-                        i64::try_from(request.0).map_err(|_| {
-                            BridgeError::UnsupportedType("request id exceeds Int".into())
-                        })?,
-                        response_failure_value(failure, table)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, BridgeError>>()?
-                .to_value(table)?],
-        ),
-        Ok(WatchObservation::Unavailable { request, failure }) => constructor(
-            table,
-            "Tidepool.Agent.Watch.Internal",
-            "RawWatchUnavailable",
-            vec![
-                i64::try_from(request.0)
-                    .map_err(|_| BridgeError::UnsupportedType("request id exceeds Int".into()))?
-                    .to_value(table)?,
-                response_failure_value(failure, table)?,
-            ],
-        ),
-        Err(error) => constructor(
-            table,
-            "Tidepool.Agent.Watch.Internal",
-            "RawWatchRejected",
-            vec![reply_error_value(error, table)?],
-        ),
     }
 }
 
-fn response_failure_value(
-    failure: ResponseFailure,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    let (name, fields) = match failure {
-        ResponseFailure::TargetUnavailable => ("ResponseTargetUnavailable", Vec::new()),
-        ResponseFailure::TargetFailed(summary) => {
-            ("ResponseTargetFailed", vec![summary.to_value(table)?])
-        }
-        ResponseFailure::TargetCancelled(summary) => {
-            ("ResponseTargetCancelled", vec![summary.to_value(table)?])
-        }
-        ResponseFailure::RequesterStopped => ("ResponseRequesterStopped", Vec::new()),
-        ResponseFailure::Abandoned => ("ResponseAbandoned", Vec::new()),
-        ResponseFailure::Cancelled => ("ResponseCancelled", Vec::new()),
-        ResponseFailure::DeadlineExceeded => ("ResponseDeadlineExceeded", Vec::new()),
-        ResponseFailure::SettlementFailed(detail) => {
-            ("ResponseSettlementFailed", vec![detail.to_value(table)?])
-        }
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
+/// Owned reply metadata, visited only at the immediate resume boundary.
+pub(crate) enum RequestAnswer {
+    Response(Result<ResponseObservation, ReplyError>),
+    Cancel(Result<crate::CancelRequestOutcome, ReplyError>),
+    Abandon(Result<crate::AbandonResponseOutcome, ReplyError>),
+    ForgetResponse(Result<crate::ForgetResponseOutcome, ReplyError>),
+    Reply(Result<ReplyObservation, ReplyError>),
+    Watch(Result<WatchObservation, ReplyError>),
+    ForgetWatch(Result<crate::ForgetWatchOutcome, ReplyError>),
 }
 
-pub(crate) fn constructor(
+fn visit_constructor(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     module: &str,
     name: &str,
-    fields: Vec<HaskellValue>,
-) -> Result<HaskellValue, BridgeError> {
+    fields: &[&dyn ToHaskell],
+) -> Result<(), BridgeError> {
     let qualified = format!("{module}.{name}");
-    let constructor = table
+    let id = table
         .get_by_qualified_name(&qualified)
         .ok_or(BridgeError::UnknownDataConName(qualified))?;
-    Ok(HaskellValue::Con(constructor, fields))
+    visitor.begin_constructor(id, fields.len())?;
+    for field in fields {
+        field.visit(table, visitor)?;
+    }
+    visitor.end_constructor()
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for RequestAnswer {}
+impl ToHaskell for RequestAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let module = match self {
+            Self::Watch(_) | Self::ForgetWatch(_) => "Tidepool.Agent.Watch.Internal",
+            _ => "Tidepool.Agent.Reply.Internal",
+        };
+        macro_rules! emit {
+            ($name:expr $(, $field:expr)* $(,)?) => {
+                visit_constructor(table, visitor, module, $name, &[$($field),*])
+            };
+        }
+        match self {
+            Self::Response(Ok(ResponseObservation::Pending)) => emit!("RawResponsePending"),
+            Self::Response(Ok(ResponseObservation::CancellationPending(reason))) => {
+                emit!("RawResponseCancellationPending", reason)
+            }
+            Self::Response(Ok(ResponseObservation::Ready)) => emit!("RawResponseReady"),
+            Self::Response(Ok(ResponseObservation::Unavailable(failure))) => {
+                emit!("RawResponseUnavailable", failure)
+            }
+            Self::Response(Ok(ResponseObservation::Starting(detail))) => {
+                emit!("RawResponseStarting", detail)
+            }
+            Self::Response(Err(error)) => emit!("RawResponseRejected", error),
+            Self::Cancel(Ok(crate::CancelRequestOutcome::Requested)) => {
+                emit!("CancellationRequested")
+            }
+            Self::Cancel(Ok(crate::CancelRequestOutcome::AlreadyRequested)) => {
+                emit!("CancellationAlreadyRequested")
+            }
+            Self::Cancel(Ok(crate::CancelRequestOutcome::AlreadyTerminal)) => {
+                emit!("CancellationAlreadyTerminal")
+            }
+            Self::Cancel(Err(error)) => emit!("CancellationRejected", error),
+            Self::Abandon(Ok(crate::AbandonResponseOutcome::AbandonedNow)) => {
+                emit!("ResponseAbandonedNow")
+            }
+            Self::Abandon(Ok(crate::AbandonResponseOutcome::AlreadyAbandoned)) => {
+                emit!("ResponseAlreadyAbandoned")
+            }
+            Self::Abandon(Ok(crate::AbandonResponseOutcome::AlreadyTerminal)) => {
+                emit!("ResponseAlreadyTerminal")
+            }
+            Self::Abandon(Err(error)) => emit!("ResponseAbandonRejected", error),
+            Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::Forgotten)) => {
+                emit!("ResponseForgotten")
+            }
+            Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::StillPending)) => {
+                emit!("ResponseForgetPending")
+            }
+            Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::TargetStillActive)) => {
+                emit!("ResponseForgetTargetActive")
+            }
+            Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::RetainedByWatches(watches))) => {
+                emit!("ResponseRetainedByWatches", watches)
+            }
+            Self::ForgetResponse(Err(error)) => emit!("ResponseForgetRejected", error),
+            Self::Reply(Ok(ReplyObservation::Open)) => emit!("RawReplyOpen"),
+            Self::Reply(Ok(ReplyObservation::CancellationRequested(reason))) => {
+                emit!("RawReplyCancellationRequested", reason)
+            }
+            Self::Reply(Ok(ReplyObservation::Closed)) => emit!("RawReplyClosed"),
+            Self::Reply(Err(error)) => emit!("RawReplyRejected", error),
+            Self::Watch(Ok(WatchObservation::Pending)) => emit!("RawWatchPending"),
+            Self::Watch(Ok(WatchObservation::Ready(failures))) => emit!("RawWatchReady", failures),
+            Self::Watch(Ok(WatchObservation::Unavailable { request, failure })) => {
+                emit!("RawWatchUnavailable", request, failure)
+            }
+            Self::Watch(Err(error)) => emit!("RawWatchRejected", error),
+            Self::ForgetWatch(Ok(crate::ForgetWatchOutcome::Forgotten)) => emit!("WatchForgotten"),
+            Self::ForgetWatch(Ok(crate::ForgetWatchOutcome::StillPending)) => {
+                emit!("WatchForgetPending")
+            }
+            Self::ForgetWatch(Err(error)) => emit!("WatchForgetRejected", error),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for ReplyError {}
+impl ToHaskell for ReplyError {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        visit_constructor(
+            table,
+            visitor,
+            "Tidepool.Agent.Reply.Internal",
+            reply_error_name(*self),
+            &[],
+        )
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CancellationReason {}
+impl ToHaskell for CancellationReason {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let name = match self {
+            Self::RequesterCancelled => "CancelledByRequester",
+            Self::DeadlineExpired => "DeadlineExpired",
+        };
+        visit_constructor(table, visitor, "Tidepool.Agent.Reply.Internal", name, &[])
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for ResponseFailure {}
+impl ToHaskell for ResponseFailure {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let (name, detail) = match self {
+            Self::TargetUnavailable => ("ResponseTargetUnavailable", None),
+            Self::TargetFailed(summary) => ("ResponseTargetFailed", Some(summary)),
+            Self::TargetCancelled(summary) => ("ResponseTargetCancelled", Some(summary)),
+            Self::RequesterStopped => ("ResponseRequesterStopped", None),
+            Self::Abandoned => ("ResponseAbandoned", None),
+            Self::Cancelled => ("ResponseCancelled", None),
+            Self::DeadlineExceeded => ("ResponseDeadlineExceeded", None),
+            Self::SettlementFailed(detail) => ("ResponseSettlementFailed", Some(detail)),
+        };
+        match detail {
+            Some(detail) => visit_constructor(
+                table,
+                visitor,
+                "Tidepool.Agent.Reply.Internal",
+                name,
+                &[detail],
+            ),
+            None => visit_constructor(table, visitor, "Tidepool.Agent.Reply.Internal", name, &[]),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for RequestId {}
+impl ToHaskell for RequestId {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        i64::try_from(self.0)
+            .map_err(|_| BridgeError::UnsupportedType("request id exceeds Int".into()))?
+            .visit(table, visitor)
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for WatchId {}
+impl ToHaskell for WatchId {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        i64::try_from(self.0)
+            .map_err(|_| BridgeError::UnsupportedType("watch id exceeds Int".into()))?
+            .visit(table, visitor)
+    }
 }
 
 #[cfg(test)]

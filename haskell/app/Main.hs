@@ -10,7 +10,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
   ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
-  , fromException, toException )
+  , fromException, toException, IOException )
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
@@ -50,6 +51,7 @@ import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjection, projectSelected, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
+import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
   , WireProgram(..), SiteRow(..) )
@@ -68,7 +70,7 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
-  , preparedDecodeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName
+  , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , parseSessionModule )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
@@ -81,6 +83,8 @@ import Tidepool.Metadata
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
+import Tidepool.DependencyEvidence
+  ( DependencyEvidence, renderDependencyEvidence, revalidateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -254,7 +258,7 @@ runInspectionMode compiler args _path = do
       (crHscEnv successful)
       (crTargetTcGblEnv successful)
       (crTargetRdrEnv successful)
-      (crCapturedTypes successful)
+      (crInspectionProbes successful)
       queries
 
     -- A source path identifies an exact generated source in this request.
@@ -411,9 +415,10 @@ processFile compiler caches timing args path = do
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
-      else timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds tycons mCapturedTy warnTexts preparedArtifacts
+      else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    writeDependencyEvidence outDir (pprDependencies prepared)
 
   reportDiags res
 
@@ -442,6 +447,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
+  jsonAuthority <- timePhase timing "json_authority" $ resolveJsonAuthority hscEnv
   textAuthority <- timePhase timing "text_authority" $ resolveTextPackageUnit hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
@@ -470,6 +476,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
               | root <- auxiliaryRoots ]
           , projectionFormattingAuthority = formattingAuthority
           , projectionTimeAuthority = timeAuthority
+          , projectionJsonAuthority = jsonAuthority
           , projectionTextUnit = textAuthority
           }
   recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)
@@ -504,17 +511,17 @@ requireProjection = \case
   Right projected -> evaluate projected
 
 -- | Filter the standard prepared-turn auxiliary root names
--- ('preparedResumeTargetName', 'preparedDecodeTargetName') down to those the
+-- ('preparedResumeTargetName' and the generic apply roots) down to those the
 -- module actually defines as top-level binders. Shared by 'processFile' and
--- 'runTurnMode' so both admit @__resume@\/@__decodeValue@ as auxiliary roots
+-- 'runTurnMode' so both admit the executable scaffold's auxiliary roots
 -- exactly when a compiled module (e.g. the harness's fused turn module)
 -- defines them, and admit nothing extra for an ordinary module with no
 -- scaffold.
 standardAuxiliaryRoots :: [CoreBind] -> [String]
 standardAuxiliaryRoots binds =
   [ name
-  | name <- [ preparedResumeTargetName, preparedDecodeTargetName
-            , preparedApplyEntryTargetName, preparedApplyValueTargetName
+  | name <- [ preparedResumeTargetName, preparedApplyEntryTargetName
+            , preparedApplyValueTargetName
             ]
   , name `Set.member` topLevelNames
   ]
@@ -533,20 +540,37 @@ writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
   BS.writeFile output (paBytes artifact)
   hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
 
+writeDependencyEvidence :: FilePath -> DependencyEvidence -> IO ()
+writeDependencyEvidence outDir evidence = do
+  validateDependencyEvidence evidence
+  writeFile (outDir </> "dependencies.json") (renderDependencyEvidence evidence)
+
+validateDependencyEvidence :: DependencyEvidence -> IO ()
+validateDependencyEvidence evidence = do
+  unchanged <- revalidateDependencyEvidence evidence
+  if unchanged
+    then pure ()
+    else ioError (userError "source changed while compiler artifacts were being published")
+
+data YieldSiteDelivery = SeparateYieldSites | InlineYieldSites
+
 writePreparedSidecars
-  :: FilePath -> [CoreBind] -> [TyCon] -> Maybe T.Text -> [T.Text]
+  :: YieldSiteDelivery -> FilePath -> [CoreBind] -> [TyCon] -> Maybe T.Text -> [T.Text]
   -> [PreparedArtifact] -> IO ()
-writePreparedSidecars outDir binds tycons capturedType warnings artifacts = do
+writePreparedSidecars delivery outDir binds tycons capturedType warnings artifacts = do
   let constructors = concatMap paConstructors artifacts
       metadata = mergeMetaPreserving
         [ wiredInDataCons, collectDataCons tycons, map dcToMeta constructors ]
       hasIO = any (targetBindingHasIO binds . paTarget) artifacts
       metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes
-  let multiple = length artifacts > 1
-  forM_ artifacts $ \artifact -> do
-    let asksName = if multiple then paTarget artifact ++ ".asks.json" else "asks.json"
-    writeFile (outDir </> asksName) (renderAsksJson (paYieldSites artifact))
+  case delivery of
+    InlineYieldSites -> pure () -- TurnOut carries the same typed sites.
+    SeparateYieldSites -> do
+      let multiple = length artifacts > 1
+      forM_ artifacts $ \artifact -> do
+        let asksName = if multiple then paTarget artifact ++ ".asks.json" else "asks.json"
+        writeFile (outDir </> asksName) (renderAsksJson (paYieldSites artifact))
 
 reportRecoveryResiduals :: String -> [RecoveryFailure] -> IO ()
 reportRecoveryResiduals _ [] = pure ()
@@ -578,6 +602,7 @@ runTurnMode
 runTurnMode compiler caches args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
+  lastAttempt <- newIORef Nothing
   res <- timePhase timing "total" $ try $ do
     turnSrc   <- readFile path
     let templates = requestTurnTemplates args
@@ -623,10 +648,9 @@ runTurnMode compiler caches args path = do
           createDirectoryIfMissing True outDir
           let modulePath = outDir </> modName ++ ".hs"
           writeFile modulePath spliced
-          -- Overwritten before every ordered compile attempt. The Rust turn
-          -- boundary reads this only on failure so frontend diagnostics use
-          -- the exact module GHC last saw, never an unspliced template guess.
-          writeFile (outDir </> "turn-attempt.hs") spliced
+          -- Retain the exact attempted source, but write the diagnostic copy
+          -- only on failure. Successful TurnOut already contains this source.
+          writeIORef lastAttempt (Just (outDir </> "turn-attempt.hs", spliced))
           return (spliced, modName, modulePath)
     if requestActivationPreview args && (sbKind sb /= KBind || length (sbBinders sb) /= 1)
       then fail "activation requires exactly one generated input binder"
@@ -659,13 +683,14 @@ runTurnMode compiler caches args path = do
             -- and the prepared modules.
             compileTurn modulePath = do
               prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-              return (pprPipelineResult prepared, pprModules prepared)
+              return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
               attempted <- try (compileTurn modulePath)
               case attempted of
-                Right (result, preparedModules) -> return (index, spliced, modulePath, result, preparedModules)
+                Right (result, preparedModules, dependencies) ->
+                  return (index, spliced, modulePath, result, preparedModules, dependencies)
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
                   (Just _, _ : _) -> compileVariants (index + 1) rest
                   _               -> throwIO err
@@ -673,7 +698,7 @@ runTurnMode compiler caches args path = do
             && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
           then fail "activation requires one prepared bind template"
           else pure ()
-        (variant, spliced, compiledPath, result, preparedModules) <- compileVariants (0 :: Int) matching
+        (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
         let binds       = prBinds result
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
@@ -683,8 +708,11 @@ runTurnMode compiler caches args path = do
         preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
           [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
         let asksSites = concatMap paYieldSites preparedArtifacts
-        timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
+        timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
         timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+        -- Mutable turns never enter the artifact cache, but publication must
+        -- still reject source changes observed during this compilation.
+        validateDependencyEvidence dependencies
         let wrapped = T.pack spliced
         case selector of
           SBind -> do
@@ -699,6 +727,13 @@ runTurnMode compiler caches args path = do
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
+  case res of
+    Left _ -> do
+      attempted <- readIORef lastAttempt
+      forM_ attempted $ \(output, source) -> do
+        _ <- try (writeFile output source) :: IO (Either IOException ())
+        pure ()
+    Right _ -> pure ()
   reportDiags res
 
 -- | Block classify mode (@--classify@):
@@ -729,6 +764,7 @@ runClassifyMode timing args =
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
 runCellMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runCellMode compiler args cellPath = do
+  provisionalOutput <- newIORef Nothing
   res <- try $ do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
@@ -748,8 +784,9 @@ runCellMode compiler args cellPath = do
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       rendered <- either fail pure (renderCellCheckSource template plan)
       writeFile modulePath rendered
-      -- Preserve GHC's source plan even when checking reports diagnostics.
-      BS.writeFile out (encodeCellOut plan [] [] rendered)
+      -- Preserve the latest plan for failure diagnostics without encoding and
+      -- writing a provisional result before every successful check attempt.
+      writeIORef provisionalOutput (Just (out, plan, rendered))
       compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
     checkedSource <- either fail pure (renderCellCheckSource template analyzed)
     (finalPlan, finalSource, compiled) <- if null (cellPlanDisplayTargets analyzed)
@@ -771,6 +808,13 @@ runCellMode compiler args cellPath = do
     expressionPlans <- cellExpressionPlans compiled
     BS.writeFile out
       (encodeCellOut finalPlan (crCheckedBinderPins compiled) expressionPlans finalSource)
+  case res of
+    Left _ -> do
+      provisional <- readIORef provisionalOutput
+      forM_ provisional $ \(out, plan, rendered) -> do
+        _ <- try (BS.writeFile out (encodeCellOut plan [] [] rendered)) :: IO (Either IOException ())
+        pure ()
+    Right _ -> pure ()
   reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same

@@ -29,7 +29,7 @@ pub type ConversationFuture =
     Pin<Box<dyn Future<Output = Result<Vec<ConversationTurn>, ConversationUnavailable>> + Send>>;
 
 /// Installed once when constructing a forest. Called with the actor whose turn
-/// is executing and how many completed turns it asked for.
+/// is executing and how many latest turns it asked for, including that turn.
 pub type ConversationReader =
     Arc<dyn Fn(crate::ActorRef, usize) -> ConversationFuture + Send + Sync>;
 
@@ -73,7 +73,7 @@ fn item(item: TurnItem) -> RfTurnItem {
     }
 }
 
-/// How many completed turns a request for `count` turns actually asks for.
+/// How many latest turns a request for `count` turns actually asks for.
 ///
 /// A count at or below zero asks for none, and nothing is read.
 #[must_use]

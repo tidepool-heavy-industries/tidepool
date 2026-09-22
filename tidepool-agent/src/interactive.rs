@@ -371,17 +371,6 @@ impl InteractiveAgentInstallation {
 /// Delivery certainty is control flow: a failure before submission allows the
 /// assignment to continue; uncertainty after submission must keep its fence.
 /// Details describe this delivery operation, not the original agent run.
-#[derive(Debug, thiserror::Error)]
-pub enum UpdatePresentationError {
-    #[error("update was not submitted: {0}")]
-    NotSubmitted(String),
-    #[error("update presentation is unconfirmed: {0}")]
-    Unconfirmed(String),
-}
-
-pub type UpdatePresentationFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), UpdatePresentationError>> + Send + 'a>>;
-
 /// A boxed asynchronous operation at the backend-neutral boundary.
 pub type InteractiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, AgentBackendError>> + Send + 'a>>;
@@ -601,23 +590,6 @@ pub trait InteractiveAgentBackend: Send + Sync {
         message: &'a str,
     ) -> InteractiveFuture<'a, ()>;
 
-    /// Present an update in the existing conversation at a safe model boundary,
-    /// waking it if idle. Success requires observed model-visible insertion with
-    /// the supplied correlation key, not merely acceptance into a queue.
-    fn present_update<'a>(
-        &'a self,
-        _cwd: &'a str,
-        _thread: &'a QueueReadyThread,
-        _key: &'a str,
-        _message: &'a str,
-    ) -> UpdatePresentationFuture<'a> {
-        Box::pin(async {
-            Err(UpdatePresentationError::NotSubmitted(
-                "this backend does not support confirmed active updates".into(),
-            ))
-        })
-    }
-
     /// Usage and provider turn health from one durable observation.
     /// `None` means unavailable, never measured zero or an idle process.
     fn observe<'a>(
@@ -627,11 +599,12 @@ pub trait InteractiveAgentBackend: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// This conversation's last `count` COMPLETED turns, oldest first.
+    /// This conversation's latest `count` turns, oldest first, including the
+    /// active turn when the durable record already contains it.
     ///
-    /// The turn the caller is executing has not completed and is never
-    /// included. `None` means this backend keeps no readable conversation
-    /// record; an empty list means it keeps one with no completed turns yet.
+    /// An active turn has no completion timestamp and contains only recorded
+    /// messages and tool activity; a pending result is never fabricated.
+    /// `None` means this backend keeps no readable conversation record.
     fn conversation<'a>(
         &'a self,
         _thread: &'a QueueReadyThread,
@@ -667,8 +640,13 @@ pub enum NativeCommandOperation {
 
 #[derive(Clone, Debug)]
 pub enum NativeCommandReply {
+    /// The controller proved that no request bytes were submitted.
+    NotSubmitted(String),
     Pending,
-    Finished { exit_code: i32, cancelled: bool },
+    Finished {
+        exit_code: i32,
+        cancelled: bool,
+    },
     Unconfirmed(String),
     Output(tidepool_bridge_effects::CommandOutput),
     Page(tidepool_bridge_effects::CommandPage),

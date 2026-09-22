@@ -15,12 +15,11 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellSourceSpan, InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, TurnKind, TypeMatchQuality,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    CellSourceSpan, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
+    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -183,6 +182,8 @@ struct ResidentEnvironment<H, O> {
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
     conversation_reader: Option<crate::ConversationReader>,
+    usage_pointers: crate::UsagePointerTable,
+    recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
 
 #[derive(Clone)]
@@ -196,6 +197,7 @@ struct ResidentActorRecord {
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    scheduler_root: bool,
 }
 
 #[derive(tidepool_bridge_derive::ToHaskell)]
@@ -351,6 +353,8 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             jev: Arc::clone(&self.jev),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
+            usage_pointers: self.usage_pointers,
+            recovery: self.recovery.clone(),
         }
     }
 }
@@ -728,6 +732,7 @@ pub struct ResidentKernelBehavior<H, O> {
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    scheduler_root: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -1269,6 +1274,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         boot: ResidentBoot,
         launch_worktrees: Vec<String>,
     ) -> Self {
+        let scheduler_root = matches!(&boot, ResidentBoot::Workbench | ResidentBoot::Prepared(_));
         Self {
             replacement_transfer: None,
             retained_replacements: Vec::new(),
@@ -1300,6 +1306,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
+            scheduler_root,
             workbench_executions: Arc::default(),
             active_route: None,
             active_fork_boundary: None,
@@ -1389,6 +1396,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        if let Some(recovery) = &self.environment.recovery {
+            if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
+                // The actor is already terminal. Retain the earlier admission
+                // as active so restart reconciliation remains conservative.
+                tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
+            }
+        }
         self.environment.fork_groups.retire_actor(actor);
         if let Some(record) = self.environment.actors.lock().get_mut(&actor) {
             record.terminal = Some(terminal.clone());
@@ -2611,6 +2625,21 @@ where
                 self.environment
                     .runner
                     .resume_agent_observation(context.clone(), inspection.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::Lookup {
+                continuation,
+                request,
+            } => Box::pin(async move {
+                self.environment
+                    .runner
+                    .application_workbench()
+                    .resume_lookup(
+                        context.clone(),
+                        continuation,
+                        request,
+                        self.environment.usage_pointers,
+                    )
                     .await
             }),
             ResidentActorBoundary::Introspection {
@@ -4229,12 +4258,21 @@ where
         }
 
         let install = self.spec_installs + 1;
+        let prepare_started = std::time::Instant::now();
         let candidate = self
             .environment
             .runner
             .application_workbench()
             .prepare_tools(context.clone(), install)
             .await;
+        tracing::info!(
+            actor = %context.actor,
+            phase = "reload",
+            install,
+            elapsed_ms = prepare_started.elapsed().as_millis(),
+            success = candidate.is_ok(),
+            "agent spec preparation"
+        );
         let candidate = match candidate {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
@@ -4301,12 +4339,22 @@ where
             )
         })?;
         self.spec_installs = 1;
-        self.compiled_tools = self
+        let prepare_started = std::time::Instant::now();
+        let compiled_tools = self
             .environment
             .runner
             .application_workbench()
             .prepare_tools(context.clone(), self.spec_installs)
-            .await?;
+            .await;
+        tracing::info!(
+            actor = %context.actor,
+            phase = "startup",
+            install = self.spec_installs,
+            elapsed_ms = prepare_started.elapsed().as_millis(),
+            success = compiled_tools.is_ok(),
+            "agent spec preparation"
+        );
+        self.compiled_tools = compiled_tools?;
         let declarations = self
             .compiled_tools
             .as_ref()
@@ -5574,10 +5622,6 @@ where
         mut request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
-        let lookup_call = request
-            .tool_call()
-            .filter(|call| call.name == crate::lookup_tool::LOOKUP_TOOL)
-            .cloned();
         let status_call = request
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
@@ -5587,8 +5631,7 @@ where
             .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
             .cloned();
         let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
-            call.name != crate::lookup_tool::LOOKUP_TOOL
-                && call.name != crate::status_tool::STATUS_TOOL
+            call.name != crate::status_tool::STATUS_TOOL
                 && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
         }) {
             let tools = self
@@ -5743,120 +5786,6 @@ where
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output,
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: None,
-                }],
-                1,
-                1,
-                None,
-            )));
-        }
-        if let Some(call) = lookup_call {
-            let prepared = crate::lookup_tool::prepare(call.arguments).map_err(|error| {
-                workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )
-            })?;
-            // Whether the batch needs the extractor at all is decided by query
-            // shape alone (a `doc`/rejected query needs nothing), so that
-            // check does not need this turn's imports and can run before the
-            // machine is checked out.
-            let needs_inspection = prepared.iter().any(|query| {
-                !matches!(
-                    query.kind,
-                    crate::lookup_tool::PreparedLookupKind::Doc(_)
-                        | crate::lookup_tool::PreparedLookupKind::Rejected(_)
-                )
-            });
-            let prepared_for_queries = prepared.clone();
-            let (inspected, live_modules) = if needs_inspection {
-                workbench
-                    .lookup_inspections(context.clone(), move |imports: &str| {
-                        prepared_for_queries
-                            .iter()
-                            .flat_map(|query| match &query.kind {
-                                crate::lookup_tool::PreparedLookupKind::Name(name) => {
-                                    // A dotted, lowercase-final name is a
-                                    // qualified value or field
-                                    // (`Cmd.exitCode`); a miss on it browses
-                                    // the qualifier's real module (resolved
-                                    // from this turn's own imports, never a
-                                    // hand-maintained alias table) in the same
-                                    // batch, so `lookup_response` can suggest
-                                    // the closest export without a second
-                                    // round trip. The pairing is decided here
-                                    // by shape alone, matching how
-                                    // `lookup_response` decides how many
-                                    // results to consume for this query.
-                                    match crate::lookup_tool::qualifier_and_identifier(name) {
-                                        Some((qualifier, _identifier)) => {
-                                            let module =
-                                                crate::lookup_tool::resolve_qualifier_module(
-                                                    imports, qualifier,
-                                                )
-                                                .unwrap_or_else(|| qualifier.to_string());
-                                            vec![
-                                                InspectionQuery::Info(name.clone()),
-                                                InspectionQuery::Browse {
-                                                    module,
-                                                    expanded: false,
-                                                },
-                                            ]
-                                        }
-                                        None => vec![InspectionQuery::Info(name.clone())],
-                                    }
-                                }
-                                // Only GHC knows whether `Cmd.RunResult` is a
-                                // name in this scope or a module. Both
-                                // interpretations go out in this batch, in
-                                // this order, and `lookup_response` picks per
-                                // result: the worker isolates rejection per
-                                // query, so a module browse still costs one
-                                // round trip and a qualified name is no
-                                // longer answered `no match` for being
-                                // dotted.
-                                crate::lookup_tool::PreparedLookupKind::Qualified(name) => vec![
-                                    InspectionQuery::Info(name.clone()),
-                                    InspectionQuery::Browse {
-                                        module: name.clone(),
-                                        expanded: false,
-                                    },
-                                ],
-                                crate::lookup_tool::PreparedLookupKind::Type(query) => {
-                                    vec![InspectionQuery::TypeSearch(query.clone())]
-                                }
-                                crate::lookup_tool::PreparedLookupKind::Doc(_) => Vec::new(),
-                                crate::lookup_tool::PreparedLookupKind::Rejected(_) => Vec::new(),
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .map_err(|error| workbench_failure(&[], 0, 1, error))?
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let response = lookup_response(
-                prepared,
-                inspected,
-                &live_modules,
-                workbench.workspace_modules(),
-            );
-            return Ok(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Committed,
-                vec![WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: 0,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output: response.render_text(),
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
@@ -6121,7 +6050,7 @@ where
                     };
                     // The tool-result boundary: the result exists and has not
                     // been returned. Only a hosted tool call reaches here —
-                    // `lookup`, `status` and `reload_agent_spec` never acquire
+                    // `status` and `reload_agent_spec` never acquire
                     // a dispatcher, and an authored cell is not a tool call at
                     // all — so a broken slot can never block its own repair.
                     let output = match (request.tool_call().cloned(), tool_dispatch.as_ref()) {
@@ -6836,6 +6765,11 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            if let Some(recovery) = &self.environment.recovery {
+                recovery
+                    .admit(context.actor, &self.descriptor, &self.launch_worktrees)
+                    .map_err(Self::failure)?;
+            }
             kernel.install_session_context(context.clone())?;
             self.environment.actors.lock().insert(
                 context.actor,
@@ -6849,6 +6783,7 @@ where
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
+                    scheduler_root: self.scheduler_root,
                 },
             );
             if self.descriptor.fork_boundary().is_some() {
@@ -7873,6 +7808,14 @@ pub struct ResidentForest<H, O> {
     incarnation: crate::Incarnation,
 }
 
+#[derive(Default)]
+struct PreparedRootAdmission {
+    replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+    identity: Option<ActorRef>,
+    launch_worktrees: Vec<String>,
+    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+}
+
 impl<H, O> ResidentForest<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -7890,6 +7833,14 @@ where
         self.environment.source_layers = Some(layers);
     }
 
+    /// Install the immutable usage pointers supplied by the facade's shipped
+    /// workspace. The actor kernel owns lookup behavior; the facade owns the
+    /// source inventory and its generated table.
+    pub fn with_usage_pointers(mut self, pointers: crate::UsagePointerTable) -> Self {
+        self.environment.usage_pointers = pointers;
+        self
+    }
+
     /// Declare that an actor host answers `LocalResidentDeployment::ReleaseAwait`.
     /// From now on a stop reports `StoppedNow` only once that host has released
     /// the actor's interactive resources.
@@ -7905,6 +7856,16 @@ where
     #[must_use]
     pub fn resident_session_state(&self) -> tidepool_runtime::session::ResidentSessionState {
         self.environment.runner.resident_session_state(self.session)
+    }
+
+    /// Read-only resident counters for matched measurement harnesses. A
+    /// running or retired machine has no snapshot rather than fabricated
+    /// zeroes.
+    #[must_use]
+    pub fn measurement_snapshot(
+        &self,
+    ) -> Option<crate::resident_workbench::ResidentMachineMeasurement> {
+        self.environment.runner.measurement_snapshot(self.session)
     }
 
     pub fn new(
@@ -7944,6 +7905,8 @@ where
             jev: Arc::new(crate::jev::UnconfiguredJev),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
+            usage_pointers: &[],
+            recovery: None,
         };
         (
             Self {
@@ -7962,6 +7925,23 @@ where
     pub fn with_conversation_reader(mut self, reader: crate::ConversationReader) -> Self {
         self.environment.conversation_reader = Some(reader);
         self
+    }
+
+    /// Persist actor-owned identity and lifecycle transitions before they are
+    /// published to the host or an authored program.
+    #[must_use]
+    pub fn with_recovery_journal(mut self, journal: Arc<crate::ActorRecoveryJournal>) -> Self {
+        self.environment.recovery = Some(journal);
+        self
+    }
+
+    /// Keep logical IDs from being consumed by unrelated new actors while
+    /// restart reconciliation decides which durable actors can be restored.
+    pub fn fence_recovery_identities(
+        &self,
+        actors: impl IntoIterator<Item = crate::ActorId>,
+    ) -> Result<(), String> {
+        self.directory.fence_logical_ids(actors)
     }
 
     /// Observe only actors the exact requester can inspect. This does not enter
@@ -8021,8 +8001,86 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        self.new_program_root_with_replay(label, role, compiled, None)
+        self.new_program_root_with_replay(label, role, compiled, None, None)
             .await
+    }
+
+    /// Rebuild a durable logical actor as an independent scheduler root in the
+    /// new host incarnation. Haskell heap state is fresh; the caller supplies
+    /// only replayable source and launch configuration.
+    pub async fn recover_durable_program_root(
+        &self,
+        durable: &crate::DurableActorAdmission,
+        role: crate::EffectiveRole,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+        worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    ) -> Result<
+        (LocalActorRef, ractor::concurrency::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(std::io::Error::other("swarm root admission is closed").into());
+        }
+        let (placement, outcome) = self
+            .environment
+            .runner
+            .prepare_root_program(self.session, compiled)
+            .await?;
+        let current = |actor: ActorRef| ActorRef {
+            id: actor.id,
+            incarnation: self.incarnation,
+        };
+        let mut descriptor = ActorDescriptor::new(&durable.label, placement)
+            .with_effective_role(role)
+            .with_model(durable.model.clone().map(crate::Model::Literal))
+            .with_instructions(durable.instructions.clone())
+            .with_fork_effort(durable.effort.as_deref().and_then(|effort| match effort {
+                "low" => Some(crate::ForkEffort::Low),
+                "medium" => Some(crate::ForkEffort::Medium),
+                "high" => Some(crate::ForkEffort::High),
+                _ => None,
+            }))
+            .with_source_layer(durable.source_layer.clone());
+        if let Some(creator) = durable.creator {
+            descriptor = descriptor.with_creator(current(creator));
+        }
+        descriptor = descriptor.with_supervisor_parent(durable.supervisor_parent.map(current));
+        if let Some(parent) = durable.context_parent {
+            descriptor = descriptor.with_context_parent(current(parent));
+        }
+        let identity =
+            ActorRef {
+                id: durable.actor.id,
+                incarnation: crate::Incarnation(
+                    durable.actor.incarnation.0.checked_add(1).ok_or_else(|| {
+                        std::io::Error::other("actor incarnation space exhausted")
+                    })?,
+                ),
+            };
+        match self
+            .admit_prepared_root(
+                descriptor,
+                outcome,
+                &admission,
+                PreparedRootAdmission {
+                    identity: Some(identity),
+                    launch_worktrees: durable.launch_worktrees.clone(),
+                    worktree_custody,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(actor) => Ok(actor),
+            Err(error) => {
+                self.environment
+                    .runner
+                    .retire_root_placement(placement)
+                    .await?;
+                Err(Box::new(error))
+            }
+        }
     }
 
     /// Recover a failed root in this resident forest without replaying its
@@ -8079,8 +8137,17 @@ where
             record.recovery_claimed = true;
             record.workbench_executions.clone()
         };
+        let identity =
+            ActorRef {
+                id: predecessor.id,
+                incarnation: crate::Incarnation(
+                    predecessor.incarnation.0.checked_add(1).ok_or_else(|| {
+                        std::io::Error::other("actor incarnation space exhausted")
+                    })?,
+                ),
+            };
         let result = self
-            .new_program_root_with_replay(label, role, compiled, Some(journal))
+            .new_program_root_with_replay(label, role, compiled, Some(journal), Some(identity))
             .await;
         if result.is_err() {
             if let Some(record) = self.environment.actors.lock().get_mut(&predecessor) {
@@ -8096,6 +8163,7 @@ where
         role: crate::EffectiveRole,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+        identity: Option<ActorRef>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
@@ -8114,7 +8182,11 @@ where
                 ActorDescriptor::new(label, placement).with_effective_role(role),
                 outcome,
                 &admission,
-                replay,
+                PreparedRootAdmission {
+                    replay,
+                    identity,
+                    ..Default::default()
+                },
             )
             .await
         {
@@ -8136,7 +8208,7 @@ where
             .actors
             .lock()
             .iter()
-            .filter(|(_, record)| record.descriptor.supervisor_parent().is_none())
+            .filter(|(_, record)| record.scheduler_root)
             .filter_map(|(actor, _)| self.directory.resolve(*actor))
             .collect::<Vec<_>>();
         for root in roots {
@@ -8209,8 +8281,34 @@ where
                 std::io::Error::other("swarm root admission is closed").into(),
             ));
         }
-        self.admit_prepared_root(descriptor, outcome, &admission, None)
+        self.admit_prepared_root(descriptor, outcome, &admission, Default::default())
             .await
+    }
+
+    /// Admit the run root with a durable logical identity selected by the
+    /// host recovery owner. The identity must already have been fenced.
+    pub async fn admit_root_with_identity(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        identity: ActorRef,
+    ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("swarm root admission is closed").into(),
+            ));
+        }
+        self.admit_prepared_root(
+            descriptor,
+            outcome,
+            &admission,
+            PreparedRootAdmission {
+                identity: Some(identity),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     async fn admit_prepared_root(
@@ -8218,11 +8316,18 @@ where
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
-        replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+        recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        let PreparedRootAdmission {
+            replay,
+            identity,
+            launch_worktrees,
+            worktree_custody,
+        } = recovery;
         if descriptor.placement().session != self.session
-            || descriptor.supervisor_parent().is_some()
-            || descriptor.context_parent().is_some()
+            || (identity.is_none()
+                && (descriptor.supervisor_parent().is_some()
+                    || descriptor.context_parent().is_some()))
         {
             return Err(ractor::SpawnErr::StartupFailed(Box::new(
                 std::io::Error::new(
@@ -8233,16 +8338,31 @@ where
         }
         let mut behavior =
             ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+        behavior.launch_worktrees = launch_worktrees;
+        behavior.worktree_custody = worktree_custody;
         if let Some(replay) = replay {
             behavior.workbench_executions = replay;
         }
-        crate::local_actor::spawn_local_actor_in_directory(
-            None,
-            behavior,
-            self.incarnation,
-            self.directory.clone(),
-        )
-        .await
+        match identity {
+            Some(identity) => {
+                crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                    None,
+                    behavior,
+                    identity,
+                    self.directory.clone(),
+                )
+                .await
+            }
+            None => {
+                crate::local_actor::spawn_local_actor_in_directory(
+                    None,
+                    behavior,
+                    self.incarnation,
+                    self.directory.clone(),
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -8487,285 +8607,14 @@ fn workbench_response(
     }
 }
 
+#[cfg(test)]
 fn lookup_response(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
-    inspected: Vec<InspectionResult>,
+    inspected: Vec<tidepool_runtime::session::InspectionResult>,
     live_modules: &[String],
     workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
-    use crate::lookup_tool::{
-        LookupEntry, LookupEntryKind, LookupInterpretation, LookupOrigin, LookupOutcome,
-        LookupResult, MatchQuality, PreparedLookupKind,
-    };
-
-    const MATCH_LIMIT: usize = 20;
-    let mut inspected = inspected.into_iter();
-    let results = prepared
-        .into_iter()
-        .map(|prepared| match prepared.kind {
-            PreparedLookupKind::Rejected(diagnostic) => LookupResult {
-                query: prepared.query,
-                outcome: LookupOutcome::Rejected { diagnostic },
-            },
-            PreparedLookupKind::Doc(topic) => {
-                match crate::prompt_catalog::workbench_doc(&topic, workspace_modules) {
-                    Ok(body) => LookupResult::found(
-                        prepared.query,
-                        vec![LookupEntry {
-                            name: topic,
-                            defining_module: None,
-                            kind: LookupEntryKind::Documentation,
-                            signature_or_declaration: body.into(),
-                            origin: LookupOrigin::Documentation,
-                            quality: MatchQuality::Exact,
-                            availability:
-                                tidepool_runtime::session::InspectionAvailability::Unknown,
-                            usage_pointer: None,
-                        }],
-                        MATCH_LIMIT,
-                    ),
-                    Err(diagnostic) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
-                }
-            }
-            PreparedLookupKind::Name(ref name) => {
-                // A dotted, lowercase-final name (`Cmd.exitCode`) sent a
-                // paired qualifier `Browse` in the same batch (built above,
-                // in `execute_workbench`); every other `Name` shape consumes
-                // exactly one result. This mirrors that same shape-based
-                // decision so the two stay aligned without threading a count
-                // through the response.
-                let qualifier_shaped = crate::lookup_tool::qualifier_and_identifier(name).is_some();
-                let info_result = inspected.next();
-                let browse_result = if qualifier_shaped {
-                    inspected.next()
-                } else {
-                    None
-                };
-                match info_result {
-                    Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::NotFound { .. }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::Name],
-                            suggestions: near_match_suggestions(name, browse_result),
-                        },
-                    },
-                    Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
-                    Some(other) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: format!(
-                                "lookup worker returned unexpected result: {other:?}"
-                            ),
-                        },
-                    },
-                    None => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: "lookup worker omitted a result".into(),
-                        },
-                    },
-                }
-            }
-            // The batch carried `Info` then `Browse` for this one query, so the
-            // name answer is taken when GHC has one and the module browse is
-            // read only when it does not. Both results are consumed either way,
-            // which is what keeps the remaining queries aligned.
-            PreparedLookupKind::Qualified(_) => match (inspected.next(), inspected.next()) {
-                (Some(InspectionResult::Info { entries, .. }), _) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (Some(InspectionResult::Ambiguous { entries, .. }), _) => LookupResult::ambiguous(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (_, Some(InspectionResult::Browse { entries, .. })) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (by_name, by_module) => unresolved_qualified(prepared.query, by_name, by_module),
-            },
-            PreparedLookupKind::Type(_) => match inspected.next() {
-                Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
-                    LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::TypeSearch],
-                            suggestions: Vec::new(),
-                        },
-                    }
-                }
-                Some(InspectionResult::TypeMatches { matches, .. }) => LookupResult::found(
-                    prepared.query,
-                    matches
-                        .into_iter()
-                        .map(|entry| LookupEntry {
-                            name: entry.name.clone(),
-                            defining_module: entry.module.clone(),
-                            kind: LookupEntryKind::Value,
-                            signature_or_declaration: format!(
-                                "{} :: {}",
-                                entry.name, entry.signature
-                            ),
-                            origin: lookup_origin(entry.module.as_deref(), live_modules),
-                            quality: match entry.quality {
-                                TypeMatchQuality::Exact => MatchQuality::Exact,
-                                TypeMatchQuality::Usable => MatchQuality::Usable,
-                            },
-                            availability: entry.availability,
-                            usage_pointer: crate::usage_pointer::pointer_for(&entry.name),
-                        })
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-                Some(other) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
-                    },
-                },
-                None => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: "lookup worker omitted a result".into(),
-                    },
-                },
-            },
-        })
-        .collect();
-    fn info_lookup_entry(
-        entry: tidepool_runtime::session::InfoEntry,
-        live_modules: &[String],
-    ) -> LookupEntry {
-        let kind = match entry.kind.as_str() {
-            "class-method" => LookupEntryKind::ClassMethod,
-            "record-selector" => LookupEntryKind::RecordSelector,
-            "constructor" => LookupEntryKind::Constructor,
-            "type" => LookupEntryKind::Type,
-            "coercion" => LookupEntryKind::Coercion,
-            _ => LookupEntryKind::Value,
-        };
-        let usage_pointer = crate::usage_pointer::pointer_for(&entry.name);
-        LookupEntry {
-            name: entry.name,
-            defining_module: entry.module.clone(),
-            kind,
-            signature_or_declaration: entry.display,
-            origin: lookup_origin(entry.module.as_deref(), live_modules),
-            quality: MatchQuality::Exact,
-            availability: entry.availability,
-            usage_pointer,
-        }
-    }
-
-    /// The closest exported names under a missed qualifier, read from the
-    /// same-batch `Browse` of that qualifier's real module (see
-    /// `crate::lookup_tool::resolve_qualifier_module`). Empty when the query
-    /// was not qualifier-shaped, the browse itself failed (an unresolvable
-    /// qualifier, most likely), or nothing in it was close enough to suggest.
-    fn near_match_suggestions(name: &str, browse: Option<InspectionResult>) -> Vec<String> {
-        let Some((_qualifier, identifier)) = crate::lookup_tool::qualifier_and_identifier(name)
-        else {
-            return Vec::new();
-        };
-        let Some(InspectionResult::Browse { entries, .. }) = browse else {
-            return Vec::new();
-        };
-        let candidates: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
-        crate::lookup_tool::near_matches(identifier, &candidates, 5)
-    }
-
-    /// Neither interpretation of a dotted capitalized query produced entries.
-    /// A miss reports both attempts, so a reader is never left guessing which
-    /// question was asked; a real diagnostic from either side outranks it,
-    /// because a failed query is not evidence the name does not exist.
-    fn unresolved_qualified(
-        query: String,
-        by_name: Option<InspectionResult>,
-        by_module: Option<InspectionResult>,
-    ) -> LookupResult {
-        let diagnostic = [by_name, by_module]
-            .into_iter()
-            .find_map(|result| match result {
-                Some(
-                    InspectionResult::NotFound { .. } | InspectionResult::ModuleNotFound { .. },
-                ) => None,
-                Some(InspectionResult::Rejected { diagnostic }) => Some(diagnostic),
-                Some(other) => Some(format!(
-                    "lookup worker returned unexpected result: {other:?}"
-                )),
-                None => Some("lookup worker omitted a result".into()),
-            });
-        LookupResult {
-            query,
-            outcome: match diagnostic {
-                Some(diagnostic) => LookupOutcome::Rejected { diagnostic },
-                None => LookupOutcome::NotFound {
-                    attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
-                    suggestions: Vec::new(),
-                },
-            },
-        }
-    }
-
-    fn lookup_origin(module: Option<&str>, live_modules: &[String]) -> LookupOrigin {
-        if module.is_some_and(|module| live_modules.iter().any(|live| live == module)) {
-            LookupOrigin::LiveBinding
-        } else {
-            LookupOrigin::ModuleExport
-        }
-    }
-
-    let response = crate::lookup_tool::LookupResponse { results };
-    // Discovery is part of a cell's story: what was asked, and what the model
-    // was actually shown in reply. Rendering costs an allocation, so ask
-    // first whether anything is listening.
-    if tracing::enabled!(target: "shoal::content", tracing::Level::INFO) {
-        tracing::info!(
-            target: "shoal::content",
-            rendered = %response.render_text(),
-            "lookup answered"
-        );
-    }
-    response
+    crate::lookup_tool::resolve(prepared, inspected, live_modules, workspace_modules, &[])
 }
 
 #[cfg(test)]
@@ -8895,6 +8744,7 @@ mod tests {
                 InspectionResult::Info {
                     query: "awaitSettled".into(),
                     entries: vec![InfoEntry {
+                        references: vec![],
                         name: "awaitSettled".into(),
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
                         kind: "value".into(),
@@ -8909,6 +8759,7 @@ mod tests {
                 InspectionResult::TypeMatches {
                     query: "Response result -> Await (Settlement result)".into(),
                     matches: vec![TypeMatch {
+                        references: vec![],
                         name: "awaitSettled".into(),
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
                         signature: "Response result -> Await (Settlement result)".into(),
@@ -8949,6 +8800,7 @@ mod tests {
 
     fn info_entry(name: &str, module: &str, kind: &str, display: &str) -> InfoEntry {
         InfoEntry {
+            references: vec![],
             name: name.into(),
             module: Some(module.into()),
             kind: kind.into(),

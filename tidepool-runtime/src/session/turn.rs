@@ -45,6 +45,16 @@ pub enum ValueTier {
     RetainOpaque,
 }
 
+/// Closed compiler-issued authority for a host-built resident value. The
+/// extractor classifies this from the exact root TyCon and its resolved unit;
+/// it is never inferred from rendered type text or a constructor name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostBindingAuthority {
+    JsonValue,
+    Text,
+    CommandJob,
+}
+
 /// One binder a BIND turn introduces — the extract's `BoundBinder` record.
 #[derive(Clone, Debug)]
 pub struct BoundBinder {
@@ -58,6 +68,13 @@ pub struct BoundBinder {
     pub tier: ValueTier,
     /// `ppr` of the bound value's type, for `:t`.
     pub type_display: String,
+    /// Exact nominal root of the persisted binding type, when its outer type
+    /// is a type constructor. This is compiler-issued structural evidence,
+    /// never parsed from `type_display` or inferred from nested type heads.
+    pub root_head: Option<NominalHead>,
+    /// The authenticated shipped type surface this binder belongs to, when it
+    /// is one of the closed set the resident host can construct.
+    pub host_authority: Option<HostBindingAuthority>,
 }
 
 /// The three mutually-exclusive shapes a turn can take (GHC-sourced).
@@ -510,20 +527,9 @@ pub const PREPARED_SCAFFOLD_TARGET: &str = "__prepared";
 /// that lacks it.
 pub const PREPARED_RESUME_TARGET: &str = "__resume";
 
-/// The decode entry every prepared turn admits beside
-/// [`PREPARED_SCAFFOLD_TARGET`] and [`PREPARED_RESUME_TARGET`]
-/// (`Tidepool.Session.preparedDecodeTargetName` on the worker side):
-/// `__decodeValue :: Text -> Either Text Value`, the leaf adapter the
-/// session enters to turn a JSON-rendered bridge answer into a retained
-/// `Tidepool.Aeson.Value.Value` before splicing it into an outer answer
-/// ([`crate::session::prepared`]'s `Value`-carrying-reply lowering). The
-/// extractor projects it as an auxiliary root beside
-/// [`PREPARED_RESUME_TARGET`].
-pub const PREPARED_DECODE_TARGET: &str = "__decodeValue";
-
 /// The generic apply entry every prepared turn admits beside
-/// [`PREPARED_SCAFFOLD_TARGET`], [`PREPARED_RESUME_TARGET`], and
-/// [`PREPARED_DECODE_TARGET`] (`Tidepool.Session.preparedApplyEntryTargetName`
+/// [`PREPARED_SCAFFOLD_TARGET`] and [`PREPARED_RESUME_TARGET`]
+/// (`Tidepool.Session.preparedApplyEntryTargetName`
 /// on the worker side): `__applyEntry f n = settle (f (I# n))`, the entry
 /// `ResidentSession::run_rooted_entry`/`run_rooted_entry_borrowed`
 /// (`tidepool-runtime/src/session/resident.rs`) enters to apply a rooted
@@ -552,28 +558,22 @@ pub const PREPARED_APPLY_VALUE_TARGET: &str = "__applyValue";
 /// The qualified alias every template imports `Tidepool.Internal.Resume` under.
 const RESUME_ALIAS: &str = "TidepoolResume";
 
-/// The qualified aliases the decode entry's signature is written under.
-/// The scaffold cannot assume a template's own preamble brings `Text` or
-/// `Value` into scope (the harness-ctx template imports almost nothing), so
-/// it imports both modules itself under aliases no authored code uses.
+/// Qualified text alias used by the activation-preview scaffold.
 const TEXT_ALIAS: &str = "TidepoolScaffoldText";
-const AESON_VALUE_ALIAS: &str = "TidepoolScaffoldAeson";
 
 /// The qualified alias every template imports `GHC.Exts` under, so
 /// [`PREPARED_APPLY_ENTRY_TARGET`] can box its unboxed `Int#` argument
 /// through `I#` without depending on a template's own imports.
 const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 
-/// The three lines every executable template ends with: the settled
-/// scaffold the prepared route projects, the resume entry it re-enters
-/// parked continuations through, and the decode entry it lowers
-/// `Value`-carrying answers through. All three are unreachable from
+/// Every executable template ends with its settled scaffold, resume entry,
+/// and generic apply entries. These auxiliary bindings are unreachable from
 /// `__result`, so they do not enlarge its prepared dependency closure. Built from
 /// [`prepared_scaffold_binding_named`] (the settled line) and
-/// [`prepared_resume_decode_binding`] (the shared resume/decode/apply group)
+/// [`prepared_resume_apply_binding`] (the shared resume/apply group)
 /// at the fixed [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/
-/// [`PREPARED_DECODE_TARGET`]/[`PREPARED_APPLY_ENTRY_TARGET`]/
-/// [`PREPARED_APPLY_VALUE_TARGET`] names every resident-turn template uses.
+/// [`PREPARED_APPLY_ENTRY_TARGET`]/[`PREPARED_APPLY_VALUE_TARGET`] names every
+/// resident-turn template uses.
 ///
 /// Public so a caller assembling its OWN template outside
 /// [`assemble_bind_module`]/[`assemble_expression_module`] (a hand-rolled
@@ -581,7 +581,7 @@ const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 /// compile requires, rather than hand-duplicating these binder names.
 pub fn prepared_scaffold_binding(target: &str) -> String {
     let mut out = prepared_scaffold_binding_named(PREPARED_SCAFFOLD_TARGET, target);
-    out.push_str(&prepared_resume_decode_binding());
+    out.push_str(&prepared_resume_apply_binding());
     out
 }
 
@@ -597,54 +597,47 @@ pub fn prepared_scaffold_binding(target: &str) -> String {
 /// [`prepared_scaffold_binding`] is a thin specialization, not a second
 /// copy.
 ///
-/// Does NOT emit `__resume`/`__decodeValue` — see
-/// [`prepared_resume_decode_binding`]'s doc for why those stay
+/// Does NOT emit the fixed auxiliary entries — see
+/// [`prepared_resume_apply_binding`]'s doc for why those stay
 /// fixed-named and module-shared rather than following `scaffold_target`.
 #[must_use]
 pub fn prepared_scaffold_binding_named(scaffold_target: &str, target: &str) -> String {
     format!("{scaffold_target} = {RESUME_ALIAS}.settle {target}\n")
 }
 
-/// The resume, decode, and generic-apply entries a module needs beside its
+/// The resume and generic-apply entries a module needs beside its
 /// settled scaffold line(s) — see [`prepared_scaffold_binding`]'s doc for
 /// what each does. UNLIKE the settled line itself, these are fixed at
-/// [`PREPARED_RESUME_TARGET`]/[`PREPARED_DECODE_TARGET`]/
-/// [`PREPARED_APPLY_ENTRY_TARGET`]/[`PREPARED_APPLY_VALUE_TARGET`] no matter
+/// [`PREPARED_RESUME_TARGET`]/[`PREPARED_APPLY_ENTRY_TARGET`]/
+/// [`PREPARED_APPLY_VALUE_TARGET`] no matter
 /// how many targets a module settles: the runtime resolves a program's
-/// resume/decode/apply roots by looking these exact names up in the
+/// resume/apply roots by looking these exact names up in the
 /// program's own top-level bindings (`ProgramFacts::of` in
 /// `tidepool-runtime/src/session/prepared.rs` scans for
-/// `identity.occurrence == PREPARED_RESUME_TARGET`/`PREPARED_DECODE_TARGET`/
+/// `identity.occurrence == PREPARED_RESUME_TARGET`/
 /// `PREPARED_APPLY_ENTRY_TARGET`/`PREPARED_APPLY_VALUE_TARGET`), and none of
-/// these four bodies take a target-specific argument (`resumeLifted`/
-/// `eitherDecodeValue`/the apply roots' own `settle` are the same computation
+/// these bodies take a target-specific argument (`resumeLifted` and the apply
+/// roots' own `settle` are the same computation
 /// regardless of which settled entry suspended) — so a module settling
 /// several targets ([`with_settled_scaffolds`] in `tidepool-harness::engine`)
 /// emits this ONCE for the whole module, not once per target the way
 /// [`prepared_scaffold_binding_named`]'s settled line must be.
 ///
-/// Every binding names its parameters on purpose: a point-free
-/// `__decodeValue = eitherDecodeValue` compiles to an arity-0 value, and the
-/// runtime enters the root with one managed argument, which the entry then
-/// refuses ("expected 0 physical scalar slots"). Eta-expanded, the root is a
-/// one-argument function with the signature the runtime enters (see `git show
-/// bd69b719d`). `__applyEntry`/`__applyValue` take no explicit signature:
+/// `__applyEntry`/`__applyValue` take no explicit signature:
 /// each has explicit parameters, so the monomorphism restriction never
 /// applies and GHC infers `n`'s type as `Int#` directly from its use as
 /// `I#`'s argument.
 #[must_use]
-pub fn prepared_resume_decode_binding() -> String {
+pub fn prepared_resume_apply_binding() -> String {
     format!(
         "{PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
-         {PREPARED_DECODE_TARGET} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
-         {PREPARED_DECODE_TARGET} t = {AESON_VALUE_ALIAS}.eitherDecodeValue t\n\
          {PREPARED_APPLY_ENTRY_TARGET} f n = {RESUME_ALIAS}.settle (f ({SCAFFOLD_EXTS_ALIAS}.I# n))\n\
          {PREPARED_APPLY_VALUE_TARGET} f x = {RESUME_ALIAS}.settle (f x)\n"
     )
 }
 
 /// The bare import targets (no leading `import `, one per line)
-/// [`prepared_scaffold_binding`]/[`prepared_resume_decode_binding`]'s aliases
+/// [`prepared_scaffold_binding`]/[`prepared_resume_apply_binding`]'s aliases
 /// need in scope. [`with_resume_import`] splices these in through
 /// [`insert_preamble_imports`]'s own marker
 /// ([`PREAMBLE_DEFAULT_MARKER`], the production preamble's shape); a caller
@@ -656,7 +649,6 @@ pub fn resume_import_targets() -> String {
     format!(
         "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
          qualified Data.Text as {TEXT_ALIAS}\n\
-         qualified Tidepool.Aeson.Value as {AESON_VALUE_ALIAS}\n\
          qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
     )
 }
@@ -1503,23 +1495,34 @@ pub struct CompiledTurn {
 }
 
 impl CompiledTurn {
-    /// Borrow the halves a resident session runs.
+    /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            table: &self.table,
-            sites: &self.asks,
-            prepared: &self.prepared,
+            table: std::borrow::Cow::Borrowed(&self.table),
+            sites: std::borrow::Cow::Borrowed(&self.asks),
+            prepared: std::borrow::Cow::Borrowed(&self.prepared),
+        }
+    }
+
+    /// Transfer a single-use turn into the machine without copying its graph.
+    #[must_use]
+    pub fn into_code(self) -> TurnCode<'static> {
+        TurnCode {
+            table: std::borrow::Cow::Owned(self.table),
+            sites: std::borrow::Cow::Owned(self.asks),
+            prepared: std::borrow::Cow::Owned(self.prepared),
         }
     }
 }
 
-/// The compiled inputs a resident session needs to install and run one turn.
-#[derive(Clone, Copy)]
+/// Immutable inputs for installation. Owned inputs move into the machine;
+/// borrowed inputs remain reusable and are copied only at installation.
+#[derive(Clone)]
 pub struct TurnCode<'a> {
-    pub table: &'a DataConTable,
-    pub sites: &'a [YieldSite],
-    pub prepared: &'a PreparedProgram,
+    pub table: std::borrow::Cow<'a, DataConTable>,
+    pub sites: std::borrow::Cow<'a, [YieldSite]>,
+    pub prepared: std::borrow::Cow<'a, PreparedProgram>,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -2155,7 +2158,7 @@ pub fn assemble_activation_module(
          __activationBudget = {budget}\n\
          {PREPARED_SCAFFOLD_TARGET} input = {RESUME_ALIAS}.settle (__activationPreview input)\n"
     ));
-    source.push_str(&prepared_resume_decode_binding());
+    source.push_str(&prepared_resume_apply_binding());
     source
 }
 
@@ -2542,7 +2545,7 @@ fn decode_export_items(v: &CborValue) -> Result<Vec<ExportItem>, CompileError> {
 }
 
 fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
-    let arr = cbor_expect_array_len(v, 5, "BoundBinder")?;
+    let arr = cbor_expect_array_len(v, 7, "BoundBinder")?;
     let name = cbor_expect_text(&arr[0], "BoundBinder name")?.to_string();
     let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
     let module = cbor_expect_text(&arr[2], "BoundBinder module")?.to_string();
@@ -2556,12 +2559,43 @@ fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
         }
     };
     let type_display = cbor_expect_text(&arr[4], "BoundBinder typeDisplay")?.to_string();
+    let root_head = match &arr[5] {
+        CborValue::Null => None,
+        head => {
+            let head = cbor_expect_array_len(head, 3, "BoundBinder nominal root")?;
+            Some(NominalHead {
+                unit: cbor_expect_text(&head[0], "BoundBinder root unit")?.to_owned(),
+                module: cbor_expect_text(&head[1], "BoundBinder root module")?.to_owned(),
+                name: cbor_expect_text(&head[2], "BoundBinder root name")?.to_owned(),
+            })
+        }
+    };
+    let host_authority = match &arr[6] {
+        CborValue::Null => None,
+        CborValue::Text(authority) => Some(match authority.as_str() {
+            "JsonValue" => HostBindingAuthority::JsonValue,
+            "Text" => HostBindingAuthority::Text,
+            "CommandJob" => HostBindingAuthority::CommandJob,
+            other => {
+                return Err(CompileError::ExtractFailed(format!(
+                    "TurnOut CBOR: unknown BoundBinder host authority {other:?}"
+                )))
+            }
+        }),
+        _ => {
+            return Err(CompileError::ExtractFailed(
+                "TurnOut CBOR: BoundBinder host authority must be text or null".into(),
+            ))
+        }
+    };
     Ok(BoundBinder {
         name,
         var_id,
         module,
         tier,
         type_display,
+        root_head,
+        host_authority,
     })
 }
 
@@ -4623,6 +4657,40 @@ mod tests {
             crate::classify_compile(&err.error).class,
             crate::FailureClass::Infra
         );
+        assert_eq!(
+            err.attempted_source.as_deref(),
+            Some(templates[0].source.replace("{{TURN}}", "1 :: Int").as_str())
+        );
+    }
+
+    #[test]
+    fn failed_turn_preserves_the_last_attempted_template() {
+        tidepool_testing::eval_harness::require_extract();
+        let session_root = TempDir::new().unwrap();
+        let templates = ["missingFirst", "missingLast"].map(|name| TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: format!("module Expr where\n__result = {name}\n"),
+        });
+        let failure = run_turn(TurnRequest {
+            turn_text: "()",
+            templates: &templates,
+            include: &[],
+            session_root: session_root.path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: vec![],
+                items: vec![],
+            }),
+            target: None,
+            retained_imports: &[],
+        })
+        .expect_err("both typed alternatives are rejected");
+        assert_eq!(
+            failure.attempted_source.as_deref(),
+            Some(templates[1].source.as_str())
+        );
     }
 
     // ---- TurnOut CBOR decoding ----
@@ -4678,6 +4746,12 @@ mod tests {
                     CborValue::Text("Tidepool.Session.Val.G3".into()),
                     CborValue::Text("ForceData".into()),
                     CborValue::Text("Int".into()),
+                    CborValue::Array(vec![
+                        CborValue::Text("main".into()),
+                        CborValue::Text("GHC.Types".into()),
+                        CborValue::Text("Int".into()),
+                    ]),
+                    CborValue::Null,
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Integer(7.into()),
@@ -4705,6 +4779,15 @@ mod tests {
                 assert_eq!(bound[0].name, "x");
                 assert_eq!(bound[0].var_id, 42);
                 assert_eq!(bound[0].tier, ValueTier::ForceData);
+                assert_eq!(bound[0].host_authority, None);
+                assert_eq!(
+                    bound[0].root_head.as_ref().map(|head| (
+                        head.unit.as_str(),
+                        head.module.as_str(),
+                        head.name.as_str(),
+                    )),
+                    Some(("main", "GHC.Types", "Int")),
+                );
                 assert_eq!(
                     asks,
                     vec![YieldSite {
@@ -4722,6 +4805,32 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bound_binder_authority_is_closed_and_required_on_the_new_wire_shape() {
+        let fields = vec![
+            CborValue::Text("host".into()),
+            CborValue::Integer(1.into()),
+            CborValue::Text("Tidepool.Session.Val.G1".into()),
+            CborValue::Text("ForceData".into()),
+            CborValue::Text("Tidepool.Aeson.Value.Value".into()),
+            CborValue::Array(vec![
+                CborValue::Text("main".into()),
+                CborValue::Text("Tidepool.Aeson.Value".into()),
+                CborValue::Text("Value".into()),
+            ]),
+            CborValue::Text("JsonValue".into()),
+        ];
+        let binder = decode_bound_binder(&CborValue::Array(fields.clone())).unwrap();
+        assert_eq!(binder.host_authority, Some(HostBindingAuthority::JsonValue));
+
+        let old_shape = CborValue::Array(fields[..6].to_vec());
+        assert!(decode_bound_binder(&old_shape).is_err());
+
+        let mut unknown = fields;
+        unknown[6] = CborValue::Text("SameSpellingWrongUnit".into());
+        assert!(decode_bound_binder(&CborValue::Array(unknown)).is_err());
     }
 
     #[test]

@@ -4,6 +4,8 @@ use tidepool_repr::DataConId;
 /// Errors that can occur when bridging between Rust types and materialized Haskell values.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
+    #[error("{0}")]
+    Decimal(#[from] crate::decimal::DecimalError),
     /// The outer constructor is unknown or does not belong to the decoded type.
     #[error("Unknown DataConId: {0:?}")]
     UnknownDataCon(DataConId),

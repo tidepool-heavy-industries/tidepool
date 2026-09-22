@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use tidepool_bridge::HaskellValue;
-use tidepool_bridge::ToHaskell;
 use tidepool_repr::DataConTable;
 
 use super::rendered_result_snippet;
@@ -16,15 +15,15 @@ use super::*;
 use crate::engine::{self};
 use crate::selfharness::observer::FormSource;
 use crate::selfharness::operator::DelegationPhase;
+use tidepool_effect::dispatch::Response;
 
 impl SelfHarnessDriver {
     /// Service a run of `askUser` suspensions the AUTHORED OUTER loop itself
     /// raised (distinct from [`Self::service_askuser_hole`], which handles a
     /// nested ANSWERER's form). Present `shape` via the operator gate
     /// ([`OperatorGate::present_form`]),
-    /// convert the flat submission into the `HaskellValue` `askUserRaw :: HaskellValue -> M
-    /// HaskellValue` returns ([`engine::json_answer_to_value`] against the outer
-    /// compile's `table`), and resume the OUTER session — repeating while the
+    /// stream the submission through the typed structural resume boundary,
+    /// and resume the OUTER session — repeating while the
     /// resume lands on ANOTHER `AskUser` suspension, since `askUser` re-prompts
     /// by RECURSION on a decode failure (no `Either`; the retry is entirely
     /// Haskell-side, so a bad submission genuinely re-suspends on a fresh
@@ -53,7 +52,7 @@ impl SelfHarnessDriver {
     /// `SubagentReq: FromHaskell` (against the loop compile's own table — the
     /// args are bridged ADTs, never JSON-probed), dispatch it into the
     /// driver-owned [`tidepool_handlers::SubagentHandler`], and return the
-    /// `Response::Complete` value the caller resumes the hole with — the
+    /// response value the caller resumes the hole with — the
     /// identical generated conversion path a dispatched effect takes. The
     /// outer resident session uses `SuspendAll`, so this driver owns delivery.
     ///
@@ -115,7 +114,7 @@ impl SelfHarnessDriver {
         request: &HaskellValue,
         table: &DataConTable,
         source: FormSource,
-    ) -> Result<HaskellValue, DriverError> {
+    ) -> Result<Response, DriverError> {
         let gate = self.resolve_gate(&source);
         gate.delegation_progress(&DelegationPhase::Started {
             brief: rendered_result_snippet(&request.to_string()),
@@ -150,15 +149,22 @@ impl SelfHarnessDriver {
         })
         .await
         .map_err(|e| DriverError::Session(format!("subagent dispatch task panicked: {e}")))?;
+        // The operator timeline consumes a real rendered snapshot; resume
+        // still owns the structural source. Snapshot failure settles the
+        // delegation through the same failure event as handler failure.
+        let dispatched = dispatched.and_then(|response| {
+            let snapshot = response.to_value(table)?;
+            Ok((response, snapshot))
+        });
         let elapsed = started.elapsed();
         match dispatched {
-            Ok(value) => {
+            Ok((value, snapshot)) => {
                 tracing::info!(
                     elapsed_ms = elapsed.as_millis() as u64,
                     "outer subagent suspension serviced"
                 );
                 gate.delegation_progress(&DelegationPhase::Settled {
-                    outcome: rendered_result_snippet(&value.to_string()),
+                    outcome: rendered_result_snippet(&snapshot.to_string()),
                     duration: elapsed,
                 });
                 Ok(value)
@@ -188,7 +194,7 @@ impl SelfHarnessDriver {
         request: &HaskellValue,
         table: &DataConTable,
         terminal_async: &[i64],
-    ) -> Result<HaskellValue, DriverError> {
+    ) -> Result<Response, DriverError> {
         if kind == engine::OuterEffectKind::Console {
             if let Ok(tidepool_handlers::ConsoleReq::Print(text)) =
                 <tidepool_handlers::ConsoleReq as tidepool_bridge::FromHaskell>::from_value(
@@ -237,9 +243,7 @@ impl SelfHarnessDriver {
                         watches,
                         terminal_async.iter().copied(),
                     );
-                    return tidepool_bridge::ToHaskell::to_value(&result, table).map_err(|e| {
-                        DriverError::Session(format!("RepoEvent subscribe encode: {e}"))
-                    });
+                    return Ok(Response::new(result));
                 }
                 Self::dispatch_outer_effect(handler, request, table)
             }
@@ -277,7 +281,7 @@ impl SelfHarnessDriver {
         &mut self,
         request: &HaskellValue,
         table: &DataConTable,
-    ) -> Result<Option<HaskellValue>, DriverError> {
+    ) -> Result<Option<Response>, DriverError> {
         use tidepool_bridge::FromHaskell;
         let mut handlers = self.handlers.lock();
         let handler = handlers.event.as_mut().ok_or_else(|| {
@@ -307,10 +311,7 @@ impl SelfHarnessDriver {
                 return Ok(None);
             }
         }
-        let value = result
-            .to_value(table)
-            .map_err(|e| DriverError::Session(format!("RepoEventAwait encode: {e}")))?;
-        Ok(Some(value))
+        Ok(Some(Response::new(result)))
     }
 
     /// The legible "no handler wired" error every [`Self::service_outer_effect`]
@@ -333,18 +334,12 @@ impl SelfHarnessDriver {
     /// compile's own table — never JSON-probed), dispatch it into `handler`
     /// under `tokio::task::block_in_place` (the same discipline every
     /// `OperatorGate` call and [`Self::service_outer_subagent`] use), and
-    /// convert the [`tidepool_effect::Response`] back into a resumable
-    /// `HaskellValue` — a `Complete` value as-is, a `List` folded into a cons chain
-    /// from its carried `cons_id`/`nil_id` (mirrors the in-machine dispatch
-    /// path's own fold, `tidepool_effect::machine`; a suspending outer row
-    /// never reaches that path itself, so this is the suspend-side
-    /// equivalent). No outer-row verb returns a list today, but a future one
-    /// (`respond_list`) resumes correctly without another servicing site.
+    /// retain its structural response source until the typed resume boundary.
     pub(crate) fn dispatch_outer_effect<H>(
         handler: &mut H,
         request: &HaskellValue,
         table: &DataConTable,
-    ) -> Result<HaskellValue, tidepool_effect::EffectError>
+    ) -> Result<Response, tidepool_effect::EffectError>
     where
         H: tidepool_effect::EffectHandler<tidepool_mcp::CapturedOutput>,
     {
@@ -352,23 +347,53 @@ impl SelfHarnessDriver {
         use tidepool_effect::dispatch::EffectContext;
         let req = H::Request::from_value(request, table)?;
         let captured = tidepool_mcp::CapturedOutput::new();
-        let resp = tokio::task::block_in_place(|| {
+        tokio::task::block_in_place(|| {
             let cx = EffectContext::with_user(table, &captured);
             handler.handle(req, &cx)
-        })?;
-        Ok(match resp {
-            tidepool_effect::Response::Complete(v) => v,
-            tidepool_effect::Response::List {
-                items,
-                cons_id,
-                nil_id,
-            } => {
-                let mut acc = HaskellValue::Con(nil_id, vec![]);
-                for item in items.into_iter().rev() {
-                    acc = HaskellValue::Con(cons_id, vec![item, acc]);
-                }
-                acc
-            }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_effect::{EffectContext, EffectHandler};
+
+    struct TextReply;
+
+    impl EffectHandler<tidepool_mcp::CapturedOutput> for TextReply {
+        type Request = ();
+
+        fn handle(
+            &mut self,
+            _request: (),
+            context: &EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        ) -> Result<Response, tidepool_effect::EffectError> {
+            context.respond(String::from("deferred text"))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outer_dispatch_keeps_response_structural_until_resume_or_snapshot() {
+        let mut table = DataConTable::new();
+        let unit = tidepool_repr::DataConId(1);
+        table.insert(tidepool_repr::DataCon {
+            id: unit,
+            name: "()".into(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: Vec::new(),
+            qualified_name: Some("GHC.Tuple.()".into()),
+            type_name: String::new(),
+        });
+        // The request is decodable, but this table cannot encode Text. The
+        // handler boundary must still succeed without visiting its response.
+        let response = SelfHarnessDriver::dispatch_outer_effect(
+            &mut TextReply,
+            &HaskellValue::Con(unit, Vec::new()),
+            &table,
+        )
+        .expect("dispatch retains the typed source");
+        assert!(response.to_value(&table).is_err());
     }
 }

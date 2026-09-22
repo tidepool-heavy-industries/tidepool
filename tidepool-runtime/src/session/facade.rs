@@ -234,6 +234,7 @@ mod tests {
             persistent_imports: SourceImports::new(),
             library: Some(SessionModule::lib(Generation(4))),
             visible_values: Vec::new(),
+            visible_value_names: Vec::new(),
             injected_values: Vec::new(),
             next_value_generation: Generation(1),
             shadowing: Vec::new(),

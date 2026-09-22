@@ -1,5 +1,6 @@
 [package]
 autotests = false
+autobins = false
 name = "tidepool-harness"
 description = "Typed-yield session tree over the tidepool eval substrate: forcing, event log, provider-driven turns"
 version.workspace = true
@@ -28,14 +29,12 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # The FromHaskell-capable bridge record types (`EvRepositoryEvent`/`WtWorktreeId`)
 # tests decode RepoEvent/Worktree suspensions against.
-tidepool-bridge-effects.workspace = true
 tidepool-codegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Context-snapshot digests (`src/snapshot.rs`) — the workspace's one digest
 # choice, already used by tidepool-runtime's compile cache and
 # tidepool-handlers.
-blake3.workspace = true
 thiserror.workspace = true
 genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
@@ -59,6 +58,7 @@ tracing.workspace = true
 static_assertions.workspace = true
 
 [dev-dependencies]
+tidepool-bridge-effects.workspace = true
 tempfile.workspace = true
 trybuild.workspace = true
 tidepool-testing.workspace = true
@@ -71,10 +71,6 @@ tidepool-worktree.workspace = true
 [[test]]
 name = "acceptance"
 path = "tests/suites/acceptance.rs"
-
-[[test]]
-name = "selfharness"
-path = "tests/suites/selfharness.rs"
 
 [[test]]
 name = "persistence"

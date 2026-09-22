@@ -5,28 +5,56 @@ use frunk::{HCons, HNil};
 use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{FromHaskell, ToHaskell};
-use tidepool_repr::{DataConId, DataConTable, PrincipalId};
+use tidepool_repr::{DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
-#[derive(Debug)]
-pub enum Response {
-    /// Fully materialized value (the classic path).
-    Complete(HaskellValue),
-    /// A list response with every element already converted. Carried as a
-    /// flat `Vec` (plus the list constructor ids) rather than a pre-built
-    /// cons `HaskellValue` so the machine can build the spine ITERATIVELY at the
-    /// heap boundary — a deep recursive `HaskellValue` spine must never exist,
-    /// neither at construction nor at `Drop` (~3 stack frames per cell
-    /// overflow the eval thread; see `materialize_cons_list`).
-    List {
-        items: Vec<HaskellValue>,
-        cons_id: DataConId,
-        nil_id: DataConId,
-    },
+pub struct Response {
+    source: Box<dyn ToHaskell + Send>,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response").finish_non_exhaustive()
+    }
+}
+
+impl Response {
+    /// Own and erase one structural response source until the runtime visits it.
+    pub fn new<T: ToHaskell + Send + 'static>(source: T) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+
+    pub fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        self.source.visit(table, visitor)
+    }
+
+    /// Materialize this response at the dispatch/resume boundary. The owned
+    /// source remains structural until a consumer actually needs a snapshot.
+    pub fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+        self.source.to_value(table)
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for Response {}
+
+impl ToHaskell for Response {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        self.source.visit(table, visitor)
+    }
 }
 
 impl From<HaskellValue> for Response {
     fn from(v: HaskellValue) -> Self {
-        Response::Complete(v)
+        Self::new(v)
     }
 }
 
@@ -60,35 +88,8 @@ impl<'a, U> EffectContext<'a, U> {
     }
 
     /// Convert a Rust value into a complete response for the JIT.
-    pub fn respond<T: ToHaskell>(&self, val: T) -> Result<Response, EffectError> {
-        val.to_value(self.table)
-            .map(Response::Complete)
-            .map_err(EffectError::Bridge)
-    }
-
-    /// Respond with an owned `Vec` as a Haskell list. Every element converts
-    /// EAGERLY, here, at dispatch time — there is no deferred conversion and
-    /// no stream machinery; what stays special about a list response is only
-    /// that the machine builds its heap spine iteratively (stack safety on
-    /// long lists), which is why this is not just `respond(items)`.
-    pub fn respond_list<T>(&self, items: Vec<T>) -> Result<Response, EffectError>
-    where
-        T: ToHaskell,
-    {
-        let cons_id = tidepool_bridge::get_resilient(self.table, ":", 2)
-            .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName(":".into())))?;
-        let nil_id = tidepool_bridge::get_resilient(self.table, "[]", 0)
-            .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName("[]".into())))?;
-        let items = items
-            .into_iter()
-            .map(|x| x.to_value(self.table))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(EffectError::Bridge)?;
-        Ok(Response::List {
-            items,
-            cons_id,
-            nil_id,
-        })
+    pub fn respond<T: ToHaskell + Send + 'static>(&self, val: T) -> Result<Response, EffectError> {
+        Ok(Response::new(val))
     }
 
     /// Access the data constructor table (for manual `FromHaskell`/`ToHaskell` calls).
@@ -223,7 +224,26 @@ impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tidepool_repr::types::Literal;
+
+    struct CountedResponse(Arc<AtomicUsize>);
+
+    impl tidepool_bridge::sealed::ToHaskellSealed for CountedResponse {}
+
+    impl ToHaskell for CountedResponse {
+        fn visit(
+            &self,
+            _table: &DataConTable,
+            visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+        ) -> Result<(), BridgeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            visitor.literal(Literal::LitInt(7))
+        }
+    }
 
     fn empty_table() -> DataConTable {
         DataConTable::new()
@@ -249,10 +269,24 @@ mod tests {
         let table = empty_table();
         let cx = make_cx(&table);
         let result = cx.respond(lit_int(42)).unwrap();
-        match result {
-            Response::Complete(HaskellValue::Lit(Literal::LitInt(42))) => {}
-            other => panic!("expected LitInt(42), got {other:?}"),
-        }
+        assert!(matches!(
+            result.to_value(&table),
+            Ok(HaskellValue::Lit(Literal::LitInt(42)))
+        ));
+    }
+
+    #[test]
+    fn response_keeps_its_source_until_materialization() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let visits = Arc::new(AtomicUsize::new(0));
+        let response = cx.respond(CountedResponse(Arc::clone(&visits))).unwrap();
+        assert_eq!(visits.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            response.to_value(&table),
+            Ok(HaskellValue::Lit(Literal::LitInt(7)))
+        ));
+        assert_eq!(visits.load(Ordering::SeqCst), 1);
     }
 
     #[test]

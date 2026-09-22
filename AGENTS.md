@@ -151,7 +151,7 @@ Keep detailed design references out of always-loaded instructions.
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.shoal/Jev/Operators.hs` |
 | Run trace (structured JSONL under `.shoal/logs/`) | `tidepool/src/shoal.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `tidepool-actor` |
-| Backend protocols, interactive launch and active-update transport | `tidepool-agent/src/backend/codex/` |
+| Backend protocols, interactive launch and bound input-control transport | `tidepool-agent/src/backend/codex/` |
 | Process mount boundary and durable inbox | `tidepool-node/src/process_boundary.rs`, `tidepool-node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `tidepool-worktree/src/git.rs`, `tidepool-worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |
@@ -171,10 +171,26 @@ Keep detailed design references out of always-loaded instructions.
   `just test-target <crate> <target> 'test(<name>)'`, and the owning crate's
   documented focused command. Haskell/extractor-backed tests must use the repository's Nix/toolchain
   setup rather than assuming ambient `cargo` is sufficient.
+- `just changed BASE` shares one compiler daemon across its selected targets.
+  A successful full `just fixtures-check` writes a compiler-derived dependency
+  index under `target/prepared-corpus/`. Ordinary Haskell library edits use that
+  index to select fixture cohorts; absent, stale or incomplete evidence keeps
+  full coverage. Compiler/schema changes always select the structural corpus.
+- `just fixtures-check [COHORT...]` batches the selected cohorts through one
+  resident compiler process. Omit cohorts for integration and metadata checks;
+  for example, `just fixtures-check containers-contract` checks that cohort.
+  Each cohort retains its own outputs and each request its own cleanup. A
+  partial run never replaces the complete dependency index.
+- Reuse compiled immutable fixtures across repeated installations in one test.
+  Keep real binding injection/generation cases and fresh mutable machines;
+  nextest still isolates tests in separate processes.
 - `just quick` runs the explicit extractor-free engine unit-test packages and
   does not build or start the compiler worker. `just changed-plan BASE` previews
   affected targets; `just changed BASE` runs each selected target once and
-  compile-checks downstream consumers of production changes. Shared build inputs
+  compile-checks downstream consumers of production changes. Normal/build
+  dependencies propagate; development dependencies check their direct consumer
+  without propagating through its production users. Cargo-only and Cabal-only
+  build selections do not start a compiler daemon. Shared build inputs
   require an explicit integration check instead of silently launching one.
 - `just test-lib PACKAGE 'test(=NAME)'` selects a unit test;
   `just test-target PACKAGE TARGET 'test(=NAME)'` selects an integration test.
@@ -194,7 +210,10 @@ Keep detailed design references out of always-loaded instructions.
   boundary check at major integration or release points, not after every edit.
 - After extractor translation or serialization changes, run
   `just fixtures-check`; use `just fixtures-update` only when the corpus should
-  intentionally change.
+  intentionally change. The fixture commands also validate registered embedded
+  prepared artifacts; their producers are listed in
+  `haskell/test-prepared-stg/embedded-fixtures.json`. A schema migration must
+  regenerate those artifacts through their producers, not edit version bytes.
 - Always run formatting appropriate to changed languages and
   `git diff --check`. Review the final diff for stale callers, duplicated
   policy, unused surface, magic-string control flow, and obsolete comments.

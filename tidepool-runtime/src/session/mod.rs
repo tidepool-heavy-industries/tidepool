@@ -32,7 +32,9 @@ pub mod turn;
 pub mod view;
 pub mod workbench;
 
-pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
+pub use dialect::{
+    declaration_pragmas, generated_support_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS,
+};
 
 pub use inspection::{
     run_inspections, ClassMethodInfo, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
@@ -76,8 +78,9 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    ProgramProvenance, ProgramProvenanceError, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, SessionRunContext,
+    HostBindingType, ProgramProvenance, ProgramProvenanceError, ResidentDisplayBundle,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
@@ -85,13 +88,13 @@ pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
 pub use workbench::{
     classify_workbench_item, detect_hoisted_declaration_collision, escape_workbench_haskell_string,
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
-    run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
-    BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, SourceOrderCollision,
-    WorkSequence, WorkbenchBinding, WorkbenchBindingKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
+    ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
+    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
@@ -754,14 +757,6 @@ impl SessionLib {
             self.current_module_in(scope),
             selected,
         ))
-    }
-
-    /// A cache salt unique to `(session, generation)`. Threaded into
-    /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
-    /// don't collide and a generation bump invalidates correctly.
-    #[must_use]
-    pub fn cache_salt(&self) -> String {
-        format!("session:{}:gen:{}", self.id, self.log.generation())
     }
 
     /// Append a declaration turn. Extracts binder names from GHC, regenerates the
@@ -1460,16 +1455,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_salt_changes_with_generation_and_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let lib1 =
-            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        let lib2 =
-            SessionLib::open(SessionId(2), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        assert_ne!(lib1.cache_salt(), lib2.cache_salt());
-    }
-
     fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {
         let receipt = lib
             .declaration_receipt(&[source])
@@ -1561,6 +1546,76 @@ mod tests {
         assert!(!failure.diagnostics.is_empty());
         assert_eq!(lib.generation(), Generation(0));
         assert_eq!(lib.declaration_value_type(1, "bad"), None);
+    }
+
+    #[test]
+    fn later_data_declaration_shadows_a_type_referenced_by_a_live_value() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = staged_test_lib(&root);
+        let first =
+            validated_staged_declaration(&lib, "data Version = OldVersion Int deriving Show");
+        lib.adopt_staged_batch_with_receipt_and_vals_in(first, &[])
+            .expect("commit the original Version declaration");
+
+        let bind_template = TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: assemble_bind_module(
+                concat!(
+                    "{-# LANGUAGE DataKinds, TypeOperators #-}\n",
+                    "module SessionBind where\n",
+                    "import Tidepool.Prelude\n",
+                    "import Tidepool.Effects\n",
+                    "import Control.Monad.Freer (Eff)\n",
+                    "import Tidepool.Session.Lib.G1\n",
+                ),
+                "",
+                "__result",
+                "'[]",
+                "{{TURN_STMT}}",
+                "{{BINDERS}}",
+                false,
+            ),
+        };
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let includes = [
+            root.path(),
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let bound = run_turn(TurnRequest {
+            turn_text: "old <- pure (OldVersion 1)",
+            templates: std::slice::from_ref(&bind_template),
+            include: &includes,
+            session_root: root.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec!["old".to_owned()],
+                items: Vec::new(),
+            }),
+            target: None,
+            retained_imports: &[],
+        })
+        .expect("compile the value against the original type");
+        let TurnResult::Bind { bound, .. } = bound else {
+            panic!("the original value must compile as a bind")
+        };
+        let injected = vec![bound[0].module.clone()];
+        let receipt = lib
+            .declaration_receipt(&["data Version = NewVersion Bool deriving Show"])
+            .expect("extract replacement declaration")
+            .expect("non-empty replacement declaration");
+        lib.stage_batch_with_receipt_and_vals_in(
+            ScopeId::ROOT,
+            &SourceImports::new(),
+            &receipt,
+            &injected,
+            &injected,
+        )
+        .expect("a replacement type may shadow the type of a live value");
     }
 
     #[test]

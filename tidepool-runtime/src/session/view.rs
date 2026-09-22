@@ -136,6 +136,11 @@ pub struct SessionCompileView {
     pub(super) persistent_imports: SourceImports,
     pub(super) library: Option<SessionModule>,
     pub(super) visible_values: Vec<SessionModule>,
+    /// Names visible from each value interface.  A generated interface can
+    /// carry helper binders beside its published value; importing its whole
+    /// module would accidentally expose those helpers before the value plane
+    /// commits them.
+    pub(super) visible_value_names: Vec<(SessionModule, Vec<String>)>,
     pub(super) injected_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
@@ -145,7 +150,23 @@ pub struct SessionCompileView {
 impl SessionCompileView {
     pub(super) fn canonicalize(mut self) -> Self {
         sort_modules(&mut self.visible_values);
+        self.visible_value_names
+            .sort_by_key(|(module, _)| module.module_name());
+        for (_, names) in &mut self.visible_value_names {
+            names.sort();
+            names.dedup();
+        }
         sort_modules(&mut self.injected_values);
+        self
+    }
+
+    /// Keep selected live values injected for already-compiled references,
+    /// while withholding their unqualified exports from a new source turn.
+    #[must_use]
+    pub fn hide_value_names(mut self, names: &[String]) -> Self {
+        for (_, published) in &mut self.visible_value_names {
+            published.retain(|name| !names.contains(name));
+        }
         self
     }
 
@@ -231,9 +252,17 @@ impl SessionCompileView {
             .into_iter()
             .map(|name| super::ExportItem::Value { name })
             .collect::<Vec<_>>();
+        let visible_names = names
+            .iter()
+            .filter_map(|item| match item {
+                super::ExportItem::Value { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         self.hide_staged_names(&names);
         self.shadowing.extend(names);
         self.visible_values.push(module);
+        self.visible_value_names.push((module, visible_names));
         self.injected_values.push(module);
         self.next_value_generation = module.gen().next();
         self.canonicalize()
@@ -268,6 +297,56 @@ impl SessionCompileView {
         }
     }
 
+    fn visible_value_import(&self, module: SessionModule) -> String {
+        let Some((_, published)) = self
+            .visible_value_names
+            .iter()
+            .find(|(candidate, _)| *candidate == module)
+        else {
+            return self.staged_import(module);
+        };
+        let hidden = self
+            .staged_hiding
+            .iter()
+            .find(|(key, _)| *key == module)
+            .map(|(_, hidden)| hidden.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let is_hidden = |candidate: &String| {
+            hidden
+                .iter()
+                .any(|item| matches!(item, super::ExportItem::Value { name } if name == candidate))
+        };
+        let visible = published
+            .iter()
+            .filter(|name| !is_hidden(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let shadowed = published
+            .iter()
+            .filter(|name| is_hidden(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let module_name = module.module_name();
+        let render_names = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| super::ExportItem::Value { name: name.clone() }.render_entry())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut imports = Vec::with_capacity(2);
+        if !visible.is_empty() {
+            imports.push(format!("{module_name} ({})", render_names(&visible)));
+        }
+        if !shadowed.is_empty() {
+            imports.push(format!(
+                "qualified {module_name} ({})",
+                render_names(&shadowed)
+            ));
+        }
+        imports.join("\n")
+    }
+
     /// External imports plus this scope's current declaration and value
     /// modules, ready for a turn template.
     #[must_use]
@@ -280,7 +359,7 @@ impl SessionCompileView {
             specs.extend_text(&self.staged_import(module));
         }
         for module in &self.visible_values {
-            specs.extend_text(&self.staged_import(*module));
+            specs.extend_text(&self.visible_value_import(*module));
         }
         specs.template_text()
     }
@@ -323,6 +402,7 @@ mod tests {
             persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
             library: Some(SessionModule::lib(Generation(3))),
             visible_values: vec![SessionModule::val(Generation(5))],
+            visible_value_names: Vec::new(),
             injected_values: vec![
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(5)),
@@ -359,6 +439,7 @@ mod tests {
             persistent_imports: SourceImports::default(),
             library: None,
             visible_values: vec![SessionModule::val(Generation(5))],
+            visible_value_names: Vec::new(),
             injected_values: vec![SessionModule::val(Generation(5))],
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
@@ -368,7 +449,7 @@ mod tests {
         .with_staged_values(SessionModule::val(Generation(7)), ["answer".into()]);
 
         assert_eq!(view.turn_imports(&SourceImports::default()),
-            "Tidepool.Session.Val.G5 hiding (answer)\nqualified Tidepool.Session.Val.G5\nTidepool.Session.Val.G6 hiding (answer)\nqualified Tidepool.Session.Val.G6\nTidepool.Session.Val.G7");
+            "Tidepool.Session.Val.G5 hiding (answer)\nqualified Tidepool.Session.Val.G5\nqualified Tidepool.Session.Val.G6 (answer)\nTidepool.Session.Val.G7 (answer)");
         assert_eq!(
             view.injected_module_names(),
             [
@@ -378,6 +459,37 @@ mod tests {
             ]
         );
         assert_eq!(view.next_value_generation(), Generation(8));
+    }
+
+    #[test]
+    fn exact_value_imports_never_expose_unpublished_generated_helpers() {
+        let old = SessionModule::val(Generation(5));
+        let view = SessionCompileView {
+            session: SessionId(4),
+            lexical_scope: ScopeId::ROOT,
+            root: PathBuf::from("/session"),
+            persistent_imports: SourceImports::default(),
+            library: None,
+            visible_values: vec![old],
+            visible_value_names: vec![(
+                old,
+                vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
+            )],
+            injected_values: vec![old],
+            next_value_generation: Generation(6),
+            shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
+        }
+        .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
+
+        let imports = view.turn_imports(&SourceImports::default());
+        assert_eq!(
+            imports,
+            "Tidepool.Session.Val.G5 ((.+), __tidepoolPage5)\n\
+             qualified Tidepool.Session.Val.G5 (cellDisplay)\n\
+             Tidepool.Session.Val.G6 (cellDisplay)"
+        );
+        assert!(!imports.contains("__tidepoolDisplayMetadata5"));
     }
 
     #[test]

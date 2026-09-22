@@ -96,14 +96,26 @@ runTypeEvidenceChecks directory project projectWithAux = do
   echoWire <- program "echoRequest"
   assert (null (programVerbSites echoWire))
     "an open reply index acquired a synthetic site"
+  functionWire <- program "functionRequest"
+  assert (null (programVerbSites functionWire))
+    "a function reply index acquired a synthetic site"
+  progressWire <- program "progressRequest"
+  progressNode <- verbAnswer progressWire "ObserveProgress"
+  case progressNode of
+    TypeData family [payload] rows -> do
+      assert (symbolOccurrence family == "Progress"
+        && map rowFields rows == [[], [payload], []])
+        ("polymorphic progress reply lost its fieldless constructors: " ++ show progressNode)
+      assert (isRefusal (nodeAt progressWire payload))
+        "polymorphic progress payload was treated as constructible"
+    other -> ioError (userError ("polymorphic progress reply lacks algebraic evidence: " ++ show other))
 
   empty <- program "unrelated"
   assert (null (programSites empty) && null (programTypes empty))
     "unreachable typed sites leaked into the selected artifact"
 
-  -- An admitted auxiliary root is not a declared site (mirrors
-  -- 'preparedDecodeTargetName'/'__decodeValue' beside a turn's resume
-  -- entry): its own result type must still be interned, even though
+  -- An admitted auxiliary root is not a declared site: its own result type
+  -- must still be interned, even though
   -- 'unrelated' -- the selected entry here -- never otherwise constructs or
   -- observes an 'Either'.
   auxWire <- either

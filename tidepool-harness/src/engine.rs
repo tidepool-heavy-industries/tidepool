@@ -56,7 +56,7 @@ use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::turn::{
-    prepared_resume_decode_binding, prepared_scaffold_binding_named, with_resume_import,
+    prepared_resume_apply_binding, prepared_scaffold_binding_named, with_resume_import,
 };
 use tidepool_runtime::session::{
     assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode,
@@ -96,9 +96,9 @@ impl CompiledTurn {
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            table: &self.table,
-            sites: &self.sites,
-            prepared: self.prepared.prepared(),
+            table: std::borrow::Cow::Borrowed(&self.table),
+            sites: std::borrow::Cow::Borrowed(&self.sites),
+            prepared: std::borrow::Cow::Borrowed(self.prepared.prepared()),
         }
     }
 }
@@ -217,7 +217,7 @@ pub fn compile_turns_with_stable_inject(
 /// settle MORE than one target in the same module (the render+loop fusion —
 /// see [`compile_turns_prepared`]'s doc): two settled bindings both named
 /// `__prepared` would be a duplicate top-level declaration. `__resume`/
-/// `__decodeValue` stay FIXED-named and module-shared instead — see
+/// the auxiliary entries stay fixed-named and module-shared instead — see
 /// [`with_settled_scaffolds`]'s doc.
 fn settled_name(target: &str) -> String {
     format!("__prepared_{target}")
@@ -229,9 +229,9 @@ fn settled_name(target: &str) -> String {
 /// ([`tidepool_runtime::session::turn::prepared_scaffold_binding_named`],
 /// unique per target so a fused multi-target module never collides two
 /// settled bindings under one name), plus a SINGLE, fixed-named
-/// `__resume`/`__decodeValue` pair for the whole module
-/// ([`tidepool_runtime::session::turn::prepared_resume_decode_binding`]) —
-/// the runtime resolves a program's resume/decode roots by looking up those
+/// resume/apply group for the whole module
+/// ([`tidepool_runtime::session::turn::prepared_resume_apply_binding`]) —
+/// the runtime resolves a program's auxiliary roots by looking up those
 /// exact fixed names in its own top-level bindings (`ProgramFacts::of`,
 /// `tidepool-runtime/src/session/prepared.rs`), and their bodies take no
 /// target-specific argument, so emitting one pair per target would be both
@@ -251,7 +251,7 @@ fn with_settled_scaffolds(source: &str, targets: &[&str]) -> (String, Vec<String
         scaffolds.push(scaffold);
     }
     if !targets.is_empty() {
-        out.push_str(&prepared_resume_decode_binding());
+        out.push_str(&prepared_resume_apply_binding());
     }
     (out, scaffolds)
 }
@@ -1598,17 +1598,19 @@ impl EngineConfig {
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
-        let dirs =
-            tidepool_mcp::ensure_effects_module_at(&decls, &tidepool_mcp::RowArgs::default())
-                .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
+            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
+        let dirs = tidepool_mcp::ensure_effects_module_at(
+            &decls,
+            &tidepool_mcp::RowArgs::default(),
+        )
+        .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = vec![prelude_dir.clone()];
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
         }
         include.push(dirs.core.clone());
         include.push(dirs.shim.clone());
-        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
-            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
         Ok(EngineConfig {
             extract_bin,
             include,
@@ -2015,11 +2017,9 @@ pub fn template_turn_for(
     } else {
         let preamble = tidepool_mcp::build_preamble(decls, false);
         if finalize_pin_active(stack) {
-            tidepool_mcp::template_haskell_anchored(
-                &preamble, stack, code, imports, helpers, None, None,
-            )
+            tidepool_mcp::template_haskell_anchored(&preamble, stack, code, imports, helpers, None)
         } else {
-            tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+            tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None)
         }
     }
 }
@@ -2566,18 +2566,6 @@ pub async fn drive_model_turn(
     })
 }
 
-/// Bridge a JSON answer (from a form submission or an in-context resume value)
-/// to a Haskell `Value` against `table`, for feeding to `ResidentSession::resume`.
-pub fn json_answer_to_value(
-    answer: &Json,
-    table: &DataConTable,
-) -> Result<HaskellValue, EngineError> {
-    use tidepool_bridge::ToHaskell;
-    answer
-        .to_value(table)
-        .map_err(|e| EngineError::Run(format!("bridge answer to Value: {e}")))
-}
-
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list
 /// `Value` for a `runLLMTurnFanout` resume — the same "hand back the native
 /// representation, not an Aeson wrapper" discipline a single fork's
@@ -2592,10 +2580,10 @@ pub fn build_list_value(
     items: Vec<HaskellValue>,
     table: &DataConTable,
 ) -> Result<HaskellValue, EngineError> {
-    let nil_id = tidepool_bridge::get_resilient(table, "[]", 0).ok_or_else(|| {
+    let nil_id = tidepool_bridge::get_qualified(table, "GHC.Types.[]", 0).ok_or_else(|| {
         EngineError::Run("build_list_value: no [] constructor in table".to_string())
     })?;
-    let cons_id = tidepool_bridge::get_resilient(table, ":", 2).ok_or_else(|| {
+    let cons_id = tidepool_bridge::get_qualified(table, "GHC.Types.:", 2).ok_or_else(|| {
         EngineError::Run("build_list_value: no : constructor in table".to_string())
     })?;
     let mut result = HaskellValue::Con(nil_id, vec![]);
@@ -2609,7 +2597,7 @@ pub fn build_list_value(
 /// side of the `InvocationExit` generated into `Tidepool.Effects`
 /// (`tidepool_mcp::runllmturn_effect_def!`'s `type_defs`). The constructor
 /// names here ARE that ADT's, and [`build_invocation_exit_value`] resolves
-/// them by name against the turn's own `DataConTable`.
+/// their exact `Tidepool.Effects.Core` identities in the turn's own table.
 ///
 /// **The line this type draws:** an
 /// `InvocationExit` describes a failure ATTRIBUTABLE TO ONE CHILD'S WINDOW —
@@ -2680,7 +2668,8 @@ pub fn build_invocation_exit_value(
 ) -> Result<HaskellValue, EngineError> {
     use tidepool_bridge::ToHaskell;
     let name = exit.constructor();
-    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+    let qualified = format!("Tidepool.Effects.Core.{name}");
+    let con = tidepool_bridge::get_qualified(table, &qualified, 1).ok_or_else(|| {
         EngineError::Run(format!(
             "build_invocation_exit_value: no `{name}` constructor in table — the \
              compiling row generated no `InvocationExit`, so a fork/fanout child's \
@@ -2707,11 +2696,15 @@ pub fn build_child_answer_value(
     outcome: Result<HaskellValue, InvocationExit>,
     table: &DataConTable,
 ) -> Result<HaskellValue, EngineError> {
-    let (name, payload) = match outcome {
-        Ok(v) => ("Right", v),
-        Err(exit) => ("Left", build_invocation_exit_value(&exit, table)?),
+    let (name, qualified, payload) = match outcome {
+        Ok(v) => ("Right", "Data.Either.Right", v),
+        Err(exit) => (
+            "Left",
+            "Data.Either.Left",
+            build_invocation_exit_value(&exit, table)?,
+        ),
     };
-    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+    let con = tidepool_bridge::get_qualified(table, qualified, 1).ok_or_else(|| {
         EngineError::Run(format!(
             "build_child_answer_value: no `{name}` constructor in table — a \
              fork/fanout answer is `Either InvocationExit T`, so both `Left` and \
@@ -2747,6 +2740,85 @@ pub type SharedProvider = Arc<dyn DynModelProvider>;
 mod tests {
     use super::*;
     use crate::provider::{Message, ReasoningItem, Role};
+
+    fn insert_fixed_constructor(
+        table: &mut DataConTable,
+        id: u64,
+        name: &str,
+        arity: u32,
+        qualified_name: &str,
+    ) {
+        table.insert(tidepool_repr::DataCon {
+            id: tidepool_repr::DataConId(id),
+            name: name.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: Some(qualified_name.into()),
+            type_name: String::new(),
+        });
+    }
+
+    #[test]
+    fn fixed_answer_assembly_uses_canonical_constructors_among_impostors() {
+        let mut table = DataConTable::new();
+        for (id, name, arity, qualified) in [
+            (1, "[]", 0, "GHC.Types.[]"),
+            (2, ":", 2, "GHC.Types.:"),
+            (3, "Right", 1, "Data.Either.Right"),
+            (4, "ExitCancelled", 1, "Tidepool.Effects.Core.ExitCancelled"),
+            (5, "Text", 3, "Data.Text.Text"),
+        ] {
+            insert_fixed_constructor(&mut table, id, name, arity, qualified);
+            insert_fixed_constructor(&mut table, id + 100, name, arity, &format!("User.{name}"));
+        }
+
+        let list = build_list_value(
+            vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(7))],
+            &table,
+        )
+        .unwrap();
+        assert!(matches!(
+            list,
+            HaskellValue::Con(tidepool_repr::DataConId(2), _)
+        ));
+
+        let answer = build_child_answer_value(
+            Ok(HaskellValue::Lit(tidepool_repr::Literal::LitInt(8))),
+            &table,
+        )
+        .unwrap();
+        assert!(matches!(
+            answer,
+            HaskellValue::Con(tidepool_repr::DataConId(3), _)
+        ));
+
+        let exit =
+            build_invocation_exit_value(&InvocationExit::Cancelled("done".into()), &table).unwrap();
+        assert!(matches!(
+            exit,
+            HaskellValue::Con(tidepool_repr::DataConId(4), _)
+        ));
+    }
+
+    #[test]
+    fn fixed_answer_assembly_rejects_impostor_only_tables() {
+        let mut table = DataConTable::new();
+        insert_fixed_constructor(&mut table, 101, "[]", 0, "User.[]");
+        insert_fixed_constructor(&mut table, 102, ":", 2, "User.:");
+        insert_fixed_constructor(&mut table, 103, "Right", 1, "User.Right");
+        insert_fixed_constructor(&mut table, 104, "ExitCancelled", 1, "User.ExitCancelled");
+
+        assert!(build_list_value(Vec::new(), &table).is_err());
+        assert!(build_child_answer_value(
+            Ok(HaskellValue::Lit(tidepool_repr::Literal::LitInt(8))),
+            &table,
+        )
+        .is_err());
+        assert!(
+            build_invocation_exit_value(&InvocationExit::Cancelled("done".into()), &table).is_err()
+        );
+    }
 
     fn user(content: &str) -> Message {
         Message {

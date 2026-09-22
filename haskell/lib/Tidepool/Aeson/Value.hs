@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE DefaultSignatures #-}
@@ -57,13 +56,13 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Char (chr, ord)
 import Data.String (IsString (..))
 import Tidepool.Aeson.Scientific
   ( Scientific, scientific, coefficient, base10Exponent
   , fromFloatDigits, toRealFloat, isFiniteDouble )
 import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
+import qualified GHC.Exts as Exts
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
@@ -125,355 +124,24 @@ emptyObject = Object Map.empty
 emptyArray :: Value
 emptyArray = Array []
 
--- | Decode a JSON document into an @'Either' 'Text' 'Value'@ — @Right v@ on
--- success, @Left msg@ (approximating the serde_json parse error) on failure.
--- This is the internal primop anchor that the public
--- @'Tidepool.Aeson.FromJSON.eitherDecode'@ is derived from — prefer that on
--- the surface.
---
--- PURE — no effect. On the Core route, calls to @eitherDecodeValue@ are
--- intercepted in the extractor (Translate.hs) and lowered to the
--- @JsonDecode@ primop, which dispatches to Rust @serde_json@ and builds the
--- ADT directly on the heap — the body below never runs there. No such
--- interception exists on the prepared-STG route (the default engine): a
--- prepared program compiles this module from source and runs the body
--- verbatim, so it must be a real, total RFC 8259 parser, not a stub. The two
--- routes are kept behaviorally equivalent (same 'Value' shapes, same
--- 'Scientific' normal form via the 'scientific' smart constructor, same
--- accept/reject grammar) but are NOT bit-for-bit identical on error message
--- text: the prepared route's messages are hand-written, approximating
--- serde_json's wording rather than reproducing it, which is fine because
--- every caller only distinguishes @Left@ from @Right@ (see
--- @STG_KNOWN_ISSUES.md@, \"Host answers and effects\").
---
--- OPAQUE (not merely NOINLINE): the Core-route interceptor matches the name
--- @eitherDecodeValue@, but returning @Either@ makes GHC's CPR worker/wrapper
--- split it into @$weitherDecodeValue@ at -O2 — which the interceptor would
--- miss. OPAQUE forbids w/w (and specialization/inlining), so the wrapper
--- name survives verbatim into every caller's Core, on both routes.
+-- | Parse JSON through Tidepool's authenticated native intrinsic. Ordinary GHC
+-- can typecheck this anchor; execution requires the Tidepool prepared runtime.
+-- The fallback records a conservative lazy use because GHC exports demand
+-- facts before prepared projection replaces the body. A shallow 'seq' would
+-- still let optimized importers discard the 'Text' fields the native parser
+-- reads.
 {-# OPAQUE eitherDecodeValue #-}
 eitherDecodeValue :: Text -> Either Text Value
-eitherDecodeValue input = case jsonParseTopLevel input of
-  Left err -> Left (T.pack err)
-  Right v  -> Right v
+eitherDecodeValue input = Exts.lazy input `seq` Left (T.pack "requires Tidepool")
 
--- | Encode a 'Value' as compact RFC 8259 JSON text: no inserted whitespace,
--- object members in the underlying 'Data.Map.Strict' key order, numbers via
--- 'Scientific'\'s own 'Show' (already RFC-8259-shaped: full-digit integers,
--- plain fixed-point fractions, never exponent form — see
--- "Tidepool.Aeson.Scientific"), strings with control characters, quote, and
--- backslash escaped (@\\uXXXX@ for other C0 controls). Total: every 'Value'
--- constructed by this module's own smart constructors is representable.
+-- | Render compact, deterministic JSON through Tidepool's authenticated native
+-- intrinsic. Object keys are emitted in their 'Map' order.
+-- Keep a conservative lazy use here as well: the native encoder reads fields
+-- throughout the recursive 'Value', while evaluating them early would change
+-- bottom and cycle behavior.
+{-# OPAQUE encodeValue #-}
 encodeValue :: Value -> Text
-encodeValue Null = T.pack "null"
-encodeValue (Bool True) = T.pack "true"
-encodeValue (Bool False) = T.pack "false"
-encodeValue (Number n) = T.pack (show n)
-encodeValue (String s) = encodeJsonString s
-encodeValue (Array xs) = T.pack "[" `T.append` T.intercalate (T.pack ",") (map encodeValue xs) `T.append` T.pack "]"
-encodeValue (Object kv) =
-  T.pack "{"
-    `T.append` T.intercalate (T.pack ",") (map encodePair (Map.toList kv))
-    `T.append` T.pack "}"
-  where
-    encodePair (k, v) = encodeJsonString k `T.append` T.pack ":" `T.append` encodeValue v
-
-encodeJsonString :: Text -> Text
-encodeJsonString s = T.pack "\"" `T.append` T.concatMap escapeJsonChar s `T.append` T.pack "\""
-
-escapeJsonChar :: Char -> Text
-escapeJsonChar c
-  | c == '"' = T.pack "\\\""
-  | c == '\\' = T.pack "\\\\"
-  | c == '\n' = T.pack "\\n"
-  | c == '\r' = T.pack "\\r"
-  | c == '\t' = T.pack "\\t"
-  | jsonIsControl c = T.pack "\\u" `T.append` hex4Of (ord c)
-  | otherwise = T.singleton c
-
--- | Render a non-negative code point below 0x10000 as four lowercase hex
--- digits (the only range 'escapeJsonChar' calls this for: C0 controls).
-hex4Of :: Int -> Text
-hex4Of n = T.pack [hexDigit ((n `div` 4096) `mod` 16), hexDigit ((n `div` 256) `mod` 16), hexDigit ((n `div` 16) `mod` 16), hexDigit (n `mod` 16)]
-  where
-    hexDigit d
-      | d < 10 = chr (48 + d)
-      | otherwise = chr (97 + d - 10)
-
--- ---------------------------------------------------------------------------
--- RFC 8259 JSON parser (recursive descent over 'Text').
---
--- Used only on the prepared-STG route (the Core route intercepts
--- 'eitherDecodeValue' before this body ever runs). Errors are threaded as
--- plain 'String' internally and packed to 'Text' once, at the top
--- ('eitherDecodeValue') — 'T.pack' on a literal is ambiguous under
--- @Tidepool.Data.Text@'s polymorphic 'Pack' class, so error TEXT is built as
--- 'String' (via @(++)@ / 'show') and only the final result crosses to 'Text'.
---
--- Every scan uses either 'T.uncons' (no predicate closure, always safe to
--- call on an externally-defined 'Text') or the home-compiled predicate
--- family ('T.span', 'T.dropWhile', ...) that "Tidepool.Data.Text" vendors
--- specifically so a HOME module's predicate closures don't cross into
--- external-package unfoldings under the JIT (see that module's Haddock).
--- Nothing here uses 'Data.Text.foldl'' or similar EXTERNAL higher-order
--- functions with a locally-defined closure argument.
--- ---------------------------------------------------------------------------
-
--- | Maximum object/array nesting depth, matching serde_json's default
--- recursion limit (128) — see @tidepool-bridge/src/json_builder.rs@'s
--- @json_to_value@ Haddock (\"Recursion depth is bounded by serde_json's own
--- nesting limit (128 by default)\").
-jsonMaxDepth :: Int
-jsonMaxDepth = 128
-
--- | Parse a complete JSON document: one value, optional surrounding
--- whitespace, and nothing else. Trailing non-whitespace content is a parse
--- error, matching @serde_json::from_str@'s whole-input contract.
-jsonParseTopLevel :: Text -> Either String Value
-jsonParseTopLevel input = do
-  (v, rest) <- jsonValue 0 (jsonSkipWs input)
-  let rest' = jsonSkipWs rest
-  if T.null rest'
-    then Right v
-    else Left "trailing characters after JSON value"
-
-jsonSkipWs :: Text -> Text
-jsonSkipWs = T.dropWhile jsonIsWs
-
-jsonIsWs :: Char -> Bool
-jsonIsWs c = c == ' ' || c == '\t' || c == '\n' || c == '\r'
-
-jsonIsDigit :: Char -> Bool
-jsonIsDigit c = c >= '0' && c <= '9'
-
--- | One JSON value, plus the unconsumed remainder. Literal keywords
--- (@true@/@false@/@null@) are matched before falling into the
--- structural/number dispatch so a truncated keyword (e.g. @"tru"@) is
--- rejected rather than misparsed as something else.
-jsonValue :: Int -> Text -> Either String (Value, Text)
-jsonValue depth t
-  | Just rest <- T.stripPrefix "true" t  = Right (Bool True, rest)
-  | Just rest <- T.stripPrefix "false" t = Right (Bool False, rest)
-  | Just rest <- T.stripPrefix "null" t  = Right (Null, rest)
-  | otherwise = case T.uncons t of
-      Nothing -> Left "unexpected end of input"
-      Just ('"', rest) -> do
-        (s, rest') <- jsonStringBody rest
-        Right (String s, rest')
-      Just ('{', rest) -> jsonObject (depth + 1) rest
-      Just ('[', rest) -> jsonArray (depth + 1) rest
-      Just (c, _) | c == '-' || jsonIsDigit c -> jsonNumber t
-      Just (c, _) -> Left ("unexpected character " ++ show c ++ " in JSON value")
-
--- | An object body, just past the opening @{@.
-jsonObject :: Int -> Text -> Either String (Value, Text)
-jsonObject depth t
-  | depth > jsonMaxDepth = Left "exceeded maximum nesting depth"
-  | otherwise = case T.uncons (jsonSkipWs t) of
-      Just ('}', rest) -> Right (Object Map.empty, rest)
-      _ -> jsonMembers depth (jsonSkipWs t) Map.empty
-
--- | One or more @"key": value@ members, comma-separated, ending in @}@. A
--- trailing comma (e.g. @{"a":1,}@) is rejected: after consuming a comma this
--- always requires another string key, and @}@ is not one.
-jsonMembers :: Int -> Text -> Object -> Either String (Value, Text)
-jsonMembers depth t acc = do
-  (key, t1) <- jsonStringAt (jsonSkipWs t)
-  t2 <- jsonExpect ':' (jsonSkipWs t1)
-  (val, t3) <- jsonValue depth (jsonSkipWs t2)
-  -- Duplicate keys: last write wins (matches serde_json's `Map::insert`
-  -- accumulation and `Data.Map.Strict.insert`'s own overwrite-on-collision
-  -- semantics), so no special-casing is needed beyond a plain 'Map.insert'.
-  let acc' = Map.insert key val acc
-  case T.uncons (jsonSkipWs t3) of
-    Just (',', rest) -> jsonMembers depth rest acc'
-    Just ('}', rest) -> Right (Object acc', rest)
-    _ -> Left "expected ',' or '}' in object"
-
--- | An array body, just past the opening @[@.
-jsonArray :: Int -> Text -> Either String (Value, Text)
-jsonArray depth t
-  | depth > jsonMaxDepth = Left "exceeded maximum nesting depth"
-  | otherwise = case T.uncons (jsonSkipWs t) of
-      Just (']', rest) -> Right (Array [], rest)
-      _ -> do
-        (v, t1) <- jsonValue depth (jsonSkipWs t)
-        jsonElements depth t1 [v]
-
--- | One or more comma-separated elements, ending in @]@. A trailing comma
--- (e.g. @[1,]@) is rejected the same way 'jsonMembers' rejects one: after a
--- comma another value is always required.
-jsonElements :: Int -> Text -> [Value] -> Either String (Value, Text)
-jsonElements depth t acc = case T.uncons (jsonSkipWs t) of
-  Just (',', rest) -> do
-    (v, t1) <- jsonValue depth (jsonSkipWs rest)
-    jsonElements depth t1 (v : acc)
-  Just (']', rest) -> Right (Array (reverse acc), rest)
-  _ -> Left "expected ',' or ']' in array"
-
-jsonExpect :: Char -> Text -> Either String Text
-jsonExpect c t = case T.uncons t of
-  Just (c', rest) | c' == c -> Right rest
-  _ -> Left ("expected " ++ show c)
-
--- | A string, including its opening quote.
-jsonStringAt :: Text -> Either String (Text, Text)
-jsonStringAt t = case T.uncons t of
-  Just ('"', rest) -> jsonStringBody rest
-  _ -> Left "expected string"
-
--- | A string body, just past the opening quote: alternating runs of plain
--- (unescaped, non-control) characters and single escape sequences, ending at
--- the closing quote. Built as a list of already-decoded 'Text' chunks and
--- 'T.concat'ed once at the end, so this stays linear in the string length —
--- no per-character 'T.append', no 'T.length'/'T.index' re-scans.
-jsonStringBody :: Text -> Either String (Text, Text)
-jsonStringBody = go []
-  where
-    go acc t = case T.span jsonIsPlainStringChar t of
-      (chunk, rest) -> case T.uncons rest of
-        Nothing -> Left "unterminated string literal"
-        Just ('"', rest') -> Right (T.concat (reverse (chunk : acc)), rest')
-        Just ('\\', rest') -> do
-          (esc, rest'') <- jsonEscape rest'
-          go (esc : chunk : acc) rest''
-        Just (c, _) -> Left ("control character " ++ show c ++ " in string literal")
-
-jsonIsPlainStringChar :: Char -> Bool
-jsonIsPlainStringChar c = c /= '"' && c /= '\\' && not (jsonIsControl c)
-
-jsonIsControl :: Char -> Bool
-jsonIsControl c = c < '\x20'
-
--- | One escape sequence, just past the backslash.
-jsonEscape :: Text -> Either String (Text, Text)
-jsonEscape t = case T.uncons t of
-  Nothing -> Left "unterminated escape sequence"
-  Just ('"', rest)  -> Right ("\"", rest)
-  Just ('\\', rest) -> Right ("\\", rest)
-  Just ('/', rest)  -> Right ("/", rest)
-  Just ('b', rest)  -> Right ("\b", rest)
-  Just ('f', rest)  -> Right ("\f", rest)
-  Just ('n', rest)  -> Right ("\n", rest)
-  Just ('r', rest)  -> Right ("\r", rest)
-  Just ('t', rest)  -> Right ("\t", rest)
-  Just ('u', rest)  -> jsonUnicodeEscape rest
-  Just (c, _)       -> Left ("invalid escape character " ++ show c)
-
--- | @\\uXXXX@, just past the @u@. A high surrogate (@0xD800@-@0xDBFF@) must
--- be immediately followed by a @\\uXXXX@ low surrogate (@0xDC00@-@0xDFFF@),
--- combined into the astral code point; either surrogate appearing alone is
--- rejected, matching serde_json (which errors on a lone surrogate rather
--- than substituting U+FFFD).
-jsonUnicodeEscape :: Text -> Either String (Text, Text)
-jsonUnicodeEscape t = do
-  (n, rest) <- jsonHex4 t
-  if n >= 0xD800 && n <= 0xDBFF
-    then case T.stripPrefix "\\u" rest of
-      Just rest2 -> do
-        (n2, rest3) <- jsonHex4 rest2
-        if n2 >= 0xDC00 && n2 <= 0xDFFF
-          then
-            let cp = 0x10000 + (n - 0xD800) * 0x400 + (n2 - 0xDC00)
-            in Right (T.singleton (chr cp), rest3)
-          else Left "low surrogate must follow a high surrogate"
-      Nothing -> Left "unpaired high surrogate in \\u escape"
-    else
-      if n >= 0xDC00 && n <= 0xDFFF
-        then Left "unpaired low surrogate in \\u escape"
-        else Right (T.singleton (chr n), rest)
-
-jsonHex4 :: Text -> Either String (Int, Text)
-jsonHex4 t0 = do
-  (d0, t1) <- jsonHexDigit t0
-  (d1, t2) <- jsonHexDigit t1
-  (d2, t3) <- jsonHexDigit t2
-  (d3, t4) <- jsonHexDigit t3
-  Right (((d0 * 16 + d1) * 16 + d2) * 16 + d3, t4)
-
-jsonHexDigit :: Text -> Either String (Int, Text)
-jsonHexDigit t = case T.uncons t of
-  Just (c, rest)
-    | c >= '0' && c <= '9' -> Right (ord c - ord '0', rest)
-    | c >= 'a' && c <= 'f' -> Right (ord c - ord 'a' + 10, rest)
-    | c >= 'A' && c <= 'F' -> Right (ord c - ord 'A' + 10, rest)
-  _ -> Left "invalid \\u escape (expected 4 hex digits)"
-
--- | A JSON number: @[-] int [frac] [exp]@ per RFC 8259 — no leading zeros
--- (@01@), no leading @+@, no bare @.5@/@5.@ (a digit is required on both
--- sides of the decimal point). Mirrors
--- @tidepool-bridge/src/shapes.rs@'s @parse_decimal_token@: the coefficient
--- is the integer-part digits followed by the fractional-part digits (leading
--- zeros immaterial to the 'Integer' value), and the base-10 exponent is the
--- parsed @exp@ shifted down by the fractional digit count — so @1.50e2@ and
--- @150@ both parse to the numeric value 150 (coefficient\/exponent pair need
--- not match bit-for-bit: 'Scientific'\'s 'Eq' compares by value via
--- 'toRational', and its 'Show' re-normalizes via 'stripZeros' at render
--- time, so any faithful pair renders and compares identically).
-jsonNumber :: Text -> Either String (Value, Text)
-jsonNumber t = do
-  (isNeg, t1) <- jsonOptMinus t
-  (intDigits, t2) <- jsonIntPart t1
-  (fracDigits, t3) <- jsonOptFrac t2
-  (expValue, t4) <- jsonOptExp t3
-  let maxIntBound = toInteger (maxBound :: Int)
-      minIntBound = toInteger (minBound :: Int)
-  if expValue > maxIntBound || expValue < minIntBound
-    then Left "unparseable exponent in JSON number"
-    else
-      let magnitude = jsonDigitsToInteger (intDigits `T.append` fracDigits)
-          coeff = if isNeg then negate magnitude else magnitude
-          expo = fromInteger expValue - T.length fracDigits
-      in Right (Number (scientific coeff expo), t4)
-
-jsonOptMinus :: Text -> Either String (Bool, Text)
-jsonOptMinus t = case T.uncons t of
-  Just ('-', rest) -> Right (True, rest)
-  _ -> Right (False, t)
-
--- | The integer part: @0@ alone, or a leading @1@-@9@ digit followed by any
--- number of further digits. A second digit right after a leading @0@ (e.g.
--- @01@) is deliberately NOT consumed here — it is left in the remainder,
--- where the caller (expecting @.@/@e@/@E@/end-of-value) rejects it.
-jsonIntPart :: Text -> Either String (Text, Text)
-jsonIntPart t = case T.uncons t of
-  Just ('0', rest) -> Right ("0", rest)
-  Just (c, _) | jsonIsDigit c -> Right (T.span jsonIsDigit t)
-  _ -> Left "expected a digit"
-
--- | An optional @.digits@ fractional part; if the @.@ is present at least
--- one digit must follow.
-jsonOptFrac :: Text -> Either String (Text, Text)
-jsonOptFrac t = case T.uncons t of
-  Just ('.', rest) -> case T.span jsonIsDigit rest of
-    (digits, rest') | not (T.null digits) -> Right (digits, rest')
-    _ -> Left "expected a digit after the decimal point"
-  _ -> Right (T.empty, t)
-
--- | An optional @e@/@E@ exponent, with an optional sign; if present, at
--- least one digit must follow the (optional) sign.
-jsonOptExp :: Text -> Either String (Integer, Text)
-jsonOptExp t = case T.uncons t of
-  Just (e, rest) | e == 'e' || e == 'E' -> case T.uncons rest of
-    Just (s, rest2) | s == '+' || s == '-' -> jsonExpDigits (s == '-') rest2
-    _ -> jsonExpDigits False rest
-  _ -> Right (0, t)
-  where
-    jsonExpDigits isNeg t' = case T.span jsonIsDigit t' of
-      (digits, rest') | not (T.null digits) ->
-        let val = jsonDigitsToInteger digits
-        in Right (if isNeg then negate val else val, rest')
-      _ -> Left "expected a digit in the exponent"
-
--- | Decimal digits (most-significant first) to an 'Integer', via
--- 'T.uncons' only — no external higher-order function (e.g. 'T.foldl'')
--- receives a locally-defined closure here.
-jsonDigitsToInteger :: Text -> Integer
-jsonDigitsToInteger = go 0
-  where
-    go !acc t = case T.uncons t of
-      Nothing -> acc
-      Just (c, rest) -> go (acc * 10 + toInteger (ord c - ord '0')) rest
+encodeValue value = Exts.lazy value `seq` T.pack ""
 
 -- | A class for types that can be converted to JSON Value.
 --

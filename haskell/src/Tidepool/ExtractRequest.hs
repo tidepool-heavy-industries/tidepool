@@ -49,6 +49,7 @@ data RequestField
   | InspectInfo String
   | InspectBrowse String
   | InspectBrowseExpanded String
+  | InspectScopeBrowse
   | InspectSearch String
   | InspectStructuredInfo StructuredInspection
   | InspectStructuredType StructuredInspection
@@ -133,6 +134,7 @@ data InspectionRequest
   = InspectTypeOf String
   | InspectNameInfo String
   | InspectModule String Bool
+  | InspectScope
   | InspectTypeSearch String
   | InspectStructuredInfoOf StructuredInspection
   | InspectStructuredTypeOf StructuredInspection
@@ -198,6 +200,8 @@ requestFromFields = foldl apply emptyWorkerRequest
         { requestInspections = requestInspections request ++ [InspectModule name False] }
       InspectBrowseExpanded name -> request
         { requestInspections = requestInspections request ++ [InspectModule name True] }
+      InspectScopeBrowse -> request
+        { requestInspections = requestInspections request ++ [InspectScope] }
       InspectSearch query -> request
         { requestInspections = requestInspections request ++ [InspectTypeSearch query] }
       InspectStructuredInfo query -> request
@@ -213,7 +217,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       InspectionStrict -> request { requestInspectionStrict = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v10"
+workerRequestFlag = "--worker-request-v12"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -232,7 +236,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ010"
+  if magic /= "TPREQ012"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -242,7 +246,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ010" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ012" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -280,6 +284,7 @@ encodeField field = case field of
   InspectTypeBatch value -> taggedText 40 value
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
+  InspectScopeBrowse -> BS.singleton 43
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -383,6 +388,7 @@ pField bytes = do
     40 -> mapParser InspectTypeBatch pText rest
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
+    43 -> Right (InspectScopeBrowse, rest)
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

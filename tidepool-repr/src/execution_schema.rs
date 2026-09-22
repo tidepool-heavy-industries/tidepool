@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 11;
-pub const EXECUTION_ABI_VERSION: u64 = 5;
+pub const SCHEMA_VERSION: u64 = 14;
+pub const EXECUTION_ABI_VERSION: u64 = 7;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -679,6 +679,104 @@ pub struct OperationDecl {
     pub signature: SignatureId,
 }
 
+/// The compiler-authenticated representation of the vendored JSON value
+/// family.  The type parameter lets each boundary retain the same named roles
+/// while translating local schema IDs to runtime IDs or descriptors.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct JsonLayout<T = ConstructorId> {
+    pub object: T,
+    pub array: T,
+    pub string: T,
+    pub number: T,
+    pub bool_: T,
+    pub null: T,
+    pub map_bin: T,
+    pub map_tip: T,
+    pub true_: T,
+    pub false_: T,
+    pub cons: T,
+    pub nil: T,
+    pub scientific: T,
+    pub integer_small: T,
+    pub integer_positive: T,
+    pub integer_negative: T,
+    pub text: T,
+    pub int: T,
+}
+
+impl<T> JsonLayout<T> {
+    pub const ROLE_COUNT: usize = 18;
+
+    pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> JsonLayout<U> {
+        JsonLayout {
+            object: map(self.object),
+            array: map(self.array),
+            string: map(self.string),
+            number: map(self.number),
+            bool_: map(self.bool_),
+            null: map(self.null),
+            map_bin: map(self.map_bin),
+            map_tip: map(self.map_tip),
+            true_: map(self.true_),
+            false_: map(self.false_),
+            cons: map(self.cons),
+            nil: map(self.nil),
+            scientific: map(self.scientific),
+            integer_small: map(self.integer_small),
+            integer_positive: map(self.integer_positive),
+            integer_negative: map(self.integer_negative),
+            text: map(self.text),
+            int: map(self.int),
+        }
+    }
+
+    pub fn as_ref(&self) -> JsonLayout<&T> {
+        JsonLayout {
+            object: &self.object,
+            array: &self.array,
+            string: &self.string,
+            number: &self.number,
+            bool_: &self.bool_,
+            null: &self.null,
+            map_bin: &self.map_bin,
+            map_tip: &self.map_tip,
+            true_: &self.true_,
+            false_: &self.false_,
+            cons: &self.cons,
+            nil: &self.nil,
+            scientific: &self.scientific,
+            integer_small: &self.integer_small,
+            integer_positive: &self.integer_positive,
+            integer_negative: &self.integer_negative,
+            text: &self.text,
+            int: &self.int,
+        }
+    }
+
+    pub fn try_map<U, E>(self, mut map: impl FnMut(T) -> Result<U, E>) -> Result<JsonLayout<U>, E> {
+        Ok(JsonLayout {
+            object: map(self.object)?,
+            array: map(self.array)?,
+            string: map(self.string)?,
+            number: map(self.number)?,
+            bool_: map(self.bool_)?,
+            null: map(self.null)?,
+            map_bin: map(self.map_bin)?,
+            map_tip: map(self.map_tip)?,
+            true_: map(self.true_)?,
+            false_: map(self.false_)?,
+            cons: map(self.cons)?,
+            nil: map(self.nil)?,
+            scientific: map(self.scientific)?,
+            integer_small: map(self.integer_small)?,
+            integer_positive: map(self.integer_positive)?,
+            integer_negative: map(self.integer_negative)?,
+            text: map(self.text)?,
+            int: map(self.int)?,
+        })
+    }
+}
+
 /// Primops and admitted foreign capabilities occupy distinct identity spaces.
 /// The declaration signature completes the operation's identity; the same
 /// primop may occur at more than one instantiated signature.
@@ -689,6 +787,11 @@ pub enum OperationIdentity {
         symbol: String,
         convention: ForeignConvention,
     },
+    JsonDecode {
+        left: ConstructorId,
+        right: ConstructorId,
+    },
+    JsonEncode,
     /// An explicitly catalogued missing runtime capability, never an arbitrary
     /// unresolved import. Keeps GHC's Returns signature; execution fails without
     /// publishing a result. Native admission checks the exact name/signature.
@@ -761,6 +864,9 @@ pub struct WireProgram {
     /// Request constructors paired with the synthetic site row
     /// ([`SYNTHETIC_SITE_BIT`]) that answers them.
     pub verb_sites: Vec<(ConstructorId, u64)>,
+    /// Compiler-issued JSON constructor evidence.  It is carried even when a
+    /// program only mounts or answers JSON and has no JSON intrinsic call.
+    pub json_layout: Option<JsonLayout>,
 }
 
 /// Validated but not yet linked program. Its fields remain private so every
@@ -803,6 +909,9 @@ impl PreparedProgram {
     }
     pub fn verb_sites(&self) -> &[(ConstructorId, u64)] {
         &self.wire.verb_sites
+    }
+    pub fn json_layout(&self) -> Option<&JsonLayout> {
+        self.wire.json_layout.as_ref()
     }
     pub fn site(&self, site: u64) -> Option<&SiteRow> {
         self.wire.sites.iter().find(|row| row.site == site)

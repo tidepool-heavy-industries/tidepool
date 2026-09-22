@@ -25,9 +25,8 @@ pub enum RfTurnItem {
     TurnToolResult(String, String),
 }
 
-/// One completed turn: everything that happened between one request
-/// and the answer to it, in provider order. Absent timestamps mean the
-/// record carried none, not an instant zero.
+/// One recorded turn in provider order. An unfinished active turn has
+/// no completion timestamp and contains only items recorded so far.
 #[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(name = "ConversationTurn")]
 pub struct RfConversationTurn {

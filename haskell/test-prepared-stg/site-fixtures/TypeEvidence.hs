@@ -18,6 +18,10 @@ data Choice a where
 data Chain = End | Link Chain
 data Nest a = Nest (Nest [a])
 data Packed = Packed {-# UNPACK #-} !Int
+data Progress progress
+  = ProgressPending
+  | ProgressUpdate progress
+  | ProgressClosed
 
 boolAnswer :: Maybe Bool
 boolAnswer = runLLMTurn @Bool "bool"
@@ -70,6 +74,8 @@ data Console a where
   Print :: Text -> Console ()
   Fetch :: Text -> Console (Either Bool Text)
   Echo :: a -> Console a
+  ObserveProgress :: Console (Progress progress)
+  FunctionReply :: Console (Int -> Int)
 
 printRequest :: Console ()
 printRequest = Print "hi"
@@ -80,14 +86,18 @@ fetchRequest = Fetch "path"
 echoRequest :: Console Int
 echoRequest = Echo 1
 
+progressRequest :: Console (Progress Int)
+progressRequest = ObserveProgress
+
+functionRequest :: Console (Int -> Int)
+functionRequest = FunctionReply
+
 unrelated :: Int
 unrelated = 42
 
--- Models the extractor's '__decodeValue' contract exactly, including its
--- eta-unexpanded point-free shape (the turn template writes
--- @__decodeValue = Aeson.eitherDecodeValue@, a zero-arity CAF whose own STG
--- result type is the whole function arrow, not its codomain): an admitted
--- auxiliary root that is not itself a declared site, whose own
+-- Models an eta-unexpanded auxiliary root whose STG result type is the whole
+-- function arrow rather than its codomain: an admitted auxiliary root that
+-- is not itself a declared site, whose own
 -- 'Left'/'Right' evidence a program must still carry even when 'unrelated'
 -- -- the only entry that reaches it -- never otherwise constructs or
 -- observes an 'Either'.

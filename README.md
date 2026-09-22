@@ -257,13 +257,14 @@ revision your project's `flake.nix` pins; `shoal new` writes that pin, and the
 Build the matching host, extractor, and client from this checkout:
 
 ```bash
-git clone https://github.com/tidepool-heavy-industries/tidepool.git
+git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
 nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-The first build compiles everything, GHC-side and Rust-side, and takes a good
+Nix 2.27 or newer is required so flake source capture includes the matched
+Codex submodule. The first build compiles everything, GHC-side and Rust-side, and takes a good
 while: Tidepool patches GHC to emit fat interface files, so the compiler and
 every Haskell dependency are rebuilt from source. Later builds are incremental.
 The wrapper selects the matched extractor and client without replacing `codex`
@@ -346,6 +347,17 @@ stop a swarm from taking the machine down. The network, your credentials, your
 environment and the rest of the host filesystem stay reachable. Run it on a
 machine and in an account where that is acceptable, as you would any coding
 agent with shell access.
+
+Run status exposes recovery generation, predecessor-to-successor actor mappings,
+lost state, unavailable actors, and resource-service health. Its resource
+snapshot distinguishes active and historical commands, retained allocations,
+cleanup failures, and bounded process, memory, pressure, CPU, and I/O
+observations; traces also report output truncation. Existing cleanup and run-map
+commands report retained build storage, and each run status contains a bounded
+run-directory byte and entry count with an explicit truncation flag. These observations are diagnostic;
+this recovery work adds no new limits. Stronger host isolation would require a
+separate security boundary rather than extending the trusted local resource
+service.
 
 A run records a structured trace under `.shoal/logs/`, and by default that
 includes cell source, tool results and diagnostics in full, so anything a

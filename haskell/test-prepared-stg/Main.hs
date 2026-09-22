@@ -2,16 +2,24 @@ module Main (main) where
 
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
+import Data.Text qualified as Text
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, flattenBinds)
+import GHC.Core.DataCon (dataConName, dataConRepArgTys)
+import GHC.Core.DataCon qualified as DC
+import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Id (idName)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, setNameUnique)
+import GHC.Types.Unique (mkUnique)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Id.Make (nospecId)
+import GHC.Types.RepType (typePrimRep_maybe)
 import GHC.Core.TyCo.Compare (eqType)
 import Tidepool.SiteClassifier
   ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
@@ -26,15 +34,18 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
+import qualified Tidepool.TypePolicy as TypePolicy
 import Tidepool.EffectSchema
   ( SiteDelivery(..), SiteType(..), SiteWireSource(..), YieldSite(..)
   , sitedVerbs, vsDelivery, vsName, vsWireSource )
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
-import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
+import Tidepool.PreparedSites
+  ( PreparedSite(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
+import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -84,9 +95,29 @@ projectEntry :: PreparedPipelineResult -> String -> String
 projectEntry result modul entry retained =
   projectEntryWithAux result modul entry [] retained
 
+projectEntryWithJsonAuthority :: JsonAuthority -> PreparedPipelineResult
+  -> String -> String -> Either Projection.ProjectionError Schema.WireProgram
+projectEntryWithJsonAuthority authority result modul entry =
+  Projection.projectPreparedTarget context (pprModules result)
+ where
+  context = Projection.ProjectionContext
+    { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+    , Projection.projectionToolchain = "ghc-9.12.2"
+    , Projection.projectionTarget =
+        Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+    , Projection.projectionRetainedGenerations = mempty
+    , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul)
+        "value" (fromString entry) Nothing
+    , Projection.projectionAuxiliaryRoots = []
+    , Projection.projectionFormattingAuthority = Nothing
+    , Projection.projectionTimeAuthority = Nothing
+    , Projection.projectionJsonAuthority = Just authority
+    , Projection.projectionTextUnit = Nothing
+    }
+
 -- | 'projectEntry' plus a set of auxiliary root occurrences in the same
--- module (mirroring 'preparedDecodeTargetName' beside a turn's resume
--- entry): admitted the same way a turn's own auxiliary roots are, so a
+-- module (mirroring the fixed entries beside a turn's resume entry): admitted
+-- the same way as a turn's own auxiliary roots, so a
 -- fixture can assert that an auxiliary root's own result type is interned
 -- even when the selected entry never otherwise reaches it.
 projectEntryWithAux :: PreparedPipelineResult -> String -> String -> [String]
@@ -106,6 +137,7 @@ projectEntryWithAux result modul entry auxEntries retained =
           | aux <- auxEntries ]
       , Projection.projectionFormattingAuthority = Nothing
       , Projection.projectionTimeAuthority = Nothing
+      , projectionJsonAuthority = Nothing
       , Projection.projectionTextUnit = Nothing
       }
 
@@ -122,6 +154,323 @@ assertProjects label outcome = case outcome of
   Right _ -> pure ()
   Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
 
+verifyJsonDependencyAuthority :: FilePath -> IO ()
+verifyJsonDependencyAuthority dir = do
+  let fixture = "test-prepared-stg/JsonAuthorityContract.hs"
+      shadowRoot = dir </> "json-shadow"
+      shadowDirectory = shadowRoot </> "Tidepool" </> "Aeson"
+  trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib"]
+  trustedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult trusted))
+  assert (trustedAuthority /= Nothing) "shipped JSON dependency graph lacks authority"
+  source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
+  let shadow = Text.replace "coefficient (Scientific c _) = c"
+        "coefficient (Scientific c _) = c + 1" (Text.pack source)
+  assert (shadow /= Text.pack source) "Scientific shadow fixture did not change semantics"
+  createDirectoryIfMissing True shadowDirectory
+  writeFile (shadowDirectory </> "Scientific.hs") (Text.unpack shadow)
+  substituted <- runPipelineSelected PreparedStg fixture
+    [shadowRoot, "test-prepared-stg", "lib"]
+  substitutedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult substituted))
+  assert (substitutedAuthority == Nothing)
+    "JSON authority admitted a same-shaped Scientific dependency with changed semantics"
+  let eitherRoot = dir </> "json-either-shadow"
+      eitherDirectory = eitherRoot </> "GHC" </> "Internal" </> "Data"
+  createDirectoryIfMissing True eitherDirectory
+  writeFile (eitherDirectory </> "Either.hs") (unlines
+    [ "{-# LANGUAGE NoImplicitPrelude #-}"
+    , "module GHC.Internal.Data.Either (Either(..)) where"
+    , "data Either a b = Left a | Right a"
+    ])
+  writeFile (eitherRoot </> "Prelude.hs") (unlines
+    [ "{-# LANGUAGE PackageImports #-}"
+    , "module Prelude (module Base, Either(..)) where"
+    , "import \"base\" Prelude as Base hiding (Either(..))"
+    , "import GHC.Internal.Data.Either (Either(..))"
+    ])
+  let eitherFixture = eitherRoot </> "JsonEitherAuthorityContract.hs"
+  writeFile eitherFixture (unlines
+    [ "module JsonEitherAuthorityContract where"
+    , "import Data.Text (Text)"
+    , "import Tidepool.Aeson.Value (Value, eitherDecodeValue)"
+    , "result :: Text -> Either Text Value"
+    , "result = eitherDecodeValue"
+    ])
+  shadowedEither <- runPipelineSelected PreparedStg eitherFixture
+    [eitherRoot, "test-prepared-stg", "lib"]
+  shadowedEitherAuthority <- resolveJsonAuthority
+    (prHscEnv (pprPipelineResult shadowedEither))
+  authority <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
+    shadowedEitherAuthority
+  case projectEntryWithJsonAuthority authority shadowedEither
+      "JsonEitherAuthorityContract" "result" of
+    Left (Projection.UnsupportedPreparedShape detail)
+      | "InvalidJsonType" `Text.isInfixOf` detail -> pure ()
+    outcome -> ioError (userError
+      ("JSON authority admitted a home-shadowed Either dependency: "
+        ++ either show (const "projected") outcome))
+
+-- An O0 bytecode interface exposes a private helper that the prepared O2 body
+-- removes. Importers must receive the prepared owner's interface, including on
+-- a warm request where that owner comes from the compiler memo.
+verifyPreparedPrivateImports :: IO ()
+verifyPreparedPrivateImports = do
+  let source = "test-prepared-stg/PreparedPrivateClient.hs"
+      includes = ["test-prepared-stg"]
+      check label result = case projectEntry result "PreparedPrivateClient" "result" Map.empty of
+        Left failure -> ioError (userError (label ++ ": " ++ show failure))
+        Right program -> assert
+          (all ((/= "main") . Schema.symbolUnit . Schema.globalIdentity) (Schema.programGlobals program))
+          (label ++ ": unresolved home implementation " ++ show (Schema.programGlobals program))
+  direct <- runPipelineSelected PreparedStg source includes
+  check "private TH dependency, direct" direct
+  withResidentPipelineSelected includes $ \compile -> do
+    cold <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    check "private TH dependency, cold" cold
+    warm <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    check "private TH dependency, warm" warm
+    assert (preparedShape cold == preparedShape warm)
+      "warm private TH dependency changed prepared module shape"
+
+-- | TH's bytecode provisioning must not change a constructor declared by an
+-- unchanged home module.  The graph checks run after metadata preparation and
+-- before projection or execution; the executable checks then compare the
+-- declarations a shared prepared machine receives from ordinary and quoted
+-- source.
+verifyConstructorRepresentations :: FilePath -> IO ()
+verifyConstructorRepresentations dir = do
+  let strictOwned = dir </> "StrictOwned.hs"
+      strictPlain = dir </> "StrictPlainMetadata.hs"
+      strictQuoted = dir </> "StrictQuotedMetadata.hs"
+      scientificPlain = dir </> "ScientificPlain.hs"
+      scientificQuoted = dir </> "ScientificQuoted.hs"
+      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
+      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
+  writeFile strictOwned (unlines
+    [ "{-# OPTIONS_GHC -O0 #-}"
+    , "module StrictOwned where"
+    , "data Automatic = Automatic !Int"
+    , "data NoUnpack = NoUnpack {-# NOUNPACK #-} !Int"
+    , "data ExplicitUnpack = ExplicitUnpack {-# UNPACK #-} !Int"
+    ])
+  writeFile strictPlain (strictMetadataSource "StrictPlainMetadata" False)
+  writeFile strictQuoted (strictMetadataSource "StrictQuotedMetadata" True)
+  writeFile scientificPlain (unlines
+    [ "module ScientificPlain where"
+    , "import Tidepool.Aeson.Scientific"
+    , "result :: Scientific"
+    , "result = scientific 42 0"
+    ])
+  writeFile scientificQuoted (unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module ScientificQuoted where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.QQ (j)"
+    , "result :: Value"
+    , "result = [j|42|]"
+    ])
+  writeFile scientificMetadataPlain (scientificMetadataSource "ScientificMetadataPlain" False)
+  writeFile scientificMetadataQuoted (scientificMetadataSource "ScientificMetadataQuoted" True)
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted [dir, "lib"]
+  scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain [dir, "lib"]
+  scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted [dir, "lib"]
+  scientificMetadataPlainResult <- runPipelineSelected PreparedStg scientificMetadataPlain [dir, "lib"]
+  scientificMetadataQuotedResult <- runPipelineSelected PreparedStg scientificMetadataQuoted [dir, "lib"]
+  assertMetadataReps "Automatic" strictPlainResult strictQuotedResult
+    ["IntRep"]
+  assertMetadataReps "NoUnpack" strictPlainResult strictQuotedResult
+    ["BoxedRep (Just Lifted)"]
+  assertMetadataReps "ExplicitUnpack" strictPlainResult strictQuotedResult
+    ["IntRep"]
+  assertMetadataReps "Scientific" scientificMetadataPlainResult scientificMetadataQuotedResult
+    ["BoxedRep (Just Lifted)", "IntRep"]
+  verifyRepeatedConstructorEvidence strictPlainResult
+  plainProgram <- project scientificPlainResult "ScientificPlain"
+  quotedProgram <- project scientificQuotedResult "ScientificQuoted"
+  plainDecl <- namedDeclaration "Scientific" plainProgram
+  quotedDecl <- namedDeclaration "Scientific" quotedProgram
+  assert (plainDecl == quotedDecl)
+    ("Scientific constructor declaration changed across ordinary and quasiquoted source: "
+      ++ show (Schema.constructorFieldReps plainDecl) ++ " /= "
+      ++ show (Schema.constructorFieldReps quotedDecl))
+  assert (Schema.constructorFieldReps plainDecl == [Schema.LiftedRefRep, Schema.IntRep 64])
+    ("Scientific did not retain the canonical physical representation: "
+      ++ show (Schema.constructorFieldReps plainDecl))
+ where
+  strictMetadataSource modul quoted = unlines $
+    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+    [ "module " ++ modul ++ " where"
+    , "import StrictOwned"
+    , "import Tidepool.Effects.Core"
+    ] ++ quasiquoteBindings quoted ++
+    [ "automatic :: Maybe Automatic"
+    , "automatic = runLLMTurn @Automatic \"automatic\""
+    , "noUnpack :: Maybe NoUnpack"
+    , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
+    , "explicitUnpack :: Maybe ExplicitUnpack"
+    , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
+    ]
+  scientificMetadataSource modul quoted = unlines $
+    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+    [ "module " ++ modul ++ " where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.Effects.Core"
+    ] ++ quasiquoteBindings quoted ++
+    [ "result :: Maybe Value"
+    , "result = runLLMTurn @Value \"scientific\""
+    ]
+  quasiquoteLanguage False = []
+  quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
+  quasiquoteBindings False = []
+  quasiquoteBindings True =
+    [ "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.QQ (j)"
+    , "quotedValue :: Value"
+    , "quotedValue = [j|42|]"
+    ]
+  assertMetadataReps occurrence plain quoted expected = do
+    let plainReps = typeGraphReps occurrence plain
+        quotedReps = typeGraphReps occurrence quoted
+    assert (plainReps == [expected])
+      ("ordinary metadata did not retain " ++ occurrence ++ " representation: "
+        ++ show plainReps)
+    assert (quotedReps == plainReps)
+      ("TH/QQ metadata changed " ++ occurrence ++ " representation: "
+        ++ show plainReps ++ " /= " ++ show quotedReps)
+  typeGraphReps occurrence result = nub
+    [ map show (concatMap (maybe [] id . typePrimRep_maybe . scaledThing)
+        (dataConRepArgTys constructor))
+    | prepared <- pprModules result
+    , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
+    , (constructor, _) <- rows
+    , dataConOccurrence constructor == occurrence
+    ]
+  scaledThing (Scaled _ ty) = ty
+  dataConOccurrence constructor = occNameString (nameOccName (dataConName constructor))
+  project result modul = case projectEntry result modul "result" mempty of
+    Left failure -> ioError (userError ("Scientific projection failed: " ++ show failure))
+    Right program -> pure program
+  namedDeclaration occurrence program = case filter (hasOccurrence occurrence)
+      (Schema.programConstructors program) of
+    [declaration] -> pure declaration
+    declarations -> ioError (userError ("expected one " ++ occurrence
+      ++ " declaration, got " ++ show declarations))
+  hasOccurrence occurrence declaration =
+    Schema.symbolModule (Schema.constructorIdentity declaration) == "Tidepool.Aeson.Scientific"
+      && Schema.symbolOccurrence (Schema.constructorIdentity declaration) == fromString occurrence
+
+-- Independently construct conflicting GHC evidence at the shared projection
+-- boundary. Equal GHC uniques are not proof of equal physical declarations.
+verifyRepeatedConstructorEvidence :: PreparedPipelineResult -> IO ()
+verifyRepeatedConstructorEvidence result = do
+  let originals = [ con | prepared <- pprModules result
+        , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
+        , (con, _) <- rows, occNameString (nameOccName (dataConName con)) == "NoUnpack" ]
+  original <- case originals of
+    con : _ -> pure con
+    [] -> ioError (userError "constructor collision fixture lacks NoUnpack evidence")
+  let clone name sourceFields runtimeFields = case DC.dataConBoxer original of
+        Nothing -> error "constructor collision fixture lacks a wrapper boxer"
+        Just boxer -> DC.mkDataCon name False name (DC.dataConSrcBangs original)
+          [] [] [] (DC.dataConConcreteTyVars original) [] [] [] sourceFields
+          (DC.dataConOrigResTy original) NoPromInfo (DC.dataConTyCon original)
+          (DC.dataConTag original) [] (DC.dataConWorkId original)
+          (DC.DCR (DC.dataConWrapId original) boxer runtimeFields
+            (DC.dataConRepStrictness original) (DC.dataConImplBangs original))
+      name = dataConName original
+      otherName = setNameUnique name (mkUnique 'z' 54321)
+      fields = DC.dataConOrigArgTys original
+      runtimeFields = DC.dataConRepArgTys original
+      conflictingFields = [Scaled multiplicity wordPrimTy | Scaled multiplicity _ <- fields]
+      replace pair prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
+              (concatMap (\row@(con, children) -> if con == original
+                then [(first, children) | first <- pair] else [row]) rows)
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      project pair = projectEntry
+        (result { pprModules = map (replace pair) (pprModules result) })
+        "StrictPlainMetadata" "noUnpack" mempty
+      target = case filter ((== "StrictPlainMetadata")
+            . moduleNameString . moduleName . pmModule) (pprModules result) of
+        [prepared] -> prepared
+        prepared -> error ("constructor collision fixture expected one target module, got "
+          ++ show (map (moduleNameString . moduleName . pmModule) prepared))
+      replaceNominal occurrence replacement prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
+              [ (if occNameString (nameOccName (dataConName con)) == occurrence
+                  then replacement else con, children)
+              | (con, children) <- rows ]
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      siteOwnedBy occurrence site = occurrence `isInfixOf`
+        Text.unpack (ysOrigin (psSite site))
+      noUnpackRoot = case filter (siteOwnedBy "noUnpack") (pmPreparedSites target) of
+        [site] -> psWireNode site
+        sites -> error ("constructor collision fixture expected one noUnpack site, got "
+          ++ show (length sites))
+      graphModule bindingName replacement =
+        let selected = filter (siteOwnedBy bindingName) (pmPreparedSites target)
+            rooted = [ if bindingName == "automatic"
+                then site { psWireNode = noUnpackRoot }
+                else site
+              | site <- selected ]
+            owners = map (idName . psOwner) selected
+            ownsSelected (binding, _) = any ((`elem` owners) . idName)
+              (Projection.topBinders binding)
+        in (replaceNominal "NoUnpack" replacement target)
+          { pmBindings = filter ownsSelected (pmBindings target)
+          , pmPreparedSites = rooted
+          , pmSiteRejections = []
+          }
+      otherModules = filter ((/= "StrictPlainMetadata")
+        . moduleNameString . moduleName . pmModule) (pprModules result)
+      projectAcrossGraphs first second = Projection.projectPrepared context
+        (otherModules
+          ++ [ graphModule "noUnpack" first
+             , graphModule "automatic" second
+             ])
+      context = Projection.ProjectionContext
+        { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+        , Projection.projectionToolchain = "ghc-9.12.2"
+        , Projection.projectionTarget =
+            Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+        , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionEntry = Schema.SymbolIdentity "main"
+            (fromString "StrictPlainMetadata") "value" (fromString "noUnpack") Nothing
+        , Projection.projectionAuxiliaryRoots = []
+        , Projection.projectionFormattingAuthority = Nothing
+        , Projection.projectionTimeAuthority = Nothing
+        , Projection.projectionJsonAuthority = Nothing
+        , Projection.projectionTextUnit = Nothing
+        }
+      rejects pair = case project pair of
+        Left (Projection.InvalidPreparedIdentity detail) ->
+          assert ("conflicting physical declarations" `Text.isInfixOf` detail)
+            ("unexpected constructor rejection: " ++ show detail)
+        outcome -> ioError (userError ("conflicting constructor evidence was not rejected: "
+          ++ either show (const "accepted") outcome))
+      rejectsAcrossGraphs first second = case projectAcrossGraphs first second of
+        Left (Projection.InvalidPreparedIdentity detail) ->
+          assert ("conflicting physical declarations" `Text.isInfixOf` detail)
+            ("unexpected cross-graph constructor rejection: " ++ show detail)
+        outcome -> ioError (userError
+          ("conflicting constructor evidence in separate graphs was not rejected: "
+            ++ either show (const "accepted") outcome))
+  assertProjects "identical constructor provenance"
+    (project [original, clone otherName fields runtimeFields])
+  mapM_ (\changed -> do
+    rejects [original, changed]
+    rejects [changed, original]
+    rejectsAcrossGraphs original changed
+    rejectsAcrossGraphs changed original)
+    [ clone name conflictingFields conflictingFields
+    , clone otherName conflictingFields conflictingFields
+    , clone name fields conflictingFields
+    , clone otherName fields conflictingFields
+    ]
 assertWireSite :: String -> Schema.SiteDelivery -> String
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
 assertWireSite label delivery family outcome = case outcome of
@@ -217,16 +566,22 @@ main = do
         , "{-# OPAQUE runLLMTurn #-}"
         , "runLLMTurn :: forall a. String -> Maybe a"
         , "runLLMTurn _ = Nothing"
+        , "{-# OPAQUE runLLMTurnSited #-}"
         , "runLLMTurnSited :: forall a. Int -> String -> Maybe a"
         , "runLLMTurnSited _ _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFork #-}"
         , "runLLMTurnFork :: forall a. String -> Maybe (Either InvocationExit a)"
         , "runLLMTurnFork _ = Nothing"
+        , "{-# OPAQUE runLLMTurnForkSited #-}"
         , "runLLMTurnForkSited :: forall a. Int -> String -> Maybe (Either InvocationExit a)"
         , "runLLMTurnForkSited _ _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFanout #-}"
         , "runLLMTurnFanout :: forall a. [String] -> Maybe [Either InvocationExit a]"
         , "runLLMTurnFanout _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFanoutSited #-}"
         , "runLLMTurnFanoutSited :: forall a. Int -> [String] -> Maybe [Either InvocationExit a]"
         , "runLLMTurnFanoutSited _ _ = Nothing"
+        , "{-# OPAQUE forkAllSited #-}"
         , "forkAllSited :: forall a. Int -> String -> Maybe [a]"
         , "forkAllSited _ _ = Nothing"
         , "keepForkAllSited :: Maybe [Bool]"
@@ -254,6 +609,9 @@ main = do
         (\result entry -> projectEntry result "TypeEvidence" entry mempty)
         (\result entry auxEntries ->
           projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
+      verifyPreparedPrivateImports
+      verifyConstructorRepresentations dir
+      verifyJsonDependencyAuthority dir
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
@@ -276,7 +634,7 @@ main = do
         -- Fully applied to a computed argument, so the simplifier cannot
         -- eta-reduce it to a partial, unelaborated verb occurrence.
         , "polyHelper label = runLLMTurn @a (label ++ \"!\")"
-        , "{-# NOINLINE polyHelper #-}"
+        , "{-# OPAQUE polyHelper #-}"
         , "polyNested :: forall a. Bool -> String -> Maybe a"
         , "polyNested flag label = if flag then runLLMTurn @a label else Nothing"
         , "{-# NOINLINE polyNested #-}"

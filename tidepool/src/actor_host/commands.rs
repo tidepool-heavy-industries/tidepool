@@ -115,6 +115,29 @@ impl NativeCommandBackend {
         let mut stop_sent = false;
         loop {
             match reply {
+                Reply::NotSubmitted(message) => {
+                    let resource = self
+                        .resources
+                        .cancel(&self.actor, id)
+                        .await
+                        .map_err(detail)?;
+                    let cleanup = match resource {
+                        Resource::Completed
+                        | Resource::ResourceExhausted
+                        | Resource::CancelledBeforeStart => CommandCleanup::CommandClean,
+                        Resource::CleanupUnconfirmed { detail } => {
+                            CommandCleanup::CommandCleanupUnknown(detail)
+                        }
+                        Resource::Admitted { .. } | Resource::Running | Resource::Queued => {
+                            CommandCleanup::CommandRetained
+                        }
+                        Resource::Retired => CommandCleanup::CommandClean,
+                    };
+                    return Ok(CommandResult {
+                        outcome: CommandOutcome::CommandFailed(message),
+                        cleanup,
+                    });
+                }
                 Reply::Finished {
                     exit_code,
                     cancelled,
@@ -336,6 +359,7 @@ pub(super) struct HostCommandBackend {
     resources: Arc<CommandResourceClient>,
     actor: String,
     roots: super::ResidentCommandRoots,
+    bubblewrap: std::path::PathBuf,
     running: parking_lot::Mutex<Option<Arc<HostCommand>>>,
     cancelled: watch::Sender<bool>,
     ready: watch::Sender<OutputReadiness>,
@@ -346,11 +370,13 @@ impl HostCommandBackend {
         resources: Arc<CommandResourceClient>,
         actor: tidepool_actor::ActorRef,
         roots: super::ResidentCommandRoots,
+        bubblewrap: std::path::PathBuf,
     ) -> Self {
         Self {
             resources,
             actor: format!("{}-{}", actor.id.0, actor.incarnation.0),
             roots,
+            bubblewrap,
             running: parking_lot::Mutex::new(None),
             cancelled: watch::channel(false).0,
             ready: watch::channel(OutputReadiness::Pending).0,
@@ -362,7 +388,20 @@ impl HostCommandBackend {
         self.running
             .lock()
             .clone()
-            .ok_or_else(|| CommandError::CommandOutputPending)
+            .ok_or(CommandError::CommandOutputPending)
+    }
+
+    async fn fail_after_admission(&self, id: &str, detail: String) -> String {
+        match self.resources.cancel(&self.actor, id).await {
+            Ok(Resource::CleanupUnconfirmed { detail: cleanup }) => {
+                format!("{detail}; resource cleanup is unconfirmed: {cleanup}")
+            }
+            Ok(Resource::Admitted { .. } | Resource::Running | Resource::Queued) => {
+                format!("{detail}; resource cleanup remains pending")
+            }
+            Ok(_) => detail,
+            Err(error) => format!("{detail}; resource cleanup is unconfirmed: {error}"),
+        }
     }
 
     async fn execute_inner(
@@ -411,41 +450,54 @@ impl HostCommandBackend {
             Some(requested) => std::path::PathBuf::from(requested),
             None => self.roots.directory.clone(),
         };
-        let boundary = tidepool_node::ProcessMountBoundary::new(
+        let boundary = match tidepool_node::ProcessMountBoundary::new(
             &directory,
             self.roots.protected.clone(),
             self.roots.writable.clone(),
-        )
-        .map_err(|error| {
-            format!(
-                "this actor cannot run a command in {}: {error}; it may run in {}{}",
-                directory.display(),
-                self.roots.directory.display(),
-                if self.roots.custody {
-                    " and write there"
-                } else {
-                    ", and holds no worktree to write in"
-                }
-            )
-        })?;
+        ) {
+            Ok(boundary) => boundary,
+            Err(error) => {
+                return Err(self
+                    .fail_after_admission(
+                        id,
+                        format!(
+                            "this actor cannot run a command in {}: {error}; it may run in {}{}",
+                            directory.display(),
+                            self.roots.directory.display(),
+                            if self.roots.custody {
+                                " and write there"
+                            } else {
+                                ", and holds no worktree to write in"
+                            },
+                        ),
+                    )
+                    .await);
+            }
+        };
         tracing::debug!(actor = %self.actor, ?directory, custody = self.roots.custody,
             argv = ?spec.argv, "resident actor command");
-        let command = Arc::new(
-            HostCommand::spawn(HostCommandSpec {
-                argv: &spec.argv,
-                directory: &directory,
-                environment: &spec.environment,
-                stdin,
-                cgroup: Some(cgroup),
-                boundary: Some(&boundary),
-            })
-            .map_err(detail)?,
-        );
+        let command = match HostCommand::spawn(HostCommandSpec {
+            argv: &spec.argv,
+            directory: &directory,
+            environment: &spec.environment,
+            stdin,
+            cgroup: Some(cgroup),
+            boundary: Some(&boundary),
+            bubblewrap: Some(&self.bubblewrap),
+        }) {
+            Ok(command) => Arc::new(command),
+            Err(error) => {
+                return Err(self
+                    .fail_after_admission(id, format!("command spawn failed: {error}"))
+                    .await);
+            }
+        };
         *self.running.lock() = Some(Arc::clone(&command));
-        self.resources
-            .started(&self.actor, id)
-            .await
-            .map_err(detail)?;
+        if let Err(error) = self.resources.started(&self.actor, id).await {
+            return Err(self
+                .fail_after_admission(id, format!("command registration failed: {error}"))
+                .await);
+        }
         self.ready.send_replace(OutputReadiness::Ready);
         phase.send_replace(CommandStatus::CommandRunning);
 
@@ -456,10 +508,9 @@ impl HostCommandBackend {
                 _ = wait_until_set(&mut cancelled), if !stop_sent => {
                     stop_sent = true;
                     phase.send_replace(CommandStatus::CommandStopping);
-                    // Fence a not-yet-started cgroup join as well, exactly as
-                    // the native path does, then stop the whole group.
+                    // The resource owner fences joins and kills the complete
+                    // cgroup. Retained output carries no separate signal authority.
                     self.resources.cancel(&self.actor, id).await.map_err(detail)?;
-                    command.terminate();
                 }
                 exit = command.wait() => break exit.map_err(detail)?,
             }

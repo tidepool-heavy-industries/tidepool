@@ -1,6 +1,8 @@
 //! Versioned prepared-execution artifact contract shared by the extractor
 //! writer, compile cache, and native consumers.
 
+use std::sync::Arc;
+
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, LinkError, LinkedProgram,
     MachineImports, ParseError, PreparedProgram, ProgramRequirements, TargetDescriptor,
@@ -45,22 +47,31 @@ pub fn prepared_artifact_name(target: &str) -> String {
 /// preserve the exact writer output while consumers cannot bypass parsing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedArtifact {
-    bytes: Vec<u8>,
-    prepared: PreparedProgram,
+    bytes: Arc<Vec<u8>>,
+    prepared: Arc<PreparedProgram>,
 }
 
 impl PreparedArtifact {
     pub fn parse(bytes: Vec<u8>, limits: DecodeLimits) -> Result<Self, ParseError> {
         let requirements = production_requirements()?;
-        Self::parse_for_requirements(bytes, &requirements, limits)
+        Self::parse_shared(Arc::new(bytes), &requirements, limits)
     }
 
+    #[cfg(test)]
     fn parse_for_requirements(
         bytes: Vec<u8>,
         requirements: &ProgramRequirements,
         limits: DecodeLimits,
     ) -> Result<Self, ParseError> {
-        let prepared = parse_program(&bytes, requirements, limits)?;
+        Self::parse_shared(Arc::new(bytes), requirements, limits)
+    }
+
+    pub(crate) fn parse_shared(
+        bytes: Arc<Vec<u8>>,
+        requirements: &ProgramRequirements,
+        limits: DecodeLimits,
+    ) -> Result<Self, ParseError> {
+        let prepared = Arc::new(parse_program(&bytes, requirements, limits)?);
         Ok(Self { bytes, prepared })
     }
 
@@ -72,12 +83,17 @@ impl PreparedArtifact {
         &self.prepared
     }
 
+    /// Consume this artifact without copying its graph when it is uniquely owned.
+    pub fn into_prepared(self) -> PreparedProgram {
+        Arc::unwrap_or_clone(self.prepared)
+    }
+
     #[expect(
         clippy::result_large_err,
         reason = "structured link evidence is retained on this cold artifact-admission path"
     )]
     pub fn link(self, imports: &MachineImports) -> Result<LinkedProgram, LinkError> {
-        link_program(self.prepared, imports)
+        link_program(self.into_prepared(), imports)
     }
 }
 

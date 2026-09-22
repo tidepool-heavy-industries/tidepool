@@ -120,8 +120,8 @@ fi
 #   `.meta`/`.prepared` variants, `<key>.asks.json`, `<key>.a<N>`).
 #
 #   Deliberately NOT a wholesale `rm -rf ~/.cache/tidepool/`: that root also
-#   holds `listen/` (durable listen-channel state), `actor-builds/` and
-#   `shoal/` (Shoal actor-worktree state), and `toolchain-stamp.json` itself
+#   holds `actor-builds/`, `shoal/` (Shoal actor-worktree state), and
+#   `toolchain-stamp.json` itself
 #   — none of which a redeploy invalidates, and on a shared box the worktree
 #   state under `shoal/actor-worktrees/**` belongs to OTHER agents' live
 #   work. `toolchain-stamp.json` is left alone here too: Step 6 overwrites it

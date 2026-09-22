@@ -6,32 +6,19 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Model Context Protocol (MCP) server for Tidepool"
+description = "Effect declarations, Haskell source assembly, and validation for Tidepool"
 readme = "../README.md"
 
 [dependencies]
-tidepool-codegen.workspace = true
 tidepool-runtime.workspace = true
-tidepool-repr.workspace = true
-tidepool-effect.workspace = true
-tidepool-actor.workspace = true
-tidepool-tool.workspace = true
-rmcp.workspace = true
-axum.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "signal", "sync", "test-util"] }
-serde.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
 parking_lot.workspace = true
-dyn-clone = "1.0"
 frunk.workspace = true
-schemars.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 blake3.workspace = true
 
 [dev-dependencies]
-rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
+tidepool-repr.workspace = true
+tidepool-effect.workspace = true
 tidepool-protocol.workspace = true
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
@@ -39,4 +26,3 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest.workspace = true
-tempfile.workspace = true

@@ -29,6 +29,14 @@ use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationCon
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
+mod operation_journal;
+
+pub(crate) fn validate_operation_recovery(path: PathBuf) -> Result<(), String> {
+    operation_journal::OperationJournal::open_existing(path)
+        .map(|_| ())
+        .map_err(|error| format!("hosted-operation recovery evidence is unavailable: {error}"))
+}
+
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 const DESCRIPTION_LIMIT: usize = 1024;
@@ -179,6 +187,7 @@ struct HostState {
     binding_path: PathBuf,
     expected_thread: Option<BackendThreadId>,
     boundaries: Arc<Mutex<HashMap<(String, String), HostBoundaryState>>>,
+    operations: Option<Arc<parking_lot::Mutex<operation_journal::OperationJournal>>>,
 }
 
 /// Immutable actor-specific service inputs.
@@ -227,7 +236,7 @@ impl HostDynamicToolService {
         let registration = Registration {
             protocol_version: PROTOCOL_VERSION,
             dynamic_tools: wire_tools,
-            scope: RegistrationScope::PrimaryThread,
+            scope: codex_shoal_protocol::HostedRegistrationScope::PrimaryThread,
             input_control_socket: None,
             launch_id: uuid::Uuid::new_v4().to_string(),
             input_control_nonce: uuid::Uuid::new_v4().to_string(),
@@ -247,8 +256,35 @@ impl HostDynamicToolService {
                 binding_path,
                 expected_thread,
                 boundaries: Arc::default(),
+                operations: None,
             },
         })
+    }
+
+    pub(crate) fn with_operation_journal(
+        mut self,
+        path: PathBuf,
+        require_existing: bool,
+    ) -> Result<Self, String> {
+        let journal = if require_existing {
+            operation_journal::OperationJournal::open_existing(path)
+        } else {
+            operation_journal::OperationJournal::open(path)
+        }
+        .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
+        self.state.boundaries = Arc::new(Mutex::new(
+            journal
+                .settled_boundaries()
+                .map(|boundary| {
+                    (
+                        (boundary.thread_id.clone(), boundary.context_call_id.clone()),
+                        HostBoundaryState::Settled,
+                    )
+                })
+                .collect(),
+        ));
+        self.state.operations = Some(Arc::new(parking_lot::Mutex::new(journal)));
+        Ok(self)
     }
 
     pub(crate) fn with_command_resources(
@@ -314,23 +350,7 @@ fn validate_description(kind: &str, name: &str, description: &str) -> Result<(),
     ))
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Registration {
-    protocol_version: u32,
-    dynamic_tools: Vec<DynamicTool>,
-    scope: RegistrationScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input_control_socket: Option<PathBuf>,
-    launch_id: String,
-    input_control_nonce: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-enum RegistrationScope {
-    PrimaryThread,
-}
+type Registration = codex_shoal_protocol::HostedRegistration<DynamicTool, PathBuf>;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
@@ -348,32 +368,13 @@ enum DynamicTool {
     Function(DynamicToolFunctionSpec),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompletionRequest {
-    protocol_version: u32,
-    thread_id: String,
-    context_call_id: String,
-}
+type CompletionRequest = codex_shoal_protocol::HostedCompletionRequest<String>;
 
 /// Exact native/application custody supplied by the challenged session plus
 /// the complete hosted invocation coordinate. The resident owner derives its
 /// opaque execution identity from this coordinate; the HTTP host never issues
 /// or substitutes one.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WorkbenchCancellationRequest {
-    protocol_version: u32,
-    thread_id: String,
-    turn_id: String,
-    call_id: String,
-    context_call_id: Option<String>,
-    namespace: Option<String>,
-    launch_id: String,
-    application_instance_id: String,
-    session_generation: u64,
-    input_control_nonce: String,
-}
+type WorkbenchCancellationRequest = codex_shoal_protocol::HostedCancellationRequest<String>;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
@@ -623,6 +624,7 @@ async fn completed(
     let previous = {
         let mut boundaries = state.boundaries.lock().await;
         match boundaries.get(&key).copied() {
+            Some(HostBoundaryState::Settled) => return Ok(Json(serde_json::Value::Null)),
             Some(
                 HostBoundaryState::Active
                 | HostBoundaryState::Reconciling
@@ -650,6 +652,20 @@ async fn completed(
             }
         }
         return Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
+    }
+    if let Some(operations) = &state.operations {
+        operations
+            .lock()
+            .settle_boundary(operation_journal::BoundaryKey {
+                thread_id: key.0.clone(),
+                context_call_id: key.1.clone(),
+            })
+            .map_err(|error| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("hosted-operation acknowledgment is unconfirmed: {error}"),
+                )
+            })?;
     }
     state
         .boundaries
@@ -692,22 +708,7 @@ async fn registration(State(state): State<HostState>) -> Result<Json<Registratio
     Ok(Json((*state.registration).clone()))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionRequest {
-    protocol_version: u32,
-    thread_id: String,
-    #[serde(default)]
-    input_control_socket: Option<PathBuf>,
-    #[serde(default)]
-    launch_id: Option<String>,
-    #[serde(default)]
-    application_instance_id: Option<String>,
-    #[serde(default)]
-    session_generation: Option<u64>,
-    #[serde(default)]
-    input_control_nonce: Option<String>,
-}
+type SessionRequest = codex_shoal_protocol::HostedSessionRequest<String, PathBuf>;
 
 async fn attach_session(
     State(state): State<HostState>,
@@ -806,27 +807,16 @@ fn parse_thread(raw: String) -> Result<BackendThreadId, uuid::Error> {
     Ok(BackendThreadId(raw))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CallRequest {
-    context_call_id: Option<String>,
-    protocol_version: u32,
-    thread_id: String,
-    turn_id: String,
-    call_id: String,
-    namespace: Option<String>,
-    tool: String,
-    arguments: serde_json::Value,
-}
+type CallRequest = codex_shoal_protocol::HostedCallRequest<String, serde_json::Value>;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CallResponse {
     content_items: Vec<CallContent>,
     success: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum CallContent {
     InputText { text: String },
@@ -922,6 +912,10 @@ enum HostToolFailure {
     SettledBoundary,
     #[error("tool completion boundary already has an active call")]
     ActiveBoundary,
+    #[error("the original hosted operation outcome is uncertain; it was not rerun")]
+    OperationUncertain,
+    #[error("hosted-operation durability failed: {0}")]
+    OperationJournal(String),
     #[error("unsupported dynamic-tool protocol version {actual}; expected {expected}")]
     UnsupportedProtocol { expected: u32, actual: u32 },
     #[error("dynamic-tool namespace mismatch: received {actual:?}; expected {expected:?}")]
@@ -1024,6 +1018,7 @@ async fn call(
     State(state): State<HostState>,
     Json(request): Json<CallRequest>,
 ) -> Json<CallResponse> {
+    let journal_request = request.clone();
     if !state.control.admits(AdmissionKind::NewWork) {
         return Json(CallResponse::failure(&HostToolFailure::Quiescing));
     }
@@ -1090,6 +1085,32 @@ async fn call(
             }
         }
     }
+    if let Some(operations) = &state.operations {
+        let admission = operations.lock().admit(&journal_request);
+        match admission {
+            Ok(operation_journal::Admission::New) => {}
+            Ok(operation_journal::Admission::Known(response)) => {
+                if let Some(key) = &boundary_key {
+                    state.boundaries.lock().await.remove(key);
+                }
+                return Json(response);
+            }
+            Ok(operation_journal::Admission::Uncertain) => {
+                if let Some(key) = &boundary_key {
+                    state.boundaries.lock().await.remove(key);
+                }
+                return Json(CallResponse::failure(&HostToolFailure::OperationUncertain));
+            }
+            Err(error) => {
+                if let Some(key) = &boundary_key {
+                    state.boundaries.lock().await.remove(key);
+                }
+                return Json(CallResponse::failure(&HostToolFailure::OperationJournal(
+                    error.to_string(),
+                )));
+            }
+        }
+    }
     let invocation = ToolInvocation {
         context: Some(ToolInvocationContext {
             context_call_id: request.context_call_id.clone(),
@@ -1119,14 +1140,18 @@ async fn call(
             if let Some(key) = &boundary_key {
                 state.boundaries.lock().await.remove(key);
             }
-            return Json(CallResponse::failure(&failure));
+            return Json(record_operation_response(
+                &state,
+                &journal_request,
+                CallResponse::failure(&failure),
+            ));
         }
     };
     let response = match result {
-        Ok(Ok(value)) => Json(match state.endpoint.output_format() {
+        Ok(Ok(value)) => match state.endpoint.output_format() {
             tidepool_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
             tidepool_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
-        }),
+        },
         Ok(Err(error)) => {
             let failure = HostToolFailure::Dispatch(error);
             tracing::error!(
@@ -1135,7 +1160,7 @@ async fn call(
                 error = %failure,
                 "resident tool dispatch failed"
             );
-            Json(CallResponse::failure(&failure))
+            CallResponse::failure(&failure)
         }
         Err(payload) => {
             let failure =
@@ -1146,16 +1171,33 @@ async fn call(
                 error = %failure,
                 "resident tool dispatch panicked"
             );
-            Json(CallResponse::failure(&failure))
+            CallResponse::failure(&failure)
         }
     };
+    let response = record_operation_response(&state, &journal_request, response);
     if let Some(key) = &boundary_key {
         let mut boundaries = state.boundaries.lock().await;
         if boundaries.get(key) == Some(&HostBoundaryState::Active) {
             boundaries.remove(key);
         }
     }
-    response
+    Json(response)
+}
+
+fn record_operation_response(
+    state: &HostState,
+    request: &CallRequest,
+    response: CallResponse,
+) -> CallResponse {
+    let Some(operations) = &state.operations else {
+        return response;
+    };
+    match operations.lock().finish(request, &response) {
+        Ok(()) => response,
+        Err(error) => CallResponse::failure(&HostToolFailure::OperationJournal(format!(
+            "terminal outcome is unconfirmed: {error}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -1749,6 +1791,116 @@ pub(crate) mod tests {
             tool: "haskell".into(),
             arguments,
         }
+    }
+
+    struct CountingEndpoint {
+        tools: Vec<HostedTool>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ResidentToolEndpoint for CountingEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+            self.dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                let ToolArguments::Raw(source) = invocation.arguments else {
+                    return Err(ResidentToolError::InvalidInvocation(
+                        "expected raw source".into(),
+                    ));
+                };
+                Ok(serde_json::json!({ "source": source }))
+            })
+        }
+    }
+
+    fn counting_endpoint(
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<dyn ResidentToolEndpoint> {
+        Arc::new(CountingEndpoint {
+            tools: vec![HostedTool::Custom(CustomToolDeclaration {
+                name: "haskell".into(),
+                description: "Run Haskell".into(),
+            })],
+            dispatches,
+        })
+    }
+
+    async fn bind_test_thread(state: &HostState) {
+        *state.control.bound_thread.lock().await = Some(BackendThreadId(
+            "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+        ));
+    }
+
+    #[tokio::test]
+    async fn restart_returns_durable_outcome_without_redispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = directory.path().join("operations.jsonl");
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = HostDynamicToolService::new(
+            counting_endpoint(Arc::clone(&dispatches)),
+            directory.path().join("binding-a"),
+            None,
+        )
+        .unwrap()
+        .with_operation_journal(journal.clone(), false)
+        .unwrap()
+        .state;
+        bind_test_thread(&first).await;
+        let request = call_request(serde_json::Value::String("effect".into()));
+        let expected = call(State(first), Json(request.clone())).await.0;
+        assert!(expected.success);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let recovered = HostDynamicToolService::new(
+            counting_endpoint(Arc::clone(&dispatches)),
+            directory.path().join("binding-b"),
+            None,
+        )
+        .unwrap()
+        .with_operation_journal(journal, true)
+        .unwrap()
+        .state;
+        bind_test_thread(&recovered).await;
+        assert_eq!(call(State(recovered), Json(request)).await.0, expected);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_reports_accepted_operation_as_uncertain_without_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("operations.jsonl");
+        let request = call_request(serde_json::Value::String("effect".into()));
+        let mut journal = operation_journal::OperationJournal::open(journal_path.clone()).unwrap();
+        assert!(matches!(
+            journal.admit(&request).unwrap(),
+            operation_journal::Admission::New
+        ));
+        drop(journal);
+
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovered = HostDynamicToolService::new(
+            counting_endpoint(Arc::clone(&dispatches)),
+            directory.path().join("binding"),
+            None,
+        )
+        .unwrap()
+        .with_operation_journal(journal_path, true)
+        .unwrap()
+        .state;
+        bind_test_thread(&recovered).await;
+        let response = call(State(recovered), Json(request)).await.0;
+        assert!(!response.success);
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert!(text.contains("outcome is uncertain"));
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

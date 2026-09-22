@@ -23,6 +23,15 @@
 // `super::ambiguous_type_advice`.
 pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}";
 
+/// Dialect for generated support modules whose definitions never execute
+/// splices. Authored cells still use [`EVAL_PRAGMAS`]. Enabling QuasiQuotes on
+/// these support modules would mark them as untracked compile-time providers
+/// and invalidate every dependent on each resident compiler request.
+#[must_use]
+pub fn generated_support_pragmas() -> String {
+    EVAL_PRAGMAS.replace(", QuasiQuotes", "")
+}
+
 /// [`EVAL_PRAGMAS`] plus `NoMonomorphismRestriction` for persistent
 /// declaration modules, where authored top-level bindings must generalize.
 #[must_use]

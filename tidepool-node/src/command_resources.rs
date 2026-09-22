@@ -1,13 +1,15 @@
 //! Command-tree admission and cgroup custody. Control processes stay outside the pool.
+mod journal;
 mod queue;
 pub mod service;
 pub use service::CommandResourceClient;
 
+use journal::{EventKind as JournalEvent, Journal};
 use parking_lot::Mutex;
 use queue::{Key, Queue};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -119,12 +121,33 @@ fn actor_start_decision(
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CommandResourceStatus {
     Queued,
-    Admitted { cgroup: PathBuf },
+    Admitted {
+        cgroup: PathBuf,
+    },
     Running,
     Completed,
     ResourceExhausted,
     CancelledBeforeStart,
-    CleanupUnconfirmed { detail: String },
+    CleanupUnconfirmed {
+        detail: String,
+    },
+    /// Durable identity fence retained after detailed terminal evidence was acknowledged.
+    Retired,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResourceObservation {
+    pub active: usize,
+    pub historical: usize,
+    pub retained_allocations: usize,
+    pub cleanup_failures: usize,
+    pub sealed_producers: usize,
+    pub process_count: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub memory_pressure_avg10_micros: Option<u64>,
+    pub cpu_usage_micros: Option<u64>,
+    pub io_read_bytes: Option<u64>,
+    pub io_write_bytes: Option<u64>,
 }
 impl CommandResourceStatus {
     pub fn is_queued(&self) -> bool {
@@ -153,13 +176,49 @@ impl Entry {
 }
 struct State {
     entries: HashMap<Key, Entry>,
+    active: HashSet<Key>,
+    cleanup_failures: HashSet<Key>,
+    retained_allocations: HashSet<Key>,
     queue: Queue,
+    sealed_producers: HashSet<String>,
+    acknowledged: HashSet<Key>,
+}
+
+fn refresh_observation_indexes(state: &mut State, key: &Key) {
+    let Some(entry) = state.entries.get(key) else {
+        state.cleanup_failures.remove(key);
+        state.retained_allocations.remove(key);
+        return;
+    };
+    if matches!(
+        entry.current(),
+        CommandResourceStatus::CleanupUnconfirmed { .. }
+    ) {
+        state.cleanup_failures.insert(key.clone());
+    } else {
+        state.cleanup_failures.remove(key);
+    }
+    if entry.directory.is_some() {
+        state.retained_allocations.insert(key.clone());
+    } else {
+        state.retained_allocations.remove(key);
+    }
+}
+
+fn rebuild_observation_indexes(state: &mut State) {
+    state.cleanup_failures.clear();
+    state.retained_allocations.clear();
+    let keys = state.entries.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        refresh_observation_indexes(state, &key);
+    }
 }
 
 pub struct CommandResources {
     root: PathBuf,
     policy: CommandResourcePolicy,
     state: Mutex<State>,
+    journal: Mutex<Journal>,
     actor_starts: Mutex<u64>,
 }
 fn io_error(message: impl Into<String>) -> std::io::Error {
@@ -176,6 +235,64 @@ fn read_counter(path: &Path, key: &str) -> std::io::Result<u64> {
         })
         .ok_or_else(|| io_error(format!("missing {key} in {}", path.display())))
 }
+fn read_scalar(path: &Path) -> std::io::Result<u64> {
+    std::fs::read_to_string(path)?
+        .trim()
+        .parse()
+        .map_err(|_| io_error(format!("invalid counter in {}", path.display())))
+}
+fn read_pressure_avg10(path: &Path) -> std::io::Result<u64> {
+    let text = std::fs::read_to_string(path)?;
+    let value = text
+        .lines()
+        .find(|line| line.starts_with("some "))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("avg10="))
+        })
+        .and_then(|value| value.parse::<f64>().ok())
+        .ok_or_else(|| io_error(format!("invalid pressure data in {}", path.display())))?;
+    Ok((value * 1_000_000.0).round() as u64)
+}
+fn read_io_bytes(path: &Path) -> std::io::Result<(u64, u64)> {
+    let mut read = 0_u64;
+    let mut write = 0_u64;
+    for line in std::fs::read_to_string(path)?.lines() {
+        for field in line.split_whitespace().skip(1) {
+            if let Some(value) = field.strip_prefix("rbytes=") {
+                read = read.saturating_add(value.parse::<u64>().unwrap_or(0));
+            } else if let Some(value) = field.strip_prefix("wbytes=") {
+                write = write.saturating_add(value.parse::<u64>().unwrap_or(0));
+            }
+        }
+    }
+    Ok((read, write))
+}
+fn bounded_process_count(root: &Path, limit: usize) -> std::io::Result<u64> {
+    let mut count = 0_u64;
+    let mut visited = 0_usize;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        visited += 1;
+        if visited > limit {
+            return Err(io_error(
+                "command cgroup observation exceeds directory limit",
+            ));
+        }
+        count = count.saturating_add(
+            std::fs::read_to_string(directory.join("cgroup.procs"))?
+                .lines()
+                .count() as u64,
+        );
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(count)
+}
 fn valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 160
@@ -190,6 +307,21 @@ fn validate_key(actor: &str, id: &str) -> std::io::Result<Key> {
 impl CommandResources {
     /// Create the sole resource owner inside a fresh delegated systemd scope.
     pub fn delegated(policy: CommandResourcePolicy) -> std::io::Result<Arc<Self>> {
+        Self::delegated_inner(policy, None)
+    }
+
+    /// Open the durable owner used by the per-user resource service.
+    pub fn delegated_with_journal(
+        policy: CommandResourcePolicy,
+        journal: PathBuf,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::delegated_inner(policy, Some(journal))
+    }
+
+    fn delegated_inner(
+        policy: CommandResourcePolicy,
+        journal_path: Option<PathBuf>,
+    ) -> std::io::Result<Arc<Self>> {
         policy.validate().map_err(io_error)?;
         let membership = std::fs::read_to_string("/proc/self/cgroup")?;
         let relative = membership
@@ -213,19 +345,30 @@ impl CommandResources {
             policy.swap_max_bytes.to_string(),
         )?;
         std::fs::write(root.join("cgroup.subtree_control"), "+memory")?;
+        let (journal, events) = match journal_path {
+            Some(path) => Journal::open(path)?,
+            None => (Journal::ephemeral(), Vec::new()),
+        };
         let owner = Arc::new(Self {
             root,
             state: Mutex::new(State {
                 entries: HashMap::new(),
+                active: HashSet::new(),
+                cleanup_failures: HashSet::new(),
+                retained_allocations: HashSet::new(),
                 queue: Queue::new(
                     policy.general_bytes,
                     policy.protected_bytes,
                     NATIVE_COMMAND_BYTES,
                 ),
+                sealed_producers: HashSet::new(),
+                acknowledged: HashSet::new(),
             }),
+            journal: Mutex::new(journal),
             policy,
             actor_starts: Mutex::new(0),
         });
+        owner.reconcile(events)?;
         let weak = Arc::downgrade(&owner);
         tokio::spawn(async move {
             loop {
@@ -237,8 +380,321 @@ impl CommandResources {
         Ok(owner)
     }
 
+    fn reconcile(&self, events: Vec<JournalEvent>) -> std::io::Result<()> {
+        let mut state = self.state.lock();
+        for event in events {
+            match event {
+                JournalEvent::Admission {
+                    producer,
+                    actor,
+                    command,
+                    requested_bytes,
+                } => {
+                    let key = validate_key(&actor, &command)?;
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    if state.sealed_producers.contains(&producer) {
+                        return Err(io_error("admission follows durable producer seal"));
+                    }
+                    if let Some(entry) = state.entries.get(&key) {
+                        if entry.bytes != Some(requested_bytes) {
+                            return Err(io_error(
+                                "command identity was reused with changed parameters",
+                            ));
+                        }
+                    } else {
+                        state.entries.insert(
+                            key.clone(),
+                            Entry::new(CommandResourceStatus::Queued, Some(requested_bytes)),
+                        );
+                        state.active.insert(key.clone());
+                        state.queue.push(key, requested_bytes);
+                    }
+                }
+                JournalEvent::CancellationFence {
+                    producer,
+                    actor,
+                    command,
+                } => {
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    let key = validate_key(&actor, &command)?;
+                    if state.entries.contains_key(&key) {
+                        return Err(io_error("cancellation fence follows command admission"));
+                    }
+                    state.entries.insert(
+                        key,
+                        Entry::new(CommandResourceStatus::CancelledBeforeStart, None),
+                    );
+                }
+                JournalEvent::Allocation {
+                    producer,
+                    actor,
+                    command,
+                    requested_bytes,
+                    allocation,
+                } => {
+                    let key = validate_key(&actor, &command)?;
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    let directory = journal::allocation_path(&self.root, &allocation)?;
+                    let entry = state
+                        .entries
+                        .get_mut(&key)
+                        .ok_or_else(|| io_error("allocation without admission intent"))?;
+                    if entry.bytes != Some(requested_bytes) {
+                        return Err(io_error("allocation budget differs from admission intent"));
+                    }
+                    entry.directory = Some(directory.clone());
+                    entry
+                        .status
+                        .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
+                    state
+                        .queue
+                        .recover_active(key, requested_bytes)
+                        .map_err(io_error)?;
+                }
+                JournalEvent::Started {
+                    producer,
+                    actor,
+                    command,
+                } => {
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    let entry = state
+                        .entries
+                        .get_mut(&validate_key(&actor, &command)?)
+                        .ok_or_else(|| io_error("start without allocation"))?;
+                    entry.started = true;
+                    entry.status.send_replace(CommandResourceStatus::Running);
+                }
+                JournalEvent::Terminal {
+                    producer,
+                    actor,
+                    command,
+                    disposition,
+                } => {
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    if matches!(
+                        disposition,
+                        CommandResourceStatus::Queued
+                            | CommandResourceStatus::Admitted { .. }
+                            | CommandResourceStatus::Running
+                            | CommandResourceStatus::CleanupUnconfirmed { .. }
+                            | CommandResourceStatus::Retired
+                    ) {
+                        return Err(io_error(
+                            "journal terminal event has non-terminal disposition",
+                        ));
+                    }
+                    let key = validate_key(&actor, &command)?;
+                    let entry = state
+                        .entries
+                        .get_mut(&key)
+                        .ok_or_else(|| io_error("terminal disposition without admission"))?;
+                    entry.directory = None;
+                    entry.status.send_replace(disposition);
+                    state.queue.release(&key);
+                    state.active.remove(&key);
+                }
+                JournalEvent::ProducerSealed { producer } => {
+                    if state.active.iter().any(|key| key.0 == producer) {
+                        return Err(io_error("producer was sealed with active commands"));
+                    }
+                    for (key, entry) in &state.entries {
+                        if key.0 == producer {
+                            entry.status.send_replace(CommandResourceStatus::Retired);
+                        }
+                    }
+                    state.sealed_producers.insert(producer);
+                }
+                JournalEvent::Acknowledged {
+                    producer,
+                    actor,
+                    command,
+                } => {
+                    if producer != actor {
+                        return Err(io_error("unsupported recovered producer identity"));
+                    }
+                    let key = validate_key(&actor, &command)?;
+                    if state.active.contains(&key) {
+                        return Err(io_error("acknowledgment of active command"));
+                    }
+                    let entry = state
+                        .entries
+                        .get_mut(&key)
+                        .ok_or_else(|| io_error("acknowledgment without admission"))?;
+                    entry.status.send_replace(CommandResourceStatus::Retired);
+                    state.acknowledged.insert(key);
+                }
+            }
+        }
+
+        let mut known_directories = HashSet::new();
+        for (key, entry) in &state.entries {
+            if let Some(directory) = &entry.directory {
+                known_directories.insert(directory.clone());
+                if !directory.is_dir() {
+                    entry
+                        .status
+                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                            detail: "recorded allocation is missing after resource-service restart"
+                                .into(),
+                        });
+                    continue;
+                }
+                let populated = read_counter(&directory.join("cgroup.events"), "populated")?;
+                if populated > 0 {
+                    entry.status.send_replace(CommandResourceStatus::Running);
+                } else if entry.started {
+                    entry
+                        .status
+                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                            detail:
+                                "started allocation was empty at recovery; completion is unproven"
+                                    .into(),
+                        });
+                } else {
+                    tracing::warn!(actor = %key.0, command = %key.1,
+                        "fencing unpublished command launch during recovery");
+                }
+            }
+        }
+
+        for actor in std::fs::read_dir(&self.root)? {
+            let actor = actor?;
+            if !actor.file_type()?.is_dir() {
+                continue;
+            }
+            for command in std::fs::read_dir(actor.path())? {
+                let command = command?;
+                if !command.file_type()?.is_dir() || known_directories.contains(&command.path()) {
+                    continue;
+                }
+                let actor_name = actor.file_name().to_string_lossy().into_owned();
+                let command_name = command.file_name().to_string_lossy().into_owned();
+                let key = validate_key(&actor_name, &command_name)?;
+                let bytes = std::fs::read_to_string(command.path().join("memory.max"))?
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| io_error("orphaned allocation has invalid memory.max"))?;
+                state
+                    .queue
+                    .recover_active(key.clone(), bytes)
+                    .map_err(io_error)?;
+                let mut entry = Entry::new(
+                    CommandResourceStatus::CleanupUnconfirmed {
+                        detail: "orphaned cgroup has no durable ownership record".into(),
+                    },
+                    Some(bytes),
+                );
+                entry.directory = Some(command.path());
+                entry.started =
+                    read_counter(&command.path().join("cgroup.events"), "populated")? > 0;
+                state.entries.insert(key, entry);
+            }
+        }
+
+        let unpublished = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (!entry.started
+                    && matches!(entry.current(), CommandResourceStatus::Admitted { .. }))
+                .then(|| {
+                    entry
+                        .directory
+                        .as_ref()
+                        .map(|directory| (key.clone(), directory.clone()))
+                })
+                .flatten()
+            })
+            .collect::<Vec<_>>();
+        for (key, directory) in unpublished {
+            match std::fs::remove_dir(&directory) {
+                Ok(()) => {
+                    let disposition = CommandResourceStatus::CancelledBeforeStart;
+                    self.journal.lock().append(JournalEvent::Terminal {
+                        producer: key.0.clone(),
+                        actor: key.0.clone(),
+                        command: key.1.clone(),
+                        disposition: disposition.clone(),
+                    })?;
+                    if let Some(entry) = state.entries.get_mut(&key) {
+                        entry.directory = None;
+                        entry.status.send_replace(disposition);
+                    }
+                    state.queue.release(&key);
+                    state.active.remove(&key);
+                }
+                Err(error) => {
+                    state.entries[&key].status.send_replace(
+                        CommandResourceStatus::CleanupUnconfirmed {
+                            detail: format!("cannot fence unpublished allocation: {error}"),
+                        },
+                    );
+                }
+            }
+        }
+        // An admission row without an allocation row is the crash window
+        // before a launch grant became externally visible. Requeueing it
+        // would turn recovery into a second submission, so retain the
+        // identity and settle it before accepting new work.
+        let unfinished = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (entry.directory.is_none() && entry.current().is_queued()).then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in unfinished {
+            let disposition = CommandResourceStatus::CancelledBeforeStart;
+            self.journal.lock().append(JournalEvent::Terminal {
+                producer: key.0.clone(),
+                actor: key.0.clone(),
+                command: key.1.clone(),
+                disposition: disposition.clone(),
+            })?;
+            state.entries[&key].status.send_replace(disposition);
+            state.queue.release(&key);
+            state.active.remove(&key);
+        }
+        rebuild_observation_indexes(&mut state);
+        self.admit_waiters(&mut state);
+        Ok(())
+    }
+
     pub fn policy(&self) -> &CommandResourcePolicy {
         &self.policy
+    }
+
+    pub fn observation(&self) -> CommandResourceObservation {
+        self.observe();
+        let state = self.state.lock();
+        let mut observation = CommandResourceObservation {
+            active: state.active.len(),
+            historical: state.entries.len().saturating_sub(state.active.len()),
+            retained_allocations: state.retained_allocations.len(),
+            cleanup_failures: state.cleanup_failures.len(),
+            sealed_producers: state.sealed_producers.len(),
+            ..CommandResourceObservation::default()
+        };
+        observation.process_count = bounded_process_count(&self.root, 4096).ok();
+        observation.memory_bytes = read_scalar(&self.root.join("memory.current")).ok();
+        observation.memory_pressure_avg10_micros =
+            read_pressure_avg10(&self.root.join("memory.pressure")).ok();
+        observation.cpu_usage_micros = read_counter(&self.root.join("cpu.stat"), "usage_usec").ok();
+        if let Ok((read, write)) = read_io_bytes(&self.root.join("io.stat")) {
+            observation.io_read_bytes = Some(read);
+            observation.io_write_bytes = Some(write);
+        }
+        observation
     }
 
     pub fn actor_directory(&self, actor: &str) -> std::io::Result<PathBuf> {
@@ -283,6 +739,9 @@ impl CommandResources {
             return Err(io_error("command memory must fit the general allowance"));
         }
         let mut state = self.state.lock();
+        if state.sealed_producers.contains(actor) {
+            return Err(io_error("resource producer is sealed"));
+        }
         if let Some(entry) = state.entries.get(&key) {
             if requested.is_some() && entry.bytes.is_some_and(|previous| previous != bytes) {
                 return Err(io_error(
@@ -291,13 +750,81 @@ impl CommandResources {
             }
             return Ok(entry.current());
         }
+        self.journal.lock().append(JournalEvent::Admission {
+            producer: actor.to_owned(),
+            actor: actor.to_owned(),
+            command: id.to_owned(),
+            requested_bytes: bytes,
+        })?;
         state.entries.insert(
             key.clone(),
             Entry::new(CommandResourceStatus::Queued, Some(bytes)),
         );
+        state.active.insert(key.clone());
         state.queue.push(key.clone(), bytes);
         self.admit_waiters(&mut state);
         Ok(state.entries[&key].current())
+    }
+
+    /// Permanently fence new command identities from a retired producer.
+    pub fn seal_producer(&self, producer: &str) -> std::io::Result<()> {
+        if !valid_key(producer) {
+            return Err(io_error("invalid resource producer identity"));
+        }
+        let mut state = self.state.lock();
+        if state.sealed_producers.contains(producer) {
+            return Ok(());
+        }
+        if state.active.iter().any(|key| key.0 == producer) {
+            return Err(io_error("cannot seal a producer with active commands"));
+        }
+        self.journal.lock().append(JournalEvent::ProducerSealed {
+            producer: producer.to_owned(),
+        })?;
+        state.sealed_producers.insert(producer.to_owned());
+        let retired = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (key.0 == producer && !state.active.contains(key) && entry.directory.is_none())
+                    .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in retired {
+            state.entries[&key]
+                .status
+                .send_replace(CommandResourceStatus::Retired);
+            refresh_observation_indexes(&mut state, &key);
+            state.acknowledged.insert(key);
+        }
+        Ok(())
+    }
+
+    /// Acknowledge that the producer no longer needs a terminal result's detail.
+    /// The identity tombstone remains, so a delayed submission cannot revive it.
+    pub fn acknowledge(&self, actor: &str, id: &str) -> std::io::Result<()> {
+        let key = validate_key(actor, id)?;
+        let mut state = self.state.lock();
+        if !state.entries.contains_key(&key) {
+            return Err(io_error("unknown command"));
+        }
+        if state.active.contains(&key) {
+            return Err(io_error("cannot acknowledge an active command"));
+        }
+        if state.acknowledged.contains(&key) {
+            return Ok(());
+        }
+        self.journal.lock().append(JournalEvent::Acknowledged {
+            producer: actor.to_owned(),
+            actor: actor.to_owned(),
+            command: id.to_owned(),
+        })?;
+        state.entries[&key]
+            .status
+            .send_replace(CommandResourceStatus::Retired);
+        refresh_observation_indexes(&mut state, &key);
+        state.acknowledged.insert(key);
+        Ok(())
     }
 
     pub async fn acquire(
@@ -331,6 +858,7 @@ impl CommandResources {
     }
 
     fn admit_waiters(&self, state: &mut State) {
+        let mut changed = Vec::new();
         while let Some((key, bytes)) = state.queue.next() {
             let configured = self.configure_command(&key, bytes);
             #[expect(
@@ -343,6 +871,34 @@ impl CommandResources {
                 .expect("queued command has retained entry");
             match configured {
                 Ok(directory) => {
+                    let allocation = format!("{}/{}", key.0, key.1);
+                    if let Err(error) = self.journal.lock().append(JournalEvent::Allocation {
+                        producer: key.0.clone(),
+                        actor: key.0.clone(),
+                        command: key.1.clone(),
+                        requested_bytes: bytes,
+                        allocation,
+                    }) {
+                        let cleanup = std::fs::remove_dir(&directory);
+                        if cleanup.is_ok() {
+                            state.queue.release(&key);
+                            state.active.remove(&key);
+                        } else {
+                            entry.directory = Some(directory);
+                        }
+                        entry
+                            .status
+                            .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                                detail: match cleanup {
+                                    Ok(()) => format!("allocation publication failed: {error}"),
+                                    Err(cleanup) => format!(
+                                        "allocation publication failed: {error}; cleanup failed: {cleanup}"
+                                    ),
+                                },
+                            });
+                        changed.push(key);
+                        continue;
+                    }
                     entry.directory = Some(directory.clone());
                     entry
                         .status
@@ -350,6 +906,7 @@ impl CommandResources {
                 }
                 Err(error) => {
                     state.queue.release(&key);
+                    state.active.remove(&key);
                     entry
                         .status
                         .send_replace(CommandResourceStatus::CleanupUnconfirmed {
@@ -357,6 +914,10 @@ impl CommandResources {
                         });
                 }
             }
+            changed.push(key);
+        }
+        for key in changed {
+            refresh_observation_indexes(state, &key);
         }
     }
 
@@ -385,6 +946,11 @@ impl CommandResources {
             .get_mut(&validate_key(actor, id)?)
             .ok_or_else(|| io_error("unknown command"))?;
         if matches!(entry.current(), CommandResourceStatus::Admitted { .. }) {
+            self.journal.lock().append(JournalEvent::Started {
+                producer: actor.to_owned(),
+                actor: actor.to_owned(),
+                command: id.to_owned(),
+            })?;
             entry.started = true;
             entry.status.send_replace(CommandResourceStatus::Running);
         }
@@ -405,6 +971,21 @@ impl CommandResources {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         // A tombstone prevents a delayed submission after cancellation from starting.
+        if let std::collections::hash_map::Entry::Vacant(vacant) = state.entries.entry(key.clone())
+        {
+            self.journal
+                .lock()
+                .append(JournalEvent::CancellationFence {
+                    producer: actor.to_owned(),
+                    actor: actor.to_owned(),
+                    command: id.to_owned(),
+                })?;
+            vacant.insert(Entry::new(
+                CommandResourceStatus::CancelledBeforeStart,
+                None,
+            ));
+            return Ok(CommandResourceStatus::CancelledBeforeStart);
+        }
         let entry = state
             .entries
             .entry(key.clone())
@@ -429,10 +1010,18 @@ impl CommandResources {
             }
         }
         if released {
+            self.journal.lock().append(JournalEvent::Terminal {
+                producer: actor.to_owned(),
+                actor: actor.to_owned(),
+                command: id.to_owned(),
+                disposition: CommandResourceStatus::CancelledBeforeStart,
+            })?;
             entry
                 .status
                 .send_replace(CommandResourceStatus::CancelledBeforeStart);
             state.queue.release(&key);
+            state.active.remove(&key);
+            refresh_observation_indexes(&mut state, &key);
             self.admit_waiters(&mut state);
         }
         Ok(state.entries[&key].current())
@@ -441,7 +1030,19 @@ impl CommandResources {
     fn observe(&self) {
         let mut state = self.state.lock();
         let mut released = Vec::new();
-        for (key, entry) in &mut state.entries {
+        let active = state.active.iter().cloned().collect::<Vec<_>>();
+        for key in active.iter().cloned() {
+            let Some(entry) = state.entries.get_mut(&key) else {
+                tracing::error!(actor = %key.0, command = %key.1,
+                    "active command has no retained ownership entry");
+                continue;
+            };
+            if matches!(
+                entry.current(),
+                CommandResourceStatus::CleanupUnconfirmed { .. }
+            ) {
+                continue;
+            }
             let Some(dir) = entry.directory.as_ref() else {
                 continue;
             };
@@ -457,13 +1058,18 @@ impl CommandResources {
                 }
                 // Removal invalidates retained join descriptors, fencing a late spawn.
                 std::fs::remove_dir(dir)?;
-                entry.status.send_replace(if oom > 0 {
+                let disposition = if oom > 0 {
                     CommandResourceStatus::ResourceExhausted
-                } else if entry.started {
-                    CommandResourceStatus::Completed
                 } else {
-                    CommandResourceStatus::CancelledBeforeStart
-                });
+                    CommandResourceStatus::Completed
+                };
+                self.journal.lock().append(JournalEvent::Terminal {
+                    producer: key.0.clone(),
+                    actor: key.0.clone(),
+                    command: key.1.clone(),
+                    disposition: disposition.clone(),
+                })?;
+                entry.status.send_replace(disposition);
                 Ok(true)
             })();
             match result {
@@ -483,6 +1089,10 @@ impl CommandResources {
         }
         for key in released {
             state.queue.release(&key);
+            state.active.remove(&key);
+        }
+        for key in active {
+            refresh_observation_indexes(&mut state, &key);
         }
         self.admit_waiters(&mut state);
     }
@@ -547,6 +1157,29 @@ impl Drop for ActorStartReservation {
 mod tests {
     use super::*;
 
+    fn owner(root: &Path) -> CommandResources {
+        let policy = policy();
+        CommandResources {
+            root: root.to_path_buf(),
+            state: Mutex::new(State {
+                entries: HashMap::new(),
+                active: HashSet::new(),
+                cleanup_failures: HashSet::new(),
+                retained_allocations: HashSet::new(),
+                queue: Queue::new(
+                    policy.general_bytes,
+                    policy.protected_bytes,
+                    NATIVE_COMMAND_BYTES,
+                ),
+                sealed_producers: HashSet::new(),
+                acknowledged: HashSet::new(),
+            }),
+            journal: Mutex::new(Journal::ephemeral()),
+            policy,
+            actor_starts: Mutex::new(0),
+        }
+    }
+
     fn policy() -> CommandResourcePolicy {
         CommandResourcePolicy {
             machine_headroom_bytes: 6 * GIB,
@@ -592,5 +1225,224 @@ mod tests {
         // One byte more pending than headroom+start allows tips it over.
         assert_eq!(actor_start_decision(&policy, 14 * GIB, 7 * GIB), Ok(()));
         assert!(actor_start_decision(&policy, 14 * GIB, 7 * GIB + 1).is_err());
+    }
+
+    #[test]
+    fn replay_rejects_command_identity_reuse_with_a_changed_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        let events = vec![
+            JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+            },
+            JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: 2 * MIB,
+            },
+        ];
+        assert!(owner.reconcile(events).is_err());
+    }
+
+    #[test]
+    fn acknowledgment_compacts_detail_and_sealing_fences_late_submissions() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        let key = ("actor-1".into(), "command-1".into());
+        owner
+            .state
+            .lock()
+            .entries
+            .insert(key, Entry::new(CommandResourceStatus::Completed, Some(MIB)));
+
+        owner.acknowledge("actor-1", "command-1").unwrap();
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::Retired
+        );
+        owner.seal_producer("actor-1").unwrap();
+        assert!(owner.submit("actor-1", "late-command", MIB).is_err());
+    }
+
+    #[test]
+    fn cancellation_before_submission_is_a_durable_identity_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        owner
+            .reconcile(vec![JournalEvent::CancellationFence {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+            }])
+            .unwrap();
+        assert_eq!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CancelledBeforeStart
+        );
+    }
+
+    #[test]
+    fn recovery_fences_an_admission_without_relaunching_it() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        owner
+            .reconcile(vec![JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+            }])
+            .unwrap();
+
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CancelledBeforeStart
+        );
+        assert_eq!(owner.observation().active, 0);
+        assert!(!root.path().join("actor-1/command-1").exists());
+        assert_eq!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CancelledBeforeStart
+        );
+    }
+
+    fn fake_allocation(root: &Path, actor: &str, command: &str, populated: u64) {
+        let directory = root.join(actor).join(command);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("memory.max"), MIB.to_string()).unwrap();
+        std::fs::write(
+            directory.join("cgroup.events"),
+            format!("populated {populated}\n"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("memory.events"), "oom_kill 0\n").unwrap();
+    }
+
+    fn allocated_events(started: bool) -> Vec<JournalEvent> {
+        let mut events = vec![
+            JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+            },
+            JournalEvent::Allocation {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+                allocation: "actor-1/command-1".into(),
+            },
+        ];
+        if started {
+            events.push(JournalEvent::Started {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+            });
+        }
+        events
+    }
+
+    #[test]
+    fn recovery_adopts_a_recorded_populated_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 1);
+        let owner = owner(root.path());
+
+        owner.reconcile(allocated_events(false)).unwrap();
+
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::Running
+        );
+        let observation = owner.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+    }
+
+    #[test]
+    fn recovery_retains_a_started_empty_allocation_as_unconfirmed() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 0);
+        let owner = owner(root.path());
+
+        owner.reconcile(allocated_events(true)).unwrap();
+
+        assert!(matches!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = owner.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+    }
+
+    #[test]
+    fn recovery_retains_an_orphaned_allocation_without_inventing_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 1);
+        let owner = owner(root.path());
+
+        owner.reconcile(Vec::new()).unwrap();
+
+        assert!(matches!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = owner.observation();
+        assert_eq!(observation.active, 0);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+    }
+
+    #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn retained_history_does_not_scale_resource_polling() {
+        fn rss_kib() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0)
+        }
+        fn poll(owner: &CommandResources, count: usize) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..count {
+                std::hint::black_box(owner.observation());
+            }
+            started.elapsed().as_nanos() / count as u128
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        let empty_ns = poll(&owner, 2_000);
+        let rss_before = rss_kib();
+        {
+            let mut state = owner.state.lock();
+            for ordinal in 0..100_000 {
+                state.entries.insert(
+                    ("retired".into(), format!("command-{ordinal}")),
+                    Entry::new(CommandResourceStatus::Completed, Some(MIB)),
+                );
+            }
+            rebuild_observation_indexes(&mut state);
+        }
+        let retained_ns = poll(&owner, 2_000);
+        let observation = owner.observation();
+        eprintln!(
+            "resource_poll empty_ns={empty_ns} retained_ns={retained_ns} historical={} rss_delta_kib={}",
+            observation.historical,
+            rss_kib().saturating_sub(rss_before),
+        );
+        assert_eq!(observation.historical, 100_000);
+        assert_eq!(observation.active, 0);
     }
 }

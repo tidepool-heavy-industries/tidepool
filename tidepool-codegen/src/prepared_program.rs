@@ -48,13 +48,40 @@ mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;
 mod answer;
+mod construction;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
-pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};
+pub use answer::{AnswerBuildError, MAX_ANSWER_DEPTH};
+
+struct ActiveIntrinsicScope<'a> {
+    machine: &'a crate::machine_state::MachineState,
+}
+
+impl<'a> ActiveIntrinsicScope<'a> {
+    fn new(
+        machine: &'a crate::machine_state::MachineState,
+        program: &'a CompiledProgram,
+        statics: &'a tidepool_heap::static_region::StaticRegionCatalog,
+        registry: &'a BTreeMap<usize, DescriptorMetadata>,
+    ) -> Result<Self, ExecutionError> {
+        if !machine.install_active_intrinsic_program(program, statics, registry) {
+            return Err(ExecutionError::Invariant(
+                "a nested managed intrinsic operation is already active",
+            ));
+        }
+        Ok(Self { machine })
+    }
+}
+
+impl Drop for ActiveIntrinsicScope<'_> {
+    fn drop(&mut self) {
+        self.machine.clear_active_intrinsic_program();
+    }
+}
 pub use machine::{
-    ImportBindings, ParkRequest, PreparedCallOptions, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
-    ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
+    ImportBindings, ManagedBuilder, ManagedField, ManagedNode, ParkRequest, PreparedCallOptions,
+    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter,
+    PreparedResult, PreparedResultBatch, ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
 };
 pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]
@@ -73,6 +100,7 @@ mod forcing;
 #[cfg(test)]
 mod foreign_apply_tests;
 mod formatting;
+mod json;
 mod plan;
 mod primitives;
 #[cfg(test)]
@@ -133,6 +161,8 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("JSON operation was admitted without a program JSON layout")]
+    MissingJsonLayout,
     #[error("the program's root block could not be allocated")]
     RootBlock,
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
@@ -241,12 +271,27 @@ unsafe extern "C" fn prepared_resolve_call(
     vmctx: *mut crate::context::VMContext,
     header: u64,
     demand: *const Signature,
+    logical_cursor: u64,
+    plan_out: *mut u64,
 ) -> u64 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     let masked = (header as usize) & !7;
-    machine
-        .resolve_prepared_call(masked, unsafe { &*demand })
-        .map_or(0, |code| code as u64)
+    let Some(resolution) =
+        machine.resolve_prepared_application(masked, unsafe { &*demand }, logical_cursor as usize)
+    else {
+        return 0;
+    };
+    let kind = match resolution.continuation {
+        crate::machine_state::PreparedCallContinuation::Return => apply::RESOLUTION_RETURN,
+        crate::machine_state::PreparedCallContinuation::Terminal => apply::RESOLUTION_TERMINAL,
+        crate::machine_state::PreparedCallContinuation::Apply => apply::RESOLUTION_APPLY,
+    };
+    unsafe {
+        plan_out.write(resolution.logical_consumed as u64);
+        plan_out.add(1).write(resolution.physical_consumed as u64);
+        plan_out.add(2).write(kind);
+    }
+    resolution.code as u64
 }
 
 /// Report an exhausted application search exactly once. `object` is the
@@ -274,13 +319,10 @@ unsafe extern "C" fn prepared_unresolved_call(
 /// the caller returns the reference unchanged. Never a code address.
 pub(crate) const ENTER_EVALUATED: u64 = 1;
 
-/// Resolve how to enter an untagged object `entry.rs`'s per-program chain
-/// does not know. A foreign thunk/function/PAP resolves to its owning
-/// program's `prepared_enter`. A constructor is a value whatever program
-/// declared it: interned constructors are machine-shared and have no owner
-/// row, so they answer [`ENTER_EVALUATED`] from the live descriptor space.
-/// Returns 0 on a miss -- no installed program owns the object, an
-/// integrity failure rather than an unresolved callee.
+/// Resolve how to enter an untagged object `entry.rs`'s thunk chain does not
+/// know. Foreign thunks resolve to their owner's `prepared_enter`; functions,
+/// PAPs, and constructors are already values and are recognized through the
+/// descriptor space without a generated header enumeration.
 unsafe extern "C" fn prepared_resolve_enter(
     vmctx: *mut crate::context::VMContext,
     object: u64,
@@ -290,7 +332,12 @@ unsafe extern "C" fn prepared_resolve_enter(
     if let Some(code) = machine.resolve_prepared_enter(header) {
         return code as u64;
     }
-    if unsafe { machine.prepared_constructor_tag(object as usize) }.is_ok() {
+    if matches!(
+        unsafe { machine.prepared_object_kind(object as usize) },
+        Ok(tidepool_heap::execution_descriptor::ObjectKind::Function
+            | tidepool_heap::execution_descriptor::ObjectKind::Pap
+            | tidepool_heap::execution_descriptor::ObjectKind::Constructor)
+    ) {
         return ENTER_EVALUATED;
     }
     machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
@@ -353,17 +400,11 @@ pub struct CompiledProgram {
     pub(crate) callables: Vec<resolve::CallableExport>,
     /// Pins every demand address embedded in the generated resolver calls.
     _dispatchers: apply::Dispatchers,
-    /// This program's own `prepared_enter` FuncId. `PreparedMachine::install`
-    /// registers it as the owner for every header in `enter_owned_headers`.
-    pub(crate) enter: FuncId,
-    /// Every thunk/function/PAP descriptor header this program owns and its
-    /// `prepared_enter` (the `enter` field above) knows how to force.
-    /// `PreparedMachine::install` registers these against `enter` so
-    /// `prepared_resolve_enter` can dispatch foreign headers to their
-    /// owning program, and retirement removes exactly these rows. Shared
-    /// descriptors (interned constructors, external wrappers) are never
-    /// listed: another program may rely on them after this one retires.
-    pub(crate) enter_owned_headers: Vec<usize>,
+    /// Exact per-thunk entry state machines, keyed by descriptor header.
+    pub(crate) thunk_entries: Vec<(usize, FuncId)>,
+    /// Every descriptor header with a published call or enter record. Shared
+    /// descriptors are excluded so retirement removes only this owner.
+    pub(crate) dispatch_owned_headers: Vec<usize>,
 }
 
 impl CompiledProgram {
@@ -564,6 +605,14 @@ impl CompiledProgram {
                     time::prepared_parse_iso8601 as *const u8,
                 ),
                 (
+                    json::PARSE_JSON_HOST,
+                    json::prepared_parse_json as *const u8,
+                ),
+                (
+                    json::ENCODE_JSON_HOST,
+                    json::prepared_encode_json as *const u8,
+                ),
+                (
                     "prepared_no_success_returned",
                     no_success::unexpected_success as *const u8,
                 ),
@@ -683,6 +732,12 @@ impl CompiledProgram {
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut prepared_resolve_call_signature =
             ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
         prepared_resolve_call_signature
             .params
             .push(AbiParam::new(types::I64));
@@ -830,7 +885,7 @@ impl CompiledProgram {
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
         phases.declare = clock.lap();
         let mut category_start = compile_phases::NativeCounts::read(&pipeline);
-        let callables = apply::emit_dispatchers(
+        let mut callables = apply::emit_dispatchers(
             &plan,
             &dispatchers,
             &functions,
@@ -844,6 +899,15 @@ impl CompiledProgram {
             prepared_unresolved_call,
             &mut pipeline,
         )?;
+        for (index, callable) in callables.iter_mut().enumerate() {
+            callable.function = adapter::emit_dynamic_adapter(
+                &mut pipeline,
+                &format!("prepared_dynamic_adapter_{index}"),
+                callable.function,
+                &callable.signature,
+                &profile,
+            )?;
+        }
         native_metrics.category("dispatchers", category_start, &pipeline);
         phases.emit_dispatchers = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
@@ -859,6 +923,7 @@ impl CompiledProgram {
                     id,
                     output,
                     results,
+                    &functions,
                     &dispatchers,
                     prepared_gc,
                     prepared_poll,
@@ -879,6 +944,7 @@ impl CompiledProgram {
                 &plan,
                 id,
                 body,
+                &functions,
                 &dispatchers,
                 prepared_gc,
                 prepared_poll,
@@ -892,7 +958,7 @@ impl CompiledProgram {
         native_metrics.category("thunks", category_start, &pipeline);
         phases.emit_thunks = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
-        let thunk_entries = plan
+        let thunk_metadata = plan
             .thunks
             .iter()
             .map(|(&id, thunk)| entry::ThunkEntry {
@@ -902,21 +968,27 @@ impl CompiledProgram {
                 results: thunk.signature.results.clone(),
             })
             .collect::<Vec<_>>();
-        let mut enter_evaluated = plan.constructors.clone();
-        enter_evaluated.extend(
-            plan.functions
-                .values()
-                .map(|function| Arc::clone(&function.descriptor)),
-        );
-        enter_evaluated.extend(
-            plan.pap_layouts
-                .values()
-                .map(|pap| Arc::clone(&pap.descriptor)),
-        );
+        let thunk_entries = thunk_metadata
+            .iter()
+            .enumerate()
+            .map(|(index, thunk)| {
+                pipeline
+                    .declare_function_with_signature(
+                        &format!("prepared_thunk_enter_{index}"),
+                        Linkage::Local,
+                        &entry::signature(),
+                    )
+                    .map(|function| (thunk.descriptor.initial_header_word(), function))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Evaluated objects are classified by the machine's descriptor space;
+        // only thunk state machines require owner-specific generated code.
+        let enter_evaluated = Vec::new();
         entry::emit_prepared_enter(
             &mut pipeline,
             prepared_enter,
-            &thunk_entries,
+            prepared_enter,
+            &[],
             &enter_evaluated,
             prepared_poll,
             prepared_stack_overflow,
@@ -926,6 +998,22 @@ impl CompiledProgram {
             prepared_recorded_failure,
             write_barrier,
         )?;
+        for (thunk, &(_, function)) in thunk_metadata.iter().zip(&thunk_entries) {
+            entry::emit_prepared_enter(
+                &mut pipeline,
+                function,
+                prepared_enter,
+                std::slice::from_ref(thunk),
+                &enter_evaluated,
+                prepared_poll,
+                prepared_stack_overflow,
+                prepared_bad_state,
+                prepared_blackhole,
+                prepared_resolve_enter,
+                prepared_recorded_failure,
+                write_barrier,
+            )?;
+        }
         native_metrics.category("enter", category_start, &pipeline);
         phases.emit_enter = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
@@ -1061,15 +1149,13 @@ impl CompiledProgram {
             .map(|descriptor| descriptor.initial_header_word())
             .chain(plan.externals.headers())
             .collect::<std::collections::HashSet<_>>();
-        let enter_owned_headers = thunk_entries
+        let dispatch_owned_headers = thunk_entries
             .iter()
-            .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
-            .chain(
-                enter_evaluated
-                    .iter()
-                    .map(|descriptor| descriptor.initial_header_word()),
-            )
+            .map(|&(header, _)| header)
+            .chain(callables.iter().map(|callable| callable.header))
             .filter(|header| !shared.contains(header))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let byte_tops = plan
             .top_bindings
@@ -1118,8 +1204,8 @@ impl CompiledProgram {
             force_adapter,
             callables,
             _dispatchers: dispatchers,
-            enter: prepared_enter,
-            enter_owned_headers,
+            thunk_entries,
+            dispatch_owned_headers,
         })
     }
 

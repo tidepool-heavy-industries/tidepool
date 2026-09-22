@@ -9,12 +9,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 - A cache key must describe the exact invocation and every readable input.
   Unknown flags or unenumerable inputs make an invocation explicitly
   uncacheable rather than silently under-keyed.
-- Keep eval keys path-identity-sensitive and relocatable invocation keys based
-  on root-relative module identity. Normalize diagnostics before caching so
-  temporary absolute paths do not escape.
-- `.hs`, `.hs-boot`, `.lhs`, and `.lhs-boot` share one dependency-manifest
-  policy. CPP inputs remain uncacheable until their dependency closure can be
-  proven.
+- Use one immutable recipe and named bundle. Authored dependencies retain path
+  identity; generated source markers exclude scratch-directory identity.
+  Normalize diagnostics before caching so temporary paths do not escape.
+- Compiler evidence owns consumed bytes and import-resolution witnesses.
+  Missing, incomplete, or incompatible evidence cannot yield a cache hit.
+  CPP, TH and other untracked inputs remain uncacheable until proven complete.
 - `tidepool-extract-cmd` stays the small invocation builder. Do not move cache
   or runtime policy into that dependency leaf.
 - Cache tests must cover invalidation, relocation, warnings, and uncacheable

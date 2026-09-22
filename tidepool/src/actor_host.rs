@@ -12,8 +12,6 @@ mod cell_compile_cost_tests;
 mod command_jobs_tests;
 mod commands;
 #[cfg(test)]
-mod compiler_warmup_tests;
-#[cfg(test)]
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
@@ -74,12 +72,29 @@ use tidepool_actor::{
 };
 use tidepool_agent::interactive::InputProducerId;
 use tidepool_agent::{
-    native_interactive_backend, read_interactive_binding, BackendThreadId, InputOperationId,
-    InputPurpose, InteractiveAgentBackend, InteractiveAgentInstallation, InteractiveAgentSpec,
-    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode,
-    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread, ReasoningEffort,
+    copy_interactive_binding, native_interactive_backend, read_interactive_binding,
+    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
+    InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveInputEnvelope,
+    InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode, InteractiveNativeSandbox,
+    InteractiveNativeToolPolicy, InteractivePolicyMount, QueueReadyThread, ReasoningEffort,
 };
+
+include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
+
+#[cfg(test)]
+mod usage_pointer_tests {
+    #[test]
+    fn shipped_usage_table_resolves_known_callable_and_uses_path_locators() {
+        let call = super::SHOAL_USAGE_POINTERS
+            .iter()
+            .find(|(identifier, _)| *identifier == "call")
+            .map(|(_, locator)| *locator);
+        assert!(call.is_some());
+        assert!(call.is_some_and(|locator| {
+            locator.starts_with(".shoal/checks/") || locator.starts_with(".shoal/skills/")
+        }));
+    }
+}
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
@@ -106,7 +121,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
-use self::host_incarnation::HostIncarnationLease;
+pub(crate) use self::host_incarnation::HostIncarnationLease;
 use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot, SharedOverlayResource};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
@@ -262,6 +277,63 @@ impl Drop for ActorWorkspaceCustody {
 }
 
 impl ActorForkWorkspaceAdmission {
+    fn recover_workspace(
+        &self,
+        predecessor: ActorRef,
+        successor: ActorRef,
+        worktree: &str,
+        role: tidepool_actor::ActorRole,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        if !WorktreeId::is_path_safe(worktree) {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "invalid recovery worktree id".into(),
+            });
+        }
+        let worktree = WorktreeId::from_raw(worktree);
+        if self
+            .manager
+            .lookup(&worktree)
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?
+            .is_none()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "recovery worktree is not registered".into(),
+            });
+        }
+        let predecessor_principal = WorktreePrincipal::exact_actor(
+            &self.runtime,
+            predecessor.id.0,
+            predecessor.incarnation.0,
+        );
+        let successor_principal =
+            WorktreePrincipal::exact_actor(&self.runtime, successor.id.0, successor.incarnation.0);
+        let binding = self
+            .bindings
+            .lock()
+            .recover_active(
+                &worktree,
+                &predecessor_principal,
+                &successor_principal,
+                current_time_ms(),
+            )
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
+        self.authority
+            .install_grant(successor.into(), worktree_grant(role));
+        Ok(Arc::new(ActorWorkspaceCustody {
+            runtime: self.runtime.clone(),
+            bindings: self.bindings.clone(),
+            binding: Mutex::new(Some(binding)),
+            actor: successor,
+            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
+            workspace: None,
+            inheritance_notice: None,
+        }))
+    }
+
     fn bind_workspace(
         &self,
         actor: ActorRef,
@@ -435,6 +507,442 @@ pub struct ActorHostConfig {
     pub jev: Option<tidepool_actor::JevBackendHandle>,
 }
 
+const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
+
+fn hosted_operation_journal(run_root: &Path, actor: tidepool_actor::ActorId) -> PathBuf {
+    run_root
+        .join("hosted-operations")
+        .join(format!("{}.v1.jsonl", actor.0))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessRecoveryRecord {
+    version: u32,
+    launch_id: String,
+    recovery_secret: String,
+    supervisor_socket: PathBuf,
+    socket_root: PathBuf,
+    retired: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessRecoveryCheckpoint {
+    version: u32,
+    launch_id: String,
+    observation: tidepool_node::ProcessSupervisorObservation,
+    operation_pending: bool,
+    error: Option<String>,
+}
+
+pub(crate) struct PredecessorRecovery {
+    pub(crate) stopped: usize,
+    pub(crate) unavailable: Vec<String>,
+}
+
+impl PredecessorRecovery {
+    pub(crate) fn root_available(&self) -> bool {
+        !self.unavailable.iter().any(|actor| actor.starts_with("1-"))
+    }
+}
+
+/// Stop each predecessor whose exact supervisor identity remains provable.
+/// Unverifiable children remain unavailable without preventing independent
+/// actors from recovering. Composition separately rejects an unverifiable root.
+pub(crate) fn stop_predecessor_processes(
+    run_root: &Path,
+) -> Result<PredecessorRecovery, std::io::Error> {
+    let mut report = PredecessorRecovery {
+        stopped: 0,
+        unavailable: Vec::new(),
+    };
+    for actor in std::fs::read_dir(run_root)? {
+        let actor = actor?;
+        if !actor.file_type()?.is_dir() {
+            continue;
+        }
+        let actor_name = actor.file_name().to_string_lossy().into_owned();
+        let mut components = actor_name.split('-');
+        let actor_directory = components
+            .next()
+            .is_some_and(|part| part.parse::<u64>().is_ok())
+            && components
+                .next()
+                .is_some_and(|part| part.parse::<u64>().is_ok())
+            && components.next().is_none();
+        if !actor_directory {
+            continue;
+        }
+        let record_path = actor.path().join(PROCESS_RECOVERY_RECORD);
+        let bytes = match std::fs::read(&record_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                report.unavailable.push(actor_name);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let mut record: ProcessRecoveryRecord = match serde_json::from_slice(&bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(actor = %actor_name, %error, "corrupt predecessor evidence");
+                report.unavailable.push(actor_name);
+                continue;
+            }
+        };
+        if record.version != 1 {
+            report.unavailable.push(actor_name);
+            continue;
+        }
+        if record.retired {
+            continue;
+        }
+        let terminal = (|| -> Result<_, std::io::Error> {
+            if record.supervisor_socket.exists() {
+                let (mut recovery, _) = tidepool_node::ProcessSupervisorRecovery::recover(
+                    record.supervisor_socket.clone(),
+                    record.launch_id.clone(),
+                    record.recovery_secret.clone(),
+                    PROCESS_OPERATION_TIMEOUT,
+                )
+                .map_err(std::io::Error::other)?;
+                let observation = recovery
+                    .stop(PROCESS_OPERATION_TIMEOUT)
+                    .map_err(std::io::Error::other)?;
+                recovery
+                    .finalize(PROCESS_OPERATION_TIMEOUT)
+                    .map_err(std::io::Error::other)?;
+                Ok(observation)
+            } else {
+                let checkpoint_path = record
+                    .supervisor_socket
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("supervisor socket has no parent"))?
+                    .join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT);
+                let checkpoint: ProcessRecoveryCheckpoint =
+                    serde_json::from_slice(&std::fs::read(&checkpoint_path).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "predecessor process evidence unavailable at {}: {error}",
+                            checkpoint_path.display()
+                        ))
+                    })?)
+                    .map_err(std::io::Error::other)?;
+                if checkpoint.version != tidepool_node::PROCESS_SUPERVISOR_VERSION
+                    || checkpoint.launch_id != record.launch_id
+                    || checkpoint.operation_pending
+                    || checkpoint.error.is_some()
+                {
+                    return Err(std::io::Error::other(format!(
+                        "predecessor process evidence is unresolved at {}",
+                        checkpoint_path.display()
+                    )));
+                }
+                Ok(checkpoint.observation)
+            }
+        })();
+        let terminal = match terminal {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                tracing::warn!(actor = %actor_name, %error, "predecessor actor remains unavailable");
+                report.unavailable.push(actor_name);
+                continue;
+            }
+        };
+        if !matches!(
+            terminal,
+            tidepool_node::ProcessSupervisorObservation::ProcessStopped
+                | tidepool_node::ProcessSupervisorObservation::NotSpawned
+        ) {
+            report.unavailable.push(actor_name);
+            continue;
+        }
+        record.retired = true;
+        tidepool_atomic_write::write_durable(
+            &record_path,
+            &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
+        )
+        .map_err(std::io::Error::from)?;
+        std::fs::remove_dir_all(&record.socket_root)?;
+        report.stopped += 1;
+        // Process evidence is enough to prove that replacing the root is safe,
+        // but it does not reconstruct a child actor's lost Haskell state,
+        // lineage, or mailbox. Keep that child visible as unavailable until an
+        // actor-owned durable record can restore those identities.
+        if !actor_name.starts_with("1-") {
+            report.unavailable.push(actor_name);
+        }
+    }
+    Ok(report)
+}
+
+fn recovery_role(
+    durable: &tidepool_actor::DurableActorAdmission,
+    research_policy: tidepool_actor::ResearchPolicy,
+) -> Option<tidepool_actor::EffectiveRole> {
+    let role = match durable.role.as_str() {
+        "research" => tidepool_actor::EffectiveRole::research(),
+        "coding" => tidepool_actor::EffectiveRole::coding(),
+        "scaffolding" => {
+            tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
+                maximum_depth: durable.descendant_depth,
+                maximum_active_children: durable.descendant_active_children,
+            })
+        }
+        "integration" => tidepool_actor::EffectiveRole::integration(),
+        // A second root or an inherited role carries authority that cannot be
+        // reconstructed from the compact durable role name alone.
+        "root" | "inherited" => return None,
+        _ => return None,
+    };
+    Some(role.with_research_policy(research_policy))
+}
+
+fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
+    let path = run_root
+        .join(format!("{}-{}", actor.id.0, actor.incarnation.0))
+        .join(PROCESS_RECOVERY_RECORD);
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProcessRecoveryRecord>(&bytes).ok())
+        .is_some_and(|record| record.version == 1 && record.retired)
+}
+
+fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
+    Ok(ActorRef {
+        id: actor.id,
+        incarnation: tidepool_actor::Incarnation(
+            actor
+                .incarnation
+                .0
+                .checked_add(1)
+                .ok_or_else(|| runtime_error("actor incarnation space exhausted"))?,
+        ),
+    })
+}
+
+fn durable_root_identity(
+    records: &[tidepool_actor::DurableActorRecord],
+    accepted_source: Option<&str>,
+) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
+    records
+        .iter()
+        .filter(|record| {
+            record.admission.role == "root"
+                && record.admission.creator.is_none()
+                && record.admission.supervisor_parent.is_none()
+                && record.admission.context_parent.is_none()
+        })
+        .max_by_key(|record| record.admission.actor.incarnation)
+        .filter(|record| {
+            record.terminal.is_none()
+                && record.application.as_ref().is_some_and(|application| {
+                    application.conversation.is_some()
+                        && application.accepted_source.as_deref() == accepted_source
+                })
+        })
+        .map(|record| {
+            next_actor_incarnation(record.admission.actor)
+                .map(|successor| (record.admission.actor, successor))
+        })
+        .transpose()
+}
+
+fn contains_durable_root_admission(records: &[tidepool_actor::DurableActorRecord]) -> bool {
+    records.iter().any(|record| {
+        record.admission.role == "root"
+            && record.admission.creator.is_none()
+            && record.admission.supervisor_parent.is_none()
+            && record.admission.context_parent.is_none()
+    })
+}
+
+fn latest_recoverable_actor_records(
+    records: &[tidepool_actor::DurableActorRecord],
+    root: ActorRef,
+) -> Vec<tidepool_actor::DurableActorRecord> {
+    let mut latest = BTreeMap::new();
+    for record in records
+        .iter()
+        .filter(|record| record.admission.actor.id != root.id)
+    {
+        latest
+            .entry(record.admission.actor.id)
+            .and_modify(|current: &mut &tidepool_actor::DurableActorRecord| {
+                if record.admission.actor.incarnation > current.admission.actor.incarnation {
+                    *current = record;
+                }
+            })
+            .or_insert(record);
+    }
+    latest
+        .into_values()
+        .filter(|record| {
+            record.terminal.is_none()
+                && record
+                    .application
+                    .as_ref()
+                    .is_some_and(|application| application.conversation.is_some())
+        })
+        .cloned()
+        .collect()
+}
+
+async fn recover_prior_actors(
+    forest: &Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
+    run_root: &Path,
+    root: ActorRef,
+    incarnation: tidepool_actor::Incarnation,
+    records: &[tidepool_actor::DurableActorRecord],
+    program: Arc<tidepool_runtime::session::CompiledTurn>,
+    research_policy: tidepool_actor::ResearchPolicy,
+    worktree_admission: &ActorForkWorkspaceAdmission,
+    accepted_source: Option<&str>,
+) -> BTreeMap<ActorRef, (ActorRef, QueueReadyThread)> {
+    if incarnation == tidepool_actor::Incarnation::FIRST {
+        return BTreeMap::new();
+    }
+    let mut pending = latest_recoverable_actor_records(records, root);
+    let mut recovered = BTreeMap::new();
+    let mut recovered_ids = std::collections::BTreeSet::from([root.id]);
+    loop {
+        let mut progressed = false;
+        let mut remaining = Vec::new();
+        for record in pending {
+            let durable = &record.admission;
+            let parents_ready = [
+                durable.creator,
+                durable.supervisor_parent,
+                durable.context_parent,
+            ]
+            .into_iter()
+            .flatten()
+            .all(|parent| recovered_ids.contains(&parent.id));
+            if !parents_ready {
+                remaining.push(record);
+                continue;
+            }
+            let Some(application) = &record.application else {
+                continue;
+            };
+            let Some(expected_conversation) = application.conversation.as_deref() else {
+                continue;
+            };
+            if application.accepted_source.as_deref() != accepted_source {
+                tracing::warn!(actor = %durable.actor,
+                    recorded_source = ?application.accepted_source,
+                    current_source = ?accepted_source,
+                    "durable actor accepted-source identity cannot be verified");
+                continue;
+            }
+            let Some(role) = recovery_role(durable, research_policy) else {
+                tracing::warn!(actor = %durable.actor, role = %durable.role,
+                    "durable actor role cannot be reconstructed");
+                continue;
+            };
+            if durable.launch_worktrees.len() > 1
+                || durable.source_layer.iter().any(|path| !path.exists())
+                || !predecessor_process_was_retired(run_root, durable.actor)
+            {
+                tracing::warn!(actor = %durable.actor,
+                    "durable actor resources are not independently recoverable");
+                continue;
+            }
+            if let Err(error) = crate::host_dynamic_tools::validate_operation_recovery(
+                hosted_operation_journal(run_root, durable.actor.id),
+            ) {
+                tracing::warn!(actor = %durable.actor, %error,
+                    "durable actor operation ownership cannot be verified");
+                continue;
+            }
+            let thread = match read_interactive_binding(&application.binding_path).await {
+                Ok(thread) if thread.id().0 == expected_conversation => thread,
+                Ok(_) => {
+                    tracing::warn!(actor = %durable.actor,
+                        "durable actor conversation binding changed identity");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor conversation binding is unavailable");
+                    continue;
+                }
+            };
+            let successor = match next_actor_incarnation(durable.actor) {
+                Ok(successor) => successor,
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor incarnation cannot advance");
+                    continue;
+                }
+            };
+            let custody = match durable.launch_worktrees.as_slice() {
+                [] => None,
+                [worktree] => match worktree_admission.recover_workspace(
+                    durable.actor,
+                    successor,
+                    worktree,
+                    role.role(),
+                ) {
+                    Ok(custody) => Some(custody),
+                    Err(error) => {
+                        tracing::warn!(actor = %durable.actor, detail = %error.detail,
+                            "durable actor worktree custody could not be recovered");
+                        continue;
+                    }
+                },
+                _ => {
+                    tracing::warn!(actor = %durable.actor,
+                        "durable actor names more than one launch worktree");
+                    continue;
+                }
+            };
+            let (actor, task) = match forest
+                .recover_durable_program_root(durable, role, program.clone(), custody)
+                .await
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor program could not be reconstructed");
+                    continue;
+                }
+            };
+            drop(task);
+            let binding = run_root
+                .join(format!(
+                    "{}-{}",
+                    actor.identity().id.0,
+                    actor.identity().incarnation.0
+                ))
+                .join("binding.json");
+            if let Err(error) = copy_interactive_binding(&binding, &thread).await {
+                tracing::warn!(actor = %durable.actor, %error,
+                    "recovered actor binding could not be republished");
+                let _ = actor
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: "recovered conversation binding could not be republished".into(),
+                    })
+                    .await;
+                continue;
+            }
+            recovered_ids.insert(actor.identity().id);
+            recovered.insert(actor.identity(), (durable.actor, thread));
+            progressed = true;
+        }
+        if remaining.is_empty() || !progressed {
+            for record in remaining {
+                tracing::warn!(actor = %record.admission.actor,
+                    "durable actor lineage has an unavailable predecessor");
+            }
+            break;
+        }
+        pending = remaining;
+    }
+    recovered
+}
+
 impl ActorHostConfig {
     /// Whether this run's captured workspace supplies the Jev authoring
     /// surface. Jev is pinned source a project opts into through
@@ -594,6 +1102,18 @@ pub enum ActorHostReadiness {
         root: ActorRef,
         thread: QueueReadyThread,
     },
+    /// One predecessor conversation was independently verified and its
+    /// replacement native application was admitted for the same logical actor.
+    ActorRecovered {
+        predecessor: ActorRef,
+        actor: ActorRef,
+    },
+    /// Durable evidence was insufficient to reconstruct one actor. This is
+    /// reported even when the actor had no native-process directory.
+    ActorUnavailable {
+        predecessor: ActorRef,
+        reason: String,
+    },
 }
 
 struct InteractiveDeployment {
@@ -614,6 +1134,7 @@ struct InteractiveDeployment {
     connection: InteractiveConnection,
     service: hosted_retirement::HostedOwner,
     socket_directory: SocketDirectory,
+    process_recovery_record: PathBuf,
     worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
@@ -1396,6 +1917,9 @@ struct InteractiveFleet {
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
     source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
+    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
+    recovered_root_predecessor: Option<ActorRef>,
 }
 
 #[derive(Clone)]
@@ -1408,16 +1932,32 @@ struct InteractiveLaunchContext {
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
+    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
-pub async fn run(
+fn active_source_identity(
+    run_root: &Path,
+    has_workspace_source: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !has_workspace_source {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::shoal::source::SourceLayer::new(run_root)
+            .read_active()?
+            .ok_or("root compilation did not publish its accepted source revision")?
+            .identity,
+    ))
+}
+
+pub(crate) async fn run(
     mut config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    host_incarnation: HostIncarnationLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
-    let host_incarnation = HostIncarnationLease::claim(&run_root)?;
-
     let workspace = config.workspace.clone();
     let (worktrees, bindings) =
         tokio::task::spawn_blocking(move || actor_worktree_resources(&workspace)).await??;
@@ -1434,6 +1974,9 @@ pub async fn run(
     let backend = native_interactive_backend(config.interactive_agent.clone());
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
+    let actor_recovery =
+        tidepool_actor::ActorRecoveryJournal::open(run_root.join("actor-lifecycle.v1.jsonl"))?;
+    let prior_actor_records = actor_recovery.records();
     let (source, root, program) = compile_root(
         &config,
         &run_root,
@@ -1441,72 +1984,151 @@ pub async fn run(
         worktree_authority.clone(),
         source_layers.as_ref(),
     )?;
-    // The agent client takes tens of seconds to boot and a reader takes longer
-    // still to write anything, so the run's first-touch compile cost is paid
-    // here, in the background, instead of inside the first cell. A failure
-    // costs the run nothing it was going to have anyway.
-    {
-        let haskell_root = config.haskell_root.clone();
-        let workspace_inputs = config.workspace_inputs.clone();
-        let warm_root = run_root.clone();
-        let workbench_imports = source.workbench_import_text();
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) = warm_compiler(
-                &haskell_root,
-                workspace_inputs.as_ref(),
-                &warm_root,
-                &workbench_imports,
-            ) {
-                tracing::warn!(%error, "compiler warm-up did not complete");
-            }
-        });
-    }
+    let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
+    let worktree_admission = fork_workspace_admission(
+        worktrees.clone(),
+        worktree_authority.clone(),
+        bindings.clone(),
+        runtime_namespace(&run_root),
+        Some(NativeForkAdmission {
+            owners: application_owners.clone(),
+            backend: backend.clone(),
+            layout: Some(WorkspaceLayout {
+                run_namespace: runtime_namespace(&run_root),
+                source_root: config.workspace.clone(),
+                source_exclude: config.source_exclude.clone(),
+                root_imports: Arc::default(),
+                worktrees: worktrees.clone(),
+                backend: backend.clone(),
+                base_prompt: FrozenBasePrompt::materialize_selected(
+                    &run_root,
+                    config
+                        .workspace_inputs
+                        .as_ref()
+                        .and_then(|inputs| inputs.prompts.get("core"))
+                        .map(String::as_str),
+                    config.jev_surface(),
+                )?,
+            }),
+        }),
+    );
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
         descriptor.placement().session,
         machine,
-        Some(fork_workspace_admission(
-            worktrees.clone(),
-            worktree_authority.clone(),
-            bindings.clone(),
-            runtime_namespace(&run_root),
-            Some(NativeForkAdmission {
-                owners: application_owners.clone(),
-                backend: backend.clone(),
-                layout: Some(WorkspaceLayout {
-                    run_namespace: runtime_namespace(&run_root),
-                    source_root: config.workspace.clone(),
-                    source_exclude: config.source_exclude.clone(),
-                    root_imports: Arc::default(),
-                    worktrees: worktrees.clone(),
-                    backend: backend.clone(),
-                    base_prompt: FrozenBasePrompt::materialize_selected(
-                        &run_root,
-                        config
-                            .workspace_inputs
-                            .as_ref()
-                            .and_then(|inputs| inputs.prompts.get("core"))
-                            .map(String::as_str),
-                        config.jev_surface(),
-                    )?,
-                }),
-            }),
-        )),
+        Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
     );
-    let mut forest = forest.with_conversation_reader(conversation_reader(
-        application_owners.clone(),
-        backend.clone(),
-    ));
+    let mut forest = forest
+        .with_usage_pointers(SHOAL_USAGE_POINTERS)
+        .with_recovery_journal(actor_recovery.clone())
+        .with_conversation_reader(conversation_reader(
+            application_owners.clone(),
+            backend.clone(),
+        ));
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
     }
     forest.track_resource_release();
     let forest = Arc::new(forest);
-    let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
+    let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
+    if contains_durable_root_admission(&prior_actor_records) && recovered_root.is_none() {
+        return Err(runtime_error(
+            "host recovery cannot adopt a root without complete durable actor, source, and conversation evidence",
+        ));
+    }
+    let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
+    if let Some(predecessor) = recovered_root_predecessor {
+        crate::host_dynamic_tools::validate_operation_recovery(hosted_operation_journal(
+            &run_root,
+            predecessor.id,
+        ))
+        .map_err(|error| {
+            runtime_error(format!(
+                "root actor {predecessor} cannot be recovered without hosted-operation evidence: {error}"
+            ))
+        })?;
+    }
+    forest
+        .fence_recovery_identities(
+            prior_actor_records
+                .iter()
+                .filter(|record| record.terminal.is_none())
+                .map(|record| record.admission.actor.id)
+                .chain(recovered_root.map(|(_, actor)| actor.id)),
+        )
+        .map_err(runtime_error)?;
+    let (mut root_actor, mut root_task) = match recovered_root {
+        Some((_, identity)) => {
+            forest
+                .admit_root_with_identity(descriptor, outcome, identity)
+                .await?
+        }
+        None => forest.admit_root(descriptor, outcome).await?,
+    };
+    let recovered_threads = Arc::new(
+        recover_prior_actors(
+            &forest,
+            &run_root,
+            root_actor.identity(),
+            host_incarnation.incarnation(),
+            &prior_actor_records,
+            program.clone(),
+            config.research_policy,
+            &worktree_admission,
+            accepted_source.as_deref(),
+        )
+        .await,
+    );
+    let recovered_predecessors = recovered_threads
+        .values()
+        .map(|(predecessor, _)| *predecessor)
+        .collect::<std::collections::BTreeSet<_>>();
+    let unavailable_records = prior_actor_records
+        .iter()
+        .filter(|record| {
+            record.terminal.is_none()
+                && record.admission.actor.id != root_actor.identity().id
+                && !recovered_predecessors.contains(&record.admission.actor)
+        })
+        .map(|record| record.admission.actor)
+        .collect::<Vec<_>>();
+    for predecessor in &unavailable_records {
+        let _ = readiness.send(ActorHostReadiness::ActorUnavailable {
+            predecessor: *predecessor,
+            reason: "durable actor resources or replayable launch state could not be verified"
+                .into(),
+        });
+    }
+    if host_incarnation.incarnation() != tidepool_actor::Incarnation::FIRST {
+        let notice_path = run_root.join("host-recovery-notice.txt");
+        let mut notice = std::fs::read_to_string(&notice_path).unwrap_or_default();
+        let recovered = recovered_threads
+            .iter()
+            .map(|(actor, (predecessor, _))| format!("{predecessor}->{actor}"))
+            .collect::<Vec<_>>();
+        let unavailable = unavailable_records
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        notice.push_str(&format!(
+            " Durable actor reconstruction admitted: {}. Durable actors still unavailable: {}.",
+            if recovered.is_empty() {
+                "none".into()
+            } else {
+                recovered.join(", ")
+            },
+            if unavailable.is_empty() {
+                "none".into()
+            } else {
+                unavailable.join(", ")
+            },
+        ));
+        tidepool_atomic_write::write_durable(&notice_path, notice.as_bytes())?;
+    }
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
     // The run's own layer belongs to the actor that owns the run, named here,
     // before it runs anything. Every other actor is bound as it is admitted.
@@ -1572,6 +2194,9 @@ pub async fn run(
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
             source_layers,
+            actor_recovery: actor_recovery.clone(),
+            recovered_threads,
+            recovered_root_predecessor,
         },
         shutdown_rx,
         root_config_rx,
@@ -1946,9 +2571,7 @@ struct CandidateSources<'a> {
     extra_modules: &'a [String],
 }
 
-/// The preamble and include list one driver compile reads. Shared by the
-/// driver compile itself and by the compiler warm-up, which needs the same
-/// module graph without producing a driver.
+/// The preamble and include list read by one driver compile.
 struct DriverSources {
     preamble: String,
     include: Vec<PathBuf>,
@@ -2060,77 +2683,6 @@ fn compile_driver(
         include,
         compiled,
     })
-}
-
-/// The statement the warm-up compiles. It binds a name so the compile is a
-/// BIND turn — the only turn kind that mints a `Tidepool.Session.Val.G<g>`
-/// interface — and it reaches nothing, because what this compile is for is the
-/// module graph around it, not its own body.
-const WARMUP_BIND: &str = "__tidepoolWarmup <- pure ()";
-
-/// Pay a run's first-touch compile cost before the first cell asks for it.
-///
-/// The compiler daemon memoizes each home module's optimized Core for its
-/// lifetime, but which modules a cycle is allowed to memoize depends on the
-/// tier it runs under (`Tidepool.GhcPipeline.runCompileCycle`). A cycle with
-/// no injected session values runs `OptimizeCoreReachable`, which memoizes
-/// only the modules the target's Core actually references; a façade module
-/// (`Tidepool.Aeson`), a compile-time-only module (`Tidepool.QQ.*`), or an
-/// unused workspace module is never Core-reachable, so it is never memoized —
-/// and because a memo hit also requires every direct home import to have hit
-/// this cycle, one such module invalidates its whole reverse-dependency
-/// closure. That is why the first several compiles of a run each re-optimize
-/// `Tidepool.Effects.Core` and `Tidepool.Prelude` from scratch.
-///
-/// A cycle WITH injected session values runs `OptimizeEveryModule`, which
-/// memoizes every module in the graph and ends the cascade for the daemon's
-/// lifetime. A bind turn writes its value interface during COMPILATION
-/// (`Tidepool.SessionArtifacts.mkBoundBinders`), so two compiles — one to mint
-/// the interface, one to inject it — reach that tier without running a single
-/// instruction of the program.
-///
-/// Both compiles are ordinary turn compiles through the one compiler path,
-/// against a scratch session root of their own, and neither installs anything
-/// into any actor's scope.
-#[tracing::instrument(name = "compiler_warmup", level = "info", skip_all)]
-pub(crate) fn warm_compiler(
-    haskell_root: &Path,
-    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
-    run_root: &Path,
-    workbench_imports: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // The memo being warmed belongs to a resident compiler daemon's worker. A
-    // run without one spawns a fresh worker per compile and keeps nothing
-    // between them, so there is nothing here to warm and the two compiles
-    // would be pure cost.
-    if std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none() {
-        tracing::debug!("no compiler daemon; nothing to warm");
-        return Ok(());
-    }
-    let DriverSources { preamble, include } = driver_sources(haskell_root, inputs, run_root, None)?;
-    let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, workbench_imports);
-    let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
-    let session_root = run_root.join("compiler-warmup");
-    std::fs::create_dir_all(&session_root)?;
-    let minted = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
-    let warm = |gen: u64, inject: &[String]| {
-        run_turn(HaskellTurnRequest {
-            turn_text: WARMUP_BIND,
-            templates: &templates,
-            include: &include_refs,
-            session_root: &session_root,
-            inject_modules: inject,
-            gen,
-            verdict: None,
-            target: None,
-            // A warm-up links against nothing: it exists to fill the daemon's
-            // module memo, and has no live bindings of its own.
-            retained_imports: &[],
-        })
-    };
-    warm(minted.gen().0, &[])?;
-    warm(minted.gen().next().0, &[minted.module_name()])?;
-    Ok(())
 }
 
 fn compile_root(
@@ -2261,7 +2813,7 @@ fn compile_root(
                     .workspace_inputs
                     .as_ref()
                     .and_then(|inputs| inputs.tools.as_deref())
-                    .unwrap_or("Tidepool.Command.Tools.tools"),
+                    .unwrap_or("Tidepool.Tools.tools"),
             )
             // Rule two of spec discovery. Rule one is a file in an actor's own
             // checkout and belongs to no run-wide value; this key is how a
@@ -2494,6 +3046,9 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
         source_layers,
+        actor_recovery,
+        recovered_threads,
+        recovered_root_predecessor,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -2515,6 +3070,8 @@ async fn run_interactive_applications(
         backend: Arc::clone(&backend),
         worktrees: worktrees.clone(),
         bindings: Arc::clone(&bindings),
+        actor_recovery,
+        recovered_threads: Arc::clone(&recovered_threads),
     };
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
@@ -2667,9 +3224,13 @@ async fn run_interactive_applications(
                             installation.actor.identity().into(),
                             worktree_grant(installation.effective_role.role()),
                         );
-                        let fork_parent_thread = match installation.context_parent {
-                            None => None,
-                            Some(parent) => {
+                        let fork_parent_thread = match (
+                            recovered_threads.contains_key(&installation.actor.identity()),
+                            installation.context_parent,
+                        ) {
+                            (true, _) => None,
+                            (false, None) => None,
+                            (false, Some(parent)) => {
                                 let Some(thread) = deployments
                                     .iter()
                                     .find(|deployment| deployment.actor == parent)
@@ -2796,6 +3357,12 @@ async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
+                        if let Some(resources) = &launch_context.config.command_resources {
+                            let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
+                            if let Err(error) = resources.seal_producer(&producer).await {
+                                tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
+                            }
+                        }
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.retired(terminal);
                         }
@@ -2843,6 +3410,14 @@ async fn run_interactive_applications(
                                         launch_context.backend.clone(), thread, resources, request.owner,
                                     )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>),
                                     None => {
+                                        let bubblewrap = resolve_scope_bubblewrap(
+                                            &launch_context.config.pane_environment,
+                                        )
+                                        .map_err(|error| {
+                                            tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                                format!("cannot resolve bubblewrap for resident commands: {error}"),
+                                            )
+                                        })?;
                                         Ok(Arc::new(commands::HostCommandBackend::new(
                                             resources,
                                             request.owner,
@@ -2852,6 +3427,7 @@ async fn run_interactive_applications(
                                                 &launch_context.config.workspace,
                                                 request.owner,
                                             ),
+                                            bubblewrap,
                                         ))
                                             as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
                                     }
@@ -3060,7 +3636,19 @@ async fn run_interactive_applications(
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                             continue;
                         }
+                        if let Some((predecessor, _)) = recovered_threads.get(&actor) {
+                            let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                                predecessor: *predecessor,
+                                actor,
+                            });
+                        }
                         if actor == root_identity {
+                            if let Some(predecessor) = recovered_root_predecessor {
+                                let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                                    predecessor,
+                                    actor,
+                                });
+                            }
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
                         let pane = deployment.pane.clone();
@@ -3158,6 +3746,14 @@ async fn run_interactive_applications(
                         };
                         if !matches!(deployment.connection, InteractiveConnection::AwaitingBinding) {
                             break Some(format!("interactive application {actor:?} published more than one conversation binding"));
+                        }
+                        if let Err(error) = launch_context.actor_recovery.bind_application(
+                            actor,
+                            thread.id().0.clone(),
+                        ) {
+                            break Some(format!(
+                                "interactive application {actor:?} binding could not be journalled: {error}"
+                            ));
                         }
                         if let Err(error) = retain_input_custody_and_bind(
                             &deployment.service,
@@ -3641,6 +4237,8 @@ async fn launch_prepared_interactive_application(
         backend,
         worktrees,
         bindings: _,
+        actor_recovery,
+        recovered_threads,
     } = context;
     let actor = installation.actor;
     let fork_gate = installation.fork_gate.clone();
@@ -3756,7 +4354,18 @@ async fn launch_prepared_interactive_application(
     } else {
         actor_root.join("binding.json")
     };
-    let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
+    let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+    actor_recovery
+        .prepare_application(actor_identity, binding_path.clone(), accepted_source)
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+    let launch_mode = if let Some((_, thread)) = recovered_threads.get(&actor_identity) {
+        InteractiveLaunchMode::Resume(thread.id().clone())
+    } else if let Some(parent) = fork_parent_thread.clone() {
         let boundary = installation
             .fork_boundary
             .as_ref()
@@ -3874,6 +4483,9 @@ async fn launch_prepared_interactive_application(
             launch_effort(&launch_mode, config.effort, installation.fork_effort),
         )
     };
+    let recovery_notice = matches!(launch_mode, InteractiveLaunchMode::Resume(_))
+        .then(|| std::fs::read_to_string(config.run_root.join("host-recovery-notice.txt")).ok())
+        .flatten();
     let spec = InteractiveAgentSpec {
         shell_tools: tidepool_agent::InteractiveShellTools::Hosted,
         mode: launch_mode,
@@ -3884,7 +4496,7 @@ async fn launch_prepared_interactive_application(
         effort: Some(effort),
         developer_instructions,
         base_instructions_file: base_prompt.file().to_path_buf(),
-        initial_prompt: installation.initial_user_message.clone(),
+        initial_prompt: recovery_notice.or_else(|| installation.initial_user_message.clone()),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         host_tools_socket: endpoint.clone(),
     };
@@ -3927,6 +4539,7 @@ async fn launch_prepared_interactive_application(
                 format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0),
             )
         }),
+        hosted_operation_journal(&run_root, actor_identity.id),
     )
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
@@ -4040,6 +4653,31 @@ async fn launch_prepared_interactive_application(
     });
     let manifest_path = manifest.write_new().map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    tidepool_atomic_write::write_durable(
+        &actor_root.join(PROCESS_RECOVERY_RECORD),
+        &serde_json::to_vec_pretty(&ProcessRecoveryRecord {
+            version: 1,
+            launch_id: launch_id.clone(),
+            recovery_secret: recovery_secret.clone(),
+            supervisor_socket: supervisor_socket.clone(),
+            socket_root: socket_directory.path().to_path_buf(),
+            retired: false,
+        })
+        .map_err(|error| {
+            application_error(
+                actor_identity,
+                InteractiveOperation::PrepareRuntime,
+                error,
+            )
+        })?,
+    )
+    .map_err(|error| {
+        application_error(
+            actor_identity,
+            InteractiveOperation::PrepareRuntime,
+            error,
+        )
     })?;
     scoped_custody::stage_supervisor(
         &scope_slot,
@@ -4273,6 +4911,7 @@ async fn launch_prepared_interactive_application(
             connection: InteractiveConnection::AwaitingBinding,
             service,
             socket_directory,
+            process_recovery_record: actor_root.join(PROCESS_RECOVERY_RECORD),
             worktree_custody: installation.worktree_custody.clone(),
             failure_reported: false,
             last_activation_sequence: 0,
@@ -5217,7 +5856,11 @@ async fn retire_interactive_application(
         component: CleanupComponent::Delivery,
         outcome: delivery_outcome,
     });
-    let quiescent = exact_process_stopped
+    let retirement_record_error = exact_process_stopped
+        .then(|| mark_process_recovery_retired(&deployment.process_recovery_record).err())
+        .flatten();
+    let retirement_recorded = exact_process_stopped && retirement_record_error.is_none();
+    let quiescent = retirement_recorded
         && components
             .iter()
             .filter(|component| {
@@ -5231,9 +5874,15 @@ async fn retire_interactive_application(
     if quiescent {
         socket_directory.work_settled();
     }
+    let socket_outcome = retirement_record_error.map_or_else(
+        || socket_cleanup_outcome(socket_directory),
+        |error| CleanupComponentOutcome::Failed {
+            detail: format!("process retirement evidence remains retained: {error}"),
+        },
+    );
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Socket,
-        outcome: socket_cleanup_outcome(socket_directory),
+        outcome: socket_outcome,
     });
     let build_outcome = if quiescent {
         match deployment
@@ -5304,6 +5953,22 @@ async fn retire_interactive_application(
         outcome: binding_outcome,
     });
     InteractiveCleanupReceipt { actor, components }
+}
+
+fn mark_process_recovery_retired(path: &Path) -> std::io::Result<()> {
+    let mut record: ProcessRecoveryRecord =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?;
+    if record.version != 1 {
+        return Err(std::io::Error::other(
+            "unsupported process recovery record version",
+        ));
+    }
+    record.retired = true;
+    tidepool_atomic_write::write_durable(
+        path,
+        &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
+    )
+    .map_err(std::io::Error::from)
 }
 
 /// Account for exact resident cleanup before draining the original HTTP task.
@@ -6131,12 +6796,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_update_keeps_original_request_and_fences_terminal_delivery() {
+    async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
         let setup = dispatch_haskell_script(
             root.as_ref(),
-            include_str!("actor_host/active_update_setup.hs"),
+            include_str!("actor_host/request_update_setup.hs"),
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -6182,11 +6847,11 @@ mod tests {
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(log.reopen().unwrap()))
             .finish();
-        let error = tidepool_agent::UpdatePresentationError::NotSubmitted(
-            "connecting update proxy: controlled transport failure".into(),
-        );
         tracing::subscriber::with_default(subscriber, || {
-            presentation.not_presented(error.to_string())
+            presentation.not_presented(
+                "native input was not submitted: connecting update proxy: controlled transport failure"
+                    .into(),
+            )
         });
         let logged = std::fs::read_to_string(log.path()).unwrap();
         for expected in [
@@ -6397,6 +7062,307 @@ mod tests {
     };
     use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use tidepool_worktree::WorktreeSpec;
+
+    fn durable_root(actor: ActorRef) -> tidepool_actor::DurableActorRecord {
+        tidepool_actor::DurableActorRecord {
+            admission: tidepool_actor::DurableActorAdmission {
+                actor,
+                label: "shoal-root".into(),
+                creator: None,
+                supervisor_parent: None,
+                context_parent: None,
+                actor_path: None,
+                role: "root".into(),
+                descendant_depth: 8,
+                descendant_active_children: None,
+                model: None,
+                effort: None,
+                instructions: None,
+                launch_worktrees: Vec::new(),
+                source_layer: Vec::new(),
+            },
+            application: Some(tidepool_actor::DurableActorApplication {
+                binding_path: std::path::PathBuf::from(format!(
+                    "binding-{}-{}.json",
+                    actor.id.0, actor.incarnation.0
+                )),
+                conversation: Some(format!("conversation-{}", actor.id.0)),
+                accepted_source: Some("source-revision".into()),
+            }),
+            terminal: None,
+        }
+    }
+
+    fn durable_child(
+        actor: ActorRef,
+        conversation: Option<&str>,
+    ) -> tidepool_actor::DurableActorRecord {
+        let mut record = durable_root(actor);
+        record.admission.role = "coding".into();
+        record.admission.creator = Some(ActorRef::first(tidepool_actor::ActorId(1)));
+        record.application =
+            conversation.map(|conversation| tidepool_actor::DurableActorApplication {
+                binding_path: std::path::PathBuf::from(format!(
+                    "binding-{}-{}.json",
+                    actor.id.0, actor.incarnation.0
+                )),
+                conversation: Some(conversation.into()),
+                accepted_source: Some("source-revision".into()),
+            });
+        record
+    }
+
+    #[test]
+    fn actor_recovery_records_the_published_source_revision() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal/Project");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(
+            project.path().join(".shoal/config.toml"),
+            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 1\n",
+        )
+        .unwrap();
+        let frozen =
+            crate::shoal::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = crate::shoal::source::SourceLayer::new(run.path());
+        let first = layer.ensure_active(&frozen).unwrap();
+
+        assert_eq!(
+            active_source_identity(run.path(), true).unwrap(),
+            Some(first.identity.clone())
+        );
+        assert_ne!(first.identity, frozen.identity());
+
+        std::fs::write(
+            project.path().join(".shoal/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        let second = layer
+            .publish(
+                layer
+                    .capture_from_workspace(&frozen, project.path())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            active_source_identity(run.path(), true).unwrap(),
+            Some(second.identity)
+        );
+        assert_eq!(active_source_identity(run.path(), false).unwrap(), None);
+    }
+
+    #[test]
+    fn recovery_preserves_root_logical_id_and_advances_actor_incarnation() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let records = vec![durable_root(first), durable_root(second)];
+        assert_eq!(
+            durable_root_identity(&records, Some("source-revision")).unwrap(),
+            Some((
+                second,
+                ActorRef {
+                    id: first.id,
+                    incarnation: tidepool_actor::Incarnation(3),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn root_recovery_does_not_fall_back_past_incomplete_latest_evidence() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let mut latest = durable_root(second);
+        latest.application.as_mut().unwrap().accepted_source = Some("different-source".into());
+
+        assert_eq!(
+            durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let mut latest = durable_root(second);
+        latest.terminal = Some(tidepool_actor::DurableActorTerminal {
+            kind: tidepool_actor::ActorExitKind::Completed,
+            summary: "retired".into(),
+        });
+
+        assert_eq!(
+            durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn crash_before_root_admission_has_no_identity_to_adopt() {
+        let records = Vec::new();
+        assert!(!contains_durable_root_admission(&records));
+        assert_eq!(
+            durable_root_identity(&records, Some("source-revision")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn repeated_recovery_uses_only_the_latest_logical_actor_incarnation() {
+        let root = ActorRef {
+            id: tidepool_actor::ActorId(1),
+            incarnation: tidepool_actor::Incarnation(4),
+        };
+        let child = tidepool_actor::ActorId(2);
+        let first = durable_child(
+            ActorRef {
+                id: child,
+                incarnation: tidepool_actor::Incarnation(1),
+            },
+            Some("old-conversation"),
+        );
+        let second = durable_child(
+            ActorRef {
+                id: child,
+                // Actor incarnations can advance independently of the host
+                // generation and may happen to have the same number.
+                incarnation: tidepool_actor::Incarnation(4),
+            },
+            Some("latest-conversation"),
+        );
+        let selected = latest_recoverable_actor_records(&[first.clone(), second.clone()], root);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].admission.actor, second.admission.actor);
+
+        // A crash after the successor admission must fence the older
+        // conversation instead of launching it yet again.
+        let unpublished = durable_child(
+            ActorRef {
+                id: child,
+                incarnation: tidepool_actor::Incarnation(5),
+            },
+            None,
+        );
+        assert!(latest_recoverable_actor_records(
+            &[first.clone(), second.clone(), unpublished],
+            root,
+        )
+        .is_empty());
+
+        let mut retired = second;
+        retired.terminal = Some(tidepool_actor::DurableActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        });
+        assert!(latest_recoverable_actor_records(&[first, retired], root).is_empty());
+    }
+
+    #[test]
+    fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {
+        let run = tempfile::tempdir().unwrap();
+        let root = run.path().join("1-1");
+        let child = run.path().join("2-1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        tidepool_atomic_write::write_durable(
+            &root.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "root-launch".into(),
+                recovery_secret: "retired".into(),
+                supervisor_socket: root.join("supervisor.sock"),
+                socket_root: root.join("sockets"),
+                retired: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(child.join(PROCESS_RECOVERY_RECORD), b"not-json").unwrap();
+
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(report.root_available());
+        assert_eq!(report.unavailable, vec!["2-1"]);
+    }
+
+    #[test]
+    fn recovery_fails_closed_when_root_process_evidence_is_missing() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(run.path().join("1-1")).unwrap();
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(!report.root_available());
+        assert_eq!(report.unavailable, vec!["1-1"]);
+    }
+
+    #[test]
+    fn recovery_reports_a_stopped_child_until_its_actor_state_can_be_rebuilt() {
+        let run = tempfile::tempdir().unwrap();
+        let root = run.path().join("1-1");
+        let child = run.path().join("2-1");
+        let socket_root = child.join("sockets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&socket_root).unwrap();
+        tidepool_atomic_write::write_durable(
+            &root.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "root-launch".into(),
+                recovery_secret: "retired".into(),
+                supervisor_socket: root.join("supervisor.sock"),
+                socket_root: root.join("sockets"),
+                retired: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let supervisor_socket = socket_root.join("supervisor.sock");
+        tidepool_atomic_write::write_durable(
+            &child.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "child-launch".into(),
+                recovery_secret: "secret".into(),
+                supervisor_socket: supervisor_socket.clone(),
+                socket_root: socket_root.clone(),
+                retired: false,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        tidepool_atomic_write::write_durable(
+            &socket_root.join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT),
+            &serde_json::to_vec(&ProcessRecoveryCheckpoint {
+                version: tidepool_node::PROCESS_SUPERVISOR_VERSION,
+                launch_id: "child-launch".into(),
+                observation: tidepool_node::ProcessSupervisorObservation::ProcessStopped,
+                operation_pending: false,
+                error: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(report.root_available());
+        assert_eq!(report.stopped, 1);
+        assert_eq!(report.unavailable, vec!["2-1"]);
+        assert!(!socket_root.exists());
+    }
 
     fn test_delivery_dependencies(
         root: &Path,
@@ -7208,28 +8174,6 @@ mod tests {
         ) -> InteractiveFuture<'a, ()> {
             self.0.archive(cwd, thread)
         }
-        fn present_update<'a>(
-            &'a self,
-            _cwd: &'a str,
-            _thread: &'a QueueReadyThread,
-            key: &'a str,
-            message: &'a str,
-        ) -> tidepool_agent::UpdatePresentationFuture<'a> {
-            Box::pin(async move {
-                self.0
-                    .messages
-                    .lock()
-                    .unwrap()
-                    .push(format!("{key}:{message}"));
-                if self.0.fail.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(tidepool_agent::UpdatePresentationError::Unconfirmed(
-                        "lost confirmation".into(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-        }
     }
 
     struct LostAckThenLate {
@@ -7534,7 +8478,7 @@ mod tests {
         ) {
             let body = serde_json::to_vec(&serde_json::json!({
                 "binding": {
-                    "protocolVersion": 4,
+                    "protocolVersion": 5,
                     "launchId": binding.launch_id,
                     "instanceId": binding.instance_id,
                     "generation": binding.generation.get(),

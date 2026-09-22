@@ -20,9 +20,9 @@ serde_json.workspace = true
 schemars.workspace = true
 tempfile.workspace = true
 blake3.workspace = true
+sha2 = "0.10"
 which = "8"
 tracing.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
-filetime = "0.2"

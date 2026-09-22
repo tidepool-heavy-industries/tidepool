@@ -9,7 +9,9 @@ use crate::external_storage::{
 };
 use crate::layout::*;
 use crate::managed_reference::{tag_of, tag_valid, untag};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -22,12 +24,11 @@ pub struct CopyResult {
 /// Descriptor addresses are the header identities; object addresses are found
 /// afresh from the exact initialized region on every collection.
 pub struct DescriptorSpace {
-    /// Every immutable static image admitted into this space. A prepared
-    /// machine hosting several installed programs extends this set one
-    /// region per install (`extend_static_region`); each region's admission
-    /// is independent, so a pointer is static iff SOME region in the set
-    /// admits it.
-    static_regions: Vec<Arc<crate::static_region::StaticRegion>>,
+    /// The one machine-wide owner of immutable static images. Collection and
+    /// observation borrow this catalog rather than keeping copied region
+    /// lists; it indexes candidate ranges and leaves exact admission to the
+    /// selected `StaticRegion`.
+    static_catalog: Rc<RefCell<crate::static_region::StaticRegionCatalog>>,
     static_metrics: crate::static_region::StaticLookupMetrics,
     descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
     object_starts: Vec<u64>,
@@ -35,20 +36,28 @@ pub struct DescriptorSpace {
     updated_visited: Vec<u64>,
     updated_path: Vec<usize>,
     external_payloads: HashMap<usize, ExternalStorageKind>,
-    /// Header keys inserted since the open [`OwnersMark`], if any.
-    owner_log: Option<Vec<usize>>,
+    /// Headers and static ranges inserted since the open [`OwnersMark`], if
+    /// any. The catalog is address sorted, so rollback removes logged starts
+    /// rather than truncating an installation-order vector.
+    owner_log: Option<OwnerLog>,
 }
 
 /// Registration checkpoint for a prepared-program install, opened by
 /// [`DescriptorSpace::mark_owners`]. While it is open the space logs exactly
 /// the header keys it inserts; rollback removes those keys and truncates the
-/// static regions pushed since the mark, so an install's undo cost is
-/// proportional to what that install added, not to the whole space.
+/// static regions admitted since the mark, so an install's undo cost is
+/// proportional to what that install added, not to the whole space. Empty
+/// regions have no addressable range and therefore never enter the catalog.
 /// Collection scratch and relocated object addresses deliberately do not
 /// belong to this checkpoint.
 #[must_use = "an owner mark must be committed or rolled back"]
 pub struct OwnersMark {
-    static_regions: usize,
+    _private: (),
+}
+
+struct OwnerLog {
+    headers: Vec<usize>,
+    static_starts: Vec<usize>,
 }
 
 impl DescriptorSpace {
@@ -59,10 +68,11 @@ impl DescriptorSpace {
             self.owner_log.is_none(),
             "descriptor owner mark already open"
         );
-        self.owner_log = Some(Vec::new());
-        OwnersMark {
-            static_regions: self.static_regions.len(),
-        }
+        self.owner_log = Some(OwnerLog {
+            headers: Vec::new(),
+            static_starts: Vec::new(),
+        });
+        OwnersMark { _private: () }
     }
 
     /// Keep every registration made since `mark` and close the log.
@@ -73,12 +83,19 @@ impl DescriptorSpace {
 
     /// Remove exactly the header keys and static regions registered since
     /// `mark`, and close the log.
-    pub fn rollback_owners(&mut self, mark: OwnersMark) {
-        for key in self.owner_log.take().unwrap_or_default() {
+    pub fn rollback_owners(&mut self, _mark: OwnersMark) {
+        let log = self.owner_log.take().unwrap_or(OwnerLog {
+            headers: Vec::new(),
+            static_starts: Vec::new(),
+        });
+        for key in log.headers {
             self.descriptors.remove(&key);
         }
-        debug_assert!(self.static_regions.len() >= mark.static_regions);
-        self.static_regions.truncate(mark.static_regions);
+        let mut catalog = self.static_catalog.borrow_mut();
+        for start in log.static_starts {
+            let removed = catalog.remove_start(start);
+            debug_assert!(removed);
+        }
     }
 
     /// Resolve a live header through this space's pinned descriptor owner.
@@ -100,7 +117,9 @@ impl DescriptorSpace {
             owners.insert(descriptor.initial_header_word(), descriptor);
         }
         Ok(Self {
-            static_regions: Vec::new(),
+            static_catalog: Rc::new(RefCell::new(
+                crate::static_region::StaticRegionCatalog::new(),
+            )),
             static_metrics: crate::static_region::StaticLookupMetrics::new("collector"),
             descriptors: owners,
             object_starts: Vec::new(),
@@ -128,9 +147,10 @@ impl DescriptorSpace {
                 .try_reserve(1)
                 .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
             if let Some(log) = &mut self.owner_log {
-                log.try_reserve(1)
+                log.headers
+                    .try_reserve(1)
                     .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
-                log.push(key);
+                log.headers.push(key);
             }
             self.descriptors.insert(key, descriptor);
         }
@@ -149,8 +169,7 @@ impl DescriptorSpace {
             self.descriptors.remove(header);
         }
         if let Some(region) = region {
-            self.static_regions
-                .retain(|admitted| !Arc::ptr_eq(admitted, region));
+            self.static_catalog.borrow_mut().remove(region);
         }
     }
 
@@ -160,10 +179,18 @@ impl DescriptorSpace {
         &mut self,
         region: Arc<crate::static_region::StaticRegion>,
     ) -> Result<(), DescriptorTraceError> {
-        self.static_regions
-            .try_reserve(1)
-            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
-        self.static_regions.push(region);
+        let start = region.address_range().start;
+        if let Some(log) = &mut self.owner_log {
+            log.static_starts
+                .try_reserve(1)
+                .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        }
+        let inserted = self.static_catalog.borrow_mut().insert(region)?;
+        if inserted {
+            if let Some(log) = &mut self.owner_log {
+                log.static_starts.push(start);
+            }
+        }
         Ok(())
     }
 
@@ -217,9 +244,12 @@ impl DescriptorSpace {
 
     /// Pin the closed immutable allocation before installing this space in a
     /// machine. Its fields cannot acquire nursery edges, so GC never scans it.
-    pub fn with_static_region(mut self, region: Arc<crate::static_region::StaticRegion>) -> Self {
-        self.static_regions.push(region);
-        self
+    pub fn with_static_region(
+        mut self,
+        region: Arc<crate::static_region::StaticRegion>,
+    ) -> Result<Self, DescriptorTraceError> {
+        self.extend_static_region(region)?;
+        Ok(self)
     }
 
     fn prepare_roots(&mut self, root_ptrs: &[*mut *mut u8]) -> Result<(), DescriptorTraceError> {
@@ -292,22 +322,10 @@ impl DescriptorSpace {
     }
 
     fn static_reference(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
-        for (index, region) in self.static_regions.iter().enumerate() {
-            match region.admit(encoded) {
-                Ok(None) => {}
-                result => {
-                    self.static_metrics.record(
-                        self.static_regions.len(),
-                        index + 1,
-                        result.is_ok(),
-                    );
-                    return result;
-                }
-            }
-        }
-        self.static_metrics
-            .record(self.static_regions.len(), self.static_regions.len(), false);
-        Ok(None)
+        self.static_catalog
+            .borrow()
+            .admit(encoded, &self.static_metrics)
+            .map(|region| region.map(|_| encoded))
     }
 
     /// Validate a reference against the immutable static regions this space
@@ -323,13 +341,15 @@ impl DescriptorSpace {
     }
 
     fn root_slot_overlaps_static(&self, address: usize) -> bool {
-        self.static_regions.iter().any(|region| {
-            let range = region.address_range();
-            let Some(end) = address.checked_add(std::mem::size_of::<*mut u8>()) else {
-                return true;
-            };
-            address < range.end && range.start < end
-        })
+        self.static_catalog.borrow().overlaps_slot(address)
+    }
+
+    /// Shared only with the prepared machine's non-moving observer. The
+    /// `Rc<RefCell<_>>` preserves one catalog owner while collection mutates
+    /// it exclusively and observation holds an immutable borrow at a
+    /// quiescent point.
+    pub fn static_catalog(&self) -> Rc<RefCell<crate::static_region::StaticRegionCatalog>> {
+        Rc::clone(&self.static_catalog)
     }
 }
 
@@ -2591,13 +2611,28 @@ mod descriptor_copy_tests {
         space.rollback_owners(mark);
         assert!(space.live_descriptor(kept.initial_header_word()).is_some());
         assert!(space.live_descriptor(added.initial_header_word()).is_none());
-        assert!(space.static_regions.is_empty());
+        assert_eq!(space.static_catalog.borrow().len(), 0);
 
         let mark = space.mark_owners();
         space.extend_descriptors([Arc::clone(&added)]).unwrap();
         space.commit_owners(mark);
         assert!(space.owner_log.is_none());
         assert!(space.live_descriptor(added.initial_header_word()).is_some());
+    }
+
+    #[test]
+    fn owner_rollback_never_records_an_empty_static_region() {
+        let empty = Arc::new(
+            StaticImage::new(vec![], vec![], BTreeMap::new(), [])
+                .unwrap()
+                .instantiate()
+                .unwrap(),
+        );
+        let mut space = DescriptorSpace::new([]).unwrap();
+        let mark = space.mark_owners();
+        space.extend_static_region(empty).unwrap();
+        space.rollback_owners(mark);
+        assert_eq!(space.static_catalog.borrow().len(), 0);
     }
 
     #[test]
@@ -3050,7 +3085,8 @@ mod descriptor_copy_tests {
         let mut to = [0_u64; 4];
         let mut space = DescriptorSpace::new([Arc::clone(&nursery)])
             .unwrap()
-            .with_static_region(Arc::clone(&static_region));
+            .with_static_region(Arc::clone(&static_region))
+            .unwrap();
         unsafe {
             let object = write_object(from.as_mut_ptr().cast(), 0, &nursery, DescriptorState::Live);
             let static_root = static_region
@@ -3079,7 +3115,8 @@ mod descriptor_copy_tests {
         let mut to = [0_u64; 2];
         let mut space = DescriptorSpace::new([])
             .unwrap()
-            .with_static_region(Arc::clone(&static_region));
+            .with_static_region(Arc::clone(&static_region))
+            .unwrap();
         let mut root = static_region
             .entry(tidepool_repr::execution_schema::ValueId(1))
             .unwrap() as *mut u8;
@@ -3127,7 +3164,8 @@ mod descriptor_copy_tests {
         ] {
             let mut space = DescriptorSpace::new([])
                 .unwrap()
-                .with_static_region(Arc::clone(&static_region));
+                .with_static_region(Arc::clone(&static_region))
+                .unwrap();
             let mut root = value as *mut u8;
             unsafe {
                 let error = cheney_copy_descriptors(
@@ -3157,7 +3195,8 @@ mod descriptor_copy_tests {
         let mut to = [0_u64; 2];
         let mut space = DescriptorSpace::new([])
             .unwrap()
-            .with_static_region(Arc::clone(&static_region));
+            .with_static_region(Arc::clone(&static_region))
+            .unwrap();
         unsafe {
             let error = cheney_copy_descriptors(
                 &[slot],
@@ -3183,7 +3222,8 @@ mod descriptor_copy_tests {
         let mut to = vec![0_u64; source_bytes / 8];
         let mut space = DescriptorSpace::new([Arc::clone(&thunk)])
             .unwrap()
-            .with_static_region(Arc::clone(&static_region));
+            .with_static_region(Arc::clone(&static_region))
+            .unwrap();
         unsafe {
             let first = write_object(
                 from.as_mut_ptr().cast(),

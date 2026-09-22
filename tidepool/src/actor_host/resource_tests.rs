@@ -34,6 +34,11 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
         backend: native_interactive_backend(config.interactive_agent.clone()),
         worktrees: campaign.worktrees.clone(),
         bindings: campaign.bindings.clone(),
+        actor_recovery: tidepool_actor::ActorRecoveryJournal::open(
+            config.run_root.join("resource-test-actors.jsonl"),
+        )
+        .unwrap(),
+        recovered_threads: Arc::new(BTreeMap::new()),
         config,
     };
     for cancel_after in [None, Some(Duration::from_millis(50))] {

@@ -11,6 +11,7 @@ const WAIT_WINDOW: Duration = Duration::from_secs(20);
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Policy,
+    Observe,
     Directory {
         actor: String,
     },
@@ -39,15 +40,24 @@ enum Request {
         actor: String,
         id: String,
     },
+    SealProducer {
+        producer: String,
+    },
+    Acknowledge {
+        actor: String,
+        id: String,
+    },
     ActorAdmission,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "result", content = "value", rename_all = "snake_case")]
 enum Response {
     Policy(CommandResourcePolicy),
+    Observation(CommandResourceObservation),
     Directory(PathBuf),
     Status(CommandResourceStatus),
     ActorAdmitted,
+    Acknowledged,
     Error(String),
 }
 
@@ -93,6 +103,7 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
             }
             let result = match request {
                 Request::Policy => Ok(Response::Policy(owner.policy().clone())),
+                Request::Observe => Ok(Response::Observation(owner.observation())),
                 Request::Directory { actor } => {
                     owner.actor_directory(&actor).map(Response::Directory)
                 }
@@ -111,6 +122,12 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                 Request::Status { actor, id } => owner.status(&actor, &id).map(Response::Status),
                 Request::Started { actor, id } => owner.started(&actor, &id).map(Response::Status),
                 Request::Cancel { actor, id } => owner.cancel(&actor, &id).map(Response::Status),
+                Request::SealProducer { producer } => owner
+                    .seal_producer(&producer)
+                    .map(|()| Response::Acknowledged),
+                Request::Acknowledge { actor, id } => owner
+                    .acknowledge(&actor, &id)
+                    .map(|()| Response::Acknowledged),
                 Request::ActorAdmission => unreachable!("startup lease handled above"),
             };
             let response = result.unwrap_or_else(|error| Response::Error(error.to_string()));
@@ -139,7 +156,24 @@ impl CommandResourceClient {
         }
         let client = Arc::new(Self::Remote { socket, run });
         match client.rpc(Request::Policy).await? {
-            Response::Policy(actual) if actual == *policy => Ok(client),
+            Response::Policy(actual) if actual == *policy => {
+                let observation = client.observation().await?;
+                tracing::info!(
+                    active = observation.active,
+                    historical = observation.historical,
+                    retained_allocations = observation.retained_allocations,
+                    cleanup_failures = observation.cleanup_failures,
+                    sealed_producers = observation.sealed_producers,
+                    process_count = observation.process_count,
+                    memory_bytes = observation.memory_bytes,
+                    memory_pressure_avg10_micros = observation.memory_pressure_avg10_micros,
+                    cpu_usage_micros = observation.cpu_usage_micros,
+                    io_read_bytes = observation.io_read_bytes,
+                    io_write_bytes = observation.io_write_bytes,
+                    "command resource service healthy"
+                );
+                Ok(client)
+            }
             Response::Policy(_) => Err(io_error("shared command resource policy differs; stop allocations before changing the service policy")),
             _ => Err(io_error("invalid resource service policy response")),
         }
@@ -187,6 +221,16 @@ impl CommandResourceClient {
         {
             Response::Directory(path) => Ok(path),
             _ => Err(io_error("invalid resource directory response")),
+        }
+    }
+
+    pub async fn observation(&self) -> std::io::Result<CommandResourceObservation> {
+        if let Self::Local(owner) = self {
+            return Ok(owner.observation());
+        }
+        match self.rpc(Request::Observe).await? {
+            Response::Observation(observation) => Ok(observation),
+            _ => Err(io_error("invalid command resource observation response")),
         }
     }
 
@@ -271,6 +315,37 @@ impl CommandResourceClient {
             id: id.into(),
         })
         .await
+    }
+
+    pub async fn seal_producer(&self, producer: &str) -> std::io::Result<()> {
+        if let Self::Local(owner) = self {
+            return owner.seal_producer(producer);
+        }
+        match self
+            .rpc(Request::SealProducer {
+                producer: self.actor(producer),
+            })
+            .await?
+        {
+            Response::Acknowledged => Ok(()),
+            _ => Err(io_error("invalid producer seal response")),
+        }
+    }
+
+    pub async fn acknowledge(&self, actor: &str, id: &str) -> std::io::Result<()> {
+        if let Self::Local(owner) = self {
+            return owner.acknowledge(actor, id);
+        }
+        match self
+            .rpc(Request::Acknowledge {
+                actor: self.actor(actor),
+                id: id.into(),
+            })
+            .await?
+        {
+            Response::Acknowledged => Ok(()),
+            _ => Err(io_error("invalid command acknowledgment response")),
+        }
     }
 
     pub async fn admit_actor(&self) -> std::io::Result<StartupLease> {

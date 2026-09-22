@@ -25,10 +25,8 @@ members = [
     "tidepool-mcp",
     "tidepool-protocol",
     "tidepool-handlers",
-    "tidepool-harness",
     "tidepool-worktree",
     "tidepool-agent",
-    "tidepool-web",
     "tidepool",
 ]
 resolver = "2"
@@ -44,6 +42,7 @@ authors = ["Inanna Malick <inanna@recursion.wtf>"]
 rust-version = "1.89"
 
 [workspace.dependencies]
+codex-shoal-protocol = { path = "vendor/codex/codex-rs/shoal-protocol" }
 tidepool-actor = { version = "0.1.0", path = "tidepool-actor" }
 tidepool-agent = { version = "0.1.0", path = "tidepool-agent" }
 tidepool-atomic-write = { path = "tidepool-atomic-write" }
@@ -56,7 +55,6 @@ tidepool-effect = { version = "0.1.0", path = "tidepool-effect" }
 tidepool-extract-cmd = { version = "0.1.0", path = "tidepool-extract-cmd" }
 tidepool-extract-report = { version = "0.1.0", path = "tidepool-extract-report" }
 tidepool-handlers = { version = "0.1.0", path = "tidepool-handlers" }
-tidepool-harness = { version = "0.1.0", path = "tidepool-harness" }
 tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }
 tidepool-mcp = { version = "0.1.0", path = "tidepool-mcp" }
 tidepool-model-output = { version = "0.1.0", path = "tidepool-model-output" }
@@ -70,7 +68,6 @@ tidepool-testing = { path = "tidepool-testing" }
 tidepool-test-data = { path = "tidepool-test-data" }
 tidepool-prepared-corpus = { path = "tidepool-prepared-corpus" }
 tidepool-toolchain = { path = "tidepool-toolchain" }
-tidepool-web = { path = "tidepool-web" }
 tidepool-worktree = { path = "tidepool-worktree" }
 
 axum = "0.8"
@@ -93,11 +90,10 @@ quote = "1"
 ractor = { version = "0.16.5", default-features = false, features = ["tokio_runtime"] }
 recursion = "0.5.4"
 reqwest = { version = "0.13", features = ["json", "stream"] }
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
 rustc-hash = "2.1.0"
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 serial_test = "3"
 static_assertions = "1.1"
 syn = { version = "3", features = ["full"] }

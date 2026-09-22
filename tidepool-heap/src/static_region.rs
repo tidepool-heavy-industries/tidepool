@@ -189,6 +189,13 @@ fn is_start(bitmap: &[u64], bytes: usize, offset: usize) -> bool {
 }
 
 impl StaticRegion {
+    /// Empty images have no stable address to classify. Their zero-length
+    /// boxed slice may use a shared dangling pointer, so catalogs deliberately
+    /// do not index or record them.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
     /// Immutable allocation bounds, for rejecting collector root slots that
     /// would otherwise write into this region. Empty regions contain nothing.
     pub fn address_range(&self) -> std::ops::Range<usize> {
@@ -226,6 +233,135 @@ impl StaticRegion {
             return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
         }
         Ok(Some(encoded))
+    }
+}
+
+/// The immutable static allocations admitted by one prepared machine.
+///
+/// Regions are ordered by their stable allocation address.  The order is an
+/// index only: a selected region still performs the exact object-start and
+/// tag validation in [`StaticRegion::admit`].  That keeps an interior or
+/// contradictorily tagged pointer an integrity error rather than letting a
+/// range lookup grant it membership.
+pub struct StaticRegionCatalog {
+    regions: Vec<Arc<StaticRegion>>,
+}
+
+impl StaticRegionCatalog {
+    pub fn new() -> Self {
+        Self {
+            regions: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.regions.len()
+    }
+
+    pub fn insert(&mut self, region: Arc<StaticRegion>) -> Result<bool, DescriptorTraceError> {
+        if region.is_empty() {
+            return Ok(false);
+        }
+        let start = region.address_range().start;
+        match self
+            .regions
+            .binary_search_by_key(&start, |existing| existing.address_range().start)
+        {
+            Ok(index) => {
+                if Arc::ptr_eq(&self.regions[index], &region) {
+                    Ok(false)
+                } else {
+                    Err(DescriptorTraceError::MetadataIntegrity)
+                }
+            }
+            Err(index) => {
+                self.regions
+                    .try_reserve(1)
+                    .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+                self.regions.insert(index, region);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn remove(&mut self, region: &Arc<StaticRegion>) -> bool {
+        if region.is_empty() {
+            return false;
+        }
+        let start = region.address_range().start;
+        let Ok(index) = self
+            .regions
+            .binary_search_by_key(&start, |existing| existing.address_range().start)
+        else {
+            return false;
+        };
+        if !Arc::ptr_eq(&self.regions[index], region) {
+            return false;
+        }
+        self.regions.remove(index);
+        true
+    }
+
+    pub fn remove_start(&mut self, start: usize) -> bool {
+        let Ok(index) = self
+            .regions
+            .binary_search_by_key(&start, |existing| existing.address_range().start)
+        else {
+            return false;
+        };
+        self.regions.remove(index);
+        true
+    }
+
+    /// Admit `encoded` only after a range search selects its one possible
+    /// region.  Allocation ranges cannot overlap, so the predecessor of the
+    /// untagged address is the sole candidate.
+    pub fn admit(
+        &self,
+        encoded: usize,
+        metrics: &StaticLookupMetrics,
+    ) -> Result<Option<&StaticRegion>, DescriptorTraceError> {
+        let address = untag(encoded);
+        let candidate = self
+            .regions
+            .partition_point(|region| region.address_range().start <= address);
+        let Some(region) = candidate
+            .checked_sub(1)
+            .and_then(|index| self.regions.get(index))
+        else {
+            metrics.record(self.len(), 0, false);
+            return Ok(None);
+        };
+        let range = region.address_range();
+        if address >= range.end {
+            metrics.record(self.len(), 0, false);
+            return Ok(None);
+        }
+        let admitted = region.admit(encoded);
+        metrics.record(self.len(), 1, admitted.as_ref().is_ok_and(Option::is_some));
+        admitted.map(|value| value.map(|_| region.as_ref()))
+    }
+
+    pub fn overlaps_slot(&self, address: usize) -> bool {
+        let Some(end) = address.checked_add(std::mem::size_of::<*mut u8>()) else {
+            return true;
+        };
+        let candidate = self
+            .regions
+            .partition_point(|region| region.address_range().start < end);
+        candidate
+            .checked_sub(1)
+            .and_then(|index| self.regions.get(index))
+            .is_some_and(|region| {
+                let range = region.address_range();
+                address < range.end
+            })
+    }
+}
+
+impl Default for StaticRegionCatalog {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -276,6 +412,18 @@ mod tests {
         let region = image.instantiate().unwrap();
         assert_eq!(region.entry(ValueId(0)), None);
         assert_eq!(region.admit(0).unwrap(), None);
+    }
+
+    #[test]
+    fn catalog_ignores_multiple_empty_regions_with_shared_dangling_addresses() {
+        let image = StaticImage::new(vec![], vec![], BTreeMap::new(), []).unwrap();
+        let first = Arc::new(image.instantiate().unwrap());
+        let second = Arc::new(image.instantiate().unwrap());
+        assert_eq!(first.address_range().start, second.address_range().start);
+        let mut catalog = StaticRegionCatalog::new();
+        assert!(!catalog.insert(first).unwrap());
+        assert!(!catalog.insert(second).unwrap());
+        assert_eq!(catalog.len(), 0);
     }
 
     #[test]
@@ -397,6 +545,34 @@ mod tests {
             region.admit(entry | 2),
             Err(DescriptorTraceError::InvalidManagedTag { .. })
         ));
+    }
+
+    #[test]
+    fn catalog_selects_ranges_but_keeps_exact_admission_authoritative() {
+        let image = image_with_one_object(
+            descriptor(1, &[]),
+            BTreeMap::from([(ValueId(73), 0)]),
+            vec![],
+        );
+        let first = Arc::new(image.instantiate().unwrap());
+        let second = Arc::new(image.instantiate().unwrap());
+        let mut catalog = StaticRegionCatalog::new();
+        // Addresses are allocator-selected, so insertion must not rely on
+        // installation order to find either region.
+        catalog.insert(Arc::clone(&second)).unwrap();
+        catalog.insert(Arc::clone(&first)).unwrap();
+        let metrics = StaticLookupMetrics::new("test");
+        let entry = first.entry(ValueId(73)).unwrap();
+        assert!(std::ptr::eq(
+            catalog.admit(entry, &metrics).unwrap().unwrap(),
+            first.as_ref()
+        ));
+        assert!(matches!(
+            catalog.admit(untag(entry) + 8, &metrics),
+            Err(DescriptorTraceError::InvalidManagedPointer { .. })
+        ));
+        assert!(catalog.remove(&first));
+        assert!(catalog.admit(entry, &metrics).unwrap().is_none());
     }
 }
 

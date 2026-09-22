@@ -73,7 +73,8 @@ elif [ ! -x "$worker" ]; then
 else
   note "path:   $worker"
   note "source: $worker_source"
-  freshness "worker" "$worker" "$repo_root/haskell/src" "$repo_root/haskell/app" "$repo_root/haskell/tidepool-extract.cabal"
+  mapfile -t worker_sources < <(tidepool_extract_worker_sources)
+  freshness "worker" "$worker" "${worker_sources[@]}"
 fi
 
 echo

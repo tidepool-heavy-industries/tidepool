@@ -29,11 +29,12 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
 import Data.Generics (everything, everywhereM, mkM, mkQ)
-import Data.List (nub, nubBy, sortOn)
+import Data.List (isPrefixOf, nub, nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust, listToMaybe)
-import GHC.Core.TyCo.FVs (tyCoVarsOfTypes)
+import GHC.Core.TyCo.FVs (tyCoVarsOfTypes, tyConsOfType)
 import GHC.Core.TyCo.Subst (emptySubst, extendTvSubst)
+import GHC.Core.TyCo.Tidy (tidyOpenType)
 import GHC.Core.Type (getTyVar_maybe, splitTyConApp_maybe, substTy)
 import GHC.Tc.Solver (tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
@@ -62,8 +63,16 @@ import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
 import GHC.Types.FieldLabel (flLabel, flSelector)
 import GHC.Types.Var (varName)
+import GHC.Types.Var.Env (emptyTidyEnv)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitFunTys, tcSplitSigmaTy)
-import GHC.Utils.Outputable (Outputable, defaultSDocContext, ppr, renderWithContext)
+import GHC.Utils.Outputable
+  ( Outputable,
+    defaultSDocContext,
+    ppr,
+    renderWithContext,
+    sdocSuppressUniques,
+  )
 import Tidepool.ExtractRequest
   ( InspectionProvenance (..), InspectionRequest (..), StructuredInspection (..),
     StructuredNameNamespace (..), StructuredNameScope (..)
@@ -75,7 +84,8 @@ data InfoEntry = InfoEntry
     infoModule :: Maybe String,
     infoKind :: String,
     infoDisplay :: String,
-    infoAvailability :: Availability
+    infoAvailability :: Availability,
+    infoReferences :: [IdentifierRef]
   }
   deriving (Eq, Show)
 
@@ -115,7 +125,8 @@ data TypeMatch = TypeMatch
     typeMatchModule :: Maybe String,
     typeMatchSignature :: String,
     typeMatchQuality :: TypeMatchQuality,
-    typeMatchAvailability :: Availability
+    typeMatchAvailability :: Availability,
+    typeMatchReferences :: [IdentifierRef]
   }
   deriving (Eq, Show)
 
@@ -124,7 +135,7 @@ data IdentifierNamespace
   | TypeIdentifier
   | ConstructorIdentifier
   | FieldIdentifier
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data IdentifierRef = IdentifierRef
   { identifierModule :: String,
@@ -218,16 +229,27 @@ lookupExecutionRow rdrEnv = do
   case nubBy (==) names of
     [name] -> do
       found <- lookupName name
-      proxy <- lookupProxyTyCon
-      case (found, proxy) of
-        (Just (AnId identifier), Just proxyConstructor) ->
-          case splitTyConApp_maybe (idType identifier) of
-            Just (constructor, arguments)
-              | constructor == proxyConstructor,
-                Just row <- listToMaybe (reverse arguments) -> pure (Just row)
-            _ -> malformed
+      case found of
+        Just (AnId identifier) -> Just <$> inspectionRow identifier
         _ -> malformed
     _ -> pure Nothing
+  where
+    malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
+
+-- | Read the actor row from the exact target-local Id retained by the checked
+-- source. Its interface is deliberately not installed merely so inspection
+-- can rediscover a compiler-only binding by name.
+inspectionRow :: (GhcMonad m) => Id -> m Type
+inspectionRow identifier = do
+  proxy <- lookupProxyTyCon
+  let (_, _, body) = tcSplitSigmaTy (idType identifier)
+  case proxy of
+    Just proxyConstructor -> case splitTyConApp_maybe body of
+      Just (constructor, arguments)
+        | constructor == proxyConstructor,
+          Just row <- listToMaybe (reverse arguments) -> pure row
+      _ -> malformed
+    Nothing -> malformed
   where
     malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
 
@@ -450,9 +472,10 @@ searchTypeMatchesWithContext context rdrEnv queryBinder query = do
         { typeMatchName = spelling,
           typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe name,
           typeMatchSignature =
-            renderWithContext defaultSDocContext (ppr candidate),
+            renderType candidate,
           typeMatchQuality = quality,
-          typeMatchAvailability = availability
+          typeMatchAvailability = availability,
+          typeMatchReferences = typeReferences candidate
         }
 
     matchKey result =
@@ -467,15 +490,17 @@ runInspection ::
   HscEnv ->
   TcGblEnv ->
   GlobalRdrEnv ->
-  Map.Map String String ->
+  Map.Map String Id ->
   [InspectionRequest] ->
   IO [InspectionResult]
-runInspection hscEnv tcGblEnv rdrEnv capturedTypes requests = do
+runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     setSession hscEnv
     effTyCon <- lookupEffTyCon
-    row <- lookupExecutionRow rdrEnv
+    row <- case Map.lookup "__tidepool_lookup_row" inspectionProbes of
+      Just identifier -> Just <$> inspectionRow identifier
+      Nothing -> pure Nothing
     case (row, effTyCon) of
       (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
       _ -> pure ()
@@ -485,26 +510,21 @@ runInspection hscEnv tcGblEnv rdrEnv capturedTypes requests = do
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
         let binder = "__tidepool_inspect_" ++ show typeIndex
-         in case Map.lookup binder capturedTypes of
-              Just display -> do
-                let names =
-                      [ greName gre
-                      | gre <- globalRdrEnvElts rdrEnv,
-                        any (matchesQuery binder) (greRdrNames gre)
-                      ]
-                case nubBy (==) names of
-                  [name] -> do
-                    found <- lookupName name
-                    case found of
-                      Just (AnId identifier) -> do
-                        availability <- liftIO $ signatureAvailability context (idType identifier)
-                        pure (typeIndex + 1, results ++ [InspectionType expression display availability])
-                      _ -> missing binder
-                  _ -> missing binder
-              Nothing -> liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
+         in case Map.lookup binder inspectionProbes of
+              Just identifier -> do
+                availability <- liftIO $ signatureAvailability context (idType identifier)
+                let display = renderType (idType identifier)
+                pure (typeIndex + 1, results ++ [InspectionType expression display availability])
+              Nothing -> missing binder
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
         pure (typeIndex, results ++ [result])
+      InspectScope -> do
+        let names = nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
+              not ("__tidepool_" `isPrefixOf` occNameString (nameOccName name))]
+        entries <- browseEntries context True names
+        pure (typeIndex, results ++ [InspectionBrowse "" True
+          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries)])
       InspectModule moduleName expanded -> do
         result <- inspectModule context moduleName expanded
         pure (typeIndex, results ++ [result])
@@ -664,8 +684,13 @@ typeForThing thing = case thing of
   ACoAxiom _ -> Nothing
 
 describeType :: Type -> TypeExpression
-describeType ty = TypeExpression (render ty) (map (render . varName) variables) (map render constraints)
+describeType original =
+  TypeExpression
+    (renderUser ty)
+    (map (renderUser . varName) variables)
+    (map renderUser constraints)
   where
+    ty = tidyInspectionType original
     (variables, constraints, _) = tcSplitSigmaTy ty
 
 identifierRefForThing :: TyThing -> IdentifierRef
@@ -679,9 +704,53 @@ identifierRef name thing = IdentifierRef
       AnId identifier | isRecordSelector identifier -> FieldIdentifier
       AnId _ -> ValueIdentifier
       AConLike _ -> ConstructorIdentifier
+      ATyCon _ | isDataConName name -> ConstructorIdentifier
       ATyCon _ -> TypeIdentifier
       ACoAxiom _ -> TypeIdentifier
   }
+
+-- | Immediate nominal references, obtained from compiler declarations. Member
+-- visibility matches the declaration renderer; following a reference never
+-- recursively traverses the referenced declaration.
+declarationReferences :: [Name] -> TyThing -> [IdentifierRef]
+declarationReferences visible thing = orderedReferences $
+  maybe [] (pure . identifierRefForThing) (tyThingParent_maybe thing)
+    ++ case thing of
+      AnId identifier -> typeReferences (idType identifier)
+      AConLike (RealDataCon constructor) -> constructorReferences constructor
+      AConLike (PatSynCon _) -> []
+      ATyCon tyCon
+        | Just cls <- tyConClass_maybe tyCon ->
+            concatMap typeReferences (classSCTheta cls)
+              ++ concatMap (\method -> identifierRefForThing (AnId method)
+                  : typeReferences (idType method))
+                (filter ((`elem` visible) . getName) (classMethods cls))
+        | Just rhs <- synTyConRhs_maybe tyCon -> typeReferences rhs
+        | isAlgTyCon tyCon -> concatMap constructorReferences
+            (filter ((`elem` visible) . getName) (tyConDataCons tyCon))
+        | otherwise -> typeReferences (tyConKind tyCon)
+      ACoAxiom _ -> []
+  where
+    constructorReferences constructor =
+      identifierRefForThing (AConLike (RealDataCon constructor))
+        : typeReferences (dataConDisplayType False constructor)
+          ++ [ IdentifierRef
+                (maybe "" (moduleNameString . moduleName) (nameModule_maybe name))
+                (occNameString (nameOccName name)) FieldIdentifier
+             | field <- dataConFieldLabels constructor,
+               let name = flSelector field,
+               name `elem` visible
+             ]
+
+-- tyConsOfType includes nominal types underneath applications and constraints.
+-- Sort by stable identity rather than GHC's allocation-dependent Unique order.
+typeReferences :: Type -> [IdentifierRef]
+typeReferences = orderedReferences . map (identifierRefForThing . ATyCon)
+  . nonDetEltsUniqSet . tyConsOfType
+
+orderedReferences :: [IdentifierRef] -> [IdentifierRef]
+orderedReferences = nub . sortOn (\reference ->
+  (identifierModule reference, identifierName reference, identifierNamespace reference))
 
 queryProvenance :: StructuredInspection -> ScopeProvenance
 queryProvenance query = ScopeProvenance
@@ -768,7 +837,8 @@ entriesFor context visible names = fmap concat $ forM names $ \name -> do
                   infoModule = definingModule,
                   infoKind = thingKind thing,
                   infoDisplay = display,
-                  infoAvailability = availability
+                  infoAvailability = availability,
+                  infoReferences = declarationReferences visible thing
                 }
             ]
 
@@ -785,7 +855,7 @@ browseEntries context expanded names = do
   forM visible $ \(name, thing) -> do
     availability <- thingAvailability context thing
     let display =
-          if expanded
+          if expanded && isJust (tyThingParent_maybe thing)
             then renderWithContext defaultSDocContext (pprTyThing showEverything thing)
             else visibleDisplay exportedNames thing
         definingModule = moduleNameString . moduleName <$> nameModule_maybe name
@@ -794,7 +864,8 @@ browseEntries context expanded names = do
             infoModule = definingModule,
             infoKind = thingKind thing,
             infoDisplay = display,
-            infoAvailability = availability
+            infoAvailability = availability,
+            infoReferences = declarationReferences exportedNames thing
           }
   where
     hasExportedParent exported thing = case tyThingParent_maybe thing of
@@ -835,12 +906,25 @@ thingKind thing = case thing of
 render :: Outputable value => value -> String
 render = renderWithContext defaultSDocContext . ppr
 
--- | Private V5 batch receipt. The outer list is @['TPINSP005', results]@.
+-- Type variables may retain compiler allocation suffixes in the typechecked
+-- source. They are semantically irrelevant and vary when otherwise independent
+-- inspection probes share a module, so remove them before producing any
+-- user-facing type text.
+renderType :: Type -> String
+renderType = renderUser . tidyInspectionType
+
+renderUser :: Outputable value => value -> String
+renderUser = renderWithContext defaultSDocContext {sdocSuppressUniques = True} . ppr
+
+tidyInspectionType :: Type -> Type
+tidyInspectionType = tidyOpenType emptyTidyEnv
+
+-- | Private V6 batch receipt. The outer list is @['TPINSP006', results]@.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString
 encodeInspectionResults results =
   toStrictByteString $
     encodeListLen 2
-      <> encodeString "TPINSP005"
+      <> encodeString "TPINSP006"
       <> encodeListLen (fromIntegral (length results))
       <> foldMap encodeResult results
   where
@@ -878,16 +962,17 @@ encodeInspectionResults results =
     encodeEntries entries =
       encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries
     encodeEntry entry =
-      encodeListLen 5
+      encodeListLen 6
         <> text (infoName entry)
         <> maybe encodeNull text (infoModule entry)
         <> text (infoKind entry)
         <> text (infoDisplay entry)
         <> encodeAvailability (infoAvailability entry)
+        <> encodeList encodeIdentifierRef (infoReferences entry)
     encodeTypeMatches matches =
       encodeListLen (fromIntegral (length matches)) <> foldMap encodeTypeMatch matches
     encodeTypeMatch match =
-      encodeListLen 5
+      encodeListLen 6
         <> text (typeMatchName match)
         <> maybe encodeNull text (typeMatchModule match)
         <> text (typeMatchSignature match)
@@ -895,6 +980,7 @@ encodeInspectionResults results =
           TypeMatchExact -> "Exact"
           TypeMatchUsable -> "Usable")
         <> encodeAvailability (typeMatchAvailability match)
+        <> encodeList encodeIdentifierRef (typeMatchReferences match)
     encodeAvailability = encodeString . T.pack . show
     text = encodeString . T.pack
 

@@ -76,8 +76,8 @@ pub enum ExecutionError {
     /// already taken by a resume or abort, or dropped with its realm.
     #[error("continuation {0:?} is not parked on this machine")]
     UnknownContinuation(crate::suspension::ContinuationId),
-    /// A host answer could not be built; nothing was allocated or published.
-    #[error("host answer: {0}")]
+    /// A managed value could not be built; no result handle was published.
+    #[error("managed construction: {0}")]
     Answer(#[from] super::answer::AnswerBuildError),
     /// A major collection or retirement was requested while generated frames,
     /// temporary roots or an observation borrow were live, or before any

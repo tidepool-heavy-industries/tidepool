@@ -102,6 +102,19 @@ bytes and 609,845 native bytes overall. Other request shapes produced
 pool was only 3,577 bytes. Category and per-definition metrics overlap by
 design and must retain an explicit scope field so aggregators do not sum them.
 
+The linear dispatcher rewrite removes demand-closure expansion, global
+owner-by-demand comparison, and generated prefix-probe chains. It does not
+make retained PAP representation byte-linear in logical arity. A function of
+arity `A` still owns every necessary prefix layout and remaining signature,
+and each prefix adapter reloads its captured fields, for Θ(`A²`) aggregate
+metadata and emitted adapter work. Caller-result fanout across `K` concrete
+result contracts can make that Θ(`K·A²`). Runtime lookup is restricted to one
+owner record, but scans its compatible result entries at each of `D` excess
+stages, for O(`D·K`). The structural regression therefore asserts linear owner
+visits and plan-row counts only. Measure real authored arities and result
+fanout before a later wave considers compact PAP-prefix metadata or indexed
+result variants.
+
 ## Memory and disk
 
 Measure static-region probes per lookup and region counts before adding an
@@ -141,3 +154,37 @@ Its confirmed scope includes:
   pruning or sharing; and
 - evaluate static-region indexing and literal reclamation only against
   request-scoped and lifetime-scoped memory measurements.
+
+## Candidate follow-up wave: resident Haskell compute
+
+Audit these only after the structural compiler/dispatch/JSON wave has matched
+measurements. A candidate needs a production consumer and workload evidence;
+source size or a handwritten parser alone is not a reason to add an intrinsic.
+
+- **Patch parsing, matching, and generation.** `Tidepool.Patch` is a production
+  consumer after all: generated `planUpdate` calls `Patch.genPatch` and
+  `Patch.renderPatch`, and the patch quasiquoter/runtime exposes parse, apply,
+  invert, and inspection. Its runtime implementation converts `Text` to linked
+  `String` lines. Myers uses an association-list frontier plus repeated list
+  indexing, so lookup and line access add work beyond the stated `O(ND)` search;
+  hunk application also scans candidate windows with list `take`/`drop`.
+  Measure real `planUpdate` file sizes, edit distances, allocations, and native
+  bytes. If material, use one authenticated Rust-backed patch boundary with
+  indexed line spans and vector-backed Myers state, preserving the Haskell ADT,
+  context-is-truth matching, ambiguity reporting, and round-trip properties.
+- **Typed `FromJSON` traversal.** After native JSON materialization, Haskell
+  still performs typeclass-directed object/array decoding. Keep this in Haskell
+  unless profiles show it dominates: moving it requires a typed schema
+  interpreter and risks duplicating the surface's generic/typeclass semantics.
+- **Inspection rendering.** Workbench display remains a budgeted, resumable
+  Haskell tree walk. Measure concatenation and allocation within the fixed
+  display budgets; prefer removing repeated `Text` concatenation over creating
+  a native renderer that would duplicate arbitrary `Display` behavior.
+- **CSV/TSV helpers.** `Tidepool.Table` parses CSV rows through
+  `Text -> String -> Text`. This is opt-in library work, not a per-turn runtime
+  boundary. Consider byte-span parsing only if a real large-table workload
+  makes it visible.
+- **Compile-time quasiquoters.** JSON, format, patch, and Haskell-expression
+  quasiquoter parsers run under GHC. Treat them as compiler measurements, not
+  runtime intrinsic candidates; replacing them would duplicate existing parser
+  authority unless compile profiles identify a specific dominant parser.

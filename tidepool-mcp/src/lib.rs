@@ -302,11 +302,6 @@ pub(crate) fn content_hash_hex(fields: &[&[u8]]) -> String {
     h.finalize().to_hex()[..32].to_string()
 }
 
-/// Unwrap double-encoded JSON strings if they contain an object or array.
-pub fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
-    tidepool_runtime::session::normalize_workbench_input(v)
-}
-
 // ---------------------------------------------------------------------------
 // Output capture
 // ---------------------------------------------------------------------------
@@ -413,7 +408,7 @@ mod tests {
         if uses_qq(code) {
             imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
-        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        let src = template_haskell(&pre, "'[]", code, &imports, "", None);
         let qq = src
             .find("import Tidepool.QQ (fmt, j, patch, uri)\n")
             .expect("QQ import missing from rendered module");
@@ -429,7 +424,7 @@ mod tests {
         if uses_qq(code) {
             imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
-        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        let src = template_haskell(&pre, "'[]", code, &imports, "", None);
         assert!(
             !src.contains("Tidepool.QQ"),
             "no-splice eval must not import Tidepool.QQ"
@@ -524,7 +519,7 @@ mod tests {
         let stack = build_effect_stack_type(&effects);
         let source = "do\n  let x = 42\n  pure x";
 
-        let result = template_haskell(&preamble, &stack, source, "", "", None, None);
+        let result = template_haskell(&preamble, &stack, source, "", "", None);
 
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer hiding (run)"));
@@ -558,14 +553,14 @@ mod tests {
         // Multi-line composition expression rides through VERBATIM (explicit
         // let-brackets suspend layout; no indent transform).
         let pipeline = "glob \"**/*.rs\"\n  >>= mapM getFileSize\n  <&> sizeRank 9";
-        let r = template_haskell(&preamble, &stack, pipeline, "", "", None, None);
+        let r = template_haskell(&preamble, &stack, pipeline, "", "", None);
         assert!(r.contains(
             "__user = let {\n __b =\nglob \"**/*.rs\"\n  >>= mapM getFileSize\n  <&> sizeRank 9\n } in __b"
         ));
 
         // Trailing where-clause is legal: __user is a genuine declaration.
         let with_where = "sizeRank 9 <$> sized\n  where\n    sized = mapM go =<< glob \"**/*.rs\"";
-        let r = template_haskell(&preamble, &stack, with_where, "", "", None, None);
+        let r = template_haskell(&preamble, &stack, with_where, "", "", None);
         assert!(r.contains("__user = let {\n __b =\nsizeRank 9 <$> sized\n  where\n    sized ="));
     }
 
@@ -995,39 +990,13 @@ data Console a where
         let source = "pure 42";
 
         // With budget
-        let result = template_haskell(&preamble, &stack, source, "", "", None, Some(1024));
+        let result = template_haskell(&preamble, &stack, source, "", "", Some(1024));
         assert!(result.contains("kvSet \"__sayChars\" (toJSON (0 :: Int))"));
         assert!(result.contains("paginateResult (max 100 (1024 - _sayC)) (toJSON _r)"));
 
         // Without budget (defaults to 4096)
-        let result = template_haskell(&preamble, &stack, source, "", "", None, None);
+        let result = template_haskell(&preamble, &stack, source, "", "", None);
         assert!(result.contains("paginateResult 4096 (toJSON _r)"));
-    }
-
-    #[test]
-    fn test_template_haskell_input() {
-        let effects = vec![EffectDecl {
-            type_name: "Console",
-            description: "",
-            constructors: &["Print :: Text -> Console ()"],
-            type_defs: &[],
-            extra_imports: &[],
-            helpers: &[],
-            type_params: &[],
-            default_row_args: &[],
-            prompt_card: None,
-            helpers_row_polymorphic: false,
-        }];
-        let preamble = build_preamble(&effects, false);
-        let stack = build_effect_stack_type(&effects);
-        let source = "pure 42";
-        let input = serde_json::json!({"val": 123});
-
-        let result = template_haskell(&preamble, &stack, source, "", "", Some(&input), None);
-
-        assert!(result.contains("input :: Aeson.Value"));
-        assert!(result
-            .contains("input = object [\"val\" .= Aeson.Number (Aeson.scientific (123) (0))]"));
     }
 
     #[test]
@@ -1138,7 +1107,6 @@ data Console a where
 #[cfg(test)]
 mod ergonomics_tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_preamble_ergonomics() {
@@ -1151,130 +1119,5 @@ mod ergonomics_tests {
         let orch = orchestrate_module_source(&decls);
         assert!(orch.contains("renderJson :: Value -> Text"));
         assert!(orch.contains("| Reply with a stub id (e.g. stub_0) to fetch that chunk"));
-    }
-
-    #[test]
-    fn test_normalize_input_string_unwrapping() {
-        // #315: stringified bare-string payloads unwrap one level.
-        let stringified = serde_json::Value::String("\"line1\\nline2\"".to_string());
-        assert_eq!(
-            normalize_input(&stringified),
-            serde_json::Value::String("line1\nline2".to_string())
-        );
-        // A plain non-JSON string stays untouched.
-        let plain = serde_json::Value::String("not json".to_string());
-        assert_eq!(normalize_input(&plain), plain);
-        // Numbers-as-strings stay strings.
-        let num = serde_json::Value::String("42".to_string());
-        assert_eq!(normalize_input(&num), num);
-    }
-
-    #[test]
-    fn test_normalize_input_unwrapping() {
-        // Stringified object (unwrapped)
-        let v1 = json!("{\"a\": 1}");
-        assert_eq!(normalize_input(&v1), json!({"a": 1}));
-
-        // Stringified array (unwrapped)
-        let v2 = json!("[1, 2, 3]");
-        assert_eq!(normalize_input(&v2), json!([1, 2, 3]));
-
-        // Plain string "hello" (unchanged)
-        let v3 = json!("hello");
-        assert_eq!(normalize_input(&v3), v3);
-
-        // Plain string "123" (unchanged — only Object/Array unwrap)
-        let v4 = json!("123");
-        assert_eq!(normalize_input(&v4), v4);
-
-        // Real object (unchanged)
-        let v5 = json!({"a": 1});
-        assert_eq!(normalize_input(&v5), v5);
-    }
-
-    // ---------------------------------------------------------------------------
-    // #315 regression: normalize_input → input_binding_source source-generation
-    // round-trip for all five payload shapes.  Fast (no JIT/GHC).
-    // ---------------------------------------------------------------------------
-
-    /// Helper: apply normalize_input then render to the Haskell binding snippet.
-    fn binding_for(v: &serde_json::Value) -> String {
-        let normalized = normalize_input(v);
-        input_binding_source(Some(&normalized))
-    }
-
-    /// Per-payload-shape cases: each row is a raw JSON input plus the
-    /// substring(s) its generated Haskell binding must contain.
-    #[test]
-    fn test_input_source_gen_renders_expected_binding() {
-        let cases: Vec<(&str, serde_json::Value, Vec<&str>)> = vec![
-            // THE #315 CASE: a double-encoded string (MCP client
-            // JSON.stringify'd the payload) must unwrap so the generated
-            // binding contains the bare string, not the surrounding
-            // quotes/escapes as literal characters.
-            (
-                "double_encoded_string",
-                json!("\"hello\""),
-                vec![r#"Aeson.String "hello""#],
-            ),
-            // Multi-line double-encoded string (the bug-report shape): after
-            // unwrapping, the \n should be in the Haskell escape, not the
-            // outer quotes.
-            (
-                "double_encoded_multiline",
-                json!("\"line1\\nline2\""),
-                vec![r#"Aeson.String "line1\nline2""#],
-            ),
-            // Plain string (not double-encoded) passes through.
-            (
-                "plain_string",
-                json!("hello world"),
-                vec![r#"Aeson.String "hello world""#],
-            ),
-            // Number: binding emits `Aeson.Number (Aeson.scientific (42) (0))`.
-            (
-                "number",
-                json!(42),
-                vec!["Aeson.Number (Aeson.scientific (42) (0))"],
-            ),
-            // Bool true: binding emits `Aeson.Bool True`.
-            ("bool_true", json!(true), vec!["Aeson.Bool True"]),
-            // Bool false: binding emits `Aeson.Bool False`.
-            ("bool_false", json!(false), vec!["Aeson.Bool False"]),
-            // Object: binding emits `object [...]`.
-            (
-                "object",
-                json!({"key": "val"}),
-                vec!["object [", r#""key" .= Aeson.String "val""#],
-            ),
-            // Array: binding emits `toJSON [...]`.
-            (
-                "array",
-                json!(["x", "y"]),
-                vec!["toJSON [", r#"Aeson.String "x""#, r#"Aeson.String "y""#],
-            ),
-        ];
-
-        for (label, raw, expected_substrings) in cases {
-            let src = binding_for(&raw);
-            for expected in expected_substrings {
-                assert!(
-                    src.contains(expected),
-                    "case {label}: expected {expected:?} in: {src}"
-                );
-            }
-        }
-    }
-
-    /// THE #315 CASE, negative half: a double-encoded string must NOT leave
-    /// the literal outer quotes/escapes in the generated binding.
-    #[test]
-    fn test_input_source_gen_double_encoded_string_does_not_double_encode() {
-        let raw = json!("\"hello\"");
-        let src = binding_for(&raw);
-        assert!(
-            !src.contains(r#"Aeson.String "\"hello\"""#),
-            "double-encoding detected in: {src}"
-        );
     }
 }

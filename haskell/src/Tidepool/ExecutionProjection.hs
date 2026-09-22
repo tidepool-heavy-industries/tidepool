@@ -94,6 +94,8 @@ import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
+import Tidepool.PreparedJson
+  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout )
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -107,6 +109,7 @@ data ProjectionContext = ProjectionContext
   , projectionAuxiliaryRoots :: [SymbolIdentity]
   , projectionFormattingAuthority :: Maybe FormattingAuthority
   , projectionTimeAuthority :: Maybe TimeAuthority
+  , projectionJsonAuthority :: Maybe JsonAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
   , projectionTextUnit :: Maybe TextUnitAuthority
   } deriving stock (Eq, Show)
@@ -144,6 +147,7 @@ data PState = PState
   , homeModules :: Set (Text, Text)
   , formattingAuthority :: Maybe FormattingAuthority
   , timeAuthority :: Maybe TimeAuthority
+  , jsonAuthority :: Maybe JsonAuthority
   , textUnit :: Maybe TextUnitAuthority
   }
 
@@ -183,7 +187,7 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -216,17 +220,21 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
+        (projectionJsonAuthority context)
         (projectionTextUnit context)
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  ((bindingGroups, programTypes, programSites, programVerbSites), final) <- runStateT
-    (do preallocate projectable
+  ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
+    (do validatePreparedEvidence context projectable
+        preallocate projectable
         groups <- concat <$> mapM projectModule projectable
         (types, sites, verbSites) <- lowerPreparedEvidence context projectable
-        pure (groups, types, sites, verbSites)) initial
+        jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
+          (projectionJsonAuthority context)
+        pure (groups, types, sites, verbSites, jsonLayout)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
   let entry = topValue entryTop
@@ -249,6 +257,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         , programTypes = programTypes
         , programSites = programSites
         , programVerbSites = programVerbSites
+        , programJsonLayout = programJsonLayout
         }
   pure (program, map fst (constructors final))
   where
@@ -531,9 +540,22 @@ registeredTime context binder = case timeSpec context binder of
   Right (Just _) -> True
   _ -> False
 
+jsonSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe JsonSpec)
+jsonSpec context binder = case projectionJsonAuthority context of
+  Nothing -> Right Nothing
+  Just authority -> case classifyJson authority binder of
+    Left failure -> Left (UnsupportedPreparedShape (Text.pack (show failure)))
+    Right spec -> Right spec
+
+registeredJson :: ProjectionContext -> Id -> Bool
+registeredJson context binder = case jsonSpec context binder of
+  Right (Just _) -> True
+  _ -> False
+
 registeredReplacement :: ProjectionContext -> Id -> Bool
 registeredReplacement context binder =
   registeredFormatting context binder || registeredTime context binder
+    || registeredJson context binder
     || isJust (deferredFunction binder)
 
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
@@ -736,14 +758,7 @@ lowerPreparedEvidence context modules = do
     [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
  where
   lowerOne (priorNodes, priorSites) prepared = do
-    let owners = mkUniqSet
-          [ varUnique binder
-          | (binding, _) <- pmBindings prepared
-          , binder <- topBinders binding
-          ]
-        selected = filter
-          (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
-          (pmPreparedSites prepared)
+    let selected = selectedPreparedSites prepared
         roots = concat
           [ psWireNode site : psInputNodes site | site <- selected ]
     (lowered, rebase) <- lowerTypeGraph (length priorNodes)
@@ -761,34 +776,65 @@ lowerPreparedEvidence context modules = do
               }) selected
     pure (priorNodes <> lowered, priorSites <> rows)
 
+-- Compare all reachable constructor evidence before projecting bindings or
+-- lowering any one graph. Representation recovery may roll one graph's local
+-- state back; a conflict in that graph must still reject the complete program
+-- in either encounter order. Publication remains owned by 'internConstructor'.
+validatePreparedEvidence :: ProjectionContext -> [PreparedModule] -> P ()
+validatePreparedEvidence context modules = do
+  moduleEvidence <- lift . fmap concat . traverse evidenceForModule $ modules
+  (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
+  auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
+  validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence)
+ where
+  evidenceForModule prepared =
+    constructorsForTypeGraph
+      (TypePolicy.tgNodes (pmTypeGraph prepared))
+      (concat [ psWireNode site : psInputNodes site
+              | site <- selectedPreparedSites prepared ])
+
+selectedPreparedSites :: PreparedModule -> [PreparedSite]
+selectedPreparedSites prepared =
+  let owners = mkUniqSet
+        [ varUnique binder
+        | (binding, _) <- pmBindings prepared
+        , binder <- topBinders binding
+        ]
+  in filter
+    (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
+    (pmPreparedSites prepared)
+
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
 -- ('lowerOne'/'siteWireType' in "Tidepool.PreparedSites"). An auxiliary root
--- (for example the turn's admitted decode entry, 'preparedDecodeTargetName')
 -- is not itself a site: nothing about ordinary site traversal reaches its
 -- answer type, so a program whose turns never independently construct or
 -- observe that type (no 'httpGet', no rendered 'Left'/'Right') would
 -- otherwise leave its constructors out of the program's evidence even though
 -- the auxiliary root itself needs to read them back.
 --
--- The answer type is read off the binder's own (pre-erasure) GHC 'Type' via
--- 'splitFunTys', never off its STG 'StgRhsClosure' result type: an
--- eta-unexpanded auxiliary root (@__decodeValue = Aeson.eitherDecodeValue@,
--- a zero-arity CAF) has an STG result type that is the whole function arrow
--- rather than its codomain, and 'TypePolicy.classifyType' refuses a function
--- type outright.
--- | An auxiliary root's answer type is skipped for evidence interning when
+-- The answer type is read off the binder's own pre-erasure GHC 'Type' via
+-- 'splitFunTys', never off its STG closure result type: an eta-unexpanded
+-- zero-arity root can retain the whole function arrow there.
+--
+-- An auxiliary root's answer type is skipped for evidence interning when
 -- it still carries a free type variable after 'splitFunTys' (a genuinely
 -- polymorphic root like 'Tidepool.Session.preparedApplyEntryTargetName'/
 -- 'Tidepool.Session.preparedApplyValueTargetName', whose settled result is
 -- whatever the applied closure returns, not one concrete turn's type).
 -- 'TypePolicy.internType'/'classifyType' has no node for an unresolved type
 -- variable, so interning one would fail the whole projection rather than
--- leaving the root's own evidence merely absent. Every OTHER auxiliary root
--- ('preparedResumeTargetName', 'preparedDecodeTargetName') is compiled
--- concretely per turn and is unaffected by this filter.
+-- leaving the root's own evidence merely absent. Concrete auxiliary roots
+-- are unaffected by this filter.
 lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
 lowerAuxiliaryRootEvidence context modules base = do
+  (nodes, graphRoots) <- auxiliaryRootTypeGraph context modules
+  (lowered, _rebase) <- lowerTypeGraph base nodes graphRoots
+  pure lowered
+
+auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
+  -> P ([TypePolicy.TypeNodeG], [TypePolicy.TypeNodeId])
+auxiliaryRootTypeGraph context modules = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
   let answerTypes =
@@ -804,9 +850,7 @@ lowerAuxiliaryRootEvidence context modules base = do
       (graphRoots, builder) = runState
         (traverse TypePolicy.internType answerTypes)
         TypePolicy.emptyTypeGraphBuilder
-  (lowered, _rebase) <- lowerTypeGraph base
-    (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) graphRoots
-  pure lowered
+  pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
 -- | One synthetic 'HostAnswer' row per interned constructor with a closed
 -- reply index ('requestReplyIndex'), and the table naming it. Only the index
@@ -860,6 +904,22 @@ lowerTypeGraph base nodes roots = do
         pure (Map.lookup node mapping)
   lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
   pure (lowered, rebase)
+
+constructorsForTypeGraph :: [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
+  -> Either ProjectionError [DataCon]
+constructorsForTypeGraph nodes roots = do
+  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
+  reachable <- reachableTypeNodes graphNodes roots
+  pure (concatMap nodeConstructors
+    [ node | (index, node) <- IntMap.toAscList graphNodes
+           , Set.member index reachable ])
+ where
+  nodeConstructors node = case node of
+    TypePolicy.DataG _ _ _ rows -> map fst rows
+    TypePolicy.TextG _ constructors -> constructors
+    TypePolicy.IntegerG _ constructors -> constructors
+    TypePolicy.NaturalG _ constructors -> constructors
+    _ -> []
 
 reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError (Set Int)
@@ -917,11 +977,10 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
       lowerRow (constructor, fields) = do
         sourceReps <- verifySourceLayout constructor
         identity@(ConstructorId index) <- internConstructor constructor
-        -- The row is checked against the declaration it will name, not only
-        -- the type graph's DataCon: the declaration interned first (from the
-        -- program's own STG) is authoritative for the runtime layout, and a
-        -- type reached through another DataCon object for the same
-        -- constructor must not borrow it with a different field shape.
+        -- The row is checked against the canonical declaration it will name,
+        -- not only the type graph's DataCon. Evidence reached through another
+        -- DataCon object for the same constructor must not borrow that
+        -- declaration with a different field shape.
         declared <- gets (fmap constructorFieldReps . listToMaybe
           . drop (fromIntegral index) . constructorDecls)
         unless (declared == Just sourceReps)
@@ -990,12 +1049,15 @@ projectTopPair binder rhs = do
   symbol <- topIdentity binder
   formatting <- formattingSpecFor binder
   time <- timeSpecFor binder
+  json <- jsonSpecFor binder
   let project = case deferredFunction binder of
         Just deferred -> projectDeferredRhs binder deferred rhs
-        Nothing -> case time of
-          Just spec -> projectTimeRhs spec rhs
-          Nothing -> maybe (projectRhs binder rhs)
-            (\spec -> projectFormattingRhs spec rhs) formatting
+        Nothing -> case json of
+          Just spec -> projectJsonRhs spec rhs
+          Nothing -> case time of
+            Just spec -> projectTimeRhs spec rhs
+            Nothing -> maybe (projectRhs binder rhs)
+              (\spec -> projectFormattingRhs spec rhs) formatting
   TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
@@ -1015,6 +1077,72 @@ timeSpecFor binder = do
     Just owner -> case classifyTime owner binder of
       Left failure -> failShape (Text.pack (show failure))
       Right result -> pure result
+
+jsonSpecFor :: Id -> P (Maybe JsonSpec)
+jsonSpecFor binder = do
+  authority <- gets jsonAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> case classifyJson owner binder of
+      Left failure -> failShape (Text.pack (show failure))
+      Right result -> pure result
+
+projectJsonRhs :: JsonSpec -> CgStgRhs -> P HeapRhs
+projectJsonRhs (DecodeJson textDataCon left right)
+    (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
+    (failRepresentation "registered JSON parser has unexpected prepared entry reps")
+  textConstructor <- internConstructor textDataCon
+  left' <- internConstructor left
+  right' <- internConstructor right
+  textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "JSON parser Text constructor must contain byte array, offset, length")
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  body <- case parameters' of
+    [input] -> jsonDecodeBody textDataCon textConstructor left' right' input
+    _ -> failShape "registered JSON parser has unexpected prepared arity"
+  pure (Function signature parameters' [] body)
+ where scaledThing (Scaled _ ty) = ty
+projectJsonRhs (EncodeJson textDataCon)
+    (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
+    (failRepresentation "registered JSON encoder has unexpected prepared entry reps")
+  textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "JSON encoder Text constructor must contain byte array, offset, length")
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  encodeSignature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  encode <- internSyntheticOperation Schema.JsonEncodeIdentity encodeSignature
+  body <- case parameters' of
+    [input] -> pure (Operation encode [Ref (Local input)])
+    _ -> failShape "registered JSON encoder has unexpected prepared arity"
+  pure (Function signature parameters' [] body)
+ where scaledThing (Scaled _ ty) = ty
+projectJsonRhs _ _ = failShape "registered JSON anchor is not a reentrant closure"
+
+jsonDecodeBody :: DataCon -> ConstructorId -> ConstructorId -> ConstructorId -> ValueId -> P Expr
+jsonDecodeBody textDataCon textConstructor left right input = do
+  enter <- internSignature (Signature [] (Returns [LiftedRefRep]))
+  parseSignature <- internSignature (Signature
+    [UnliftedRefRep, IntRep 64, IntRep 64] (Returns [LiftedRefRep]))
+  parse <- internSyntheticOperation (Schema.JsonDecodeIdentity left right) parseSignature
+  inputCase <- freshValue
+  rawBytes <- freshValue
+  rawOffset <- freshValue
+  rawLength <- freshValue
+  let textFamily = AlgebraicCase (nameSymbol "type"
+        (GHC.tyConName (dataConTyCon textDataCon)))
+      parsed = Operation parse
+        [Ref (Local rawBytes), Ref (Local rawOffset), Ref (Local rawLength)]
+  pure (Case (Enter (Ref (Local input)) enter) inputCase (Returns [LiftedRefRep]) textFamily
+    [Alternative (ConstructorPattern textConstructor) [rawBytes, rawOffset, rawLength] parsed])
 
 -- A registered wrapper is a normal function top. The source body has already
 -- established non-bottoming demand facts in GHC; only its dependencies and
@@ -1673,45 +1801,83 @@ internSignature signature = do
       modify' (\current -> current { signatures = signatures current <> [(signature, identity)] })
       pure identity
 
+constructorDeclaration :: DataCon -> P ConstructorDecl
+constructorDeclaration con = do
+  reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
+  -- GHC expands strictness along with representation arguments: a strict
+  -- unboxed tuple does not make its lifted components strict. Resolve all
+  -- representations first, before calling the fixed-representation helper.
+  let marks = map isMarkedStrict (dataConRuntimeRepStrictness con)
+  if length marks /= length reps
+    then failRepresentation "constructor runtime strictness/representation arity mismatch"
+    else pure ()
+  let fieldStrictness = zipWith (\strict rep -> strict || isUnboxed rep) marks reps
+  resultReps <- repsForType (dataConOrigResTy con)
+  resultRep <- case resultReps of
+    [rep@LiftedRefRep] -> pure rep
+    [rep@UnliftedRefRep] -> pure rep
+    _ -> failRepresentation "heap constructor lacks a managed result representation"
+  layout <- layoutFor reps
+  tag <- checkedWord32 "constructor tag" (dataConTag con)
+  familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
+  pure (ConstructorDecl
+        (nameSymbol "constructor" (dataConName con))
+        (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
+        resultRep reps fieldStrictness layout tag familySize
+        (varId (dataConWorkId con)))
+ where
+  scaledThing (Scaled _ ty) = ty
+  isUnboxed LiftedRefRep = False
+  isUnboxed UnliftedRefRep = False
+  isUnboxed _ = True
+
+validateConstructorEvidence :: [DataCon] -> P ()
+validateConstructorEvidence = mapM_ validateOne
+ where
+  validateOne constructor = do
+    attempted <- tryRepresentation (internConstructor constructor)
+    case attempted of
+      Right _ -> pure ()
+      Left (InvalidPreparedLayout _) -> pure ()
+      Left (InvalidPreparedRepresentation _) -> pure ()
+      Left failure -> lift (Left failure)
+
 internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
-  known <- gets constructors
-  case lookup con known of
-    Just identity -> pure identity
-    Nothing -> do
-      reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
-      -- GHC expands strictness along with representation arguments: a strict
-      -- unboxed tuple does not make its lifted components strict. Resolve all
-      -- representations first, before calling the fixed-representation helper.
-      let marks = map isMarkedStrict (dataConRuntimeRepStrictness con)
-      if length marks /= length reps
-        then failRepresentation "constructor runtime strictness/representation arity mismatch"
-        else pure ()
-      let fieldStrictness = zipWith (\strict rep -> strict || isUnboxed rep) marks reps
-      resultReps <- repsForType (dataConOrigResTy con)
-      resultRep <- case resultReps of
-        [rep@LiftedRefRep] -> pure rep
-        [rep@UnliftedRefRep] -> pure rep
-        _ -> failRepresentation "heap constructor lacks a managed result representation"
-      layout <- layoutFor reps
-      tag <- checkedWord32 "constructor tag" (dataConTag con)
-      familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
-      prior <- gets constructorDecls
+  declaration <- constructorDeclaration con
+  prior <- gets constructorDecls
+  let nominal = constructorIdentity declaration
+      -- 'DataCon' equality follows a GHC object, not its durable nominal
+      -- identity. The same source can therefore reach this boundary via a
+      -- separately loaded interface. Only one physical declaration may be
+      -- published for that nominal constructor.
+      priorNominal =
+        [ (ConstructorId (fromIntegral index), existing)
+        | (index, existing) <- zip [0 :: Int ..] prior
+        , constructorIdentity existing == nominal
+        ]
+  case priorNominal of
+    [] -> do
       let identity = ConstructorId (fromIntegral (length prior))
-          declaration = ConstructorDecl
-            (nameSymbol "constructor" (dataConName con))
-            (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
-            resultRep reps fieldStrictness layout tag familySize
-            (varId (dataConWorkId con))
       modify' (\current -> current
         { constructors = constructors current <> [(con, identity)]
         , constructorDecls = constructorDecls current <> [declaration] })
       pure identity
-  where
-    scaledThing (Scaled _ ty) = ty
-    isUnboxed LiftedRefRep = False
-    isUnboxed UnliftedRefRep = False
-    isUnboxed _ = True
+    [(identity, existing)]
+      | existing == declaration -> pure identity
+      | otherwise -> failConstructorConflict existing declaration
+    _ -> lift . Left . InvalidPreparedIdentity $
+      ("nominal constructor has multiple declarations before interning: "
+        <> symbolText nominal)
+
+failConstructorConflict :: ConstructorDecl -> ConstructorDecl -> P a
+failConstructorConflict existing incoming =
+  lift . Left . InvalidPreparedIdentity $
+    "distinct GHC provenance for nominal constructor "
+      <> symbolText (constructorIdentity incoming)
+      <> " has conflicting physical declarations before publication; existing="
+      <> Text.pack (show existing)
+      <> ", incoming=" <> Text.pack (show incoming)
 
 checkedWord32 :: Text -> Int -> P Word32
 checkedWord32 label value

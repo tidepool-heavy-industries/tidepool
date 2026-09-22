@@ -26,6 +26,7 @@ use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tidepool_heap::execution_descriptor::DescriptorTraceError;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, StorageLayout, ValueId};
 
@@ -35,7 +36,7 @@ pub(super) struct PreparedInvocation<'code> {
     // contains its pointer. MachineState mutates through its existing cells.
     pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
-    pub(super) statics: Arc<StaticRegion>,
+    static_catalog: tidepool_heap::static_region::StaticRegionCatalog,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
@@ -43,6 +44,19 @@ pub(super) struct PreparedInvocation<'code> {
     /// Boxed so the machine's borrowed admission pointer remains stable even
     /// while this invocation value is moved out of `enter`.
     old_space: Box<OldSpace>,
+}
+
+fn static_catalog(
+    region: &Arc<StaticRegion>,
+) -> Result<tidepool_heap::static_region::StaticRegionCatalog, RuntimeError> {
+    let mut catalog = tidepool_heap::static_region::StaticRegionCatalog::new();
+    catalog
+        .insert(Arc::clone(region))
+        .map_err(|error| match error {
+            DescriptorTraceError::MetadataAllocation => RuntimeError::HeapOverflow,
+            _ => RuntimeError::BadPointer,
+        })?;
+    Ok(catalog)
 }
 
 impl<'code> PreparedInvocation<'code> {
@@ -110,6 +124,7 @@ impl<'code> PreparedInvocation<'code> {
             .map_err(runtime_error_without_machine)?;
 
         let statics = Arc::new(program.statics.instantiate()?);
+        let static_catalog = static_catalog(&statics).map_err(runtime_error_without_machine)?;
         // The program's own root block carries its tops for this invocation,
         // exactly as it does when installed on a machine.
         let top_table = &program.root_block;
@@ -139,6 +154,19 @@ impl<'code> PreparedInvocation<'code> {
         let results = super::run::try_root_words(result_words.max(1))?;
 
         let machine = Rc::new(MachineState::new());
+        machine.register_prepared_entries(
+            program.callables.iter().map(|callable| {
+                (
+                    callable.header,
+                    callable.signature.clone(),
+                    program.pipeline.get_function_ptr(callable.function),
+                )
+            }),
+            program
+                .thunk_entries
+                .iter()
+                .map(|&(header, function)| (header, program.pipeline.get_function_ptr(function))),
+        );
         machine.absorb_interned_bytes(&program.bytes);
         machine.set_cancel_flag(Arc::clone(&cancel));
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
@@ -189,7 +217,7 @@ impl<'code> PreparedInvocation<'code> {
             program,
             machine,
             vmctx,
-            statics,
+            static_catalog,
             results,
             result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
@@ -221,6 +249,12 @@ impl<'code> PreparedInvocation<'code> {
             .pipeline
             .get_function_ptr(compiled.adapter);
         let raw_status = {
+            let _intrinsic = super::ActiveIntrinsicScope::new(
+                &invocation.machine,
+                invocation.program,
+                &invocation.static_catalog,
+                &invocation.program.descriptor_registry,
+            )?;
             let _scope = OldSpaceScope::new(&invocation.machine, &invocation.old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
@@ -245,12 +279,11 @@ impl<'code> PreparedInvocation<'code> {
         if status != CallStatus::Success
             || invocation.machine.prepared_call_status() != CallStatus::Success
         {
-            let statics = Arc::clone(&invocation.statics);
             super::forcing::describe_raised_exception(
                 &invocation.machine,
                 invocation.program,
                 &mut invocation.vmctx,
-                std::slice::from_ref(&statics),
+                &invocation.static_catalog,
                 &invocation.program.descriptor_registry,
                 &invocation.old_space,
             );
@@ -304,7 +337,7 @@ impl<'code> PreparedInvocation<'code> {
             &self.machine,
             self.program,
             &mut self.vmctx,
-            std::slice::from_ref(&self.statics),
+            &self.static_catalog,
             &self.program.descriptor_registry,
             &self.old_space,
             &result_seeds,
@@ -402,6 +435,7 @@ impl Drop for PreparedInvocation<'_> {
         // Native execution has returned before this owner can be dropped.
         // Teardown consults ownership tables only, even after terminal failure.
         self.machine.clear_prepared_old_space();
+        self.machine.clear_prepared_entries();
         self.machine.clear_rust_roots();
         self.machine.free_session_heap();
         self.machine.clear_stack_map_registry();

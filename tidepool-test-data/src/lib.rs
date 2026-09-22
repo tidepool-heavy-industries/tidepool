@@ -13,7 +13,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
-        qualified_name: None,
+        qualified_name: Some("GHC.Maybe.Nothing".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -22,7 +22,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 2,
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Maybe.Just".into()),
         type_name: String::new(),
     });
     // Bool
@@ -32,7 +32,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.False".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -41,7 +41,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 2,
         rep_arity: 0,
         field_bangs: vec![],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.True".into()),
         type_name: String::new(),
     });
     // Pair (,)
@@ -51,7 +51,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 2,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Tuple.(,)".into()),
         type_name: String::new(),
     });
     // List [] and :
@@ -61,7 +61,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.[]".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -70,7 +70,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 2,
         rep_arity: 2,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.:".into()),
         type_name: String::new(),
     });
     // Boxing
@@ -80,7 +80,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.I#".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -89,7 +89,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.W#".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -98,7 +98,7 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.D#".into()),
         type_name: String::new(),
     });
     table.insert(DataCon {
@@ -107,17 +107,17 @@ pub fn standard_datacon_table() -> DataConTable {
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Types.C#".into()),
         type_name: String::new(),
     });
-    // Text (Data.Text.Internal.Text)
+    // Text (the extractor normalizes Data.Text.Internal to Data.Text)
     table.insert(DataCon {
         id: DataConId(11),
         name: "Text".to_string(),
         tag: 1,
         rep_arity: 3,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("Data.Text.Text".into()),
         type_name: String::new(),
     });
     table

@@ -17,7 +17,7 @@ fn get_table() -> &'static DataConTable {
             tag: 1,
             rep_arity: 3,
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: None,
+            qualified_name: Some("Data.Text.Text".into()),
             type_name: String::new(),
         });
         // I# (needed for i64/Int# fields of Text if they were boxed,
@@ -28,7 +28,7 @@ fn get_table() -> &'static DataConTable {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: None,
+            qualified_name: Some("GHC.Types.I#".into()),
             type_name: String::new(),
         });
         table

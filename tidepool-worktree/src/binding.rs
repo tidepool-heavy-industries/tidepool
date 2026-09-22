@@ -210,6 +210,64 @@ pub struct BindingTable {
 }
 
 impl BindingTable {
+    /// Reconcile one durable active row after the caller has proved the old
+    /// actor process stopped. This is the only path that can issue a fresh
+    /// in-process receipt for a row loaded from disk. It either transfers the
+    /// exact predecessor atomically or reclaims an already-published successor
+    /// row after an interrupted recovery.
+    pub fn recover_active(
+        &mut self,
+        worktree: &WorktreeId,
+        predecessor: &AgentRef,
+        successor: &AgentRef,
+        now_ms: i64,
+    ) -> Result<ActiveBinding, WorktreeError> {
+        self.ensure_writable()?;
+        let current = self
+            .bindings
+            .iter()
+            .enumerate()
+            .rfind(|(_, binding)| {
+                binding.worktree() == worktree && binding.state() == BindingState::Active
+            })
+            .map(|(index, binding)| (index, binding.agent().clone()))
+            .ok_or_else(|| WorktreeError::StorageFailure {
+                path: self.path_for(worktree),
+                detail: format!("worktree {worktree} has no durable Active binding to recover"),
+            })?;
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        if current.1 == *successor {
+            self.generations[current.0] = Some(generation);
+            return Ok(ActiveBinding {
+                worktree: worktree.clone(),
+                generation,
+            });
+        }
+        if current.1 != *predecessor {
+            return Err(WorktreeError::WorktreeBusy {
+                worktree: worktree.clone(),
+                holder: current.1.to_string(),
+            });
+        }
+        self.bindings[current.0].state = BindingState::Released;
+        self.bindings.push(Binding::new(
+            worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            now_ms,
+        ));
+        self.generations.push(Some(generation));
+        if let Err(error) = self.persist(worktree) {
+            self.write_uncertain = true;
+            return Err(error);
+        }
+        Ok(ActiveBinding {
+            worktree: worktree.clone(),
+            generation,
+        })
+    }
+
     /// Move a live lease to a replacement actor without opening an unbound
     /// interval. Both history rows are published in the same atomic file write.
     /// An uncertain write retains the receipt but fences all table authority.
@@ -489,5 +547,50 @@ mod tests {
             Some(&previous_run),
             "the retained row still names its holder, so rebinding fails loud"
         );
+    }
+
+    #[test]
+    fn recovery_transfers_loaded_custody_and_can_reclaim_its_published_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = WorktreeId::from_raw("wt-recovery");
+        let predecessor = AgentRef::exact_actor("run", 2, 1);
+        let successor = AgentRef::exact_actor("run", 2, 2);
+
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        drop(table.bind(&tree, &predecessor, 1).unwrap());
+        drop(table);
+
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        let recovered = table
+            .recover_active(&tree, &predecessor, &successor, 2)
+            .unwrap();
+        assert_eq!(table.current(&tree).map(Binding::agent), Some(&successor));
+        drop(recovered);
+        drop(table);
+
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        let reclaimed = table
+            .recover_active(&tree, &predecessor, &successor, 3)
+            .unwrap();
+        reclaimed.complete(&mut table).unwrap();
+        assert!(table.current(&tree).is_none());
+    }
+
+    #[test]
+    fn recovery_rejects_a_different_durable_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = WorktreeId::from_raw("wt-busy");
+        let holder = AgentRef::exact_actor("run", 3, 1);
+        let predecessor = AgentRef::exact_actor("run", 2, 1);
+        let successor = AgentRef::exact_actor("run", 2, 2);
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        drop(table.bind(&tree, &holder, 1).unwrap());
+        drop(table);
+
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        assert!(matches!(
+            table.recover_active(&tree, &predecessor, &successor, 2),
+            Err(WorktreeError::WorktreeBusy { holder: actual, .. }) if actual == holder.to_string()
+        ));
     }
 }

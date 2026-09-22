@@ -62,6 +62,11 @@ suite-plan crate:
 suite-check:
     {{ nix }} scripts/test-suite-check.sh
 
+# Exercise command admission, OOM, cancellation, and descendant cleanup in an
+# isolated delegated user service. This does not touch active Shoal services.
+test-command-resources-delegated:
+    {{ nix }} scripts/test-command-resources-delegated.sh
+
 # Run an inner-loop test selection derived from files changed since BASE.
 [positional-arguments]
 changed base="HEAD":
@@ -73,8 +78,9 @@ changed-plan base="HEAD":
     {{ nix }} scripts/test-changed.sh "$1" --list
 
 # Check that committed Haskell CBOR fixtures match current extractor output.
-fixtures-check:
-    {{ nix }} scripts/fixtures.sh check
+[positional-arguments]
+fixtures-check *cohorts:
+    {{ nix }} scripts/fixtures.sh check "$@"
 
 # Regenerate the committed Haskell CBOR fixture corpus.
 fixtures-update:

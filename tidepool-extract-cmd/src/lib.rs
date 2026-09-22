@@ -592,6 +592,11 @@ impl ExtractCmd {
         self
     }
 
+    pub fn inspect_scope_browse(&mut self) -> &mut Self {
+        self.request.inspect_scope_browse();
+        self
+    }
+
     pub fn inspect_browse(&mut self, module: &str, expanded: bool) -> &mut Self {
         self.request.inspect_browse(module, expanded);
         self

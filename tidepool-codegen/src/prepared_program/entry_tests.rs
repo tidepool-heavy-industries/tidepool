@@ -811,8 +811,7 @@ fn w5_a4_forcing_observation_20k_constructors_small_stack() {
 /// what later programs rely on.
 mod shared_constructor_rows {
     use super::super::{
-        AnswerPlan, ImportBindings, PreparedCallOptions, PreparedMachine, PreparedMachineOptions,
-        RunOptions,
+        ImportBindings, PreparedCallOptions, PreparedMachine, PreparedMachineOptions, RunOptions,
     };
     use super::{caf_linked, caf_program};
     use crate::suspension::RealmId;
@@ -863,15 +862,13 @@ mod shared_constructor_rows {
         machine
             .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B builds its Unit");
-        let unit = machine
-            .build_answer(
-                RealmId::ROOT,
-                &AnswerPlan::Constructor {
-                    host_id: DataConId(900),
-                    fields: Vec::new(),
-                },
-            )
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let root = builder
+            .constructor(DataConId(900), &[])
             .expect("a shared Unit builds");
+        let unit = builder
+            .finish(RealmId::ROOT, root)
+            .expect("the shared Unit is retained");
         let before = machine.residency().enter_rows;
 
         let token = machine.quiesce().expect("quiescent");
@@ -888,7 +885,7 @@ mod shared_constructor_rows {
         let slot = machine.handle_root(unit).expect("the Unit handle is live");
         unsafe {
             let word = slot.current() as usize;
-            assert_ne!(word & 7, 0, "host answers are pointer-tagged");
+            assert_ne!(word & 7, 0, "managed constructors are pointer-tagged");
             slot.addr().write((word & !7) as *mut u8);
         }
 

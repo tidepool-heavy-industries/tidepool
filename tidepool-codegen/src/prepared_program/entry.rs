@@ -42,6 +42,7 @@ pub(super) fn signature() -> ir::Signature {
 pub(super) fn emit_prepared_enter(
     pipeline: &mut crate::pipeline::CodegenPipeline,
     function: FuncId,
+    recursive_enter: FuncId,
     thunks: &[ThunkEntry],
     evaluated: &[Arc<ObjectDescriptor>],
     poll: FuncId,
@@ -82,7 +83,9 @@ pub(super) fn emit_prepared_enter(
     let write_barrier_ref = pipeline
         .module
         .declare_func_in_func(write_barrier, builder.func);
-    let self_ref = pipeline.module.declare_func_in_func(function, builder.func);
+    let enter_ref = pipeline
+        .module
+        .declare_func_in_func(recursive_enter, builder.func);
     let preflight = super::emit::emit_preflight(&mut builder, vmctx, stack_overflow, pipeline);
     let early_abort = builder.create_block();
     let enough_stack = builder.ins().icmp_imm(IntCC::Equal, preflight, 0);
@@ -251,7 +254,7 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(body_ok);
         builder.seal_block(body_ok);
         builder.declare_value_needs_stack_map(returned[1]);
-        let forced = builder.ins().call(self_ref, &[vmctx, returned[1]]);
+        let forced = builder.ins().call(enter_ref, &[vmctx, returned[1]]);
         let forced_results = builder.inst_results(forced).to_vec();
         let force_ok = builder.create_block();
         let force_succeeded =

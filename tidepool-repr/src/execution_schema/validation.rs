@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorId, DecodeLimits,
-    Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId,
-    ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId,
-    SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION,
-    SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
+    Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorDecl, ConstructorId,
+    DecodeLimits, Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
+    OperationId, ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral,
+    SignatureId, SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram,
+    EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1401,6 +1401,10 @@ impl<'a> Validator<'a> {
             self.check_layout(&constructor.field_reps, &constructor.layout)?;
         }
 
+        if let Some(layout) = &self.wire.json_layout {
+            self.check_json_layout(layout)?;
+        }
+
         self.check_type_nodes(&family_sizes)?;
         self.check_sites()?;
         self.check_verb_sites()?;
@@ -1979,9 +1983,449 @@ impl<'a> Validator<'a> {
         match identity {
             super::OperationIdentity::PrimOp(name) => self.check_text(name),
             super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
+            super::OperationIdentity::JsonDecode { left, right } => {
+                self.require_json_layout()?;
+                self.check_json_decode_result(*left, *right)
+            }
+            super::OperationIdentity::JsonEncode => self.require_json_layout(),
             super::OperationIdentity::Capability { name } => self.check_text(name),
             super::OperationIdentity::WiredInError { .. } => Ok(()),
         }
+    }
+
+    fn require_json_layout(&self) -> Result<(), ParseError> {
+        self.wire.json_layout.as_ref().ok_or_else(|| {
+            ParseError::Malformed("JSON operation lacks program layout evidence".into())
+        })?;
+        Ok(())
+    }
+
+    fn json_constructor(
+        &self,
+        id: ConstructorId,
+        role: &'static str,
+        seen: &mut BTreeSet<ConstructorId>,
+    ) -> Result<&ConstructorDecl, ParseError> {
+        if !seen.insert(id) {
+            return Err(ParseError::Malformed(format!(
+                "duplicate JSON constructor role at {role}"
+            )));
+        }
+        self.wire.constructors.get(id.0 as usize).ok_or_else(|| {
+            ParseError::Malformed(format!("JSON {role} constructor is out of range"))
+        })
+    }
+
+    fn check_json_reps(
+        declaration: &ConstructorDecl,
+        role: &'static str,
+        expected: &[RuntimeRep],
+    ) -> Result<(), ParseError> {
+        if declaration.result_rep != RuntimeRep::LiftedRef || declaration.field_reps != expected {
+            return Err(ParseError::InvalidLayout(format!(
+                "JSON {role} constructor has an inadmissible physical layout"
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_json_same_family(
+        role: &'static str,
+        first: &ConstructorDecl,
+        other: &ConstructorDecl,
+    ) -> Result<(), ParseError> {
+        if first.family != other.family || first.family_size != other.family_size {
+            return Err(ParseError::Malformed(format!(
+                "JSON {role} constructors do not share declared nominal family evidence"
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_json_nominal(
+        declaration: &ConstructorDecl,
+        role: &'static str,
+        constructor_module: &'static str,
+        constructor_occurrence: &'static str,
+        family_module: &'static str,
+        family_occurrence: &'static str,
+        tag: u32,
+        family_size: u32,
+    ) -> Result<(), ParseError> {
+        let constructor = &declaration.identity;
+        let family = &declaration.family;
+        if constructor.module != constructor_module
+            || constructor.namespace != "constructor"
+            || constructor.occurrence != constructor_occurrence
+            || constructor.record_parent.is_some()
+            || family.module != family_module
+            || family.namespace != "type"
+            || family.occurrence != family_occurrence
+            || family.record_parent.is_some()
+            || constructor.unit != family.unit
+        {
+            return Err(ParseError::Malformed(format!(
+                "JSON {role} constructor does not match its admitted nominal identity: \
+                 constructor={}:{}:{} family={}:{}:{} tag={}/{}",
+                constructor.unit,
+                constructor.module,
+                constructor.occurrence,
+                family.unit,
+                family.module,
+                family.occurrence,
+                declaration.tag,
+                declaration.family_size,
+            )));
+        }
+        if declaration.tag != tag || declaration.family_size != family_size {
+            return Err(ParseError::InvalidLayout(format!(
+                "JSON {role} constructor does not match its admitted family tag"
+            )));
+        }
+        Ok(())
+    }
+
+    /// JSON role assignment is compiler evidence, so schema admission is the
+    /// one place that binds each named role to its nominal identity, tag, and
+    /// physical representation. Runtime consumers receive only the admitted
+    /// IDs and descriptors.
+    fn check_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
+        let mut seen = BTreeSet::new();
+        let object = self.json_constructor(layout.object, "Object", &mut seen)?;
+        let array = self.json_constructor(layout.array, "Array", &mut seen)?;
+        let string = self.json_constructor(layout.string, "String", &mut seen)?;
+        let number = self.json_constructor(layout.number, "Number", &mut seen)?;
+        let bool_ = self.json_constructor(layout.bool_, "Bool", &mut seen)?;
+        let null = self.json_constructor(layout.null, "Null", &mut seen)?;
+        let map_bin = self.json_constructor(layout.map_bin, "map Bin", &mut seen)?;
+        let map_tip = self.json_constructor(layout.map_tip, "map Tip", &mut seen)?;
+        let true_ = self.json_constructor(layout.true_, "True", &mut seen)?;
+        let false_ = self.json_constructor(layout.false_, "False", &mut seen)?;
+        let cons = self.json_constructor(layout.cons, "list cons", &mut seen)?;
+        let nil = self.json_constructor(layout.nil, "list nil", &mut seen)?;
+        let scientific = self.json_constructor(layout.scientific, "Scientific", &mut seen)?;
+        let integer_small =
+            self.json_constructor(layout.integer_small, "integer small", &mut seen)?;
+        let integer_positive =
+            self.json_constructor(layout.integer_positive, "integer positive", &mut seen)?;
+        let integer_negative =
+            self.json_constructor(layout.integer_negative, "integer negative", &mut seen)?;
+        let text = self.json_constructor(layout.text, "Text", &mut seen)?;
+        let int = self.json_constructor(layout.int, "boxed Int", &mut seen)?;
+
+        for (
+            declaration,
+            role,
+            constructor_module,
+            constructor_occurrence,
+            family_module,
+            family_occurrence,
+            tag,
+            family_size,
+        ) in [
+            (
+                object,
+                "Object",
+                "Tidepool.Aeson.Value",
+                "Object",
+                "Tidepool.Aeson.Value",
+                "Value",
+                1,
+                6,
+            ),
+            (
+                array,
+                "Array",
+                "Tidepool.Aeson.Value",
+                "Array",
+                "Tidepool.Aeson.Value",
+                "Value",
+                2,
+                6,
+            ),
+            (
+                string,
+                "String",
+                "Tidepool.Aeson.Value",
+                "String",
+                "Tidepool.Aeson.Value",
+                "Value",
+                3,
+                6,
+            ),
+            (
+                number,
+                "Number",
+                "Tidepool.Aeson.Value",
+                "Number",
+                "Tidepool.Aeson.Value",
+                "Value",
+                4,
+                6,
+            ),
+            (
+                bool_,
+                "Bool",
+                "Tidepool.Aeson.Value",
+                "Bool",
+                "Tidepool.Aeson.Value",
+                "Value",
+                5,
+                6,
+            ),
+            (
+                null,
+                "Null",
+                "Tidepool.Aeson.Value",
+                "Null",
+                "Tidepool.Aeson.Value",
+                "Value",
+                6,
+                6,
+            ),
+            (
+                map_bin,
+                "map Bin",
+                "Data.Map.Internal",
+                "Bin",
+                "Data.Map.Internal",
+                "Map",
+                1,
+                2,
+            ),
+            (
+                map_tip,
+                "map Tip",
+                "Data.Map.Internal",
+                "Tip",
+                "Data.Map.Internal",
+                "Map",
+                2,
+                2,
+            ),
+            (
+                true_,
+                "True",
+                "GHC.Types",
+                "True",
+                "GHC.Types",
+                "Bool",
+                2,
+                2,
+            ),
+            (
+                false_,
+                "False",
+                "GHC.Types",
+                "False",
+                "GHC.Types",
+                "Bool",
+                1,
+                2,
+            ),
+            (
+                cons,
+                "list cons",
+                "GHC.Types",
+                ":",
+                "GHC.Types",
+                "List",
+                2,
+                2,
+            ),
+            (
+                nil,
+                "list nil",
+                "GHC.Types",
+                "[]",
+                "GHC.Types",
+                "List",
+                1,
+                2,
+            ),
+            (
+                scientific,
+                "Scientific",
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                1,
+                1,
+            ),
+            (
+                integer_small,
+                "integer small",
+                "GHC.Num.Integer",
+                "IS",
+                "GHC.Num.Integer",
+                "Integer",
+                1,
+                3,
+            ),
+            (
+                integer_positive,
+                "integer positive",
+                "GHC.Num.Integer",
+                "IP",
+                "GHC.Num.Integer",
+                "Integer",
+                2,
+                3,
+            ),
+            (
+                integer_negative,
+                "integer negative",
+                "GHC.Num.Integer",
+                "IN",
+                "GHC.Num.Integer",
+                "Integer",
+                3,
+                3,
+            ),
+            (
+                text,
+                "Text",
+                "Data.Text.Internal",
+                "Text",
+                "Data.Text.Internal",
+                "Text",
+                1,
+                1,
+            ),
+            (
+                int,
+                "boxed Int",
+                "GHC.Types",
+                "I#",
+                "GHC.Types",
+                "Int",
+                1,
+                1,
+            ),
+        ] {
+            Self::check_json_nominal(
+                declaration,
+                role,
+                constructor_module,
+                constructor_occurrence,
+                family_module,
+                family_occurrence,
+                tag,
+                family_size,
+            )?;
+        }
+
+        for (role, declaration) in [
+            ("Object", object),
+            ("Array", array),
+            ("String", string),
+            ("Number", number),
+            ("Bool", bool_),
+        ] {
+            Self::check_json_reps(declaration, role, &[RuntimeRep::LiftedRef])?;
+            Self::check_json_same_family("Value", object, declaration)?;
+        }
+        Self::check_json_reps(null, "Null", &[])?;
+        Self::check_json_same_family("Value", object, null)?;
+        Self::check_json_reps(map_tip, "map Tip", &[])?;
+        Self::check_json_reps(
+            map_bin,
+            "map Bin",
+            &[
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+            ],
+        )
+        .or_else(|_| {
+            Self::check_json_reps(
+                map_bin,
+                "map Bin",
+                &[
+                    RuntimeRep::Int(64),
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                ],
+            )
+        })?;
+        Self::check_json_same_family("Map", map_bin, map_tip)?;
+        Self::check_json_reps(true_, "True", &[])?;
+        Self::check_json_reps(false_, "False", &[])?;
+        Self::check_json_same_family("Bool", true_, false_)?;
+        Self::check_json_reps(
+            cons,
+            "list cons",
+            &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+        )?;
+        Self::check_json_reps(nil, "list nil", &[])?;
+        Self::check_json_same_family("list", cons, nil)?;
+        Self::check_json_reps(
+            scientific,
+            "Scientific",
+            &[RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+        )?;
+        Self::check_json_reps(integer_small, "integer small", &[RuntimeRep::Int(64)])?;
+        Self::check_json_reps(
+            integer_positive,
+            "integer positive",
+            &[RuntimeRep::UnliftedRef],
+        )?;
+        Self::check_json_reps(
+            integer_negative,
+            "integer negative",
+            &[RuntimeRep::UnliftedRef],
+        )?;
+        Self::check_json_same_family("Integer", integer_small, integer_positive)?;
+        Self::check_json_same_family("Integer", integer_small, integer_negative)?;
+        Self::check_json_reps(
+            text,
+            "Text",
+            &[
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+            ],
+        )?;
+        Self::check_json_reps(int, "boxed Int", &[RuntimeRep::Int(64)])?;
+        Ok(())
+    }
+
+    fn check_json_decode_result(
+        &self,
+        left: ConstructorId,
+        right: ConstructorId,
+    ) -> Result<(), ParseError> {
+        let mut seen = BTreeSet::new();
+        let left = self.json_constructor(left, "decode Left", &mut seen)?;
+        let right = self.json_constructor(right, "decode Right", &mut seen)?;
+        Self::check_json_nominal(
+            left,
+            "decode Left",
+            "GHC.Internal.Data.Either",
+            "Left",
+            "GHC.Internal.Data.Either",
+            "Either",
+            1,
+            2,
+        )?;
+        Self::check_json_nominal(
+            right,
+            "decode Right",
+            "GHC.Internal.Data.Either",
+            "Right",
+            "GHC.Internal.Data.Either",
+            "Either",
+            2,
+            2,
+        )?;
+        Self::check_json_reps(left, "decode Left", &[RuntimeRep::LiftedRef])?;
+        Self::check_json_reps(right, "decode Right", &[RuntimeRep::LiftedRef])?;
+        Self::check_json_same_family("decode result", left, right)
     }
 
     fn check_text(&mut self, text: &str) -> Result<(), ParseError> {
@@ -2066,8 +2510,9 @@ mod tests {
     use super::*;
     use crate::execution_schema::{
         Architecture, ConstructorDecl, CtorRow, Endianness, FieldLayout, HeapBinding, HeapRhs,
-        OperationDecl, ProgramEnvelope, Signature, SiteDelivery, SiteRow, TargetDescriptor,
-        TopBinding, TypeNode, TypeNodeId, UpdatePolicy, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+        JsonLayout, OperationDecl, ProgramEnvelope, Signature, SiteDelivery, SiteRow,
+        StorageLayout, TargetDescriptor, TopBinding, TypeNode, TypeNodeId, UpdatePolicy,
+        EXECUTION_ABI_VERSION, SCHEMA_VERSION,
     };
 
     fn symbol(name: &str) -> SymbolIdentity {
@@ -2139,7 +2584,28 @@ mod tests {
             types: vec![],
             sites: vec![],
             verb_sites: vec![],
+            json_layout: None,
         }
+    }
+
+    #[test]
+    fn json_operations_require_program_layout_evidence() {
+        let program = valid_program();
+        let mut validator = Validator::new(&program, DecodeLimits::default());
+        let encode = super::super::OperationIdentity::JsonEncode;
+        assert!(matches!(
+            validator.check_operation_identity(&encode),
+            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
+        ));
+
+        let decode = super::super::OperationIdentity::JsonDecode {
+            left: ConstructorId(0),
+            right: ConstructorId(0),
+        };
+        assert!(matches!(
+            validator.check_operation_identity(&decode),
+            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
+        ));
     }
 
     fn replace_root(program: &mut WireProgram, frame: ExprFrame<usize>) {
@@ -2191,6 +2657,318 @@ mod tests {
                 root_mask: vec![],
             },
         }
+    }
+
+    fn json_symbol(module: &str, namespace: &str, occurrence: &str) -> SymbolIdentity {
+        SymbolIdentity {
+            unit: "fixture".into(),
+            module: module.into(),
+            namespace: namespace.into(),
+            occurrence: occurrence.into(),
+            record_parent: None,
+        }
+    }
+
+    fn json_constructor(
+        host_id: u64,
+        constructor_module: &str,
+        constructor_occurrence: &str,
+        family_module: &str,
+        family_occurrence: &str,
+        tag: u32,
+        family_size: u32,
+        field_reps: Vec<RuntimeRep>,
+    ) -> ConstructorDecl {
+        let storage = StorageLayout::for_reps(&target(), &field_reps)
+            .expect("JSON fixture constructor layout");
+        ConstructorDecl {
+            identity: json_symbol(constructor_module, "constructor", constructor_occurrence),
+            host_id: crate::DataConId(host_id),
+            family: json_symbol(family_module, "type", family_occurrence),
+            result_rep: RuntimeRep::LiftedRef,
+            strict_fields: vec![false; field_reps.len()],
+            layout: CheckedLayout {
+                fields: storage
+                    .fields()
+                    .iter()
+                    .map(|field| FieldLayout {
+                        rep: field.rep(),
+                        offset: field.offset(),
+                    })
+                    .collect(),
+                alignment: storage.alignment(),
+                payload_size: storage.payload_size(),
+                root_mask: storage
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    })
+                    .collect(),
+            },
+            field_reps,
+            tag,
+            family_size,
+        }
+    }
+
+    fn admitted_json_program() -> WireProgram {
+        let mut program = valid_program();
+        program.constructors = vec![
+            json_constructor(
+                1,
+                "Tidepool.Aeson.Value",
+                "Object",
+                "Tidepool.Aeson.Value",
+                "Value",
+                1,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                2,
+                "Tidepool.Aeson.Value",
+                "Array",
+                "Tidepool.Aeson.Value",
+                "Value",
+                2,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                3,
+                "Tidepool.Aeson.Value",
+                "String",
+                "Tidepool.Aeson.Value",
+                "Value",
+                3,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                4,
+                "Tidepool.Aeson.Value",
+                "Number",
+                "Tidepool.Aeson.Value",
+                "Value",
+                4,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                5,
+                "Tidepool.Aeson.Value",
+                "Bool",
+                "Tidepool.Aeson.Value",
+                "Value",
+                5,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                6,
+                "Tidepool.Aeson.Value",
+                "Null",
+                "Tidepool.Aeson.Value",
+                "Value",
+                6,
+                6,
+                vec![],
+            ),
+            json_constructor(
+                7,
+                "Data.Map.Internal",
+                "Bin",
+                "Data.Map.Internal",
+                "Map",
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef; 5],
+            ),
+            json_constructor(
+                8,
+                "Data.Map.Internal",
+                "Tip",
+                "Data.Map.Internal",
+                "Map",
+                2,
+                2,
+                vec![],
+            ),
+            json_constructor(9, "GHC.Types", "True", "GHC.Types", "Bool", 2, 2, vec![]),
+            json_constructor(10, "GHC.Types", "False", "GHC.Types", "Bool", 1, 2, vec![]),
+            json_constructor(
+                11,
+                "GHC.Types",
+                ":",
+                "GHC.Types",
+                "List",
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef; 2],
+            ),
+            json_constructor(12, "GHC.Types", "[]", "GHC.Types", "List", 1, 2, vec![]),
+            json_constructor(
+                13,
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                1,
+                1,
+                vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+            ),
+            json_constructor(
+                14,
+                "GHC.Num.Integer",
+                "IS",
+                "GHC.Num.Integer",
+                "Integer",
+                1,
+                3,
+                vec![RuntimeRep::Int(64)],
+            ),
+            json_constructor(
+                15,
+                "GHC.Num.Integer",
+                "IP",
+                "GHC.Num.Integer",
+                "Integer",
+                2,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            json_constructor(
+                16,
+                "GHC.Num.Integer",
+                "IN",
+                "GHC.Num.Integer",
+                "Integer",
+                3,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            json_constructor(
+                17,
+                "Data.Text.Internal",
+                "Text",
+                "Data.Text.Internal",
+                "Text",
+                1,
+                1,
+                vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Int(64),
+                ],
+            ),
+            json_constructor(
+                18,
+                "GHC.Types",
+                "I#",
+                "GHC.Types",
+                "Int",
+                1,
+                1,
+                vec![RuntimeRep::Int(64)],
+            ),
+        ];
+        program.json_layout = Some(JsonLayout {
+            object: ConstructorId(0),
+            array: ConstructorId(1),
+            string: ConstructorId(2),
+            number: ConstructorId(3),
+            bool_: ConstructorId(4),
+            null: ConstructorId(5),
+            map_bin: ConstructorId(6),
+            map_tip: ConstructorId(7),
+            true_: ConstructorId(8),
+            false_: ConstructorId(9),
+            cons: ConstructorId(10),
+            nil: ConstructorId(11),
+            scientific: ConstructorId(12),
+            integer_small: ConstructorId(13),
+            integer_positive: ConstructorId(14),
+            integer_negative: ConstructorId(15),
+            text: ConstructorId(16),
+            int: ConstructorId(17),
+        });
+        program
+    }
+
+    #[test]
+    fn json_layout_rejects_swapped_equal_rep_nominal_roles() {
+        let mut program = admitted_json_program();
+        validate_program(&program, &requirements(), DecodeLimits::default())
+            .expect("the complete authenticated JSON role fixture is admitted");
+
+        let layout = program
+            .json_layout
+            .as_mut()
+            .expect("fixture carries layout evidence");
+        std::mem::swap(&mut layout.object, &mut layout.array);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::Malformed(detail))
+                if detail.contains("admitted nominal identity")
+        ));
+    }
+
+    #[test]
+    fn json_layout_rejects_reexported_standard_constructor_identity() {
+        let mut program = admitted_json_program();
+        let true_ = &mut program.constructors[8];
+        true_.identity.module = "GHC.Internal.Types".into();
+        true_.family.module = "GHC.Internal.Types".into();
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::Malformed(detail))
+                if detail.contains("JSON True constructor")
+                    && detail.contains("GHC.Internal.Types")
+        ));
+    }
+
+    #[test]
+    fn json_decode_roles_require_exact_nominal_identity() {
+        let mut program = admitted_json_program();
+        program.constructors.extend([
+            json_constructor(
+                19,
+                "GHC.Internal.Data.Either",
+                "Left",
+                "GHC.Internal.Data.Either",
+                "Either",
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            json_constructor(
+                20,
+                "GHC.Internal.Data.Either",
+                "Right",
+                "GHC.Internal.Data.Either",
+                "Either",
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef],
+            ),
+        ]);
+        program.operations.push(OperationDecl {
+            identity: super::super::OperationIdentity::JsonDecode {
+                left: ConstructorId(18),
+                right: ConstructorId(19),
+            },
+            signature: SignatureId(0),
+        });
+        validate_program(&program, &requirements(), DecodeLimits::default())
+            .expect("admitted decode roles validate");
+
+        program.constructors[18].identity.occurrence = "SpoofedLeft".into();
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::Malformed(detail))
+                if detail.contains("admitted nominal identity")
+        ));
     }
 
     #[test]

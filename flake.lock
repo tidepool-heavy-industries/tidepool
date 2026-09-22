@@ -6,19 +6,14 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1789173036,
-        "narHash": "sha256-6+unDKzs4WqOddIGvoubo7Nn/0XhSczlZCOQZ2Lpjf4=",
-        "owner": "inanna-malick",
-        "repo": "codex",
-        "rev": "fc8e158d582d9f28767a94a76ccb45976e845977",
-        "type": "github"
+        "path": "./vendor/codex",
+        "type": "path"
       },
       "original": {
-        "owner": "inanna-malick",
-        "repo": "codex",
-        "rev": "fc8e158d582d9f28767a94a76ccb45976e845977",
-        "type": "github"
-      }
+        "path": "./vendor/codex",
+        "type": "path"
+      },
+      "parent": []
     },
     "flake-utils": {
       "inputs": {

@@ -1,6 +1,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
+use super::{command_jobs_tests::backend_request, command_jobs_tests::TestCommands};
 use tidepool_actor::{JevBackend, JevCallFailure};
 
 /// Answers every request with one choice answer and records the requests.
@@ -20,6 +21,336 @@ impl JevBackend for FakeJev {
         let answer = self.answer.clone();
         Box::pin(async move { answer })
     }
+}
+
+/// Mirrors every score question and makes sections containing `ESSENTIAL`
+/// outrank the rest. The response legend is copied from the request so the
+/// pinned DSL's exact response validation remains part of the test.
+struct SectionScoreJev {
+    requests: Mutex<Vec<serde_json::Value>>,
+}
+
+impl JevBackend for SectionScoreJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        let parsed: serde_json::Value = serde_json::from_str(&request).expect("request is JSON");
+        self.requests.lock().push(parsed.clone());
+        let answers = parsed["questions"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(key, question)| {
+                let essential = question
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("ESSENTIAL"));
+                let legend = question["criteria"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                let (score, probabilities) = if essential {
+                    (
+                        3.0,
+                        serde_json::json!({"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0}),
+                    )
+                } else {
+                    (
+                        0.0,
+                        serde_json::json!({"0": 1.0, "1": 0.0, "2": 0.0, "3": 0.0}),
+                    )
+                };
+                (
+                    key.clone(),
+                    serde_json::json!({
+                        "type": "score",
+                        "score": score,
+                        "confidence": 1.0,
+                        "legend": legend,
+                        "probabilities": probabilities,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let body = serde_json::json!({
+            "model": "jev-test",
+            "answers": answers,
+            "usage": {},
+        })
+        .to_string();
+        Box::pin(async move { Ok(body) })
+    }
+}
+
+/// Scores every offered declaration as directly useful, or fails on demand.
+/// This tests selection limits without depending on a provider's judgment.
+struct LookupScoreJev {
+    requests: Mutex<Vec<serde_json::Value>>,
+    fail: Mutex<bool>,
+    score: Mutex<u8>,
+}
+
+impl JevBackend for LookupScoreJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        self.requests.lock().push(request.clone());
+        if *self.fail.lock() {
+            return Box::pin(async { Err(JevCallFailure::Unconfigured) });
+        }
+        let score = *self.score.lock();
+        let probabilities = (0..4)
+            .map(|index| {
+                (
+                    index.to_string(),
+                    serde_json::json!(if index == score { 1.0 } else { 0.0 }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let answers = request["questions"]
+            .as_object()
+            .expect("batched score questions")
+            .iter()
+            .map(|(key, question)| {
+                let legend = question["criteria"]
+                    .as_array()
+                    .expect("ordered rubric")
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| (index.to_string(), label.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                (
+                    key.clone(),
+                    serde_json::json!({
+                        "type": "score", "score": score, "confidence": 1.0,
+                        "legend": legend,
+                        "probabilities": probabilities
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        Box::pin(async move {
+            Ok(
+                serde_json::json!({"model": "jev-test", "answers": answers, "usage": {}})
+                    .to_string(),
+            )
+        })
+    }
+}
+
+fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/shoal-workspace")
+        .canonicalize()
+        .unwrap();
+    let authored = config.workspace.join(".shoal");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("LookupFixture.hs"),
+        include_str!("lookup_enrichment_fixture.hs"),
+    )
+    .unwrap();
+    std::fs::write(authored.join("config.toml"), format!(
+        "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['.', '{}']\nmodules = ['LookupFixture', 'Project.Lookup']\nspec = 'AgentSpec.agentSpec'\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
+        package.join(".shoal").display()
+    )).unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    super::test_campaign::commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve lookup template and fixture"),
+    );
+}
+
+#[test]
+fn lookup_tool_policy_matches_native_ghc_oracle() {
+    let library = crate::haskell_sources::ensure_embedded_stdlib().unwrap();
+    let effects = tidepool_mcp::ensure_effects_module(&shoal_effect_declarations()).unwrap();
+    let mut command = std::process::Command::new("runghc");
+    for path in effects.include_paths() {
+        command.arg(format!("-i{}", path.display()));
+    }
+    let output = command
+        .arg(format!("-i{}", library.display()))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/actor_host/lookup_policy_oracle.hs"
+        ))
+        .output()
+        .expect("run through just with the pinned GHC toolchain");
+    assert!(
+        output.status.success(),
+        "native oracle failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "lookup policy oracle passed (8 checks)"
+    );
+}
+
+async fn lookup_campaign() -> (TestCampaign, Arc<LookupScoreJev>) {
+    let backend = Arc::new(LookupScoreJev {
+        requests: Mutex::new(Vec::new()),
+        fail: Mutex::new(false),
+        score: Mutex::new(3),
+    });
+    let campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+            lookup_enrichment_workspace(config);
+        },
+    )
+    .await;
+    (campaign, backend)
+}
+
+#[tokio::test]
+async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
+    let (campaign, backend) = lookup_campaign().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let helpers = dispatch_haskell_script(
+        policy,
+        "pure (LookupFixture.rankingCheck, LookupFixture.packingCheck)",
+    )
+    .await;
+    assert_eq!(
+        helpers["items"][0]["output"].as_str().map(|text| text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()),
+        Some("(True,True)".to_owned()),
+        "pure policy contracts: {helpers}"
+    );
+    let raw = dispatch_haskell_script(policy, "LookupFixture.rawLookupCheck")
+        .await
+        .to_string();
+    assert!(raw.contains("True"), "raw lookup failed: {raw}");
+    let namespaces = dispatch_haskell_script(policy, "LookupFixture.namespaceCheck")
+        .await
+        .to_string();
+    assert!(
+        namespaces.contains("True"),
+        "namespace identity lost: {namespaces}"
+    );
+    let empty = dispatch_haskell_script(policy, "LookupFixture.emptySelectionCheck")
+        .await
+        .to_string();
+    assert!(empty.contains("True"), "empty selection failed: {empty}");
+    assert!(
+        backend.requests.lock().is_empty(),
+        "raw and empty paths must bypass Jev"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn template_lookup_batches_related_declarations_and_recovers_from_jev_failure() {
+    let (campaign, backend) = lookup_campaign().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let output = dispatch_structured_tool(
+        policy,
+        "lookup",
+        serde_json::json!({
+            "queries": ["LookupFixture.relatedRoot", "LookupFixture.alternativeRoot"]
+        }),
+    )
+    .await
+    .to_string();
+    assert!(output.contains("relatedRoot"), "{output}");
+    assert!(output.contains("Related declarations"), "{output}");
+    assert_eq!(
+        output.matches("related to:").count(),
+        4,
+        "four-declaration cap: {output}"
+    );
+    assert_eq!(
+        backend.requests.lock().len(),
+        1,
+        "one scoring batch; no recursive expansion"
+    );
+    let request = backend.requests.lock()[0].clone();
+    assert!(
+        request["questions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|question| !question["instructions"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
+        "second-degree reference was scored as a candidate: {request}"
+    );
+
+    backend.requests.lock().clear();
+    let missing = dispatch_structured_tool(
+        policy,
+        "lookup",
+        serde_json::json!({
+            "queries": ["LookupFixture.alternativeRoo"]
+        }),
+    )
+    .await
+    .to_string();
+    assert!(
+        missing.contains("alternativeRoo") && missing.contains("no match:"),
+        "original miss must remain: {missing}"
+    );
+    assert!(missing.contains("Related declarations"), "{missing}");
+    assert!(
+        missing.contains("alternativeRoot"),
+        "qualified-module alternative missing: {missing}"
+    );
+    assert_eq!(backend.requests.lock().len(), 1);
+
+    *backend.score.lock() = 0;
+    backend.requests.lock().clear();
+    let irrelevant = dispatch_structured_tool(
+        policy,
+        "lookup",
+        serde_json::json!({
+            "queries": ["LookupFixture.relatedRoot"]
+        }),
+    )
+    .await
+    .to_string();
+    assert!(irrelevant.contains("relatedRoot"), "{irrelevant}");
+    assert!(
+        !irrelevant.contains("Related declarations"),
+        "irrelevant additions: {irrelevant}"
+    );
+    assert_eq!(backend.requests.lock().len(), 1);
+
+    *backend.fail.lock() = true;
+    backend.requests.lock().clear();
+    let fallback = dispatch_structured_tool(
+        policy,
+        "lookup",
+        serde_json::json!({
+            "queries": ["LookupFixture.relatedRoot"]
+        }),
+    )
+    .await
+    .to_string();
+    assert!(
+        fallback.contains("relatedRoot"),
+        "ordinary result lost on Jev failure: {fallback}"
+    );
+    assert!(!fallback.contains("Related declarations"), "{fallback}");
+    assert_eq!(backend.requests.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
@@ -62,6 +393,110 @@ async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
         },
     )
     .await
+}
+
+fn selected_shell_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/shoal-workspace")
+        .canonicalize()
+        .expect("the shipped workspace template");
+    let authored = config.workspace.join(".shoal");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        format!(
+            "[defaults]\nmodel = 'test-model'\n\n\
+             [haskell]\nsource_roots = ['{}']\n\
+             modules = ['Project.Shell']\n\
+             spec = 'AgentSpec.agentSpec'\n\n\
+             [haskell.flake_sources]\njev-dsl = ['core']\n",
+            package.join(".shoal").display()
+        ),
+    )
+    .unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    super::test_campaign::commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve the selected-shell template"),
+    );
+}
+
+#[tokio::test]
+async fn template_bash_scores_before_display_and_keeps_recovery() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 32768,
+                "intent": "retain the decisive diagnostic"
+            }),
+        )
+        .await
+    });
+    let command_output = (1..=900)
+        .map(|index| format!("background-{index}\n"))
+        .collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, "ESSENTIAL-diagnostic\n");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands.clone()));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("ESSENTIAL-diagnostic"), "{output}");
+    assert!(output.contains("<s"), "section markers missing: {output}");
+    assert!(
+        output.contains("omitted:"),
+        "omission summary missing: {output}"
+    );
+    assert!(
+        output.contains("Project.Shell.snapshot jobN"),
+        "recovery missing: {output}"
+    );
+    assert!(
+        !output.lines().any(|line| line == "background-600"),
+        "a low-ranked section exceeded the selection budget: {output}"
+    );
+
+    let requests = backend.requests.lock();
+    assert!(!requests.is_empty(), "long output must invoke Jev");
+    assert!(
+        requests[0]["state"]
+            .as_str()
+            .is_some_and(|state| state.contains("for i in $(seq 1 900)")),
+        "command absent from Jev state: {}",
+        requests[0]["state"]
+    );
+    assert_eq!(commands.executions(), 1, "selection must not re-execute");
+    drop(requests);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect

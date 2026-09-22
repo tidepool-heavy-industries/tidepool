@@ -39,7 +39,9 @@ start_battery_daemon
 # waits for the previous target's (possibly long, low-parallelism) run. Same
 # package, profile and features as the shards, so they reuse these artifacts.
 echo "==> suite $crate: building ${total} integration targets"
-cargo nextest run --no-run -p "$crate"
+target_args=()
+for target in "${targets[@]}"; do target_args+=(--test "$target"); done
+cargo nextest run --no-run -p "$crate" "${target_args[@]}"
 
 for index in "${!targets[@]}"; do
   echo "==> suite $crate: shard $((index + 1))/$total"

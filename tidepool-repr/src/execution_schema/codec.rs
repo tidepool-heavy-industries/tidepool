@@ -204,7 +204,7 @@ impl Decoder {
         if schema_version != super::SCHEMA_VERSION {
             return Err(ParseError::UnsupportedVersion(schema_version));
         }
-        let fields = array(value, 16, "program")?;
+        let fields = array(value, 17, "program")?;
         let target = self.target(&fields[5])?;
         let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
         let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
@@ -215,6 +215,7 @@ impl Decoder {
         let types = self.type_nodes(&fields[13])?;
         let sites = self.sites(&fields[14])?;
         let verb_sites = self.verb_sites(&fields[15])?;
+        let json_layout = self.optional_json_layout(&fields[16])?;
         Ok(WireProgram {
             envelope: ProgramEnvelope {
                 schema_version,
@@ -233,6 +234,7 @@ impl Decoder {
             types,
             sites,
             verb_sites,
+            json_layout,
         })
     }
 
@@ -581,7 +583,12 @@ impl Decoder {
                 };
                 super::OperationIdentity::WiredInError { kind }
             }
-            (0..=3, _) => {
+            (4, 3) => super::OperationIdentity::JsonDecode {
+                left: ConstructorId(u32_value(&identity[1], "JSON Left constructor")?),
+                right: ConstructorId(u32_value(&identity[2], "JSON Right constructor")?),
+            },
+            (5, 1) => super::OperationIdentity::JsonEncode,
+            (0..=5, _) => {
                 return Err(ParseError::Malformed("invalid operation identity".into()));
             }
             (tag, _) => return Err(ParseError::InvalidTag(tag)),
@@ -590,6 +597,49 @@ impl Decoder {
             identity,
             signature: SignatureId(u32_value(&fields[1], "operation signature ID")?),
         })
+    }
+
+    fn json_layout(&mut self, value: &Value) -> Result<super::JsonLayout, ParseError> {
+        let fields = array(value, 18, "JSON layout")?;
+        let id = |index, label| u32_value(&fields[index], label).map(ConstructorId);
+        Ok(super::JsonLayout {
+            object: id(0, "JSON Object constructor")?,
+            array: id(1, "JSON Array constructor")?,
+            string: id(2, "JSON String constructor")?,
+            number: id(3, "JSON Number constructor")?,
+            bool_: id(4, "JSON Bool constructor")?,
+            null: id(5, "JSON Null constructor")?,
+            map_bin: id(6, "JSON Map Bin constructor")?,
+            map_tip: id(7, "JSON Map Tip constructor")?,
+            true_: id(8, "JSON True constructor")?,
+            false_: id(9, "JSON False constructor")?,
+            cons: id(10, "JSON cons constructor")?,
+            nil: id(11, "JSON nil constructor")?,
+            scientific: id(12, "JSON Scientific constructor")?,
+            integer_small: id(13, "JSON IS constructor")?,
+            integer_positive: id(14, "JSON IP constructor")?,
+            integer_negative: id(15, "JSON IN constructor")?,
+            text: id(16, "JSON Text constructor")?,
+            int: id(17, "JSON Int constructor")?,
+        })
+    }
+
+    fn optional_json_layout(
+        &mut self,
+        value: &Value,
+    ) -> Result<Option<super::JsonLayout>, ParseError> {
+        let fields = tagged(value, "program JSON layout")?;
+        match (
+            unsigned(&fields[0], "program JSON layout tag")?,
+            fields.len(),
+        ) {
+            (0, 1) => Ok(None),
+            (1, 2) => self.json_layout(&fields[1]).map(Some),
+            (0..=1, _) => Err(ParseError::Malformed(
+                "wrong program JSON layout field count".into(),
+            )),
+            (tag, _) => Err(ParseError::InvalidTag(tag)),
+        }
     }
 
     fn value_ref(&mut self, value: &Value) -> Result<ValueRef, ParseError> {
@@ -993,6 +1043,7 @@ mod tests {
             array(vec![]),
             array(vec![]),
             array(vec![]),
+            array(vec![n(0)]),
         ]);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&wire, &mut bytes).unwrap();
@@ -1109,5 +1160,20 @@ mod tests {
         assert!(decoder
             .atom(&Value::Array(vec![number(3), number(1)]))
             .is_err());
+    }
+
+    #[test]
+    fn json_layout_codec_requires_all_named_roles() {
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        let complete = Value::Array((0_u8..18).map(number).collect());
+        let layout = decoder.json_layout(&complete).unwrap();
+        assert_eq!(layout.object, ConstructorId(0));
+        assert_eq!(layout.int, ConstructorId(17));
+
+        let short = Value::Array((0_u8..17).map(number).collect());
+        assert!(matches!(
+            decoder.json_layout(&short),
+            Err(ParseError::Malformed(_))
+        ));
     }
 }

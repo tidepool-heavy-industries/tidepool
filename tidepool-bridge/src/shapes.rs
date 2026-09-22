@@ -32,9 +32,7 @@
 //!     here return raw bytes / `Option` / typed errors and let the caller
 //!     choose the surface.
 //!
-//! Constructors take pre-resolved `DataConId`s (each caller has its own
-//! resolution policy: `JsonConIds`, bridge `get_resilient`, …). Decoders take
-//! a `&DataConTable` and recognize constructors BY NAME (`name_of`), which
+//! Decoders take a `&DataConTable` and recognize constructors BY NAME (`name_of`), which
 //! tolerates duplicate same-name cons from cross-module closures.
 
 use crate::value::{HaskellValue, SharedByteArray};
@@ -87,37 +85,6 @@ unbox_lit!(unbox_int, "I#", i64, Literal::LitInt(n) => *n);
 unbox_lit!(unbox_word, "W#", u64, Literal::LitWord(n) => *n);
 unbox_lit!(unbox_double, "D#", f64, Literal::LitDouble(bits) => f64::from_bits(*bits));
 unbox_lit!(unbox_float, "F#", f32, Literal::LitFloat(bits) => f32::from_bits(*bits as u32));
-
-/// Box an `Int` as `I#(LitInt n)`.
-pub fn box_int(n: i64, i_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(i_hash, vec![HaskellValue::Lit(Literal::LitInt(n))])
-}
-
-/// Box a `Word` as `W#(LitWord n)`.
-pub fn box_word(n: u64, w_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(w_hash, vec![HaskellValue::Lit(Literal::LitWord(n))])
-}
-
-/// Box a `Double` as `D#(LitDouble bits)`.
-pub fn box_double(f: f64, d_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(
-        d_hash,
-        vec![HaskellValue::Lit(Literal::LitDouble(f.to_bits()))],
-    )
-}
-
-/// Box a `Float` as `F#(LitFloat bits)`.
-pub fn box_float(f: f32, f_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(
-        f_hash,
-        vec![HaskellValue::Lit(Literal::LitFloat(f.to_bits() as u64))],
-    )
-}
-
-/// Box a `Char` as `C#(LitChar c)`.
-pub fn box_char(c: char, c_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitChar(c))])
-}
 
 /// Extract a `char` from any of its HaskellValue shapes:
 ///   1. bare `LitChar`;
@@ -173,29 +140,9 @@ pub fn unbox_bool(v: &HaskellValue, table: &DataConTable) -> Option<bool> {
     }
 }
 
-/// Build the nullary `True`/`False` con.
-pub fn make_bool(b: bool, true_id: DataConId, false_id: DataConId) -> HaskellValue {
-    HaskellValue::Con(if b { true_id } else { false_id }, vec![])
-}
-
 // ---------------------------------------------------------------------------
 // Text — worker `Text ByteArray# Int# Int#`
 // ---------------------------------------------------------------------------
-
-/// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string
-/// (offset 0, raw `HaskellValue::ByteArray` backing).
-pub fn make_text(s: &str, text_id: DataConId) -> HaskellValue {
-    let bytes = s.as_bytes().to_vec();
-    let len = bytes.len() as i64;
-    HaskellValue::Con(
-        text_id,
-        vec![
-            HaskellValue::ByteArray(Arc::new(Mutex::new(bytes))),
-            HaskellValue::Lit(Literal::LitInt(0)),
-            HaskellValue::Lit(Literal::LitInt(len)),
-        ],
-    )
-}
 
 /// Unwrap a Text backing field to its raw bytes, given a recognizer for the
 /// lifted `Con("ByteArray", [..])` wrapper layer. Accepts a raw
@@ -280,12 +227,27 @@ pub fn text_bytes_checked(
     fields: &[HaskellValue],
     table: &DataConTable,
 ) -> Result<Vec<u8>, TextShapeError> {
+    text_bytes_checked_with(
+        fields,
+        |id| is_con_named(id, "ByteArray", table),
+        |id| is_con_named(id, "I#", table),
+    )
+}
+
+/// Table-free strict Text slicing for callers that already authenticated the
+/// exact wrapper constructors they permit.
+pub fn text_bytes_checked_with(
+    fields: &[HaskellValue],
+    is_bytearray_con: impl Fn(DataConId) -> bool,
+    is_int_con: impl Fn(DataConId) -> bool,
+) -> Result<Vec<u8>, TextShapeError> {
     if fields.len() != 3 {
         return Err(TextShapeError::WrongShape);
     }
-    let backing = text_backing(&fields[0], table).ok_or(TextShapeError::BadBacking)?;
-    let off_i = unbox_int(&fields[1], table).ok_or(TextShapeError::BadOffLen)?;
-    let len_i = unbox_int(&fields[2], table).ok_or(TextShapeError::BadOffLen)?;
+    let backing =
+        text_backing_with(&fields[0], &is_bytearray_con).ok_or(TextShapeError::BadBacking)?;
+    let off_i = unbox_int_with(&fields[1], &is_int_con).ok_or(TextShapeError::BadOffLen)?;
+    let len_i = unbox_int_with(&fields[2], &is_int_con).ok_or(TextShapeError::BadOffLen)?;
     let bytes = backing.lock().unwrap_or_else(PoisonError::into_inner);
     let bad = || TextShapeError::BadSlice {
         off: off_i,
@@ -314,8 +276,7 @@ pub fn text_bytes_checked(
 /// UTF-8 validation is the caller's policy.
 ///
 /// Table-free generalization of the same policy, for callers holding
-/// individually resolved `DataConId`s rather than a full `&DataConTable`
-/// (e.g. `JsonDecode`'s tree-walker arm, which only caches a `JsonConIds`).
+/// individually resolved `DataConId`s rather than a full `&DataConTable`.
 /// `is_bytearray_con`/`is_int_con` recognize the lifted `ByteArray` wrapper
 /// / boxed `I#` cons respectively — pass `|_| false` for either when no
 /// concrete id is reachable; that wrapper form then simply goes
@@ -348,71 +309,8 @@ pub fn text_bytes_clamped(fields: &[HaskellValue], table: &DataConTable) -> Opti
 }
 
 // ---------------------------------------------------------------------------
-// Lists — `:` / `[]` cons cells
+// Data.Map.Strict — Bin/Tip balanced tree
 // ---------------------------------------------------------------------------
-
-/// Build a cons list (`:`/`[]`) from already-converted elements.
-pub fn make_list(items: Vec<HaskellValue>, cons_id: DataConId, nil_id: DataConId) -> HaskellValue {
-    let mut acc = HaskellValue::Con(nil_id, vec![]);
-    for v in items.into_iter().rev() {
-        acc = HaskellValue::Con(cons_id, vec![v, acc]);
-    }
-    acc
-}
-
-// ---------------------------------------------------------------------------
-// Data.Map.Strict — Bin/Tip balanced tree, size boxed as I#
-// ---------------------------------------------------------------------------
-
-/// The empty map.
-pub fn map_tip(tip_id: DataConId) -> HaskellValue {
-    HaskellValue::Con(tip_id, vec![])
-}
-
-/// One `Bin size k v l r` node. The leading `!Int` (subtree size) is boxed as
-/// `I#(size)` to match GHC's heap.
-pub fn map_bin_node(
-    size: i64,
-    key: HaskellValue,
-    val: HaskellValue,
-    left: HaskellValue,
-    right: HaskellValue,
-    bin_id: DataConId,
-    i_hash: DataConId,
-) -> HaskellValue {
-    HaskellValue::Con(bin_id, vec![box_int(size, i_hash), key, val, left, right])
-}
-
-/// Build a balanced `Data.Map.Strict` from key-sorted entries by
-/// divide-and-conquer.
-pub fn make_map_from_sorted(
-    entries: Vec<(HaskellValue, HaskellValue)>,
-    bin_id: DataConId,
-    tip_id: DataConId,
-    i_hash: DataConId,
-) -> HaskellValue {
-    fn go(
-        entries: &mut [Option<(HaskellValue, HaskellValue)>],
-        bin: DataConId,
-        tip: DataConId,
-        i: DataConId,
-    ) -> HaskellValue {
-        if entries.is_empty() {
-            return map_tip(tip);
-        }
-        let size = entries.len() as i64;
-        let mid = entries.len() / 2;
-        #[allow(clippy::expect_used, reason = "entry taken twice")]
-        let (k, v) = entries[mid].take().expect("entry taken twice");
-        let (l, r) = entries.split_at_mut(mid);
-        let left = go(l, bin, tip, i);
-        let right = go(&mut r[1..], bin, tip, i);
-        map_bin_node(size, k, v, left, right, bin, i)
-    }
-    let mut entries: Vec<Option<(HaskellValue, HaskellValue)>> =
-        entries.into_iter().map(Some).collect();
-    go(&mut entries, bin_id, tip_id, i_hash)
-}
 
 /// In-order walk of a `Bin`/`Tip` tree, calling `f(key, value, node_depth)`
 /// for each entry. `depth` is the depth of the ROOT node; every level (and
@@ -443,109 +341,32 @@ pub fn walk_map_entries<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Vendored aeson HaskellValue — exact-int number policy
-// ---------------------------------------------------------------------------
-
-/// Constructor ids for building an aeson `Number (Scientific coeff exp)`.
-#[derive(Clone, Copy)]
-pub struct NumberConIds {
-    /// `Number` constructor (arity 1, wraps a `Scientific`).
-    pub number: DataConId,
-    /// `Scientific` constructor (arity 2: coefficient `Integer`, base10Exponent `Int`).
-    pub scientific: DataConId,
-    /// `IS` — the single-machine-word `Integer` constructor.
-    pub is: DataConId,
-    /// `IP` — the positive-multi-limb `Integer` constructor.
-    pub ip: DataConId,
-    /// `IN` — the negative-multi-limb `Integer` constructor.
-    pub in_: DataConId,
-}
-
-/// Split a JSON number token (`serde_json` under `arbitrary_precision` hands us
-/// the exact source text) into an integer `coefficient` decimal string and a
-/// `base10Exponent`, such that the value equals `coefficient * 10^exponent`.
-/// e.g. `"3.14"` → `("314", -2)`, `"1e10"` → `("1", 10)`, `"-0.001"` → `("-1", -3)`.
-pub fn parse_decimal_token(tok: &str) -> (String, i64) {
-    let (sign, rest) = match tok.strip_prefix('-') {
-        Some(r) => ("-", r),
-        None => ("", tok.strip_prefix('+').unwrap_or(tok)),
-    };
-    let (mantissa, exp_part) = match rest.split_once(['e', 'E']) {
-        Some((m, e)) => (m, e.parse::<i64>().unwrap_or(0)),
-        None => (rest, 0),
-    };
-    let (int_part, frac_part) = match mantissa.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (mantissa, ""),
-    };
-    // coefficient digits = int ++ frac; exponent shifts down by the frac length.
-    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
-    digits.push_str(int_part);
-    digits.push_str(frac_part);
-    let exponent = exp_part - frac_part.len() as i64;
-    // Strip leading zeros (keep at least one digit) so `integer_from_decimal`'s
-    // i64 fast-path fires whenever possible.
-    let trimmed = digits.trim_start_matches('0');
-    let coeff = if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        format!("{sign}{trimmed}")
-    };
-    (coeff, exponent)
-}
-
-/// Whether `tok` (a raw JSON number token, e.g. from `serde_json::Number::as_str`
-/// under `arbitrary_precision`) has an exponent part [`parse_decimal_token`]
-/// cannot represent as an `i64` — the case it silently maps to `unwrap_or(0)`
-/// (`1e99999999999999999999` would decode as `1×10⁰` instead of erroring).
-/// `parse_decimal_token` itself stays infallible (shared by `tidepool-bridge`
-/// and `tidepool-mcp`'s eval-prep source rendering); callers at an untrusted
-/// JSON-text boundary can use this to reject the token before building on it.
-pub fn decimal_token_exponent_overflows(tok: &str) -> bool {
-    let rest = tok
-        .strip_prefix('-')
-        .or_else(|| tok.strip_prefix('+'))
-        .unwrap_or(tok);
-    let mantissa_and_exp = rest.split_once(['e', 'E']);
-    match mantissa_and_exp {
-        Some((_, exp_part)) => exp_part.parse::<i64>().is_err(),
-        None => false,
-    }
-}
-
-/// Build an exact aeson `Number (Scientific coeff exp)` from a parsed JSON
-/// number. No precision is lost: the coefficient rides an exact `Integer`
-/// (`IS`/`IP`/`IN`) and the base-10 exponent an `Int`. Requires
-/// `serde_json`'s `arbitrary_precision` so `n.as_str()` is the exact token.
-pub fn scientific_from_number(n: &serde_json::Number, ids: &NumberConIds) -> HaskellValue {
-    let (coeff, exp) = parse_decimal_token(n.as_str());
-    let coefficient = integer_from_decimal(&coeff, ids.is, ids.ip, ids.in_);
-    let sci = HaskellValue::Con(
-        ids.scientific,
-        vec![coefficient, HaskellValue::Lit(Literal::LitInt(exp))],
-    );
-    HaskellValue::Con(ids.number, vec![sci])
-}
-
-// ---------------------------------------------------------------------------
 // GHC bignum limbs (IP/IN payloads)
 // ---------------------------------------------------------------------------
 
-/// Build a GHC `Integer` heap value from an exact decimal string (the inverse of
-/// [`bignat_bytes_to_decimal`]). `IS Int#` when the value fits a machine `Int`;
-/// otherwise `IP`/`IN` carrying the magnitude as little-endian u64 limb bytes
-/// (8 bytes per limb, least-significant first — exactly the layout the decoder
-/// reads back). This is what lets a >i64 JSON integer decode to an exact
-/// `Scientific` coefficient instead of a lossy `Double`.
-pub fn integer_from_decimal(
+/// Emit an exact Integer without allocating a temporary HaskellValue tree.
+pub(crate) fn visit_integer_from_decimal(
     s: &str,
     is_id: DataConId,
     ip_id: DataConId,
     in_id: DataConId,
-) -> HaskellValue {
+    visitor: &mut dyn crate::HaskellVisitor,
+) -> Result<(), crate::BridgeError> {
+    let (constructor, payload) = integer_payload(s, is_id, ip_id, in_id);
+    visitor.begin_constructor(constructor, 1)?;
+    visitor.literal(payload)?;
+    visitor.end_constructor()
+}
+
+fn integer_payload(
+    s: &str,
+    is_id: DataConId,
+    ip_id: DataConId,
+    in_id: DataConId,
+) -> (DataConId, Literal) {
     // Machine-Int fast path (the overwhelmingly common case).
     if let Ok(i) = s.parse::<i64>() {
-        return HaskellValue::Con(is_id, vec![HaskellValue::Lit(Literal::LitInt(i))]);
+        return (is_id, Literal::LitInt(i));
     }
     let (neg, mag) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -570,7 +391,7 @@ pub fn integer_from_decimal(
     }
     let bytes: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     let con = if neg { in_id } else { ip_id };
-    HaskellValue::Con(con, vec![HaskellValue::Lit(Literal::LitByteArray(bytes))])
+    (con, Literal::LitByteArray(bytes))
 }
 
 /// Unwrap the `BigNat#` payload of an `IP`/`IN` con to its raw limb bytes.
@@ -676,13 +497,25 @@ mod tests {
             (18, "IN", 1),
         ];
         for (id, name, arity) in cons {
+            let qualified_name = match name {
+                "I#" | "W#" | "C#" | "D#" | "F#" | "True" | "False" | ":" | "[]" => {
+                    format!("GHC.Types.{name}")
+                }
+                "Text" => "Data.Text.Text".into(),
+                "Bin" | "Tip" => format!("Data.Map.Internal.{name}"),
+                "Number" => "Tidepool.Aeson.Value.Number".into(),
+                "Scientific" => "Tidepool.Aeson.Scientific.Scientific".into(),
+                "IS" | "IP" | "IN" => format!("GHC.Num.Integer.{name}"),
+                "ByteArray" => "Tidepool.Runtime.ByteArray".into(),
+                _ => unreachable!("complete shape test constructor family"),
+            };
             t.insert(DataCon {
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,
                 rep_arity: arity,
                 field_bangs: vec![],
-                qualified_name: None,
+                qualified_name: Some(qualified_name),
                 type_name: String::new(),
             });
         }
@@ -691,55 +524,6 @@ mod tests {
 
     fn id(table: &DataConTable, name: &str) -> DataConId {
         table.get_by_name(name).unwrap()
-    }
-
-    /// The `Integer` builder is the exact inverse of `bignat_bytes_to_decimal`:
-    /// small values box as `IS Int#`, big ones as `IP`/`IN` limb bytes, and both
-    /// reconstruct to the original decimal string.
-    #[test]
-    fn integer_from_decimal_round_trips() {
-        let (is, ip, in_) = (DataConId(100), DataConId(101), DataConId(102));
-        let cases = [
-            "0",
-            "42",
-            "-42",
-            "9223372036854775807",               // i64::MAX
-            "-9223372036854775808",              // i64::MIN
-            "9223372036854775808",               // i64::MAX + 1 → IP
-            "-9223372036854775809",              // i64::MIN - 1 → IN
-            "265252859812191058636308480000000", // 30! (past u128)
-            "-123456789012345678901234567890",
-        ];
-        for s in cases {
-            let v = integer_from_decimal(s, is, ip, in_);
-            let got = match &v {
-                HaskellValue::Con(cid, f) if *cid == is => match &f[0] {
-                    HaskellValue::Lit(Literal::LitInt(n)) => n.to_string(),
-                    other => panic!("IS payload not LitInt: {other:?}"),
-                },
-                HaskellValue::Con(cid, f) if *cid == ip || *cid == in_ => {
-                    let bytes = match &f[0] {
-                        HaskellValue::Lit(Literal::LitByteArray(b)) => b.clone(),
-                        other => panic!("IP/IN payload not LitByteArray: {other:?}"),
-                    };
-                    let mag = bignat_bytes_to_decimal(&bytes);
-                    if *cid == in_ {
-                        format!("-{mag}")
-                    } else {
-                        mag
-                    }
-                }
-                other => panic!("unexpected Integer shape: {other:?}"),
-            };
-            assert_eq!(got, s, "round-trip mismatch for {s}");
-            // Big values must NOT box as IS (that would silently cap at i64).
-            if s.parse::<i64>().is_err() {
-                assert!(
-                    matches!(&v, HaskellValue::Con(cid, _) if *cid == ip || *cid == in_),
-                    "{s} should be IP/IN, got {v:?}"
-                );
-            }
-        }
     }
 
     #[test]
@@ -759,20 +543,6 @@ mod tests {
             Some(3)
         );
         assert_eq!(unbox_int(&HaskellValue::Lit(Literal::LitWord(3)), &t), None);
-    }
-
-    #[test]
-    fn box_unbox_roundtrips() {
-        let t = test_table();
-        assert_eq!(unbox_int(&box_int(-4, id(&t, "I#")), &t), Some(-4));
-        assert_eq!(unbox_word(&box_word(9, id(&t, "W#")), &t), Some(9));
-        assert_eq!(unbox_double(&box_double(1.5, id(&t, "D#")), &t), Some(1.5));
-        assert_eq!(unbox_float(&box_float(2.5, id(&t, "F#")), &t), Some(2.5));
-        assert_eq!(unbox_char(&box_char('λ', id(&t, "C#")), &t), Some('λ'));
-        let tr = id(&t, "True");
-        let fa = id(&t, "False");
-        assert_eq!(unbox_bool(&make_bool(true, tr, fa), &t), Some(true));
-        assert_eq!(unbox_bool(&make_bool(false, tr, fa), &t), Some(false));
     }
 
     #[test]
@@ -833,8 +603,14 @@ mod tests {
     #[test]
     fn text_roundtrip_and_backing_forms() {
         let t = test_table();
-        let text_id = id(&t, "Text");
-        let v = make_text("hello", text_id);
+        let v = HaskellValue::Con(
+            id(&t, "Text"),
+            vec![
+                HaskellValue::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
+                HaskellValue::Lit(Literal::LitInt(0)),
+                HaskellValue::Lit(Literal::LitInt(5)),
+            ],
+        );
         match &v {
             HaskellValue::Con(_, fields) => {
                 assert_eq!(text_bytes_checked(fields, &t).unwrap(), b"hello");
@@ -954,16 +730,49 @@ mod tests {
     #[test]
     fn map_walk_is_in_order_and_depth_capped() {
         let t = test_table();
-        let (bin, tip, i) = (id(&t, "Bin"), id(&t, "Tip"), id(&t, "I#"));
-        let entries: Vec<(HaskellValue, HaskellValue)> = (0..5)
-            .map(|n| {
-                (
-                    HaskellValue::Lit(Literal::LitInt(n)),
-                    HaskellValue::Lit(Literal::LitInt(n * 10)),
-                )
-            })
-            .collect();
-        let m = make_map_from_sorted(entries, bin, tip, i);
+        let (bin, tip) = (id(&t, "Bin"), id(&t, "Tip"));
+        fn node(
+            bin: DataConId,
+            size: i64,
+            key: i64,
+            value: i64,
+            left: HaskellValue,
+            right: HaskellValue,
+        ) -> HaskellValue {
+            HaskellValue::Con(
+                bin,
+                vec![
+                    HaskellValue::Lit(Literal::LitInt(size)),
+                    HaskellValue::Lit(Literal::LitInt(key)),
+                    HaskellValue::Lit(Literal::LitInt(value)),
+                    left,
+                    right,
+                ],
+            )
+        }
+        let tip_value = || HaskellValue::Con(tip, vec![]);
+        let m = node(
+            bin,
+            5,
+            2,
+            20,
+            node(
+                bin,
+                2,
+                1,
+                10,
+                node(bin, 1, 0, 0, tip_value(), tip_value()),
+                tip_value(),
+            ),
+            node(
+                bin,
+                2,
+                4,
+                40,
+                node(bin, 1, 3, 30, tip_value(), tip_value()),
+                tip_value(),
+            ),
+        );
         let mut seen = vec![];
         walk_map_entries(&m, &t, 0, 1000, &mut |k, v, _| {
             seen.push((unbox_int(k, &t).unwrap(), unbox_int(v, &t).unwrap()));
@@ -978,79 +787,6 @@ mod tests {
         let mut n = 0;
         walk_map_entries(&m, &t, 5, 4, &mut |_, _, _| n += 1);
         assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn parse_decimal_token_splits_coeff_and_exp() {
-        assert_eq!(parse_decimal_token("3.14"), ("314".into(), -2));
-        assert_eq!(parse_decimal_token("1e10"), ("1".into(), 10));
-        assert_eq!(parse_decimal_token("-0.001"), ("-1".into(), -3));
-        assert_eq!(parse_decimal_token("42"), ("42".into(), 0));
-        assert_eq!(parse_decimal_token("1.5e-3"), ("15".into(), -4));
-        assert_eq!(parse_decimal_token("0"), ("0".into(), 0));
-        assert_eq!(parse_decimal_token("100"), ("100".into(), 0));
-        // exact big integer past f64/i64 stays exact in the coefficient
-        assert_eq!(
-            parse_decimal_token("9007199254740993"),
-            ("9007199254740993".into(), 0)
-        );
-    }
-
-    /// F7: `decimal_token_exponent_overflows` must flag exactly the tokens
-    /// whose exponent `parse_decimal_token` would otherwise silently zero.
-    #[test]
-    fn decimal_token_exponent_overflows_flags_unparseable_exponent() {
-        assert!(decimal_token_exponent_overflows("1e99999999999999999999"));
-        assert!(decimal_token_exponent_overflows("-1e99999999999999999999"));
-        assert!(decimal_token_exponent_overflows(
-            "1E999999999999999999999999"
-        ));
-        // Sanity: ordinary tokens (including large-but-representable exponents
-        // and exponent-free tokens) are NOT flagged.
-        assert!(!decimal_token_exponent_overflows("1e10"));
-        assert!(!decimal_token_exponent_overflows("3.14"));
-        assert!(!decimal_token_exponent_overflows("42"));
-        assert!(!decimal_token_exponent_overflows("1e9223372036854775807"));
-    }
-
-    #[test]
-    fn scientific_from_number_builds_exact_contract() {
-        let ids = NumberConIds {
-            number: DataConId(200),
-            scientific: DataConId(201),
-            is: DataConId(202),
-            ip: DataConId(203),
-            in_: DataConId(204),
-        };
-        // A >i64 integer: Number(Scientific(IP<limbs>, 0)) — exact, not Double.
-        let big: serde_json::Number =
-            serde_json::from_str("265252859812191058636308480000000").unwrap();
-        match &scientific_from_number(&big, &ids) {
-            HaskellValue::Con(num, nf) => {
-                assert_eq!(*num, ids.number);
-                match &nf[0] {
-                    HaskellValue::Con(sci, sf) => {
-                        assert_eq!(*sci, ids.scientific);
-                        assert!(matches!(&sf[1], HaskellValue::Lit(Literal::LitInt(0))));
-                        match &sf[0] {
-                            HaskellValue::Con(c, cf) if *c == ids.ip => {
-                                let bytes = match &cf[0] {
-                                    HaskellValue::Lit(Literal::LitByteArray(b)) => b.clone(),
-                                    o => panic!("coeff not bytes: {o:?}"),
-                                };
-                                assert_eq!(
-                                    bignat_bytes_to_decimal(&bytes),
-                                    "265252859812191058636308480000000"
-                                );
-                            }
-                            o => panic!("coeff not IP: {o:?}"),
-                        }
-                    }
-                    o => panic!("not Scientific: {o:?}"),
-                }
-            }
-            o => panic!("not Number: {o:?}"),
-        }
     }
 
     #[test]

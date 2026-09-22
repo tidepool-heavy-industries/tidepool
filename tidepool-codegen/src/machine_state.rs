@@ -66,6 +66,31 @@ use crate::stack_map::{StackMapChain, StackMapIndex, StackMapRegistry};
 
 pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 
+/// All executable dispatch facts owned by one prepared descriptor.
+///
+/// A record is assembled before publication and thereafter only read. The
+/// outer table is mutable solely at quiescent install and retirement points;
+/// generated calls and enters therefore observe one coherent owner record
+/// instead of consulting independently updated call and enter maps.
+struct PreparedDispatchRecord {
+    enter: Option<*const u8>,
+    calls: std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparedCallContinuation {
+    Return,
+    Terminal,
+    Apply,
+}
+
+pub(crate) struct PreparedCallResolution {
+    pub code: *const u8,
+    pub logical_consumed: usize,
+    pub physical_consumed: usize,
+    pub continuation: PreparedCallContinuation,
+}
+
 /// Whether another entry may safely reuse this machine after a failed run.
 ///
 /// `Unavailable` is monotonic for the lifetime of a machine: once execution
@@ -209,6 +234,63 @@ pub(crate) struct ExternalSweepPlan {
     dead: Vec<*mut u8>,
 }
 
+/// Dense collector inventory with constant-time removal by stable registration.
+/// Moving an inventory row never moves the root slot it names. Registration
+/// order, rather than vector position, defines nested-operation stack marks.
+#[derive(Default)]
+struct TemporaryRoots {
+    slots: Vec<(usize, *mut *mut u8)>,
+    indices: HashMap<usize, usize>,
+}
+
+impl TemporaryRoots {
+    fn insert(&mut self, registration: usize, slot: *mut *mut u8) {
+        self.indices.insert(registration, self.slots.len());
+        self.slots.push((registration, slot));
+    }
+
+    fn get(&self, registration: usize) -> Option<*mut *mut u8> {
+        self.indices
+            .get(&registration)
+            .map(|index| self.slots[*index].1)
+    }
+
+    fn remove(&mut self, registration: usize) {
+        let Some(index) = self.indices.remove(&registration) else {
+            return;
+        };
+        self.slots.swap_remove(index);
+        if let Some((moved, _)) = self.slots.get(index) {
+            *self.indices.get_mut(moved).expect("registered root index") = index;
+        }
+    }
+
+    fn truncate_from(&mut self, mark: usize) {
+        let mut index = 0;
+        while index < self.slots.len() {
+            let registration = self.slots[index].0;
+            if registration >= mark {
+                self.remove(registration);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.indices.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(usize, *mut *mut u8)> {
+        self.slots.iter()
+    }
+}
+
 /// Per-machine ambient state. Each cell's wrapper type (`RefCell`/`Cell`) is
 /// chosen to match the try_borrow/borrow-panic/take semantics its callers
 /// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
@@ -245,7 +327,8 @@ pub struct MachineState {
     /// Run-scoped GC roots (`RUST_ROOTS`): heap-pointer slots registered by
     /// Rust host-fn frames the JIT frame walker cannot see. Cleared every
     /// `clear_run_scratch`/`clear_gc_state`.
-    rust_roots: RefCell<Vec<*mut *mut u8>>,
+    rust_roots: RefCell<TemporaryRoots>,
+    next_rust_root: Cell<usize>,
     /// Session-scoped GC roots (`PERSISTENT_ROOTS`): tenured bindings'
     /// stable slots. Survive across runs; cleared only at machine teardown
     /// (`free_session_heap`).
@@ -294,6 +377,14 @@ pub struct MachineState {
     /// pointer is installed only during a shared execution/observation borrow
     /// and cleared before promotion or owner movement; it is never a Send handle.
     prepared_old_space: RefCell<Option<*const crate::old_space::OldSpace>>,
+    /// Program metadata available only while one synchronous prepared entry
+    /// is executing. Rust-backed structural intrinsics use this to resolve
+    /// authenticated constructors without a process registry. Nested installs
+    /// are refused by the invocation owner.
+    active_intrinsic_program: Cell<*const crate::prepared_program::CompiledProgram>,
+    active_intrinsic_catalog: Cell<*const tidepool_heap::static_region::StaticRegionCatalog>,
+    active_intrinsic_registry:
+        Cell<*const std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>>,
     /// Payloads allocated outside the moving heap. The map key is the pointer
     /// published in a Lit's value word; `base` may differ for byte arrays,
     /// whose ABI pointer follows a hidden allocation-size word.
@@ -305,25 +396,10 @@ pub struct MachineState {
     external_allocated_objects: Cell<usize>,
     external_freed_bytes: Cell<usize>,
     external_freed_objects: Cell<usize>,
-    /// Cross-program call targets, keyed by the callee's descriptor header
-    /// word and full demand signature: registered at install, read by the
-    /// `prepared_resolve_call` host fn a foreign dispatcher call falls back
-    /// to. Holds raw code pointers into an installed pipeline's finalized
-    /// module -- valid exactly as long as that pipeline (owned by the
-    /// installed program, which the stack-map chain's lifetime rule also
-    /// governs) is alive, and must be cleared before the machine's programs
-    /// drop (`clear_prepared_entries`, called from `Drop for PreparedMachine`).
-    prepared_callables: RefCell<
-        HashMap<
-            usize,
-            std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
-        >,
-    >,
-    /// Cross-program force targets: a thunk/function/PAP descriptor header ->
-    /// the OWNING program's `prepared_enter` code pointer, so a foreign
-    /// `Enter` can force an imported thunk through the program that knows how
-    /// to run it. Same lifetime contract as `prepared_callables`.
-    prepared_enters: RefCell<HashMap<usize, *const u8>>,
+    /// Cross-program call and enter targets, keyed by descriptor header.
+    /// Each immutable record is published as one unit after installation's
+    /// fallible work and removed before its finalized code is released.
+    prepared_dispatch: RefCell<HashMap<usize, PreparedDispatchRecord>>,
     /// Constructor descriptor header -> constructor identity, for every
     /// constructor an installed program declares. A prepared case miss reads
     /// its scrutinee's header here: a known constructor is an intact object
@@ -381,7 +457,8 @@ impl MachineState {
             diagnostics: RefCell::new(Vec::new()),
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
-            rust_roots: RefCell::new(Vec::new()),
+            rust_roots: RefCell::new(TemporaryRoots::default()),
+            next_rust_root: Cell::new(0),
             prepared_exception: Cell::new(std::ptr::null_mut()),
             describing_exception: Cell::new(false),
             persistent_roots: RefCell::new(Vec::new()),
@@ -391,14 +468,16 @@ impl MachineState {
             remembered_slots: RefCell::new(HashSet::new()),
             old_space_arenas: RefCell::new(Vec::new()),
             prepared_old_space: RefCell::new(None),
+            active_intrinsic_program: Cell::new(std::ptr::null()),
+            active_intrinsic_catalog: Cell::new(std::ptr::null()),
+            active_intrinsic_registry: Cell::new(std::ptr::null()),
             external_storage: RefCell::new(HashMap::new()),
             external_revision: Cell::new(Some(0)),
             external_allocated_bytes: Cell::new(0),
             external_allocated_objects: Cell::new(0),
             external_freed_bytes: Cell::new(0),
             external_freed_objects: Cell::new(0),
-            prepared_callables: RefCell::new(HashMap::new()),
-            prepared_enters: RefCell::new(HashMap::new()),
+            prepared_dispatch: RefCell::new(HashMap::new()),
             prepared_constructors: RefCell::new(HashMap::new()),
             interned_bytes: RefCell::new(Arc::new(
                 crate::prepared_program::static_bytes::PinnedBytes::empty(),
@@ -600,14 +679,9 @@ impl MachineState {
     /// write wins, because the earliest record is the one closest to the
     /// fault.
     ///
-    /// Uses `try_borrow_mut` defensively: a fault + `siglongjmp` while
-    /// something holds this cell mutably borrowed would leave it PERMANENTLY
-    /// marked as mutably borrowed (a `RefCell` has no "unpoison"), and a
-    /// plain `borrow_mut` on the signal-recovery path — inside unwind/cleanup
-    /// — double-panics into `abort()` instead of surfacing
-    /// `YieldError::Signal`. If the borrow fails we simply can't record this
-    /// cause; silently dropping it (rather than panicking) is the same
-    /// tradeoff `take_runtime_error` already makes.
+    /// Uses `try_borrow_mut` defensively so nested failure bookkeeping cannot
+    /// panic while an earlier path still owns the cell. If the borrow fails,
+    /// the earlier cause remains authoritative.
     pub(crate) fn set_first_cause(&self, cause: RuntimeError) {
         self.record_first_cause(cause, None);
     }
@@ -756,11 +830,9 @@ impl MachineState {
         let _ = self.take_runtime_error();
     }
 
-    /// Take the pending cause, if any. Uses `try_borrow_mut` defensively: this
-    /// runs on the signal/teardown path, and a signal can fire while JIT host
-    /// code still holds a `borrow_mut` on the cell — a plain `borrow_mut`
-    /// would then panic (and panicking inside `Drop`/unwind double-panics →
-    /// `abort()`).
+    /// Take the pending cause, if any. Uses `try_borrow_mut` defensively so
+    /// cleanup does not panic if nested failure bookkeeping still owns the
+    /// cell.
     /// Consuming a prepared cause settles/releases its exception operand.
     /// Any future operand presentation must precede this operation.
     pub(crate) fn take_runtime_error(&self) -> Option<RuntimeError> {
@@ -884,6 +956,42 @@ impl MachineState {
         Ok(i64::from(tag.get() - 1))
     }
 
+    /// Resolve the physical kind of a live prepared object through the active
+    /// descriptor space. This lets generic enter recognize evaluated values
+    /// without embedding every installed function, PAP, and constructor
+    /// header in generated code.
+    ///
+    /// # Safety
+    /// `encoded` has the same managed-reference provenance requirement as
+    /// [`Self::prepared_constructor_tag`].
+    pub(crate) unsafe fn prepared_object_kind(
+        &self,
+        encoded: usize,
+    ) -> Result<tidepool_heap::execution_descriptor::ObjectKind, RuntimeError> {
+        use tidepool_heap::managed_reference::untag;
+        let reference = untag(encoded) as *const usize;
+        if reference.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(RuntimeError::BadPointer)?;
+        let header = unsafe { reference.read() };
+        if header & 7 != 0 {
+            return Err(RuntimeError::BadThunkState((header & 7) as u8));
+        }
+        prepared
+            .space
+            .live_descriptor(header)
+            .map(|descriptor| descriptor.kind())
+            .ok_or(RuntimeError::BadPointer)
+    }
+
     /// Install a prepared nursery whose descriptor space admits one immutable
     /// invocation-owned static region as an external managed space.
     pub(crate) fn install_prepared_buffer_with_static_region(
@@ -906,7 +1014,9 @@ impl MachineState {
         let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts)
             .map_err(|_| RuntimeError::HeapOverflow)?;
         let space = if let Some(region) = static_region {
-            space.with_static_region(region)
+            space
+                .with_static_region(region)
+                .map_err(|_| RuntimeError::HeapOverflow)?
         } else {
             space
         };
@@ -952,6 +1062,26 @@ impl MachineState {
             .extend_static_region(static_region)
             .map_err(|_| RuntimeError::HeapOverflow)?;
         Ok(())
+    }
+
+    /// The immutable static catalog owned by the live prepared descriptor
+    /// space. Collection mutates it only during installation/retirement;
+    /// non-moving observation borrows the same catalog between calls.
+    pub(crate) fn prepared_static_catalog(
+        &self,
+    ) -> Result<
+        std::rc::Rc<std::cell::RefCell<tidepool_heap::static_region::StaticRegionCatalog>>,
+        RuntimeError,
+    > {
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(RuntimeError::BadPointer)?;
+        Ok(prepared.space.static_catalog())
     }
 
     /// Open the descriptor space's registration undo log (see
@@ -1052,11 +1182,9 @@ impl MachineState {
     }
 
     /// Take this machine's `GcState` out of its cell, leaving the cell empty.
-    /// `perform_gc` uses this to operate on an OWNED `GcState` across the
-    /// Cheney copy instead of holding a live borrow across faultable code: a
-    /// signal there abandons the owned value on the dead frame (it leaks,
-    /// nothing double-frees) rather than leaving the `RefCell` permanently
-    /// marked borrowed. Pair with [`Self::put_gc_state`].
+    /// `perform_gc` uses this to operate on an owned `GcState` across the
+    /// Cheney copy without holding a `RefCell` borrow through collection.
+    /// Pair with [`Self::put_gc_state`].
     pub(crate) fn take_gc_state(&self) -> Option<GcState> {
         self.gc_state.borrow_mut().take()
     }
@@ -1069,17 +1197,47 @@ impl MachineState {
 
     // --- rust roots (run-scoped GC roots, leaf 3) --------------------------
 
-    pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) {
-        self.rust_roots.borrow_mut().push(slot);
+    pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) -> usize {
+        let registration = self.next_rust_root.get();
+        self.next_rust_root.set(
+            registration
+                .checked_add(1)
+                .expect("temporary root registration space exhausted"),
+        );
+        let mut roots = self.rust_roots.borrow_mut();
+        roots.insert(registration, slot);
+        registration
     }
 
-    /// Temporary root-vector mark; excludes the independently owned exception.
+    /// Stop tracing one temporary Rust root without moving registrations owned
+    /// by nested operations across their stack marks.
+    pub(crate) fn deregister_rust_root(&self, registration: usize, slot: *mut *mut u8) {
+        let mut roots = self.rust_roots.borrow_mut();
+        if roots.get(registration) == Some(slot) {
+            roots.remove(registration);
+        }
+    }
+
+    /// Remove exact registrations in linear time in their count. This is
+    /// used when a construction owner drops with many reusable DAG roots.
+    pub(crate) fn deregister_rust_roots(&self, registrations: &[usize]) {
+        let mut roots = self.rust_roots.borrow_mut();
+        for registration in registrations {
+            roots.remove(*registration);
+        }
+    }
+
+    /// Number of active temporary roots; excludes the independent exception.
     pub(crate) fn rust_roots_len(&self) -> usize {
         self.rust_roots.borrow().len()
     }
 
+    pub(crate) fn rust_roots_mark(&self) -> usize {
+        self.next_rust_root.get()
+    }
+
     pub(crate) fn truncate_rust_roots(&self, mark: usize) {
-        self.rust_roots.borrow_mut().truncate(mark);
+        self.rust_roots.borrow_mut().truncate_from(mark);
     }
 
     /// Clear temporary registrations, not the exception settlement slot.
@@ -1090,7 +1248,7 @@ impl MachineState {
     /// Append this machine's run-scoped rust roots to `out` — used by
     /// `perform_gc` to build its root slot list.
     pub(crate) fn extend_rust_roots(&self, out: &mut Vec<*mut *mut u8>) {
-        out.extend(self.rust_roots.borrow().iter().copied());
+        out.extend(self.rust_roots.borrow().iter().map(|(_, slot)| *slot));
         if !self.prepared_exception.get().is_null() {
             out.push(self.prepared_exception.as_ptr());
         }
@@ -1258,7 +1416,7 @@ impl MachineState {
     // --- cross-program call/enter resolution ------------------------------
     // Substrate for the prepared engine's cross-program call and force
     // fallback (see `prepared_program::resolve`); `apply::emit_dispatchers`'
-    // fallback and `entry::emit_prepared_enter` read these tables at a miss.
+    // fallback and `entry::emit_prepared_enter` read the same owner record.
 
     /// Register one installed program's exported call targets and owned
     /// enter headers. Headers are unique per descriptor across the machine;
@@ -1270,11 +1428,27 @@ impl MachineState {
         >,
         enters: impl IntoIterator<Item = (usize, *const u8)>,
     ) {
-        let mut targets = self.prepared_callables.borrow_mut();
+        let mut staged = HashMap::<usize, PreparedDispatchRecord>::new();
         for (header, signature, code) in callables {
-            targets.entry(header).or_default().insert(signature, code);
+            staged
+                .entry(header)
+                .or_insert_with(|| PreparedDispatchRecord {
+                    enter: None,
+                    calls: std::collections::BTreeMap::new(),
+                })
+                .calls
+                .insert(signature, code);
         }
-        self.prepared_enters.borrow_mut().extend(enters);
+        for (header, enter) in enters {
+            staged
+                .entry(header)
+                .or_insert_with(|| PreparedDispatchRecord {
+                    enter: None,
+                    calls: std::collections::BTreeMap::new(),
+                })
+                .enter = Some(enter);
+        }
+        self.prepared_dispatch.borrow_mut().extend(staged);
     }
 
     /// Record constructor headers an installed program declares; see
@@ -1313,8 +1487,7 @@ impl MachineState {
     /// Machine-teardown path (`Drop for PreparedMachine`): drop every raw
     /// code pointer before the pipelines they point into are freed.
     pub(crate) fn clear_prepared_entries(&self) {
-        self.prepared_callables.borrow_mut().clear();
-        self.prepared_enters.borrow_mut().clear();
+        self.prepared_dispatch.borrow_mut().clear();
         self.prepared_constructors.borrow_mut().clear();
     }
 
@@ -1323,23 +1496,25 @@ impl MachineState {
     /// one program (its descriptors are minted per compile), so a retired
     /// owner's rows have no other pointer to switch to; a header a live object
     /// still carried would have kept the program live.
-    pub(crate) fn retire_prepared_entries(&self, callables: &[usize], enters: &[usize]) {
-        let mut targets = self.prepared_callables.borrow_mut();
-        for header in callables {
-            targets.remove(header);
-        }
-        let mut owners = self.prepared_enters.borrow_mut();
-        for header in enters {
-            owners.remove(header);
+    pub(crate) fn retire_prepared_entries(&self, headers: &[usize]) {
+        let mut records = self.prepared_dispatch.borrow_mut();
+        for header in headers {
+            records.remove(header);
         }
     }
 
     /// `(callable rows, enter rows)` currently registered.
     pub(crate) fn prepared_entry_rows(&self) -> (usize, usize) {
-        (
-            self.prepared_callables.borrow().len(),
-            self.prepared_enters.borrow().len(),
-        )
+        let records = self.prepared_dispatch.borrow();
+        let callable_rows = records
+            .values()
+            .filter(|record| !record.calls.is_empty())
+            .count();
+        let enter_rows = records
+            .values()
+            .filter(|record| record.enter.is_some())
+            .count();
+        (callable_rows, enter_rows)
     }
 
     /// Program retirement's precondition: the live descriptor space is
@@ -1379,20 +1554,83 @@ impl MachineState {
         prepared.space.retire_owner(headers, Some(region));
     }
 
-    pub(crate) fn resolve_prepared_call(
+    pub(crate) fn resolve_prepared_application(
         &self,
         header: usize,
-        signature: &tidepool_repr::execution_schema::Signature,
-    ) -> Option<*const u8> {
-        self.prepared_callables
-            .borrow()
-            .get(&header)?
-            .get(signature)
-            .copied()
+        demand: &tidepool_repr::execution_schema::Signature,
+        logical_cursor: usize,
+    ) -> Option<PreparedCallResolution> {
+        use tidepool_repr::execution_schema::{ResultContract, RuntimeRep};
+
+        let remaining = demand.arguments.get(logical_cursor..)?;
+        let records = self.prepared_dispatch.borrow();
+        let calls = &records.get(&header)?.calls;
+        let physical = |logical: &[RuntimeRep]| {
+            logical
+                .iter()
+                .filter(|rep| **rep != RuntimeRep::Void)
+                .count()
+        };
+        let resolution = |code, consumed, continuation| PreparedCallResolution {
+            code,
+            logical_consumed: consumed,
+            physical_consumed: physical(&remaining[..consumed]),
+            continuation,
+        };
+
+        if let Some((signature, &code)) = calls.iter().find(|(signature, _)| {
+            signature.arguments.as_slice() == remaining && signature.results == demand.results
+        }) {
+            return Some(resolution(
+                code,
+                signature.arguments.len(),
+                PreparedCallContinuation::Return,
+            ));
+        }
+
+        let mut terminal = None;
+        let mut apply = None;
+        for (signature, &code) in calls {
+            let consumed = signature.arguments.len();
+            if consumed > remaining.len()
+                || signature.arguments.as_slice() != &remaining[..consumed]
+            {
+                continue;
+            }
+            match &signature.results {
+                ResultContract::NoSuccess => {
+                    if terminal
+                        .as_ref()
+                        .is_none_or(|(_, previous)| consumed > *previous)
+                    {
+                        terminal = Some((code, consumed));
+                    }
+                }
+                ResultContract::Returns(reps)
+                    if demand.results != ResultContract::NoSuccess
+                        && reps.as_slice() == [RuntimeRep::LiftedRef]
+                        && consumed > 0
+                        && consumed < remaining.len()
+                        && apply
+                            .as_ref()
+                            .is_none_or(|(_, previous)| consumed > *previous) =>
+                {
+                    apply = Some((code, consumed));
+                }
+                ResultContract::Returns(_) | ResultContract::CallerResult => {}
+            }
+        }
+        terminal
+            .map(|(code, consumed)| resolution(code, consumed, PreparedCallContinuation::Terminal))
+            .or_else(|| {
+                apply.map(|(code, consumed)| {
+                    resolution(code, consumed, PreparedCallContinuation::Apply)
+                })
+            })
     }
 
     pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
-        self.prepared_enters.borrow().get(&header).copied()
+        self.prepared_dispatch.borrow().get(&header)?.enter
     }
 
     /// Whether some installed program owns an enter routine for `header` (a
@@ -1402,7 +1640,7 @@ impl MachineState {
     /// on any other header means the callee word does not name a callable
     /// object at all, which is an integrity failure.
     pub(crate) fn owns_prepared_entry(&self, header: usize) -> bool {
-        self.prepared_enters.borrow().contains_key(&header)
+        self.prepared_dispatch.borrow().contains_key(&header)
     }
 
     /// Join a successful generated-frame walk with every ambient root registry.
@@ -1494,6 +1732,53 @@ impl MachineState {
     /// Clear the borrowed prepared admission pointer before its owner drops.
     pub(crate) fn clear_prepared_old_space(&self) {
         *self.prepared_old_space.borrow_mut() = None;
+    }
+
+    pub(crate) fn install_active_intrinsic_program(
+        &self,
+        program: &crate::prepared_program::CompiledProgram,
+        catalog: &tidepool_heap::static_region::StaticRegionCatalog,
+        registry: &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
+    ) -> bool {
+        if !self.active_intrinsic_program.get().is_null() {
+            return false;
+        }
+        self.active_intrinsic_program.set(program);
+        self.active_intrinsic_catalog.set(catalog);
+        self.active_intrinsic_registry.set(registry);
+        true
+    }
+
+    pub(crate) fn clear_active_intrinsic_program(&self) {
+        self.active_intrinsic_program.set(std::ptr::null());
+        self.active_intrinsic_catalog.set(std::ptr::null());
+        self.active_intrinsic_registry.set(std::ptr::null());
+    }
+
+    /// # Safety
+    /// The returned borrow is bounded by the synchronous invocation scope
+    /// that installed the stable compiled-program owner.
+    #[allow(dead_code, reason = "used by the prepared JSON intrinsic sink")]
+    pub(crate) unsafe fn active_intrinsic_program(
+        &self,
+    ) -> Option<&crate::prepared_program::CompiledProgram> {
+        self.active_intrinsic_program.get().as_ref()
+    }
+
+    /// # Safety
+    /// The returned borrows are bounded by the synchronous intrinsic scope.
+    pub(crate) unsafe fn active_intrinsic_observation(
+        &self,
+    ) -> Option<(
+        &tidepool_heap::static_region::StaticRegionCatalog,
+        &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
+    )> {
+        let catalog = self.active_intrinsic_catalog.get();
+        let registry = self.active_intrinsic_registry.get();
+        if catalog.is_null() || registry.is_null() {
+            return None;
+        }
+        Some((unsafe { &*catalog }, unsafe { &*registry }))
     }
 
     /// Borrow the exact-start admission owner for one collector/observer call.
@@ -1740,6 +2025,40 @@ impl MachineState {
             unsafe {
                 std::ptr::copy_nonoverlapping(data, copied.as_mut_ptr(), count);
                 copied.set_len(count);
+            }
+        }
+        Ok(copied)
+    }
+
+    /// Copy a checked external byte span while sampling cancellation between
+    /// bounded chunks. No heap action occurs while the ledger borrow is live.
+    pub(crate) fn read_external_payload_offset_polling(
+        &self,
+        published: *mut u8,
+        byte_offset: usize,
+        count: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let storage = self.external_storage.borrow();
+        let data = Self::checked_external_byte_range(&storage, published, byte_offset, count)
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let mut copied: Vec<u8> = Vec::new();
+        copied
+            .try_reserve_exact(count)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        for offset in (0..count).step_by(4096) {
+            if self.poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+                != crate::prepared_control::CallStatus::Success
+            {
+                return Err(RuntimeError::Cancelled);
+            }
+            let chunk = (count - offset).min(4096);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.add(offset),
+                    copied.as_mut_ptr().add(offset),
+                    chunk,
+                );
+                copied.set_len(offset + chunk);
             }
         }
         Ok(copied)
@@ -2946,19 +3265,12 @@ pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
 mod tests {
     use super::*;
 
-    /// `runtime_error` relies on `try_borrow_mut` defenses: a fault +
-    /// `siglongjmp` while something holds it mutably borrowed would leave it
-    /// PERMANENTLY marked as mutably borrowed (`RefCell` has no "unpoison"
-    /// once a guard's release never runs). We reproduce that exact `RefCell`
-    /// state directly — hold a live `borrow_mut()` guard across the calls
-    /// under test — rather than actually raising a signal; `signal_safety.rs`
-    /// separately covers signal delivery/recovery itself. `gc_state` avoids
-    /// this hazard class entirely via a take/put-back discipline instead —
-    /// see the `gc_state_take_put_back_*` tests below.
+    /// Nested failure bookkeeping must not panic when an earlier path still
+    /// owns the first-cause cell.
     #[test]
-    fn stuck_runtime_error_cell_does_not_panic() {
+    fn busy_runtime_error_cell_does_not_panic() {
         let ms = MachineState::new();
-        let _guard = ms.runtime_error.borrow_mut(); // simulates a stuck signal-path borrow
+        let _guard = ms.runtime_error.borrow_mut();
 
         // set_first_cause: silently cannot write the cause, but does not panic.
         ms.set_first_cause(RuntimeError::Cancelled);
@@ -3029,7 +3341,7 @@ mod tests {
             )
             .unwrap();
         let reference = machine.gc_active_range().unwrap().0;
-        let mark = machine.rust_roots_len();
+        let mark = machine.rust_roots_mark();
         let mut temporary = reference;
         machine.register_rust_root(&mut temporary);
         // The descriptor-backed object and stable Rc machine remain owned.
@@ -3045,6 +3357,56 @@ mod tests {
             Some(RuntimeError::RaisedException)
         );
         assert!(machine.prepared_exception.get().is_null());
+    }
+
+    #[test]
+    fn removing_an_outer_temporary_root_preserves_nested_mark_cleanup() {
+        let machine = MachineState::new();
+        let mut outer = std::ptr::null_mut();
+        let outer_registration = machine.register_rust_root(&mut outer);
+        let nested_mark = machine.rust_roots_mark();
+        let mut nested = std::ptr::null_mut();
+        machine.register_rust_root(&mut nested);
+
+        machine.deregister_rust_root(outer_registration, &mut outer);
+        machine.truncate_rust_roots(nested_mark);
+
+        let mut roots = Vec::new();
+        machine.extend_rust_roots(&mut roots);
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn wide_temporary_root_removal_keeps_a_dense_index_and_nested_owners() {
+        let machine = MachineState::new();
+        let mut slots = vec![std::ptr::null_mut(); 8192];
+        let registrations: Vec<_> = slots
+            .iter_mut()
+            .map(|slot| machine.register_rust_root(slot))
+            .collect();
+        let nested_mark = machine.rust_roots_mark();
+        let mut nested = std::ptr::null_mut();
+        machine.register_rust_root(&mut nested);
+        // Removing the front of a wide frontier must move at most one index
+        // row per removal, without moving any collector-visible root slot.
+        for (registration, slot) in registrations.iter().zip(&mut slots) {
+            machine.deregister_rust_root(*registration, slot);
+            let roots = machine.rust_roots.borrow();
+            assert_eq!(roots.indices.len(), roots.slots.len());
+            assert_eq!(
+                roots.slots.last().map(|row| roots.indices[&row.0]),
+                roots.slots.len().checked_sub(1)
+            );
+        }
+        assert_eq!(machine.rust_roots_len(), 1);
+        machine.truncate_rust_roots(nested_mark);
+        assert_eq!(machine.rust_roots_len(), 0);
+        assert!(machine.rust_roots.borrow().indices.is_empty());
+        let registration = machine.register_rust_root(&mut slots[0]);
+        machine.deregister_rust_root(registrations[0], &mut slots[0]);
+        assert_eq!(machine.rust_roots_len(), 1);
+        machine.deregister_rust_root(registration, &mut slots[0]);
+        assert_eq!(machine.rust_roots_len(), 0);
     }
 
     fn prepared_tag_fixture(
@@ -4522,14 +4884,10 @@ mod tests {
         );
     }
 
-    /// Simulates a fault mid-`perform_gc`: the `GcState` is taken out and the
-    /// frame holding it is abandoned (a `siglongjmp` skips the put-back). The
-    /// cell is left EMPTY rather than stuck mutably-borrowed, so every
-    /// teardown path that runs during signal recovery — including
-    /// `clear_run_scratch`, called from `RegistryGuard::drop` — completes
-    /// without panicking.
+    /// Teardown remains safe while `GcState` is temporarily taken out of its
+    /// cell, as it is throughout `perform_gc`.
     #[test]
-    fn gc_state_abandoned_take_leaves_cell_empty_and_teardown_is_safe() {
+    fn gc_state_taken_out_leaves_cell_empty_and_teardown_is_safe() {
         let ms = MachineState::new();
         ms.install_prepared_buffer(vec![0_u64; 16], Vec::new())
             .unwrap();

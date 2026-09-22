@@ -898,20 +898,10 @@ mod tests {
         }
     }
 
-    /// The compiled-artifact key an extract over these include roots would get.
+    /// Source-revision identity; artifact reuse additionally validates the
+    /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        let input = PathBuf::from("Turn.hs");
-        let argv = vec![std::ffi::OsString::from("Turn.hs")];
-        tidepool_runtime::cache::invocation_key(&tidepool_runtime::cache::Invocation {
-            source: "module Turn where",
-            argv: &argv,
-            input_path: &input,
-            include,
-            endpoint_identity: b"frozen-workspace-test",
-            stable_val: None,
-        })
-        .expect("an include-only invocation is cacheable")
-        .to_string()
+        tidepool_runtime::cache::source_roots_identity(b"source-revision-test", include)
     }
 
     #[test]

@@ -34,6 +34,24 @@ fn run_prepared_once(
     imports: MachineImports,
     cancel: Arc<AtomicBool>,
 ) -> Result<RunResult, PreparedRuntimeError> {
+    run_prepared_once_with_nursery(
+        artifact,
+        requirements,
+        limits,
+        imports,
+        cancel,
+        RunOptions::default().nursery_bytes,
+    )
+}
+
+fn run_prepared_once_with_nursery(
+    artifact: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    imports: MachineImports,
+    cancel: Arc<AtomicBool>,
+    nursery_bytes: usize,
+) -> Result<RunResult, PreparedRuntimeError> {
     // A caller may pre-cancel before this function even parses the artifact
     // (e.g. a request already cancelled before compilation started); a
     // trivial entry may never reach a tail-call safepoint that would
@@ -46,13 +64,9 @@ fn run_prepared_once(
     let entry = prepared.entry();
     let linked = link_program(prepared, &imports)?;
     let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
-    let (mut machine, program) = PreparedMachine::new(
-        compiled,
-        PreparedMachineOptions {
-            nursery_bytes: RunOptions::default().nursery_bytes,
-        },
-    )
-    .map_err(PreparedRuntimeError::Run)?;
+    let (mut machine, program) =
+        PreparedMachine::new(compiled, PreparedMachineOptions { nursery_bytes })
+            .map_err(PreparedRuntimeError::Run)?;
     let options = PreparedCallOptions {
         observation_budget: RunOptions::default().observation_budget,
         collect_before_observation: true,
@@ -77,6 +91,314 @@ const FREER_RESUME_ARTIFACT: &[u8] =
 /// header and `FreerResume.md`). Never hand-derived.
 const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
+
+#[test]
+fn compiler_json_reply_streams_using_the_parked_program_layout() {
+    use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_runtime::prepared_execution::{ParkPolicy, PreparedEngine, PreparedSettlement};
+
+    tidepool_testing::eval_harness::require_extract();
+    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+        tidepool_mcp::runllmturn_decl(),
+    ])
+    .expect("JSON reply effect surface");
+    let compiled = tidepool_runtime::compile_haskell(
+        include_str!("fixtures/JsonReply.hs"),
+        "__prepared",
+        &surface.include_path_refs(),
+    )
+    .expect("compile JSON reply without JSON intrinsic calls");
+    let prepared = compiled.prepared.into_prepared();
+    assert!(prepared.json_layout().is_some());
+    let table = compiled.table.with_json_layout(None);
+    let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
+        .expect("bootstrap compiler-produced JSON reply");
+    let PreparedSettlement::Suspended {
+        request,
+        continuation,
+    } = engine
+        .run_settled(program, RealmId::ROOT)
+        .expect("run JSON request")
+    else {
+        panic!("JSON request must suspend")
+    };
+    let parked = engine
+        .park_suspension(
+            program,
+            RealmId::ROOT,
+            ParkPolicy {
+                principal: tidepool_repr::PrincipalId::SYSTEM,
+                effect_policy: EffectRunPolicy::SuspendAll,
+                live_payload: LivePayloadPolicy::None,
+            },
+            request,
+            continuation,
+            &table,
+        )
+        .expect("park compiler-produced JSON site");
+    let payload = serde_json::json!({"mixed": [true, false, null, 42, "text", {"nested": []}]});
+    let resumed = engine
+        .resume_with_structural_answer(parked.id, &payload, &table)
+        .expect("stream JSON with the owner's physical map layout");
+    let PreparedSettlement::Done { value } = resumed.settlement else {
+        panic!("JSON reply must complete")
+    };
+    let observed = engine.observe(program, value).expect("observe JSON reply");
+    let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
+    assert_eq!(decoded, payload);
+    assert!(engine.release(value));
+    assert_eq!(engine.parked_count(), 0);
+}
+
+#[test]
+fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
+    use tidepool_repr::execution_schema::RuntimeRep;
+
+    tidepool_testing::eval_harness::require_extract();
+    let include = tidepool_testing::eval_harness::prelude_path();
+    let programs = [
+        include_str!("fixtures/ScientificPlain.hs"),
+        include_str!("fixtures/ScientificQuoted.hs"),
+    ]
+    .map(|source| {
+        tidepool_runtime::compile_haskell(source, "result", &[&include])
+            .expect("compile Scientific fixture")
+            .prepared
+            .into_prepared()
+    });
+    let declarations = programs.each_ref().map(|program| {
+        find_declared(
+            program.constructors(),
+            "Tidepool.Aeson.Scientific",
+            "Scientific",
+        )
+        .expect("Scientific declaration before execution")
+    });
+    assert_eq!(declarations[0], declarations[1]);
+    assert_eq!(
+        declarations[0].field_reps,
+        [RuntimeRep::LiftedRef, RuntimeRep::Int(64)]
+    );
+    let scientific_id = declarations[0].host_id;
+    for order in [[0, 1], [1, 0]] {
+        let (mut machine, first) = open_closed_machine_from(programs[order[0]].clone());
+        let linked = link_program(programs[order[1]].clone(), &MachineImports::default())
+            .expect("second program links");
+        let compiled = machine
+            .compile_for_install(&linked)
+            .expect("second program compiles");
+        let second = machine
+            .install_program(compiled, ImportBindings::new())
+            .expect("second program shares constructor interning");
+        for (index, program) in [(order[0], first), (order[1], second), (order[0], first)] {
+            let result = machine
+                .run_entry_with_raw_cancel(
+                    program,
+                    programs[index].entry(),
+                    &[],
+                    PreparedCallOptions {
+                        collect_before_observation: true,
+                        observation_budget: RunOptions::default().observation_budget,
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .expect("Scientific program executes after shared installation");
+            let value = &result.values[0];
+            let scientific = if index == 1 {
+                let HaskellValue::Con(_, fields) = value else {
+                    panic!("expected Number: {value:?}")
+                };
+                assert_eq!(fields.len(), 1);
+                &fields[0]
+            } else {
+                value
+            };
+            let HaskellValue::Con(id, fields) = scientific else {
+                panic!("expected Scientific: {scientific:?}")
+            };
+            assert_eq!(*id, scientific_id);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(observed_int(&fields[0]), 42);
+            assert_eq!(observed_int(&fields[1]), 0);
+        }
+    }
+}
+
+#[test]
+fn native_json_intrinsics_preserve_arguments_from_optimized_importers() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/JsonIntrinsicDemand.hs");
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin().expect("resolve extractor").path,
+    ));
+    command
+        .input(&source)
+        .targets(["result"])
+        .include(root.join("haskell/lib"))
+        .include(root.join("haskell/test-prepared-stg"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract cross-module JSON intrinsic fixture");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+    let bytes = std::fs::read(output.path().join("result.prepared.cbor"))
+        .expect("extractor wrote cross-module JSON fixture");
+    let result = run_prepared_once(
+        &bytes,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .expect("optimized importer preserves both JSON intrinsic arguments");
+    assert_eq!(observed_int(&result.values[0]), 1);
+}
+
+#[test]
+fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/JsonIntrinsic.hs");
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin().expect("resolve extractor").path,
+    ));
+    command
+        .input(&source)
+        .targets([
+            "result",
+            "cycleFailure",
+            "valueCycleFailure",
+            "depthFailure",
+            "bottomFailure",
+            "headBottomFailure",
+            "sharedValue",
+            "lazyEncoded",
+        ])
+        .include(root.join("haskell/lib"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract native JSON fixture");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+    let bytes = std::fs::read(output.path().join("result.prepared.cbor"))
+        .expect("extractor wrote JSON fixture");
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
+        .expect("artifact requirements");
+    let result = run_prepared_once_with_nursery(
+        &bytes,
+        &requirements,
+        DecodeLimits::default(),
+        MachineImports::default(),
+        Arc::new(AtomicBool::new(false)),
+        4096,
+    )
+    .expect("native JSON fixture runs");
+    assert_eq!(observed_int(&result.values[0]), 1);
+    let read_program = |target: &str| {
+        let bytes = std::fs::read(output.path().join(format!("{target}.prepared.cbor"))).unwrap();
+        parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap()
+    };
+    let lazy = read_program("lazyEncoded");
+    let lazy_entry = lazy.entry();
+    let (mut lazy_machine, lazy_program) = open_closed_machine_from(lazy);
+    let lazy_result = lazy_machine
+        .run_entry(
+            lazy_program,
+            lazy_entry,
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
+        .expect("observation can force a lazy field containing a JSON intrinsic");
+    let HaskellValue::Con(_, wrapper_fields) = &lazy_result.values[0] else {
+        panic!("lazy wrapper")
+    };
+    let HaskellValue::Con(_, text_fields) = &wrapper_fields[0] else {
+        panic!("encoded Text")
+    };
+    assert!(
+        matches!(&text_fields[0], HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes))
+        if bytes == b"[[true,null],[true,null]]")
+    );
+    let shared = read_program("sharedValue");
+    let shared_entry = shared.entry();
+    let linked = link_program(shared, &MachineImports::default()).unwrap();
+    let compiled = CompiledProgram::compile(&linked).unwrap();
+    let (mut machine, shared_program) = PreparedMachine::new(
+        compiled,
+        PreparedMachineOptions {
+            nursery_bytes: 4096,
+        },
+    )
+    .unwrap();
+    for (target, expected) in [
+        ("cycleFailure", RuntimeError::BlackHole),
+        ("valueCycleFailure", RuntimeError::BlackHole),
+        ("depthFailure", RuntimeError::StackOverflow),
+        (
+            "bottomFailure",
+            RuntimeError::RaisedExceptionMessage("JSON child bottom".into()),
+        ),
+        (
+            "headBottomFailure",
+            RuntimeError::RaisedExceptionMessage("JSON head bottom".into()),
+        ),
+    ] {
+        let prepared = read_program(target);
+        let entry = prepared.entry();
+        let linked = link_program(prepared, &MachineImports::default()).unwrap();
+        let compiled = machine.compile_for_install(&linked).unwrap();
+        let program = machine
+            .install_program(compiled, ImportBindings::new())
+            .unwrap();
+        let error = machine
+            .run_entry(program, entry, &[], call_options(true), RealmId::ROOT)
+            .expect_err("a nested encoder failure must not publish partial JSON");
+        assert!(
+            matches!(error, ExecutionError::Runtime(ref failure)
+            if failure.cause == expected),
+            "{target}: {error:?}"
+        );
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(machine.handle_count(), 0);
+        let success = machine
+            .run_entry(
+                shared_program,
+                shared_entry,
+                &[],
+                call_options(true),
+                RealmId::ROOT,
+            )
+            .expect("same machine encodes shared acyclic values after failure and collection");
+        let HaskellValue::Con(_, fields) = &success.values[0] else {
+            panic!("encoded Text")
+        };
+        let HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)) = &fields[0] else {
+            panic!("Text bytes")
+        };
+        assert_eq!(bytes, b"[[true,null],[true,null]]");
+        assert_eq!(machine.handle_count(), 0);
+    }
+}
 
 #[test]
 fn caller_result_matches_ghc_for_boxed_unboxed_and_join_forwarding() {
@@ -295,7 +617,8 @@ fn strict_artifact() -> Vec<u8> {
         uint(0),
         array([]),
         array([]),
-        array([]), // verb sites
+        array([]),        // verb sites
+        array([uint(0)]), // no authenticated JSON layout
     ])
 }
 

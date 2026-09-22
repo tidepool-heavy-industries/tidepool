@@ -25,7 +25,8 @@ use tracing_subscriber::Layer;
 
 use crate::actor_host::ACTOR_PROJECT_ROOT;
 
-const STATUS_VERSION: u32 = 4;
+pub(crate) const STATUS_VERSION: u32 = 5;
+const PREVIOUS_STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 pub mod resources;
@@ -404,6 +405,18 @@ fn resolve_agent_defaults(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub version: u32,
+    #[serde(default)]
+    pub host_generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_actors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovered_actors: Vec<RecoveredActorObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost_state: Vec<String>,
+    #[serde(default)]
+    pub resource_service: ResourceServiceObservation,
+    #[serde(default)]
+    pub run_storage: BoundedStorageObservation,
     pub run_id: String,
     pub workspace: PathBuf,
     pub session: String,
@@ -412,9 +425,38 @@ pub struct RunStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveredActorObservation {
+    pub predecessor: ActorRef,
+    pub actor: ActorRef,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceServiceObservation {
+    /// `None` means no observation was attempted for this status record.
+    pub healthy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<tidepool_node::command_resources::CommandResourceObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedStorageObservation {
+    pub bytes: u64,
+    pub entries: u64,
+    pub unreadable: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunPhase {
     Starting,
+    Recovering {
+        stage: RecoveryStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restored_source: Option<String>,
+    },
     AwaitingBinding {
         root_actor: ActorRef,
     },
@@ -426,6 +468,15 @@ pub enum RunPhase {
         error: String,
     },
     Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStage {
+    ReopeningSource,
+    StoppingPredecessors,
+    ReconcilingResources,
+    RestoringActors,
 }
 
 /// Check the authored next-swarm selection without touching native execution.
@@ -537,7 +588,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join("shoal")
         .join("runs")
         .join(&run_id);
-    std::fs::create_dir_all(&run_root)?;
+    ensure_private_run_root(&run_root)?;
     let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     crate::actor_host::validate_workspace_program(&selected, &run_root)?;
     if options.recreate {
@@ -545,10 +596,16 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         // The host repeats this check at launch so a later disappearance also
         // fails closed.
         resolve_root_launch_mode(true, &root_binding_path).await?;
-        tmux.kill().await?;
+        let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
+            runtime_error(format!(
+                "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
+            ))
+        })?;
+        stop(previous_run.trim(), &session_name).await?;
     } else {
         clear_fresh_root_binding(&root_binding_path)?;
     }
+    tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
 
     let status_path = run_root.join("status.json");
     write_status(
@@ -691,7 +748,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
-    let host_launch = slice.delegated_scope(
+    let host_launch = slice.supervised_service(
         &format!("shoal-host-{run_id}"),
         slice.verified_command(
             &executable,
@@ -762,7 +819,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "Shoal ready in tmux session {session_name:?}: actor {root_actor:?}, thread {}",
             root_thread.0
         ),
-        RunPhase::Starting | RunPhase::Failed { .. } | RunPhase::Exited => {
+        RunPhase::Starting | RunPhase::Recovering { .. } | RunPhase::Failed { .. } | RunPhase::Exited => {
             unreachable!("wait_until_interactive returns only interactive phases")
         }
     }
@@ -775,13 +832,38 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     println!("config: {}", workspace.join(SHOAL_CONFIG).display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
-        println!("stop:   tmux kill-session -t {session_name}");
+        println!("stop:   shoal stop --run-id {run_id} --session {session_name}");
         Ok(())
     } else {
         tmux.attach_or_switch()
             .await
             .map_err(|failure| Box::new(failure) as Box<dyn std::error::Error>)
     }
+}
+
+pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if run_id.is_empty()
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(runtime_error("invalid Shoal run identity"));
+    }
+    let unit = format!("shoal-host-{run_id}.service");
+    let status = tokio::process::Command::new("systemctl")
+        .args(["--user", "stop", &unit])
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(runtime_error(format!(
+            "could not stop supervised host unit {unit}"
+        )));
+    }
+    let tmux = TmuxSession::new(session)?;
+    if tmux.exists().await? {
+        tmux.kill().await?;
+    }
+    Ok(())
 }
 
 fn compiler_daemon_launch(
@@ -981,6 +1063,24 @@ async fn read_bounded_diagnostics(
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_private_run_root(&options.run_root)?;
+    let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&options.run_root)?;
+    let generation = host_incarnation.incarnation().0;
+    if generation > 1 {
+        let mut status = RunStatus::new(
+            &options.run_id,
+            &options.workspace,
+            &options.session,
+            options.agent.clone(),
+            RunPhase::Recovering {
+                stage: RecoveryStage::ReopeningSource,
+                restored_source: None,
+            },
+        )
+        .at_generation(generation);
+        status.lost_state = recovery_lost_state(generation);
+        write_status(&options.status_path, &status)?;
+    }
     let log_path = shoal_log_path(&options.workspace, &options.run_id);
     tracing::info!(
         run_id = %options.run_id,
@@ -993,10 +1093,11 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         model = %options.agent.model,
         effort = %options.agent.effort,
         detailed_log = %log_path.display(),
+        host_generation = generation,
         "starting Shoal actor host"
     );
-    let result = run_host(&options).await;
-    let settled = settle_host_result(result, &options);
+    let result = run_host(&options, generation, host_incarnation).await;
+    let settled = settle_host_result(result, &options, generation);
     if let Err(error) = &settled {
         tracing::error!(run_id = %options.run_id, error = %error, "Shoal actor host failed");
     } else {
@@ -1005,16 +1106,85 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
     settled
 }
 
-async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&options.run_root)?;
+async fn run_host(
+    options: &HostOptions,
+    host_generation: u64,
+    host_incarnation: crate::actor_host::HostIncarnationLease,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_private_run_root(&options.run_root)?;
     if let Some(parent) = options.root_binding_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let root_launch_mode =
-        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
+    let recovered_binding = options.run_root.join("root-binding.json");
+    let root_launch_mode = if host_generation > 1 {
+        resolve_root_launch_mode(true, &recovered_binding)
+            .await
+            .map_err(|error| {
+                runtime_error(format!(
+                    "host generation {host_generation} cannot prove a resumable root; actor remains unavailable: {error}"
+                ))
+            })?
+    } else {
+        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?
+    };
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    let accepted_source = source::SourceLayer::new(&options.run_root)
+        .ensure_active(&workspace_inputs)?
+        .identity;
+    let mut unavailable_actors = Vec::new();
+    let lost_state = recovery_lost_state(host_generation);
+    if host_generation > 1 {
+        let mut status = RunStatus::new(
+            &options.run_id,
+            &options.workspace,
+            &options.session,
+            options.agent.clone(),
+            RunPhase::Recovering {
+                stage: RecoveryStage::StoppingPredecessors,
+                restored_source: Some(accepted_source.clone()),
+            },
+        )
+        .at_generation(host_generation);
+        status.lost_state = lost_state.clone();
+        write_status(&options.status_path, &status)?;
+        let predecessors = crate::actor_host::stop_predecessor_processes(&options.run_root).map_err(
+            |error| {
+                runtime_error(format!(
+                    "host recovery cannot prove predecessor native applications stopped; actors remain unavailable: {error}"
+                ))
+            },
+        )?;
+        if !predecessors.root_available() {
+            return Err(runtime_error(format!(
+                "host recovery cannot prove the predecessor root stopped; actor remains unavailable: {}",
+                predecessors.unavailable.join(", ")
+            )));
+        }
+        let unavailable = if predecessors.unavailable.is_empty() {
+            "none".into()
+        } else {
+            predecessors.unavailable.join(", ")
+        };
+        unavailable_actors = predecessors.unavailable.clone();
+        let notice = format!(
+            "Recovery notice [{}:{}]. Restored accepted source {}. Live Haskell computations, requests, watches, and bindings from the prior host were lost. Native work was interrupted. The recorded conversation is being resumed without replaying unresolved tool calls. Unavailable predecessor actors: {unavailable}. Inspect Shoal status and retained command jobs before starting new work.",
+            options.run_id,
+            host_generation,
+            accepted_source,
+        );
+        tidepool_atomic_write::write_durable(
+            &options.run_root.join("host-recovery-notice.txt"),
+            notice.as_bytes(),
+        )?;
+        tracing::info!(
+            host_generation,
+            stopped = predecessors.stopped,
+            unavailable = ?predecessors.unavailable,
+            "predecessor native applications reconciled"
+        );
+    }
     let configuration = workspace_inputs.config()?;
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
@@ -1025,14 +1195,52 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     )?;
     let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
     let research_policy = configuration.research;
+    if host_generation > 1 {
+        let mut status = RunStatus::new(
+            &options.run_id,
+            &options.workspace,
+            &options.session,
+            options.agent.clone(),
+            RunPhase::Recovering {
+                stage: RecoveryStage::ReconcilingResources,
+                restored_source: Some(accepted_source.clone()),
+            },
+        )
+        .at_generation(host_generation)
+        .with_unavailable_actors(unavailable_actors.clone());
+        status.lost_state = lost_state.clone();
+        write_status(&options.status_path, &status)?;
+    }
     let command_resources =
         resources::connect(configuration.resources, &options.run_id, &slice).await?;
+    let mut recovered_actors = Vec::new();
+    if host_generation > 1 {
+        let status = observe_run_runtime(
+            RunStatus::new(
+                &options.run_id,
+                &options.workspace,
+                &options.session,
+                options.agent.clone(),
+                RunPhase::Recovering {
+                    stage: RecoveryStage::RestoringActors,
+                    restored_source: Some(accepted_source.clone()),
+                },
+            )
+            .at_generation(host_generation)
+            .with_unavailable_actors(unavailable_actors.clone()),
+            &command_resources,
+            &recovered_actors,
+            &lost_state,
+        )
+        .await;
+        write_status(&options.status_path, &status)?;
+    }
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
             systemd_slice: Some(slice),
             source_exclude: configuration.launch.source_exclude,
-            command_resources: Some(command_resources),
+            command_resources: Some(std::sync::Arc::clone(&command_resources)),
             shoal_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),
             haskell_root,
@@ -1049,6 +1257,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             jev: None,
         },
         readiness_tx,
+        host_incarnation,
     )
     .instrument(tracing::info_span!(
         "shoal_host",
@@ -1073,13 +1282,17 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                     }
                 }
                 Some(crate::actor_host::ActorHostReadiness::AwaitingBinding { root }) => {
-                    let status = RunStatus::new(
+                    let status = observe_run_runtime(RunStatus::new(
                         &options.run_id,
                         &options.workspace,
                         &options.session,
                         options.agent.clone(),
                         RunPhase::AwaitingBinding { root_actor: root },
-                    );
+                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone()),
+                        &command_resources,
+                        &recovered_actors,
+                        &lost_state,
+                    ).await;
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish pending root status; host remains active");
                     }
@@ -1094,7 +1307,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                     if let Err(error) = copy_interactive_binding(&options.root_binding_path, &thread).await {
                         tracing::error!(%error, "could not publish root binding; host remains active");
                     }
-                    let status = RunStatus::new(
+                    let status = observe_run_runtime(RunStatus::new(
                         &options.run_id,
                         &options.workspace,
                         &options.session,
@@ -1103,7 +1316,11 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                             root_actor: root,
                             root_thread: thread.id().clone(),
                         },
-                    );
+                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone()),
+                        &command_resources,
+                        &recovered_actors,
+                        &lost_state,
+                    ).await;
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish ready root status; host remains active");
                     }
@@ -1114,11 +1331,100 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         "root interactive application ready"
                     );
                 }
+                Some(crate::actor_host::ActorHostReadiness::ActorRecovered { predecessor, actor }) => {
+                    let observation = RecoveredActorObservation { predecessor, actor };
+                    if !recovered_actors.contains(&observation) {
+                        recovered_actors.push(observation);
+                        recovered_actors.sort_by_key(|recovered| {
+                            (recovered.actor.id, recovered.actor.incarnation)
+                        });
+                    }
+                    unavailable_actors.retain(|unavailable| {
+                        unavailable
+                            .split_once('-')
+                            .and_then(|(id, _)| id.parse::<u64>().ok())
+                            != Some(predecessor.id.0)
+                    });
+                    match std::fs::read(&options.status_path)
+                        .map_err(Box::<dyn std::error::Error>::from)
+                        .and_then(|bytes| decode_run_status(&bytes))
+                    {
+                        Ok(mut status) if status.host_generation == host_generation => {
+                            status.unavailable_actors = unavailable_actors.clone();
+                            let status = observe_run_runtime(
+                                status,
+                                &command_resources,
+                                &recovered_actors,
+                                &lost_state,
+                            ).await;
+                            if let Err(error) = write_status(&options.status_path, &status) {
+                                tracing::error!(%error, "could not publish recovered actor status");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "recovered actor became ready before run status could be updated");
+                        }
+                    }
+                    tracing::info!(
+                        predecessor = %predecessor,
+                        actor = %actor,
+                        "actor conversation recovered in a fresh incarnation"
+                    );
+                }
+                Some(crate::actor_host::ActorHostReadiness::ActorUnavailable { predecessor, reason }) => {
+                    let label = format!("{}-{}", predecessor.id.0, predecessor.incarnation.0);
+                    if !unavailable_actors.contains(&label) {
+                        unavailable_actors.push(label);
+                        unavailable_actors.sort();
+                    }
+                    match std::fs::read(&options.status_path)
+                        .map_err(Box::<dyn std::error::Error>::from)
+                        .and_then(|bytes| decode_run_status(&bytes))
+                    {
+                        Ok(mut status) if status.host_generation == host_generation => {
+                            status.unavailable_actors = unavailable_actors.clone();
+                            let status = observe_run_runtime(
+                                status,
+                                &command_resources,
+                                &recovered_actors,
+                                &lost_state,
+                            ).await;
+                            if let Err(error) = write_status(&options.status_path, &status) {
+                                tracing::error!(%error, "could not publish unavailable actor status");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::debug!(%error, "unavailable actor preceded initial run status");
+                        }
+                    }
+                    tracing::warn!(actor = %predecessor, %reason, "durable actor remains unavailable");
+                }
                 None => return run.await,
             },
             result = &mut run => return result,
         }
     }
+}
+
+fn recovery_lost_state(host_generation: u64) -> Vec<String> {
+    if host_generation <= 1 {
+        return Vec::new();
+    }
+    vec![
+        "live Haskell computations".into(),
+        "resident requests and watches".into(),
+        "live Haskell bindings".into(),
+        "interrupted native work".into(),
+    ]
+}
+
+fn ensure_private_run_root(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
 async fn resolve_root_launch_mode(
@@ -1153,6 +1459,7 @@ fn clear_fresh_root_binding(path: &Path) -> Result<(), Box<dyn std::error::Error
 fn settle_host_result(
     result: Result<(), Box<dyn std::error::Error>>,
     options: &HostOptions,
+    host_generation: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let phase = match &result {
         Ok(()) => RunPhase::Exited,
@@ -1160,13 +1467,25 @@ fn settle_host_result(
             error: failure.to_string(),
         },
     };
-    let status = RunStatus::new(
+    let mut status = RunStatus::new(
         &options.run_id,
         &options.workspace,
         &options.session,
         options.agent.clone(),
         phase,
     );
+    status.host_generation = host_generation;
+    if let Ok(previous) = std::fs::read(&options.status_path)
+        .map_err(Box::<dyn std::error::Error>::from)
+        .and_then(|bytes| decode_run_status(&bytes))
+    {
+        if previous.host_generation == host_generation {
+            status.unavailable_actors = previous.unavailable_actors;
+            status.recovered_actors = previous.recovered_actors;
+            status.lost_state = previous.lost_state;
+            status.resource_service = previous.resource_service;
+        }
+    }
     match (result, write_status(&options.status_path, &status)) {
         (result, Ok(())) => result,
         (Ok(()), Err(status_error)) => Err(status_error),
@@ -1268,7 +1587,7 @@ async fn wait_until_interactive(
                                 "Shoal host exited before becoming interactive",
                             ))
                         }
-                        RunPhase::Starting => {}
+                        RunPhase::Starting | RunPhase::Recovering { .. } => {}
                     }
                 }
             }
@@ -1289,13 +1608,18 @@ async fn wait_until_interactive(
 }
 
 pub(crate) fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
     let version = value
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .and_then(|version| u32::try_from(version).ok())
         .ok_or_else(|| runtime_error("Shoal run status has no valid version"))?;
-    if version != STATUS_VERSION {
+    if version == PREVIOUS_STATUS_VERSION {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| runtime_error("Shoal run status is not an object"))?;
+        object.insert("version".into(), STATUS_VERSION.into());
+    } else if version != STATUS_VERSION {
         return Err(runtime_error(format!(
             "unsupported Shoal run status version {version} (expected {STATUS_VERSION})"
         )));
@@ -1313,6 +1637,12 @@ impl RunStatus {
     ) -> Self {
         Self {
             version: STATUS_VERSION,
+            host_generation: 0,
+            unavailable_actors: Vec::new(),
+            recovered_actors: Vec::new(),
+            lost_state: Vec::new(),
+            resource_service: ResourceServiceObservation::default(),
+            run_storage: BoundedStorageObservation::default(),
             run_id: run_id.into(),
             workspace: workspace.into(),
             session: session.into(),
@@ -1320,12 +1650,100 @@ impl RunStatus {
             phase,
         }
     }
+
+    fn at_generation(mut self, generation: u64) -> Self {
+        self.host_generation = generation;
+        self
+    }
+
+    fn with_unavailable_actors(mut self, actors: Vec<String>) -> Self {
+        self.unavailable_actors = actors;
+        self
+    }
+}
+
+async fn observe_run_runtime(
+    mut status: RunStatus,
+    resources: &std::sync::Arc<tidepool_node::command_resources::CommandResourceClient>,
+    recovered_actors: &[RecoveredActorObservation],
+    lost_state: &[String],
+) -> RunStatus {
+    status.recovered_actors = recovered_actors.to_vec();
+    status.lost_state = lost_state.to_vec();
+    status.resource_service =
+        match tokio::time::timeout(Duration::from_secs(2), resources.observation()).await {
+            Ok(Ok(observation)) => ResourceServiceObservation {
+                healthy: Some(true),
+                resources: Some(observation),
+                detail: None,
+            },
+            Ok(Err(error)) => ResourceServiceObservation {
+                healthy: Some(false),
+                resources: None,
+                detail: Some(format!(
+                    "resource service unavailable; accepted commands remain retained: {error}"
+                )),
+            },
+            Err(_) => ResourceServiceObservation {
+                healthy: Some(false),
+                resources: None,
+                detail: Some(
+                    "resource service observation timed out; accepted commands remain retained"
+                        .into(),
+                ),
+            },
+        };
+    status
 }
 
 fn write_status(path: &Path, status: &RunStatus) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = serde_json::to_vec_pretty(status)?;
+    let mut status = status.clone();
+    if let Some(run_root) = path.parent() {
+        status.run_storage = observe_storage(run_root, 8_192);
+    }
+    let bytes = serde_json::to_vec_pretty(&status)?;
     tidepool_atomic_write::write_best_effort(path, &bytes)?;
     Ok(())
+}
+
+fn observe_storage(root: &Path, maximum_entries: usize) -> BoundedStorageObservation {
+    let mut observation = BoundedStorageObservation::default();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if observation.entries as usize >= maximum_entries {
+            observation.truncated = true;
+            break;
+        }
+        observation.entries += 1;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                observation.bytes = observation.bytes.saturating_add(metadata.len());
+            }
+            Ok(metadata) if metadata.is_dir() => match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry)
+                                if observation.entries as usize + pending.len()
+                                    < maximum_entries =>
+                            {
+                                pending.push(entry.path());
+                            }
+                            Ok(_) => {
+                                observation.truncated = true;
+                                break;
+                            }
+                            Err(_) => observation.unreadable += 1,
+                        }
+                    }
+                }
+                Err(_) => observation.unreadable += 1,
+            },
+            Ok(_) => {}
+            Err(_) => observation.unreadable += 1,
+        }
+    }
+    observation
 }
 
 fn shoal_state_root(workspace: &Path) -> PathBuf {
@@ -1700,11 +2118,11 @@ mod tests {
             ),
             (
                 ".shoal/AgentSpec.hs",
-                include_str!("../../.shoal/AgentSpec.hs"),
+                include_str!("../../examples/shoal-workspace/.shoal/AgentSpec.hs"),
             ),
             (
                 ".shoal/Project/Tools.hs",
-                include_str!("../../.shoal/Project/Tools.hs"),
+                include_str!("../../examples/shoal-workspace/.shoal/Project/Tools.hs"),
             ),
             (
                 ".shoal/Project/Watchdog.hs",
@@ -1718,12 +2136,14 @@ mod tests {
             );
         }
         let spec = std::fs::read_to_string(workspace.path().join(".shoal/AgentSpec.hs")).unwrap();
-        assert!(spec.contains("afterTool = Just afterEachTool"), "{spec}");
-        assert!(spec.contains("Abstained"), "{spec}");
+        assert!(spec.contains("specTools = Tools.tools"), "{spec}");
         let tools =
             std::fs::read_to_string(workspace.path().join(".shoal/Project/Tools.hs")).unwrap();
-        assert!(tools.contains("shell :: Shell.ShellTools mode"), "{tools}");
-        assert!(tools.contains("triageSearch"), "{tools}");
+        assert!(
+            tools.contains("shell :: Command.ShellTools mode"),
+            "{tools}"
+        );
+        assert!(tools.contains("inspection = Lookup.tools"), "{tools}");
     }
 
     /// Every workspace skill lands, and the links a client discovers them
@@ -2409,6 +2829,25 @@ mod tests {
             assert_eq!(decode_run_status(&encoded).unwrap(), status);
         }
 
+        let current = RunStatus::new(
+            "run-1",
+            Path::new("/tmp/work"),
+            "shoal-work",
+            test_agent_defaults(),
+            RunPhase::AwaitingBinding { root_actor },
+        );
+        let mut legacy = serde_json::to_value(current).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.insert("version".into(), PREVIOUS_STATUS_VERSION.into());
+        object.remove("recovered_actors");
+        object.remove("lost_state");
+        object.remove("resource_service");
+        let migrated = decode_run_status(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(migrated.version, STATUS_VERSION);
+        assert!(migrated.recovered_actors.is_empty());
+        assert!(migrated.lost_state.is_empty());
+        assert_eq!(migrated.resource_service.healthy, None);
+
         let old = serde_json::json!({
             "version": 3,
             "run_id": "run-1",
@@ -2420,6 +2859,90 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported Shoal run status version 3"));
+    }
+
+    #[test]
+    fn recovery_status_retains_lost_actor_and_resource_evidence() {
+        let predecessor = ActorRef::first(tidepool_actor::ActorId(7));
+        let actor = ActorRef {
+            id: predecessor.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let mut status = RunStatus::new(
+            "run-1",
+            Path::new("/tmp/work"),
+            "shoal-work",
+            test_agent_defaults(),
+            RunPhase::Recovering {
+                stage: RecoveryStage::RestoringActors,
+                restored_source: Some("source-revision".into()),
+            },
+        )
+        .at_generation(2);
+        status.recovered_actors = vec![RecoveredActorObservation { predecessor, actor }];
+        status.lost_state = recovery_lost_state(2);
+        status.resource_service = ResourceServiceObservation {
+            healthy: Some(true),
+            resources: Some(
+                tidepool_node::command_resources::CommandResourceObservation {
+                    active: 2,
+                    historical: 9,
+                    retained_allocations: 1,
+                    cleanup_failures: 1,
+                    ..Default::default()
+                },
+            ),
+            detail: None,
+        };
+
+        let decoded = decode_run_status(&serde_json::to_vec(&status).unwrap()).unwrap();
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.lost_state.len(), 4);
+        let resources = decoded.resource_service.resources.unwrap();
+        assert_eq!((resources.active, resources.historical), (2, 9));
+        assert_eq!(
+            (resources.retained_allocations, resources.cleanup_failures),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn run_storage_observation_is_bounded_and_does_not_follow_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("one"), b"1234").unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(root.path().join("nested/two"), b"12").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path(), root.path().join("loop")).unwrap();
+
+        let complete = observe_storage(root.path(), 16);
+        assert_eq!(complete.bytes, 6);
+        assert!(!complete.truncated);
+        let bounded = observe_storage(root.path(), 2);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.entries, 2);
+    }
+
+    #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn run_storage_observation_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        for ordinal in 0..8_000 {
+            std::fs::write(root.path().join(format!("entry-{ordinal}")), b"12345678").unwrap();
+        }
+        let iterations = 100_u128;
+        let started = std::time::Instant::now();
+        let mut observation = BoundedStorageObservation::default();
+        for _ in 0..iterations {
+            observation = observe_storage(root.path(), 8_192);
+        }
+        eprintln!(
+            "run_storage entries={} bytes={} sample_micros={}",
+            observation.entries,
+            observation.bytes,
+            started.elapsed().as_micros() / iterations,
+        );
+        assert!(!observation.truncated);
     }
 
     #[test]
@@ -2481,7 +3004,22 @@ mod tests {
             resume_root: false,
             agent: test_agent_defaults(),
         };
-        let result = settle_host_result(Err(runtime_error("compile exploded")), &options);
+        let mut recovering = RunStatus::new(
+            "run-failed",
+            root.path(),
+            "shoal-test",
+            test_agent_defaults(),
+            RunPhase::Recovering {
+                stage: RecoveryStage::RestoringActors,
+                restored_source: Some("source-revision".into()),
+            },
+        )
+        .at_generation(7);
+        recovering.lost_state = recovery_lost_state(7);
+        recovering.resource_service.healthy = Some(false);
+        recovering.resource_service.detail = Some("resource observation unavailable".into());
+        write_status(&status_path, &recovering).unwrap();
+        let result = settle_host_result(Err(runtime_error("compile exploded")), &options, 7);
         assert!(result.is_err());
         let status: RunStatus =
             serde_json::from_slice(&std::fs::read(status_path).unwrap()).unwrap();
@@ -2491,6 +3029,9 @@ mod tests {
                 error: "compile exploded".into()
             }
         );
+        assert_eq!(status.host_generation, 7);
+        assert_eq!(status.lost_state, recovering.lost_state);
+        assert_eq!(status.resource_service, recovering.resource_service);
     }
 
     #[tokio::test]

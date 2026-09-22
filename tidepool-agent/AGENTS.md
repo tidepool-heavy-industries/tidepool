@@ -34,10 +34,10 @@ actor lifecycle, resident tool policy, and effect-handler wiring stay elsewhere.
   by other consumers. Do not reintroduce a root/child feature-surface mismatch.
 - The Shoal host resolves omitted fork effort to Low. The backend renders the
   explicit resolved policy; it must not introduce another defaulting owner.
-- `src/backend/codex/active_update.rs` owns correlated active presentation;
-  through the negotiated owning-TUI input socket; `process.rs` owns headless
-  stdio transport and stream lifecycle. Admission,
-  confirmed presentation and recipient incorporation are separate boundaries.
+- `src/backend/codex/input_control.rs` owns correlated native input through the
+  negotiated owning-TUI socket; `process.rs` owns headless stdio transport and
+  stream lifecycle. Admission, presentation and recipient incorporation are
+  separate boundaries.
   Keep not-submitted and unconfirmed failures distinct; never silently retry
   uncertain delivery as another assignment.
 - Native Codex request tracing owns outbound payload evidence. Reuse
@@ -48,5 +48,5 @@ actor lifecycle, resident tool policy, and effect-handler wiring stay elsewhere.
 For command policy changes, run the focused
 `goal_policy_is_preserved_for_fresh_resumed_and_forked_launches` test in
 `tidepool-agent`; inspect adjacent command tests for the affected mode. For
-active-update changes, use the tests in `active_update.rs` and `process.rs` for
-correlation, failure and cleanup paths. Compile changed host consumers too.
+input-control changes, use its correlation, failure and cleanup tests and the
+tests in `process.rs`. Compile changed host consumers too.

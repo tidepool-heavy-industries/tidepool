@@ -8,16 +8,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tidepool_bridge::HaskellValue;
+use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, ParkRequest,
-    PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
+    CompileError, CompiledProgram, ExecutionError, ImportBindings, ManagedBuilder, ManagedField,
+    ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle,
+    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
+    PreparedResult, PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's realm-scoped cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -27,17 +27,16 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CtorRow, Group, HeapRhs, ImportedValue, LinkError, MachineImports, ParseError,
-    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode,
-    TypeNodeId, ValueId,
+    link_program, CtorRow, Group, HeapRhs, ImportedValue, JsonLayout, LinkError, MachineImports,
+    ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity,
+    TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use super::turn::{
-    PREPARED_APPLY_ENTRY_TARGET, PREPARED_APPLY_VALUE_TARGET, PREPARED_DECODE_TARGET,
-    PREPARED_RESUME_TARGET,
+    PREPARED_APPLY_ENTRY_TARGET, PREPARED_APPLY_VALUE_TARGET, PREPARED_RESUME_TARGET,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -147,27 +146,23 @@ pub enum PreparedRuntimeError {
     /// parked.
     #[error("typed site {site} has an unconstructible answer type: {reason}")]
     AnswerUnconstructible { site: u64, reason: String },
-    /// The program that produced a suspension admits no decode entry
-    /// (`__decodeValue`), so a `HaskellValue`-carrying leaf of its answer could
-    /// never be lowered. Every turn template defines the entry; this is a
-    /// stale or foreign artifact, never a user error.
-    #[error("program {program:?} admits no `{entry}` entry, so a HaskellValue-carrying answer cannot be decoded")]
-    NoDecodeEntry {
-        program: ProgramId,
-        entry: &'static str,
+    /// Structural conversion failed at the dispatch/resume boundary. The
+    /// frame stays parked and no answer root is published.
+    #[error("typed site {site} rejects its structural answer: {source}")]
+    AnswerRejected {
+        site: u64,
+        #[source]
+        source: tidepool_bridge::BridgeError,
     },
-    /// A `HaskellValue`-carrying leaf's JSON rendering did not decode back to a
-    /// `Tidepool.Aeson.Value.Value` (aeson's decoder disagrees with the
-    /// bridge renderer that produced the text, or the leaf reached a
-    /// malformed shape the renderer could not fully express). The frame
-    /// stays parked; every handle built before the failure is released.
-    #[error("typed site {site} rejects a HaskellValue-carrying answer: {detail}")]
-    AnswerRejected { site: u64, detail: String },
     /// A resumed handle (bare or framed) is not live in this engine's
     /// ledger: unknown, released, or minted under a different engine. The
     /// frame stays parked.
     #[error("resume delivered a handle that is not live in this engine's ledger")]
     UnknownHandle,
+    /// A host value could not be streamed into the authenticated managed
+    /// builder. No binding root is published on this path.
+    #[error("host value mount rejected: {detail}")]
+    HostMount { detail: String },
     /// [`PreparedEngine::run_rooted_entry`]/[`PreparedEngine::run_rooted_application`]
     /// found no installed program that both owns the rooted closure's object
     /// and admits the generic apply roots, and no OTHER installed program
@@ -214,13 +209,13 @@ impl PreparedRuntimeError {
             | Self::UnsitedAnswer
             | Self::UnhandledRequest
             | Self::NoResumeEntry { .. }
-            | Self::NoDecodeEntry { .. }
             | Self::AnswerDelivery { .. }
             | Self::AnswerConstructor { .. }
             | Self::AnswerShape { .. }
             | Self::AnswerUnconstructible { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
+            | Self::HostMount { .. }
             | Self::NoHostingProgram
             | Self::NoApplyEntryEntry { .. }
             | Self::NoApplyValueEntry { .. }
@@ -283,11 +278,6 @@ struct ProgramFacts {
     /// q x)`, beside the entry in its module), when the artifact retained it.
     /// A suspension of a program without one is refused before parking.
     resume: Option<ValueId>,
-    /// The turn's admitted decode entry (`__decodeValue :: Text -> Either
-    /// Text HaskellValue`, beside the entry in its module), when the artifact
-    /// retained it. A `HaskellValue`-carrying leaf of an answer to a program
-    /// without one is refused before anything is built.
-    decode: Option<ValueId>,
     /// The turn's admitted generic apply entries (`__applyEntry f n = settle
     /// (f (I# n))`, `__applyValue f x = settle (f x)`, beside the entry in
     /// its module), when the artifact retained them. Looked up by
@@ -309,6 +299,9 @@ struct ProgramFacts {
     /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
     /// to the row that admits it.
     constructors: Vec<(SymbolIdentity, DataConId)>,
+    /// Compiler-authenticated runtime IDs for the JSON constructors. This is
+    /// the only JSON role inventory consumed by answer validation.
+    json_layout: Option<JsonLayout<DataConId>>,
     /// `constructors`, indexed by qualified identity `(module, occurrence)`
     /// and built once in [`Self::of`], so a leaf lookup
     /// ([`Self::constructor_named`]) is one map lookup rather than a full
@@ -379,12 +372,6 @@ impl ProgramFacts {
                     .then_some(*id)
             })
         });
-        let decode = entry_module.clone().and_then(|module| {
-            tops.iter().find_map(|(id, (identity, _))| {
-                (identity.module == module && identity.occurrence == PREPARED_DECODE_TARGET)
-                    .then_some(*id)
-            })
-        });
         let apply_entry = entry_module.clone().and_then(|module| {
             tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_APPLY_ENTRY_TARGET)
@@ -411,6 +398,9 @@ impl ProgramFacts {
                 )
             })
             .collect();
+        let json_layout = prepared
+            .json_layout()
+            .map(|layout| (*layout).map(|constructor| constructors[constructor.0 as usize].1));
         let sites = prepared.sites().to_vec();
         // Validation guarantees every entry names a declared constructor and
         // an admitted row.
@@ -428,7 +418,6 @@ impl ProgramFacts {
             tops,
             settled: SettledIds::of(&by_identity),
             resume,
-            decode,
             apply_entry,
             apply_value,
             sites,
@@ -436,6 +425,7 @@ impl ProgramFacts {
             types: prepared.types().to_vec(),
             constructors,
             by_identity,
+            json_layout,
         }
     }
 
@@ -452,89 +442,50 @@ impl ProgramFacts {
             .map(|(identity, _)| identity)
     }
 
-    /// Lower a bridge `HaskellValue` offered as the answer at `site` against the type
-    /// node `node` of this (evidence-owning) program: every constructor must
-    /// be one of the node's rows, every field count must match, every scalar
-    /// must fit its declared representation. Text, Integer and Natural leaves
-    /// are a later slice; an unconstructible node refuses, EXCEPT the family
-    /// this checks first: `Tidepool.Aeson.Value.Value` itself is
-    /// unconstructible field-by-field (its `Object` row needs
-    /// `Data.Map.Internal.Map`, its `Number` row needs `Scientific`'s
-    /// unpacked fields), so any node of that family is lowered whole as a
-    /// [`AnswerPlan::Json`] leaf instead of walking its rows — the leaf
-    /// adapter `session::prepared`'s resume path resolves through the
-    /// program's decode root before building. `table` names constructors for
-    /// that rendering only; nothing here touches the machine, so a refusal
-    /// leaves the frame exactly as parked.
-    fn lower_answer(
+    fn json_layout(&self) -> Option<JsonLayout<DataConId>> {
+        self.json_layout
+    }
+
+    fn is_json_value_node(&self, node: TypeNodeId) -> bool {
+        let Some(layout) = self.json_layout() else {
+            return false;
+        };
+        let Some(TypeNode::Data { rows, .. }) = self.type_node(node) else {
+            return false;
+        };
+        rows.len() == 6
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.object))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.array))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.string))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.number))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.bool_))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.null))
+    }
+
+    fn constructor_host_id(
         &self,
-        site: u64,
-        node: TypeNodeId,
-        value: &HaskellValue,
-        depth: usize,
-        table: &DataConTable,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        if depth > MAX_ANSWER_DEPTH {
-            return Err(PreparedRuntimeError::AnswerShape {
-                site,
-                detail: "the answer nests deeper than the builder admits",
-            });
-        }
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        match self.type_node(node) {
-            None => Err(shape("the site's type evidence names an undeclared node")),
-            Some(TypeNode::Data { family, .. }) if is_aeson_value(family) => {
-                let rendered = crate::value_to_json(value, table, 0);
-                Ok(AnswerPlan::Json(rendered.to_string()))
-            }
-            Some(TypeNode::Data { rows, .. }) => {
-                let HaskellValue::Con(host_id, fields) = value else {
-                    return Err(shape("a constructor of the site's answer type is required"));
-                };
-                let row = rows
-                    .iter()
-                    .find(|row| {
-                        self.constructors
-                            .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared)| declared == host_id)
-                    })
-                    .ok_or(PreparedRuntimeError::AnswerConstructor {
-                        site,
-                        host_id: *host_id,
-                    })?;
-                if row.fields.len() != fields.len() {
-                    return Err(shape(
-                        "the constructor's field count does not match its declaration",
-                    ));
-                }
-                let mut planned = Vec::with_capacity(fields.len());
-                for (field_node, field) in row.fields.iter().zip(fields) {
-                    planned.push(self.lower_answer(site, *field_node, field, depth + 1, table)?);
-                }
-                Ok(AnswerPlan::Constructor {
-                    host_id: *host_id,
-                    fields: planned,
-                })
-            }
-            Some(TypeNode::Scalar(rep)) => {
-                let HaskellValue::Lit(literal) = value else {
-                    return Err(shape("a scalar field requires a literal"));
-                };
-                let bits = scalar_bits(*rep, literal).ok_or_else(|| {
-                    shape("the literal does not fit the field's scalar representation")
-                })?;
-                Ok(AnswerPlan::Scalar { rep: *rep, bits })
-            }
-            Some(TypeNode::Text) => self.lower_text(site, value),
-            Some(TypeNode::Integer) => self.lower_integer(site, value),
-            Some(TypeNode::Natural) => self.lower_natural(site, value),
-            Some(TypeNode::Unconstructible { reason, .. }) => {
-                Err(PreparedRuntimeError::AnswerUnconstructible {
-                    site,
-                    reason: reason.clone(),
-                })
-            }
-        }
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<DataConId> {
+        self.constructors
+            .get(id.0 as usize)
+            .map(|(_, host_id)| *host_id)
+    }
+
+    fn is_json_list_constructor(&self, host_id: DataConId) -> bool {
+        self.json_layout()
+            .is_some_and(|layout| host_id == layout.cons || host_id == layout.nil)
     }
 
     /// The bridge id of a declared constructor, by qualified identity.
@@ -557,225 +508,11 @@ impl ProgramFacts {
             _ => None,
         }
     }
-
-    /// One byte-backed leaf: the constructor `module.occurrence` over a
-    /// `ByteArray#` field followed by `scalars`.
-    fn bytes_plan(
-        &self,
-        site: u64,
-        module: &str,
-        occurrence: &str,
-        bytes: Vec<u8>,
-        scalars: impl IntoIterator<Item = AnswerPlan>,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let host_id = self.constructor_named(module, occurrence).ok_or(
-            PreparedRuntimeError::AnswerShape {
-                site,
-                detail:
-                    "the site's program declares no constructor for its byte-backed answer type",
-            },
-        )?;
-        let mut fields = vec![AnswerPlan::Bytes(bytes)];
-        fields.extend(scalars);
-        Ok(AnswerPlan::Constructor { host_id, fields })
-    }
-
-    /// `Text`: the bridge's `Text backing off len` (as `String::to_value`
-    /// builds it) or a bare string literal; the slice must be in bounds and
-    /// valid UTF-8. Built as `Text bytes 0 len` over a fresh byte array.
-    fn lower_text(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let text = self.constructor_named(TEXT_MODULE, "Text");
-        let bytes = match value {
-            HaskellValue::Lit(Literal::LitString(bytes)) => bytes.clone(),
-            HaskellValue::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
-                let backing = byte_backing(&fields[0])
-                    .ok_or(shape("a Text answer's backing must be a byte array"))?;
-                let (
-                    HaskellValue::Lit(Literal::LitInt(off)),
-                    HaskellValue::Lit(Literal::LitInt(len)),
-                ) = (&fields[1], &fields[2])
-                else {
-                    return Err(shape(
-                        "a Text answer's offset and length must be Int literals",
-                    ));
-                };
-                usize::try_from(*off)
-                    .ok()
-                    .zip(usize::try_from(*len).ok())
-                    .and_then(|(off, len)| backing.get(off..off.checked_add(len)?))
-                    .ok_or(shape("a Text answer's slice is out of bounds"))?
-                    .to_vec()
-            }
-            _ => return Err(shape("a Text answer requires Text or a string literal")),
-        };
-        if std::str::from_utf8(&bytes).is_err() {
-            return Err(shape("a Text answer must be valid UTF-8"));
-        }
-        let len = bytes.len() as i64;
-        self.bytes_plan(
-            site,
-            TEXT_MODULE,
-            "Text",
-            bytes,
-            [
-                scalar_plan(RuntimeRep::Int(64), 0),
-                scalar_plan(RuntimeRep::Int(64), len as u128),
-            ],
-        )
-    }
-
-    /// `Integer`: `IS Int#`, or `IP`/`IN` over canonical little-endian
-    /// 64-bit limbs whose magnitude does not fit `IS` (GHC's invariant, which
-    /// generated comparisons and conversions rely on). A bare `Int` literal
-    /// is an `IS`.
-    fn lower_integer(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let named = |occurrence: &str| self.constructor_named(INTEGER_MODULE, occurrence);
-        let small = |host_id: DataConId, value: i64| AnswerPlan::Constructor {
-            host_id,
-            fields: vec![scalar_plan(RuntimeRep::Int(64), value as u128)],
-        };
-        match value {
-            HaskellValue::Lit(Literal::LitInt(value)) => {
-                let is =
-                    named("IS").ok_or(shape("the site's program declares no IS constructor"))?;
-                Ok(small(is, *value))
-            }
-            HaskellValue::Con(id, fields) if Some(*id) == named("IS") => match fields.as_slice() {
-                [HaskellValue::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
-                _ => Err(shape("IS takes one Int literal")),
-            },
-            HaskellValue::Con(id, fields)
-                if Some(*id) == named("IP") || Some(*id) == named("IN") =>
-            {
-                let positive = Some(*id) == named("IP");
-                let limbs = bignat_limbs(fields).ok_or(shape(
-                    "IP and IN take one canonical BigNat# payload of whole limbs",
-                ))?;
-                // Beyond the `IS` range: `IP` above i64::MAX, `IN` below i64::MIN.
-                let fits_small = <[u8; 8]>::try_from(limbs.as_slice()).is_ok_and(|limb| {
-                    let limb = u64::from_le_bytes(limb);
-                    if positive {
-                        limb <= i64::MAX as u64
-                    } else {
-                        limb <= 1_u64 << 63
-                    }
-                });
-                if fits_small {
-                    return Err(shape("a BigNat# payload must lie beyond the IS range"));
-                }
-                self.bytes_plan(
-                    site,
-                    INTEGER_MODULE,
-                    if positive { "IP" } else { "IN" },
-                    limbs,
-                    [],
-                )
-            }
-            _ => Err(shape(
-                "an Integer answer requires IS, IP, IN or an Int literal",
-            )),
-        }
-    }
-
-    /// `Natural`: `NS Word#`, or `NB` over canonical limbs above `u64::MAX`.
-    /// A bare word literal, or a non-negative `Int` literal, is an `NS`.
-    fn lower_natural(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let named = |occurrence: &str| self.constructor_named(NATURAL_MODULE, occurrence);
-        let small = |host_id: DataConId, value: u64| AnswerPlan::Constructor {
-            host_id,
-            fields: vec![scalar_plan(RuntimeRep::Word(64), u128::from(value))],
-        };
-        let ns = || named("NS").ok_or(shape("the site's program declares no NS constructor"));
-        match value {
-            HaskellValue::Lit(Literal::LitWord(value)) => Ok(small(ns()?, *value)),
-            HaskellValue::Lit(Literal::LitInt(value)) => {
-                let value = u64::try_from(*value)
-                    .map_err(|_| shape("a Natural answer cannot be negative"))?;
-                Ok(small(ns()?, value))
-            }
-            HaskellValue::Con(id, fields) if Some(*id) == named("NS") => match fields.as_slice() {
-                [HaskellValue::Lit(Literal::LitWord(value))] => Ok(small(*id, *value)),
-                _ => Err(shape("NS takes one Word literal")),
-            },
-            HaskellValue::Con(id, fields) if Some(*id) == named("NB") => {
-                let limbs = bignat_limbs(fields).ok_or(shape(
-                    "NB takes one canonical BigNat# payload of whole limbs",
-                ))?;
-                if limbs.len() < 16 {
-                    return Err(shape("a BigNat# payload must lie beyond the NS range"));
-                }
-                self.bytes_plan(site, NATURAL_MODULE, "NB", limbs, [])
-            }
-            _ => Err(shape("a Natural answer requires NS, NB or a word literal")),
-        }
-    }
 }
 
 const TEXT_MODULE: &str = "Data.Text.Internal";
 const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
-const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
-const AESON_VALUE_OCCURRENCE: &str = "Value";
-
-/// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
-/// (module+name, never the numeric `TypeNodeId`, which is per-artifact) —
-/// the one family [`ProgramFacts::lower_answer`] lowers whole as JSON rather
-/// than walking rows.
-fn is_aeson_value(family: &SymbolIdentity) -> bool {
-    family.module == AESON_VALUE_MODULE && family.occurrence == AESON_VALUE_OCCURRENCE
-}
-
-/// The raw bytes behind a bridge byte-array value, in any of the forms the
-/// bridge emits for a `ByteArray#` backing.
-fn byte_backing(value: &HaskellValue) -> Option<Vec<u8>> {
-    match value {
-        HaskellValue::ByteArray(bytes) => Some(
-            bytes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-        ),
-        HaskellValue::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => {
-            Some(bytes.clone())
-        }
-        _ => None,
-    }
-}
-
-/// The one `BigNat#` payload of an `IP`/`IN`/`NB` constructor as canonical
-/// little-endian limbs: whole 64-bit words, at least one, top limb nonzero.
-fn bignat_limbs(fields: &[HaskellValue]) -> Option<Vec<u8>> {
-    let [payload] = fields else {
-        return None;
-    };
-    let limbs = byte_backing(payload)?;
-    let canonical = !limbs.is_empty()
-        && limbs.len() % 8 == 0
-        && limbs[limbs.len() - 8..].iter().any(|byte| *byte != 0);
-    canonical.then_some(limbs)
-}
-
-fn scalar_plan(rep: RuntimeRep, word: u128) -> AnswerPlan {
-    AnswerPlan::Scalar {
-        rep,
-        bits: word.to_ne_bytes(),
-    }
-}
 
 /// Target-encode `literal` for a field of representation `rep`: the value's
 /// native bytes, of which the builder writes only the field's declared width.
@@ -803,6 +540,667 @@ fn scalar_bits(rep: RuntimeRep, literal: &Literal) -> Option<[u8; 16]> {
         _ => return None,
     };
     Some(word.to_ne_bytes())
+}
+
+#[derive(Clone, Copy)]
+enum StructuralExpected {
+    Node(TypeNodeId),
+    Bytes,
+    Scalar(RuntimeRep),
+    JsonValue,
+    JsonMap,
+    JsonList,
+    JsonText,
+    JsonScientific,
+    JsonInteger,
+    JsonBool,
+    JsonBoxedInt,
+}
+
+struct StructuralFrame {
+    host_id: DataConId,
+    expected: Vec<StructuralExpected>,
+    fields: Vec<ManagedField>,
+    counts_depth: bool,
+}
+
+struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
+    site: u64,
+    root: TypeNodeId,
+    facts: &'facts ProgramFacts,
+    builder: &'builder mut ManagedBuilder<'machine, 'code>,
+    frames: Vec<StructuralFrame>,
+    result: Option<ManagedNode>,
+    failure: Option<PreparedRuntimeError>,
+    depth: usize,
+}
+
+impl StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn json_value_shape(
+        &mut self,
+        host_id: DataConId,
+    ) -> Result<Vec<StructuralExpected>, BridgeError> {
+        let Some(layout) = self.facts.json_layout() else {
+            return Err(self.shape("the program has no authenticated JSON layout"));
+        };
+        if host_id == layout.object {
+            Ok(vec![StructuralExpected::JsonMap])
+        } else if host_id == layout.array {
+            Ok(vec![StructuralExpected::JsonList])
+        } else if host_id == layout.string {
+            Ok(vec![StructuralExpected::JsonText])
+        } else if host_id == layout.number {
+            Ok(vec![StructuralExpected::JsonScientific])
+        } else if host_id == layout.bool_ {
+            Ok(vec![StructuralExpected::JsonBool])
+        } else if host_id == layout.null {
+            Ok(Vec::new())
+        } else {
+            Err(self
+                .shape("the JSON value constructor is absent from authenticated layout evidence"))
+        }
+    }
+
+    fn bridge_abort(&mut self, error: PreparedRuntimeError) -> BridgeError {
+        self.failure = Some(error);
+        BridgeError::TypeMismatch {
+            expected: "the parked site's answer type".into(),
+            got: "structural response mismatch".into(),
+        }
+    }
+
+    fn shape(&mut self, detail: &'static str) -> BridgeError {
+        self.bridge_abort(PreparedRuntimeError::AnswerShape {
+            site: self.site,
+            detail,
+        })
+    }
+
+    fn expected(&mut self) -> Result<StructuralExpected, BridgeError> {
+        if let Some(frame) = self.frames.last() {
+            frame
+                .expected
+                .get(frame.fields.len())
+                .copied()
+                .ok_or_else(|| self.shape("the response emits too many constructor fields"))
+        } else if self.result.is_none() {
+            Ok(StructuralExpected::Node(self.root))
+        } else {
+            Err(self.shape("the response emits more than one root"))
+        }
+    }
+
+    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.fields.push(field);
+            Ok(())
+        } else if let ManagedField::Node(root) = field {
+            self.result = Some(root);
+            Ok(())
+        } else {
+            Err(self.shape("a host answer root must be a constructor"))
+        }
+    }
+
+    fn constructor_shape(
+        &mut self,
+        expected: StructuralExpected,
+        host_id: DataConId,
+    ) -> Result<Vec<StructuralExpected>, BridgeError> {
+        let StructuralExpected::Node(node) = expected else {
+            return match expected {
+                StructuralExpected::JsonMap => {
+                    let Some(layout) = self.facts.json_layout() else {
+                        return Err(self.shape("the program has no authenticated JSON layout"));
+                    };
+                    if host_id == layout.map_tip {
+                        Ok(Vec::new())
+                    } else if host_id == layout.map_bin {
+                        let representation = self
+                            .builder
+                            .constructor_field_rep(host_id, 0)
+                            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+                        let size = match representation {
+                            Some(RuntimeRep::Int(64)) => {
+                                StructuralExpected::Scalar(RuntimeRep::Int(64))
+                            }
+                            Some(RuntimeRep::LiftedRef) => StructuralExpected::JsonBoxedInt,
+                            _ => {
+                                return Err(
+                                    self.shape("a JSON map size has an invalid representation")
+                                )
+                            }
+                        };
+                        Ok(vec![
+                            size,
+                            StructuralExpected::JsonText,
+                            StructuralExpected::JsonValue,
+                            StructuralExpected::JsonMap,
+                            StructuralExpected::JsonMap,
+                        ])
+                    } else {
+                        Err(self.shape("a JSON object requires Data.Map Bin or Tip"))
+                    }
+                }
+                StructuralExpected::JsonList => {
+                    let Some(layout) = self.facts.json_layout() else {
+                        return Err(self.shape("the program has no authenticated JSON layout"));
+                    };
+                    if host_id == layout.nil {
+                        Ok(Vec::new())
+                    } else if host_id == layout.cons {
+                        Ok(vec![
+                            StructuralExpected::JsonValue,
+                            StructuralExpected::JsonList,
+                        ])
+                    } else {
+                        Err(self.shape("a JSON array requires list constructors"))
+                    }
+                }
+                StructuralExpected::JsonText => {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.text)
+                    {
+                        Ok(vec![
+                            StructuralExpected::Bytes,
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                        ])
+                    } else {
+                        Err(self.shape("a JSON string requires the Text constructor"))
+                    }
+                }
+                StructuralExpected::JsonScientific => {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.scientific)
+                    {
+                        Ok(vec![
+                            StructuralExpected::JsonInteger,
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                        ])
+                    } else {
+                        Err(self.shape("a JSON number requires the Scientific constructor"))
+                    }
+                }
+                StructuralExpected::JsonInteger => {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.integer_small)
+                    {
+                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                    } else if self.facts.json_layout().is_some_and(|layout| {
+                        host_id == layout.integer_positive || host_id == layout.integer_negative
+                    }) {
+                        Ok(vec![StructuralExpected::Bytes])
+                    } else {
+                        Err(self.shape("a JSON coefficient requires IS, IP or IN"))
+                    }
+                }
+                StructuralExpected::JsonBool => {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.true_ || host_id == layout.false_)
+                    {
+                        Ok(Vec::new())
+                    } else {
+                        Err(self.shape("a JSON boolean requires True or False"))
+                    }
+                }
+                StructuralExpected::JsonBoxedInt => {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.int)
+                    {
+                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                    } else {
+                        Err(self.shape("a JSON map size requires I#"))
+                    }
+                }
+                StructuralExpected::JsonValue => self.json_value_shape(host_id),
+                StructuralExpected::Bytes | StructuralExpected::Scalar(_) => {
+                    Err(self.shape("a constructor was emitted for a scalar or byte field"))
+                }
+                StructuralExpected::Node(_) => unreachable!(),
+            };
+        };
+        let structural_node = node;
+        let Some(node) = self.facts.type_node(structural_node) else {
+            return Err(self.shape("the site's type evidence names an undeclared node"));
+        };
+        match node {
+            TypeNode::Data { rows, .. } => {
+                if self.facts.is_json_value_node(structural_node) {
+                    let admitted = rows.iter().any(|row| {
+                        self.facts
+                            .constructors
+                            .get(row.constructor.0 as usize)
+                            .is_some_and(|(_, declared)| *declared == host_id)
+                    });
+                    if !admitted {
+                        return Err(self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+                            site: self.site,
+                            host_id,
+                        }));
+                    }
+                    return self.json_value_shape(host_id);
+                }
+                let row = rows
+                    .iter()
+                    .find(|row| {
+                        self.facts
+                            .constructors
+                            .get(row.constructor.0 as usize)
+                            .is_some_and(|(_, declared)| *declared == host_id)
+                    })
+                    .ok_or_else(|| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+                            site: self.site,
+                            host_id,
+                        })
+                    })?;
+                Ok(row
+                    .fields
+                    .iter()
+                    .copied()
+                    .map(StructuralExpected::Node)
+                    .collect())
+            }
+            TypeNode::Text => {
+                let text = self.facts.constructor_named(TEXT_MODULE, "Text");
+                if text != Some(host_id) {
+                    return Err(self.shape("a Text answer requires the Text constructor"));
+                }
+                Ok(vec![
+                    StructuralExpected::Bytes,
+                    StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                    StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                ])
+            }
+            TypeNode::Integer => {
+                let is = self.facts.constructor_named(INTEGER_MODULE, "IS");
+                let ip = self.facts.constructor_named(INTEGER_MODULE, "IP");
+                let in_ = self.facts.constructor_named(INTEGER_MODULE, "IN");
+                if is == Some(host_id) {
+                    Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                } else if ip == Some(host_id) || in_ == Some(host_id) {
+                    Ok(vec![StructuralExpected::Bytes])
+                } else {
+                    Err(self.shape("an Integer answer requires IS, IP or IN"))
+                }
+            }
+            TypeNode::Natural => {
+                let ns = self.facts.constructor_named(NATURAL_MODULE, "NS");
+                let nb = self.facts.constructor_named(NATURAL_MODULE, "NB");
+                if ns == Some(host_id) {
+                    Ok(vec![StructuralExpected::Scalar(RuntimeRep::Word(64))])
+                } else if nb == Some(host_id) {
+                    Ok(vec![StructuralExpected::Bytes])
+                } else {
+                    Err(self.shape("a Natural answer requires NS or NB"))
+                }
+            }
+            TypeNode::Scalar(_) => Err(self.shape("a scalar field requires a literal")),
+            TypeNode::Unconstructible { reason, .. } => Err(self.bridge_abort(
+                PreparedRuntimeError::AnswerUnconstructible {
+                    site: self.site,
+                    reason: reason.clone(),
+                },
+            )),
+        }
+    }
+}
+
+impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn expected_field_rep(&self) -> Option<RuntimeRep> {
+        let frame = self.frames.last()?;
+        self.builder
+            .constructor_field_rep(frame.host_id, frame.fields.len())
+            .ok()
+            .flatten()
+    }
+
+    fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
+        let expected = self.expected()?;
+        // Representation spines do not add semantic nesting: a flat 100k
+        // element list or a large Map may have that many cons/tree nodes.
+        // Their elements and JSON Value wrappers still pass through this
+        // bound, as do ordinary nested constructors.
+        let counts_depth = !matches!(
+            expected,
+            StructuralExpected::JsonList
+                | StructuralExpected::JsonMap
+                | StructuralExpected::JsonText
+                | StructuralExpected::JsonScientific
+                | StructuralExpected::JsonInteger
+                | StructuralExpected::JsonBool
+                | StructuralExpected::JsonBoxedInt
+        ) && !self.facts.is_json_list_constructor(id);
+        if counts_depth && self.depth >= MAX_ANSWER_DEPTH {
+            return Err(self.shape("the response exceeds the maximum constructor nesting depth"));
+        }
+        let shape = self.constructor_shape(expected, id)?;
+        if shape.len() != fields {
+            return Err(self.shape("the constructor's field count does not match its declaration"));
+        }
+        self.frames.push(StructuralFrame {
+            host_id: id,
+            expected: shape,
+            fields: Vec::with_capacity(fields),
+            counts_depth,
+        });
+        self.depth += usize::from(counts_depth);
+        Ok(())
+    }
+
+    fn end_constructor(&mut self) -> Result<(), BridgeError> {
+        let frame = self
+            .frames
+            .pop()
+            .ok_or_else(|| self.shape("a constructor ended without a matching begin"))?;
+        self.depth -= usize::from(frame.counts_depth);
+        if frame.fields.len() != frame.expected.len() {
+            return Err(self.shape("a constructor ended before all fields were emitted"));
+        }
+        let mut fields = frame.fields;
+        for field in &mut fields {
+            *field = match *field {
+                ManagedField::Node(node) => ManagedField::Consume(node),
+                field => field,
+            };
+        }
+        let node = self
+            .builder
+            .constructor(frame.host_id, &fields)
+            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+        self.attach(ManagedField::Node(node))
+    }
+
+    fn literal(&mut self, literal: Literal) -> Result<(), BridgeError> {
+        let rep = match self.expected()? {
+            StructuralExpected::Node(node) => match self.facts.type_node(node) {
+                Some(TypeNode::Scalar(rep)) => *rep,
+                _ => return Err(self.shape("a literal was emitted for a constructor field")),
+            },
+            StructuralExpected::Scalar(rep) => rep,
+            StructuralExpected::Bytes => {
+                return Err(self.shape("a literal was emitted for a byte-array field"))
+            }
+            StructuralExpected::JsonValue
+            | StructuralExpected::JsonMap
+            | StructuralExpected::JsonList
+            | StructuralExpected::JsonText
+            | StructuralExpected::JsonScientific
+            | StructuralExpected::JsonInteger
+            | StructuralExpected::JsonBool
+            | StructuralExpected::JsonBoxedInt => {
+                return Err(self.shape("a literal was emitted for a JSON constructor field"))
+            }
+        };
+        let bits = scalar_bits(rep, &literal).ok_or_else(|| {
+            self.shape("the literal does not fit the field's scalar representation")
+        })?;
+        self.attach(ManagedField::Scalar(bits))
+    }
+
+    fn byte_array(&mut self, bytes: Vec<u8>) -> Result<(), BridgeError> {
+        if !matches!(self.expected()?, StructuralExpected::Bytes) {
+            return Err(self.shape("a byte array was emitted for a non-byte field"));
+        }
+        let node = self
+            .builder
+            .bytes(&bytes)
+            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+        self.attach(ManagedField::Node(node))
+    }
+}
+
+fn build_structural_node(
+    response: &dyn tidepool_bridge::ToHaskell,
+    table: &DataConTable,
+    site: u64,
+    root: TypeNodeId,
+    facts: &ProgramFacts,
+    builder: &mut ManagedBuilder<'_, '_>,
+) -> Result<ManagedNode, PreparedRuntimeError> {
+    // A structural reply belongs to the parked site's owner, not to the
+    // accumulated session table. Attach that owner's admitted JSON roles for
+    // this visit only: `serde_json::Value` then cannot borrow another
+    // program's layout, and ordinary JSON effect replies work even when the
+    // session table was assembled before this program installed.
+    let response_table = table.with_json_layout(facts.json_layout());
+    let mut visitor = StructuralAnswerVisitor {
+        site,
+        root,
+        facts,
+        builder,
+        frames: Vec::new(),
+        result: None,
+        failure: None,
+        depth: 0,
+    };
+    let visited = response.visit(&response_table, &mut visitor);
+    if let Some(error) = visitor.failure.take() {
+        return Err(error);
+    }
+    visited.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
+    if !visitor.frames.is_empty() {
+        return Err(PreparedRuntimeError::AnswerShape {
+            site,
+            detail: "the response left a constructor unfinished",
+        });
+    }
+    visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
+        site,
+        detail: "the response emitted no managed answer root",
+    })
+}
+
+fn build_framed_structural_node(
+    prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
+    handle: PreparedHandle,
+    constructor: DataConId,
+    field_nodes: &[TypeNodeId],
+    table: &DataConTable,
+    site: u64,
+    root: TypeNodeId,
+    facts: &ProgramFacts,
+    builder: &mut ManagedBuilder<'_, '_>,
+) -> Result<ManagedNode, PreparedRuntimeError> {
+    let response_table = table.with_json_layout(facts.json_layout());
+    let mut visitor = StructuralAnswerVisitor {
+        site,
+        root,
+        facts,
+        builder,
+        frames: vec![StructuralFrame {
+            host_id: constructor,
+            expected: field_nodes
+                .iter()
+                .copied()
+                .map(StructuralExpected::Node)
+                .collect(),
+            fields: Vec::with_capacity(field_nodes.len()),
+            counts_depth: true,
+        }],
+        result: None,
+        failure: None,
+        depth: 1,
+    };
+    for field in prefix {
+        let visited = field.visit(&response_table, &mut visitor);
+        if let Some(error) = visitor.failure.take() {
+            return Err(error);
+        }
+        visited.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
+    }
+    if visitor.frames.len() != 1 {
+        return Err(PreparedRuntimeError::AnswerShape {
+            site,
+            detail: "a framed prefix left a constructor unfinished",
+        });
+    }
+    visitor
+        .frames
+        .last_mut()
+        .expect("the outer framed constructor remains open")
+        .fields
+        .push(ManagedField::Handle(handle));
+    let ended = visitor.end_constructor();
+    if let Some(error) = visitor.failure.take() {
+        return Err(error);
+    }
+    ended.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
+    visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
+        site,
+        detail: "the framed response emitted no managed answer root",
+    })
+}
+
+/// A deliberately small structural sink for values whose Haskell type is
+/// fixed by a compiler-produced binding interface. It does not make a
+/// `HaskellValue` tree: every completed child is immediately handed to the
+/// machine's one managed builder. The builder authenticates constructor
+/// descriptors and field representations before it allocates.
+struct ManagedMountVisitor<'builder, 'machine, 'code> {
+    builder: &'builder mut ManagedBuilder<'machine, 'code>,
+    frames: Vec<MountFrame>,
+    root: Option<ManagedNode>,
+}
+
+struct MountFrame {
+    host_id: DataConId,
+    expected: usize,
+    fields: Vec<ManagedField>,
+}
+
+impl ManagedMountVisitor<'_, '_, '_> {
+    fn rejected(expected: impl Into<String>, got: impl Into<String>) -> BridgeError {
+        BridgeError::TypeMismatch {
+            expected: expected.into(),
+            got: got.into(),
+        }
+    }
+
+    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+        if let Some(frame) = self.frames.last_mut() {
+            if frame.fields.len() == frame.expected {
+                return Err(Self::rejected(
+                    format!("constructor with {} fields", frame.expected),
+                    "too many visitor fields",
+                ));
+            }
+            frame.fields.push(field);
+            return Ok(());
+        }
+        let ManagedField::Node(node) = field else {
+            return Err(Self::rejected("one managed value root", "a scalar field"));
+        };
+        if self.root.replace(node).is_some() {
+            return Err(Self::rejected("one visitor root", "multiple visitor roots"));
+        }
+        Ok(())
+    }
+
+    fn scalar(literal: Literal) -> Result<[u8; 16], BridgeError> {
+        let word = match literal {
+            Literal::LitInt(value) => value as u128,
+            Literal::LitWord(value) => u128::from(value),
+            Literal::LitChar(value) => u128::from(value as u32),
+            Literal::LitFloat(bits) | Literal::LitDouble(bits) => u128::from(bits),
+            literal => {
+                return Err(Self::rejected(
+                    "a scalar literal supported by managed construction",
+                    format!("{literal:?}"),
+                ))
+            }
+        };
+        Ok(word.to_ne_bytes())
+    }
+
+    fn finish(self) -> Result<ManagedNode, BridgeError> {
+        if !self.frames.is_empty() {
+            return Err(Self::rejected(
+                "closed visitor constructors",
+                "unfinished constructor",
+            ));
+        }
+        self.root
+            .ok_or_else(|| Self::rejected("one visitor root", "no visitor root"))
+    }
+}
+
+impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
+    fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
+        self.frames.push(MountFrame {
+            host_id: id,
+            expected: fields,
+            fields: Vec::with_capacity(fields),
+        });
+        Ok(())
+    }
+
+    fn end_constructor(&mut self) -> Result<(), BridgeError> {
+        let frame = self.frames.pop().ok_or_else(|| {
+            Self::rejected(
+                "an open visitor constructor",
+                "constructor end without begin",
+            )
+        })?;
+        if frame.fields.len() != frame.expected {
+            return Err(BridgeError::ArityMismatch {
+                con: frame.host_id,
+                expected: frame.expected,
+                got: frame.fields.len(),
+            });
+        }
+        let fields = frame
+            .fields
+            .into_iter()
+            .map(|field| match field {
+                ManagedField::Node(node) => ManagedField::Consume(node),
+                field => field,
+            })
+            .collect::<Vec<_>>();
+        let node = self
+            .builder
+            .constructor(frame.host_id, &fields)
+            .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+        self.attach(ManagedField::Node(node))
+    }
+
+    fn literal(&mut self, literal: Literal) -> Result<(), BridgeError> {
+        if let Literal::LitByteArray(bytes) = literal {
+            let node = self
+                .builder
+                .bytes(&bytes)
+                .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+            return self.attach(ManagedField::Node(node));
+        }
+        self.attach(ManagedField::Scalar(Self::scalar(literal)?))
+    }
+
+    fn byte_array(&mut self, bytes: Vec<u8>) -> Result<(), BridgeError> {
+        let node = self
+            .builder
+            .bytes(&bytes)
+            .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+        self.attach(ManagedField::Node(node))
+    }
+
+    fn expected_field_rep(&self) -> Option<RuntimeRep> {
+        let frame = self.frames.last()?;
+        self.builder
+            .constructor_field_rep(frame.host_id, frame.fields.len())
+            .ok()
+            .flatten()
+    }
 }
 
 /// Whether two site rows from two programs carry the same evidence: the same
@@ -921,7 +1319,7 @@ fn typed_site_of(request: &HaskellValue, table: &DataConTable) -> Option<u64> {
     }
     /// The numeric content of a `typedSite` leaf: an unboxed or boxed
     /// integral literal, or an aeson `Number` wrapping one. This is the one
-    /// leaf this walk ever renders through the generic JSON decoder — never
+    /// leaf this walk ever renders through the snapshot JSON renderer — never
     /// the whole request.
     fn value_u64(value: &HaskellValue, table: &DataConTable) -> Option<u64> {
         match value {
@@ -1196,6 +1594,121 @@ fn resolve_prepared_import<'a>(
 }
 
 impl PreparedEngine {
+    /// Stream a structurally encoded host value into the resident heap. The
+    /// caller supplies the compiler-authenticated constructor table for the
+    /// typed binding it will mount; no source-text representation is involved.
+    pub fn build_host_value(
+        &mut self,
+        realm: RealmId,
+        value: &dyn tidepool_bridge::ToHaskell,
+        table: &DataConTable,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = {
+            let mut visitor = ManagedMountVisitor {
+                builder: &mut builder,
+                frames: Vec::new(),
+                root: None,
+            };
+            value
+                .visit(table, &mut visitor)
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?;
+            visitor
+                .finish()
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?
+        };
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// Stream a host JSON document into the resident heap. The caller supplies
+    /// the compiler-authenticated table for the binding it will mount; this
+    /// method deliberately has no source-text representation or parser path.
+    pub fn build_host_json(
+        &mut self,
+        realm: RealmId,
+        value: &serde_json::Value,
+        layout: &JsonLayout<DataConId>,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = {
+            let mut visitor = ManagedMountVisitor {
+                builder: &mut builder,
+                frames: Vec::new(),
+                root: None,
+            };
+            tidepool_bridge::json_builder::visit_json(value, layout, &mut visitor).map_err(
+                |error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                },
+            )?;
+            visitor
+                .finish()
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?
+        };
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// Stream host UTF-8 text into the worker `Text` representation. A
+    /// qualified constructor identity is required when it is present, so a
+    /// same-named user constructor cannot silently become host text.
+    pub fn build_host_text(
+        &mut self,
+        realm: RealmId,
+        text: &str,
+        table: &DataConTable,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let text_id = table
+            .get_by_qualified_name("Data.Text.Internal.Text")
+            .or_else(|| table.get_by_qualified_name("Data.Text.Text"))
+            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 3))
+            .ok_or_else(|| PreparedRuntimeError::HostMount {
+                detail: "the compiler table does not declare Data.Text.Internal.Text".into(),
+            })?;
+        let length = i64::try_from(text.len()).map_err(|_| PreparedRuntimeError::HostMount {
+            detail: "host Text exceeds the worker Int length range".into(),
+        })?;
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let bytes = builder
+            .bytes(text.as_bytes())
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut zero = [0_u8; 16];
+        zero[..8].copy_from_slice(&0_i64.to_ne_bytes());
+        let mut len = [0_u8; 16];
+        len[..8].copy_from_slice(&length.to_ne_bytes());
+        let root = builder
+            .constructor(
+                text_id,
+                &[
+                    ManagedField::Consume(bytes),
+                    ManagedField::Scalar(zero),
+                    ManagedField::Scalar(len),
+                ],
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Create the session's machine from its first turn's program and
     /// install that program. The first turn can import nothing: no prepared
     /// binding exists before the machine does. Uses the default nursery
@@ -1639,21 +2152,6 @@ impl PreparedEngine {
             })
     }
 
-    /// The admitted decode entry of `program`, read without holding a
-    /// borrow past this call.
-    fn decode_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
-        self.programs
-            .get(&program)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                program,
-            )))?
-            .decode
-            .ok_or(PreparedRuntimeError::NoDecodeEntry {
-                program,
-                entry: PREPARED_DECODE_TARGET,
-            })
-    }
-
     /// The admitted generic apply-entry entry (`__applyEntry`) of `program`.
     fn apply_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
         self.programs
@@ -1795,7 +2293,7 @@ impl PreparedEngine {
     /// all populated by [`Self::bootstrap`]/[`Self::install`]) and mutates
     /// (the machine's own park registry) belongs to the engine itself, with
     /// no session, actor, or lexical-scope bookkeeping folded in. The rest of
-    /// the parked-continuation cycle this feeds — [`Self::resume_with_answer`],
+    /// the parked-continuation cycle this feeds — [`Self::resume_with_structural_answer`],
     /// [`Self::parked_count`], [`Self::stowed_roots_count`],
     /// [`Self::parked_ids`], [`Self::parked_realm`], [`Self::close_realm`],
     /// [`Self::abort_parked`] — was already `pub`; this was the one private
@@ -2047,7 +2545,7 @@ impl PreparedEngine {
     /// caller has already validated against the frame's site evidence and
     /// retained under the frame's realm: take the frame, enter the runner's
     /// resume entry with the continuation and the answer, and read the
-    /// settled layer through the shared decoder. `answer` is consumed on
+    /// settled layer through the shared settlement reader. `answer` is consumed on
     /// every path. Every failure before the take (unknown id, an answer from
     /// another realm, cancellation) leaves the frame parked and rooted; a
     /// failure after the take is a run failure.
@@ -2087,7 +2585,7 @@ impl PreparedEngine {
 
     /// [`Self::resume_parked`], but `answer` is BORROWED rather than
     /// consumed: it is delivered to the resume entry and left exactly as
-    /// live afterward, custody unchanged — `ResumeInput::Handle` delivery
+    /// live afterward, custody unchanged — borrowed-handle delivery
     /// (`docs/continuation-parking-contract.md`), which reads a handle's
     /// current heap pointer without releasing its root. No realm check: a
     /// handle is meant to move between parked continuations across resource
@@ -2131,7 +2629,7 @@ impl PreparedEngine {
 
     /// Re-enter the frame parked under `id` by delivering an
     /// already-retained value verbatim — no materialization, closures
-    /// included, the same shape `ResumeInput::Handle` delivers. `raw`
+    /// included, the same shape borrowed-handle delivery accepts. `raw`
     /// must be live in this engine's ledger; the only check possible on this
     /// route is its `RuntimeRep` (every handle this engine mints is
     /// `LiftedRef`), so no deeper type check is available on this path. The
@@ -2149,11 +2647,9 @@ impl PreparedEngine {
     }
 
     /// Re-enter the frame parked under `id` with a constructor whose final
-    /// field borrows `raw` verbatim: `prefix` is lowered against the site's
-    /// declared row for `constructor` exactly as an ordinary answer's fields
-    /// are (`HaskellValue`-carrying prefix fields resolve through the decode entry
-    /// the same way), and the borrowed field is spliced in unvalidated
-    /// beyond its `RuntimeRep`, under the framed-delivery contract
+    /// field borrows `raw` verbatim. Prefix fields stream through the same
+    /// typed structural visitor as ordinary host answers; the borrowed field
+    /// is spliced in unvalidated beyond its `RuntimeRep`, under the framed-delivery contract
     /// (`docs/continuation-parking-contract.md`). The built constructor is
     /// released as usual once the resume entry has read it; `raw`'s root is
     /// untouched throughout.
@@ -2165,6 +2661,24 @@ impl PreparedEngine {
         prefix: Vec<HaskellValue>,
         table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let prefix = prefix
+            .into_iter()
+            .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
+            .collect::<Vec<_>>();
+        self.resume_with_framed_handle_sources(id, raw, constructor, &prefix, table)
+    }
+
+    /// [`Self::resume_with_framed_handle`] with each prefix field supplied as
+    /// an owned structural source. The borrowed final field remains outside
+    /// normal structural construction, under the framed-delivery contract.
+    pub fn resume_with_framed_handle_sources(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+        constructor: DataConId,
+        prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
+        table: &DataConTable,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let handle = self
             .machine
             .prepared_handle_of(raw)
@@ -2172,16 +2686,13 @@ impl PreparedEngine {
         let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        let evidence = *evidence;
         let site = evidence.site;
         if site == UNSITED {
             return Err(PreparedRuntimeError::UnsitedAnswer);
         }
-        // Copied out before the cancellation check below takes `self.machine`
-        // mutably: `evidence` itself stays borrowed from it, so a field read
-        // after that point would conflict.
-        let runner = evidence.runner;
-        let owner = self
-            .programs
+        let (programs, machine) = (&self.programs, &mut self.machine);
+        let owner = programs
             .get(&evidence.owner)
             .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
                 evidence.owner,
@@ -2206,36 +2717,30 @@ impl PreparedEngine {
         if ctor_row.fields.len() != prefix.len() + 1 {
             return Err(PreparedRuntimeError::AnswerShape {
                 site,
-                detail: "the framed constructor's declared field count does not match the \
-                         supplied prefix plus the borrowed handle field",
+                detail: "the framed constructor's declared field count does not match the supplied prefix plus the borrowed handle field",
             });
         }
-        let field_nodes = ctor_row.fields[..prefix.len()].to_vec();
-        let mut fields = Vec::with_capacity(prefix.len() + 1);
-        for (field_node, field) in field_nodes.iter().zip(&prefix) {
-            fields.push(owner.lower_answer(site, *field_node, field, 0, table)?);
-        }
-        fields.push(AnswerPlan::Handle(handle));
-        let plan = AnswerPlan::Constructor {
-            host_id: constructor,
-            fields,
-        };
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let mut produced = Vec::new();
-        let built = self
-            .resolve_json_leaves(site, runner, realm, plan, table, &mut produced)
-            .and_then(|plan| {
-                self.machine
-                    .build_answer(realm, &plan)
-                    .map_err(PreparedRuntimeError::Run)
-            });
-        // Decoded prefix leaves are rooted by the built constructor from here
-        // on (or by nothing, on failure); the borrowed final field is not in
-        // `produced` and is untouched either way.
-        self.release_all(produced);
-        self.resume_parked(id, built?)
+        let mut builder = machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = build_framed_structural_node(
+            prefix,
+            handle,
+            constructor,
+            &ctor_row.fields,
+            table,
+            site,
+            row.wire,
+            owner,
+            &mut builder,
+        )?;
+        let built = builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, built)
     }
 
     /// The pre-take checks of a resume, then the take: the frame exists,
@@ -2261,38 +2766,28 @@ impl PreparedEngine {
         Ok((continuation, evidence, realm))
     }
 
-    /// Validate `value` as the host-built answer for the frame parked under
-    /// `id` and lower it to a build plan: the frame's site row must be
-    /// delivered by a host answer, and the value must fit the site's wire
-    /// type evidence in the evidence owner's tables. Nothing here touches the
-    /// machine; every refusal leaves the frame exactly as parked.
-    fn answer_plan(
-        &self,
+    /// Validate and construct an owned response directly from structural
+    /// visitor events. Completed children enter the shared incremental
+    /// builder immediately, so no intermediate `HaskellValue` tree exists.
+    pub fn resume_with_structural_answer(
+        &mut self,
         id: ContinuationId,
-        value: &HaskellValue,
+        response: &dyn tidepool_bridge::ToHaskell,
         table: &DataConTable,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        let evidence = *evidence;
         if evidence.site == UNSITED {
-            // A field-less constructor is the one host-built answer an
-            // open-reply frame accepts: it has no payload for wire evidence
-            // to shape, so building it needs only the constructor's own
-            // interned descriptor (`Nothing` closing a stateful actor's
-            // receive on drain). Anything with a field re-enters by handle.
-            return match value {
-                HaskellValue::Con(host_id, fields) if fields.is_empty() => {
-                    Ok(AnswerPlan::Constructor {
-                        host_id: *host_id,
-                        fields: Vec::new(),
-                    })
-                }
-                _ => Err(PreparedRuntimeError::UnsitedAnswer),
-            };
+            return Err(PreparedRuntimeError::UnsitedAnswer);
         }
-        let owner = self
-            .programs
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let site = evidence.site;
+        let (programs, machine) = (&self.programs, &mut self.machine);
+        let owner = programs
             .get(&evidence.owner)
             .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
                 evidence.owner,
@@ -2300,201 +2795,22 @@ impl PreparedEngine {
         let row = owner
             .sites
             .iter()
-            .find(|row| row.site == evidence.site)
-            .ok_or(PreparedRuntimeError::UnknownSite {
-                site: evidence.site,
-            })?;
+            .find(|row| row.site == site)
+            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
         if row.delivery != SiteDelivery::HostAnswer {
             return Err(PreparedRuntimeError::AnswerDelivery {
-                site: row.site,
+                site,
                 delivery: row.delivery,
             });
         }
-        owner.lower_answer(row.site, row.wire, value, 0, table)
-    }
-
-    /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `HaskellValue`-carrying
-    /// field [`ProgramFacts::lower_answer`] could not walk into rows) to an
-    /// [`AnswerPlan::Handle`]: render the leaf as a retained `Text`, enter
-    /// `runner`'s admitted decode entry, and project `Right v` to `v`'s
-    /// handle. `Left _` is a typed [`PreparedRuntimeError::AnswerRejected`]
-    /// refusal. Every handle this pass decodes is pushed onto `produced`,
-    /// and ONLY those: a caller-supplied [`AnswerPlan::Handle`] (a borrowed
-    /// framed-delivery field) is never listed there. The caller releases
-    /// `produced` on any failure, so a refusal leaves nothing extra rooted,
-    /// and again once `build_answer` has copied the decoded words into the
-    /// built answer, which roots them from then on. The frame stays parked
-    /// throughout (this runs before the take, like [`Self::answer_plan`] and
-    /// `build_answer`).
-    fn resolve_json_leaves(
-        &mut self,
-        site: u64,
-        runner: ProgramId,
-        realm: RealmId,
-        plan: AnswerPlan,
-        table: &DataConTable,
-        produced: &mut Vec<PreparedHandle>,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        match plan {
-            AnswerPlan::Json(text) => {
-                let handle = self.decode_json_leaf(site, runner, realm, &text, table)?;
-                produced.push(handle);
-                Ok(AnswerPlan::Handle(handle))
-            }
-            AnswerPlan::Constructor { host_id, fields } => {
-                let mut resolved = Vec::with_capacity(fields.len());
-                for field in fields {
-                    resolved.push(
-                        self.resolve_json_leaves(site, runner, realm, field, table, produced)?,
-                    );
-                }
-                Ok(AnswerPlan::Constructor {
-                    host_id,
-                    fields: resolved,
-                })
-            }
-            other @ (AnswerPlan::Scalar { .. } | AnswerPlan::Bytes(_) | AnswerPlan::Handle(_)) => {
-                Ok(other)
-            }
-        }
-    }
-
-    /// Decode one `HaskellValue`-carrying leaf's JSON text through `runner`'s
-    /// admitted decode entry, returning the decoded value's retained handle.
-    fn decode_json_leaf(
-        &mut self,
-        site: u64,
-        runner: ProgramId,
-        realm: RealmId,
-        text: &str,
-        table: &DataConTable,
-    ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let decode_entry = self.decode_entry_of(runner)?;
-        let owner = self.programs.get(&runner).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownProgram(runner),
-        ))?;
-        let reject = |detail: &str| PreparedRuntimeError::AnswerRejected {
-            site,
-            detail: detail.to_string(),
-        };
-        // `Either`'s constructors are never walked by `TypePolicy` (it only
-        // interns a SITE's own answer type; `__decodeValue`'s signature is
-        // not a site), so `owner`'s own declared-constructor table never
-        // carries them. The session-wide `DataConTable` does: every
-        // compile's `prTyCons` registers every constructor GHC's own type
-        // checker sees, `Either`'s included, regardless of which types a
-        // site happens to answer with. `DataConId` is the same bridge-wide
-        // space `inspect_outer`'s `identity` reads from, so the two compare
-        // directly.
-        let left = table.get_by_qualified_name("Data.Either.Left");
-        let right = table.get_by_qualified_name("Data.Either.Right");
-        let (left, right) = match (left, right) {
-            (Some(left), Some(right)) => (left, right),
-            _ => {
-                return Err(reject(
-                    "the runner declares no Either constructors to read the decode result",
-                ))
-            }
-        };
-        let text_plan = owner.lower_text(
-            site,
-            &HaskellValue::Lit(Literal::LitString(text.as_bytes().to_vec())),
-        )?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let text_handle = self
-            .machine
-            .build_answer(realm, &text_plan)
+        let mut builder = machine
+            .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let batch = self.machine.run_entry_retained(
-            runner,
-            decode_entry,
-            &[PreparedInput::Managed(text_handle)],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(text_handle);
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
-        let outer = self
-            .take_first_managed(batch.values)
-            .ok_or_else(|| reject("the decode entry returned no managed Either value"))?;
-        let layer = self.machine.inspect_outer(outer, realm);
-        self.machine.release(outer);
-        let CodegenPreparedOuter::Constructor { identity, fields } =
-            layer.map_err(PreparedRuntimeError::Run)?;
-        let managed: Vec<PreparedHandle> = fields
-            .into_iter()
-            .filter_map(|field| match field {
-                PreparedResult::Managed(handle) => Some(handle),
-                PreparedResult::Void | PreparedResult::Scalar(_) => None,
-            })
-            .collect();
-        if identity == right {
-            match managed.as_slice() {
-                [value] => Ok(*value),
-                _ => {
-                    self.release_all(managed);
-                    Err(reject("Right carried other than one managed field"))
-                }
-            }
-        } else {
-            self.release_all(managed);
-            if identity == left {
-                Err(reject("the HaskellValue-carrying answer failed to decode"))
-            } else {
-                Err(reject("the decode entry returned neither Left nor Right"))
-            }
-        }
-    }
-
-    /// Re-enter the frame parked under `id` with a host-built answer: peek,
-    /// validate and lower `value` against the site evidence, resolve any
-    /// `HaskellValue`-carrying leaves through the decode entry
-    /// ([`Self::resolve_json_leaves`]), build the result into a realm-owned
-    /// handle, then take the frame and enter the resume entry
-    /// ([`Self::resume_parked`]). A plan that is itself one resolved `HaskellValue`
-    /// leaf (the site's whole answer type is `HaskellValue`) delivers that leaf's
-    /// handle directly — a decoded `HaskellValue` is already a retained heap object,
-    /// so wrapping it in another constructor is unnecessary. Every failure
-    /// before the take leaves the frame parked with the handle and root
-    /// counts unchanged.
-    pub fn resume_with_answer(
-        &mut self,
-        id: ContinuationId,
-        value: &HaskellValue,
-        table: &DataConTable,
-    ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let plan = self.answer_plan(id, value, table)?;
-        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownContinuation(id),
-        ))?;
-        let site = evidence.site;
-        let runner = evidence.runner;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let mut produced = Vec::new();
-        let plan = match self.resolve_json_leaves(site, runner, realm, plan, table, &mut produced) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.release_all(produced);
-                return Err(error);
-            }
-        };
-        if let AnswerPlan::Handle(handle) = plan {
-            // The whole answer is one decoded leaf: it is `produced`'s only
-            // entry, and `resume_parked` releases it after the entry reads it.
-            return self.resume_parked(id, handle);
-        }
-        let built = self
-            .machine
-            .build_answer(realm, &plan)
-            .map_err(PreparedRuntimeError::Run);
-        // The built answer now roots every decoded leaf it copied in; the
-        // leaves' own handles are released whether or not the build succeeded.
-        self.release_all(produced);
-        self.resume_parked(id, built?)
+        let root = build_structural_node(response, table, site, row.wire, owner, &mut builder)?;
+        let answer = builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, answer)
     }
 
     /// Consume the frame parked under `id` without entering it: the
@@ -2943,12 +3259,15 @@ impl PreparedEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_bridge::ToHaskell;
     use tidepool_codegen::host_fns::RuntimeError;
     use tidepool_codegen::machine_state::MachineFailure;
     use tidepool_repr::execution_schema::{
         testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
-        GlobalDecl, GlobalId, ResultContract, ScalarLiteral, SignatureId, UpdatePolicy, ValueRef,
+        GlobalDecl, GlobalId, HeapBinding, ResultContract, ScalarLiteral, Signature, SignatureId,
+        StorageLayout, TopBinding, UpdatePolicy, ValueRef,
     };
+    use tidepool_repr::DataCon;
 
     #[test]
     fn integrity_failure_is_typed_independently_from_its_cause() {
@@ -3274,6 +3593,679 @@ mod tests {
             &[(identity, handle, forced)],
         )
         .expect("the same binding now satisfies required_evaluated");
+    }
+
+    fn mount_constructor(
+        module: &str,
+        occurrence: &str,
+        family_module: &str,
+        family_occurrence: &str,
+        id: u64,
+        tag: u32,
+        family_size: u32,
+        fields: Vec<RuntimeRep>,
+    ) -> ConstructorDecl {
+        let layout = StorageLayout::for_reps(&testing::target(), &fields)
+            .expect("mount fixture field layout");
+        let mut identity = testing::identity(module, occurrence);
+        identity.namespace = "constructor".into();
+        let mut family = testing::identity(family_module, family_occurrence);
+        family.namespace = "type".into();
+        ConstructorDecl {
+            identity,
+            family,
+            host_id: DataConId(id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag,
+            family_size,
+            strict_fields: vec![true; fields.len()],
+            field_reps: fields,
+            layout: CheckedLayout {
+                fields: layout
+                    .fields()
+                    .iter()
+                    .map(|field| FieldLayout {
+                        rep: field.rep(),
+                        offset: field.offset(),
+                    })
+                    .collect(),
+                alignment: layout.alignment(),
+                payload_size: layout.payload_size(),
+                root_mask: layout
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn mount_table_row(id: u64, name: &str, arity: u32, qualified_name: Option<&str>) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: Vec::new(),
+            qualified_name: qualified_name.map(str::to_owned),
+            type_name: String::new(),
+        }
+    }
+
+    fn canonical_mount_value(value: &HaskellValue, output: &mut String) {
+        match value {
+            HaskellValue::Lit(Literal::LitByteArray(bytes)) => {
+                output.push_str(&format!("B{bytes:?};"));
+            }
+            HaskellValue::Lit(literal) => output.push_str(&format!("L{literal:?};")),
+            HaskellValue::ByteArray(bytes) => {
+                output.push_str(&format!("B{:?};", *bytes.lock().expect("byte array lock")));
+            }
+            HaskellValue::Con(id, fields) => {
+                output.push_str(&format!("C{}(", id.0));
+                for field in fields {
+                    canonical_mount_value(field, output);
+                }
+                output.push_str(");");
+            }
+        }
+    }
+
+    /// The whole family the JSON bridge emits, plus `BadText`: it deliberately
+    /// has three scalar fields so its table row passes name/arity lookup but
+    /// descriptor validation rejects it after the byte array was built.
+    fn json_mount_program() -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors = vec![
+            mount_constructor(
+                "Fixture.Mount",
+                "Unit",
+                "Fixture.Mount",
+                "Unit",
+                1,
+                1,
+                1,
+                vec![],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Object",
+                "Tidepool.Aeson.Value",
+                "Value",
+                100,
+                1,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Array",
+                "Tidepool.Aeson.Value",
+                "Value",
+                101,
+                2,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "String",
+                "Tidepool.Aeson.Value",
+                "Value",
+                102,
+                3,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Number",
+                "Tidepool.Aeson.Value",
+                "Value",
+                103,
+                4,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Bool",
+                "Tidepool.Aeson.Value",
+                "Value",
+                104,
+                5,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Null",
+                "Tidepool.Aeson.Value",
+                "Value",
+                105,
+                6,
+                6,
+                vec![],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                110,
+                1,
+                1,
+                vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IS",
+                "GHC.Num.Integer",
+                "Integer",
+                120,
+                1,
+                3,
+                vec![RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IP",
+                "GHC.Num.Integer",
+                "Integer",
+                121,
+                2,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IN",
+                "GHC.Num.Integer",
+                "Integer",
+                122,
+                3,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            mount_constructor("GHC.Types", "True", "GHC.Types", "Bool", 130, 2, 2, vec![]),
+            mount_constructor("GHC.Types", "False", "GHC.Types", "Bool", 131, 1, 2, vec![]),
+            mount_constructor(
+                "Data.Map.Internal",
+                "Bin",
+                "Data.Map.Internal",
+                "Map",
+                140,
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef; 5],
+            ),
+            mount_constructor(
+                "Data.Map.Internal",
+                "Tip",
+                "Data.Map.Internal",
+                "Map",
+                141,
+                2,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "GHC.Types",
+                "I#",
+                "GHC.Types",
+                "Int",
+                150,
+                1,
+                1,
+                vec![RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "Data.Text.Internal",
+                "Text",
+                "Data.Text.Internal",
+                "Text",
+                160,
+                1,
+                1,
+                vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Int(64),
+                ],
+            ),
+            mount_constructor(
+                "GHC.Types",
+                ":",
+                "GHC.Types",
+                "List",
+                170,
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef; 2],
+            ),
+            mount_constructor("GHC.Types", "[]", "GHC.Types", "List", 171, 1, 2, vec![]),
+            mount_constructor(
+                "Fixture.Mount",
+                "BadText",
+                "Fixture.Mount",
+                "BadText",
+                900,
+                1,
+                1,
+                vec![RuntimeRep::Int(64); 3],
+            ),
+            mount_constructor(
+                "Tidepool.Internal.Resume",
+                "Done",
+                "Tidepool.Internal.Resume",
+                "Settled",
+                901,
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Internal.Resume",
+                "Suspended",
+                "Tidepool.Internal.Resume",
+                "Settled",
+                902,
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef; 2],
+            ),
+            mount_constructor(
+                "Fixture.Mount",
+                "Framed",
+                "Fixture.Mount",
+                "Framed",
+                903,
+                1,
+                1,
+                vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef],
+            ),
+        ];
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::LiftedRef; 2],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.expressions.nodes.push(ExprFrame::Construct {
+            constructor: ConstructorId(20),
+            fields: vec![Atom::Ref(ValueRef::Local(ValueId(3)))],
+        });
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", PREPARED_RESUME_TARGET),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![ValueId(2), ValueId(3)],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let mut json_value_family = testing::identity("Tidepool.Aeson.Value", "Value");
+        json_value_family.namespace = "type".into();
+        wire.types = vec![
+            TypeNode::Data {
+                family: json_value_family,
+                arguments: vec![],
+                rows: vec![
+                    CtorRow {
+                        constructor: ConstructorId(1),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(2),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(3),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(4),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(5),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(6),
+                        fields: vec![],
+                    },
+                ],
+            },
+            TypeNode::Scalar(RuntimeRep::Int(64)),
+            TypeNode::Data {
+                family: {
+                    let mut family = testing::identity("Fixture.Mount", "Framed");
+                    family.namespace = "type".into();
+                    family
+                },
+                arguments: vec![],
+                rows: vec![CtorRow {
+                    constructor: ConstructorId(22),
+                    fields: vec![TypeNodeId(1), TypeNodeId(0)],
+                }],
+            },
+        ];
+        wire.sites = vec![
+            SiteRow {
+                site: 7,
+                origin: "Fixture.Mount.json_reply".into(),
+                ordinal: 0,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(0),
+                inputs: vec![],
+            },
+            SiteRow {
+                site: 8,
+                origin: "Fixture.Mount.framed_reply".into(),
+                ordinal: 1,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(2),
+                inputs: vec![],
+            },
+        ];
+        wire.json_layout = Some(JsonLayout {
+            object: ConstructorId(1),
+            array: ConstructorId(2),
+            string: ConstructorId(3),
+            number: ConstructorId(4),
+            bool_: ConstructorId(5),
+            null: ConstructorId(6),
+            map_bin: ConstructorId(13),
+            map_tip: ConstructorId(14),
+            true_: ConstructorId(11),
+            false_: ConstructorId(12),
+            cons: ConstructorId(17),
+            nil: ConstructorId(18),
+            scientific: ConstructorId(7),
+            integer_small: ConstructorId(8),
+            integer_positive: ConstructorId(9),
+            integer_negative: ConstructorId(10),
+            text: ConstructorId(16),
+            int: ConstructorId(15),
+        });
+        testing::prepare(wire).expect("JSON mount fixture")
+    }
+
+    fn json_mount_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        for (id, name, arity, qualified_name) in [
+            (100, "Object", 1, Some("Tidepool.Aeson.Value.Object")),
+            (101, "Array", 1, Some("Tidepool.Aeson.Value.Array")),
+            (102, "String", 1, Some("Tidepool.Aeson.Value.String")),
+            (103, "Number", 1, Some("Tidepool.Aeson.Value.Number")),
+            (104, "Bool", 1, Some("Tidepool.Aeson.Value.Bool")),
+            (105, "Null", 0, Some("Tidepool.Aeson.Value.Null")),
+            (
+                110,
+                "Scientific",
+                2,
+                Some("Tidepool.Aeson.Scientific.Scientific"),
+            ),
+            (120, "IS", 1, Some("GHC.Num.Integer.IS")),
+            (121, "IP", 1, Some("GHC.Num.Integer.IP")),
+            (122, "IN", 1, Some("GHC.Num.Integer.IN")),
+            (130, "True", 0, Some("GHC.Types.True")),
+            (131, "False", 0, Some("GHC.Types.False")),
+            (140, "Bin", 5, Some("Data.Map.Internal.Bin")),
+            (141, "Tip", 0, Some("Data.Map.Internal.Tip")),
+            (150, "I#", 1, Some("GHC.Types.I#")),
+            (160, "Text", 3, Some("Data.Text.Internal.Text")),
+            (170, ":", 2, Some("GHC.Types.:")),
+            (171, "[]", 0, Some("GHC.Types.[]")),
+            (903, "Framed", 2, Some("Fixture.Mount.Framed")),
+        ] {
+            table
+                .insert_checked(mount_table_row(id, name, arity, qualified_name))
+                .unwrap();
+        }
+        table
+    }
+
+    #[test]
+    fn host_json_and_text_mount_stream_through_tiny_nursery_and_recover_after_rejection() {
+        let prepared = json_mount_program();
+        let layout = prepared
+            .json_layout()
+            .expect("JSON mount program carries layout")
+            .try_map(|constructor| {
+                prepared
+                    .constructors()
+                    .get(constructor.0 as usize)
+                    .map(|declaration| declaration.host_id)
+                    .ok_or(())
+            })
+            .expect("JSON layout IDs are declared");
+        let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 64)
+            .expect("bootstrap JSON mount fixture");
+        let table = json_mount_table();
+        let table = table.with_json_layout(Some(layout));
+        let payload = serde_json::json!({
+            "nested": [[{"key": "value", "n": serde_json::Value::Number("1000000000000000000000000000001".parse().expect("large JSON number"))}], [true, null]],
+            "large": (0..128).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),
+        });
+
+        let initial_handles = engine.handle_count();
+        let initial_roots = engine.persistent_roots_count();
+        let json = engine
+            .build_host_json(RealmId::ROOT, &payload, &layout)
+            .expect("large nested JSON mounts under a tiny nursery");
+        let observed = engine.observe(program, json).expect("observe mounted JSON");
+        let expected = payload.to_value(&table).expect("reference JSON value");
+        let mut observed_shape = String::new();
+        canonical_mount_value(&observed, &mut observed_shape);
+        let mut expected_shape = String::new();
+        canonical_mount_value(&expected, &mut expected_shape);
+        assert_eq!(observed_shape, expected_shape);
+        assert!(engine.release(json));
+
+        let mut wrong_text = DataConTable::new();
+        wrong_text
+            .insert_checked(mount_table_row(900, "Text", 3, None))
+            .unwrap();
+        let error = engine
+            .build_host_text(RealmId::ROOT, "must not publish", &wrong_text)
+            .expect_err("wrong Text descriptor is rejected after byte construction");
+        assert!(matches!(error, PreparedRuntimeError::HostMount { .. }));
+        assert_eq!(engine.handle_count(), initial_handles);
+        assert_eq!(engine.persistent_roots_count(), initial_roots);
+
+        let text = engine
+            .build_host_text(RealmId::ROOT, "reusable after rejection", &table)
+            .expect("a later Text mount succeeds");
+        assert!(matches!(
+            engine.observe(program, text).expect("observe mounted Text"),
+            HaskellValue::Con(id, ref fields)
+                if id == DataConId(160)
+                    && matches!(fields.as_slice(), [HaskellValue::Lit(Literal::LitByteArray(bytes)), HaskellValue::Lit(Literal::LitInt(0)), HaskellValue::Lit(Literal::LitInt(24))] if bytes == b"reusable after rejection")
+        ));
+        assert!(engine.release(text));
+        assert_eq!(engine.handle_count(), initial_handles);
+        assert_eq!(engine.persistent_roots_count(), initial_roots);
+    }
+
+    #[test]
+    fn structural_json_effect_reply_uses_parked_owner_layout() {
+        let (mut engine, program) =
+            PreparedEngine::bootstrap(json_mount_program()).expect("bootstrap JSON reply fixture");
+        let table = json_mount_table();
+        assert!(
+            table.json_layout().is_none(),
+            "the accumulated session table deliberately has no JSON authority"
+        );
+
+        let continuation = {
+            let mut builder = engine
+                .machine
+                .managed_builder()
+                .expect("JSON reply fixture opens a managed builder");
+            let root = builder
+                .constructor(DataConId(105), &[])
+                .expect("fixture Null constructor is declared");
+            builder
+                .finish(RealmId::ROOT, root)
+                .expect("fixture continuation is retained")
+        };
+        let id = engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        owner: program,
+                        site: 7,
+                        runner: program,
+                        resume_entry: ValueId(1),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .expect("fixture continuation parks");
+
+        let response = serde_json::json!({"worked": [true, 3]});
+        let resumed = engine
+            .resume_with_structural_answer(id, &response, &table)
+            .expect("JSON response derives its layout from the parked site owner");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("resume fixture returns a settled Done value")
+        };
+        assert!(matches!(
+            engine
+                .observe(program, value)
+                .expect("observe resumed JSON"),
+            HaskellValue::Con(DataConId(100), _)
+        ));
+        assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 0);
+    }
+
+    #[test]
+    fn framed_structural_prefix_rejects_without_consuming_then_retries() {
+        struct RawInt(i64);
+        impl tidepool_bridge::sealed::ToHaskellSealed for RawInt {}
+        impl ToHaskell for RawInt {
+            fn visit(
+                &self,
+                _table: &DataConTable,
+                visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+            ) -> Result<(), BridgeError> {
+                visitor.literal(Literal::LitInt(self.0))
+            }
+        }
+
+        let (mut engine, program) =
+            PreparedEngine::bootstrap(json_mount_program()).expect("bootstrap framed fixture");
+        let table = json_mount_table();
+        let make_null = |engine: &mut PreparedEngine| {
+            let mut builder = engine
+                .machine
+                .managed_builder()
+                .expect("framed fixture opens a managed builder");
+            let root = builder
+                .constructor(DataConId(105), &[])
+                .expect("fixture Null constructor is declared");
+            builder
+                .finish(RealmId::ROOT, root)
+                .expect("fixture value is retained")
+        };
+        let continuation = make_null(&mut engine);
+        let held = make_null(&mut engine);
+        let id = engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        owner: program,
+                        site: 8,
+                        runner: program,
+                        resume_entry: ValueId(1),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .expect("fixture continuation parks");
+        let roots_before = engine.persistent_roots_count();
+        let handles_before = engine.handle_count();
+
+        let error = match engine.resume_with_framed_handle_sources(
+            id,
+            held.raw(),
+            DataConId(903),
+            &[],
+            &table,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing prefix must be rejected"),
+        };
+        assert!(matches!(error, PreparedRuntimeError::AnswerShape { .. }));
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.persistent_roots_count(), roots_before);
+        assert_eq!(engine.handle_count(), handles_before);
+
+        let wrong: Vec<Box<dyn ToHaskell + Send>> = vec![Box::new("not an Int".to_owned())];
+        let error = match engine.resume_with_framed_handle_sources(
+            id,
+            held.raw(),
+            DataConId(903),
+            &wrong,
+            &table,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("wrong prefix shape must be rejected"),
+        };
+        assert!(matches!(error, PreparedRuntimeError::AnswerRejected { .. }));
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.persistent_roots_count(), roots_before);
+        assert_eq!(engine.handle_count(), handles_before);
+
+        let prefix: Vec<Box<dyn ToHaskell + Send>> = vec![Box::new(RawInt(37))];
+        let resumed = engine
+            .resume_with_framed_handle_sources(id, held.raw(), DataConId(903), &prefix, &table)
+            .expect("valid prefix retries the exact parked frame");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("framed fixture returns a settled Done value")
+        };
+        assert!(matches!(
+            engine.observe(program, value).expect("observe framed reply"),
+            HaskellValue::Con(DataConId(903), ref fields)
+                if matches!(fields.as_slice(), [HaskellValue::Lit(Literal::LitInt(37)), HaskellValue::Con(DataConId(105), nested)] if nested.is_empty())
+        ));
+        assert!(engine.release(value));
+        assert!(engine.release(held));
+        assert_eq!(engine.parked_count(), 0);
     }
 
     /// A program that constructs nothing but declares an effect request

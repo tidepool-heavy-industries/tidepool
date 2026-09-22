@@ -734,6 +734,12 @@ pub(super) fn recognize_operation(
     if super::time::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::ParseIso8601);
     }
+    if let Some((left, right)) = super::json::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::ParseJson(left, right));
+    }
+    if super::json::recognize_encode(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::EncodeJson);
+    }
     if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::WideWord(operation));
     }
@@ -861,6 +867,11 @@ pub(super) enum PrimitiveOperation {
     TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
     ParseIso8601,
+    ParseJson(
+        tidepool_repr::execution_schema::ConstructorId,
+        tidepool_repr::execution_schema::ConstructorId,
+    ),
+    EncodeJson,
     DecodeDoubleInt64,
     EncodeDouble {
         signed: bool,
@@ -910,6 +921,7 @@ pub(super) fn emit_operation(
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     mut_var: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
+    json_layout: Option<&tidepool_repr::execution_schema::JsonLayout>,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
         PrimitiveOperation::Fingerprint(operation) => {
@@ -1146,6 +1158,24 @@ pub(super) fn emit_operation(
         PrimitiveOperation::ParseIso8601 => {
             super::time::emit_parse_iso8601(builder, pipeline, vmctx, gc, bytes_array, arguments)
                 .map(Some)
+        }
+        PrimitiveOperation::ParseJson(left, right) => {
+            let layout = json_layout.ok_or(super::CompileError::MissingJsonLayout)?;
+            super::json::emit_parse_json(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                *layout,
+                left,
+                right,
+                arguments,
+            )
+            .map(Some)
+        }
+        PrimitiveOperation::EncodeJson => {
+            let layout = json_layout.ok_or(super::CompileError::MissingJsonLayout)?;
+            super::json::emit_encode_json(builder, pipeline, vmctx, *layout, arguments).map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(

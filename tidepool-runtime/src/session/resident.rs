@@ -14,21 +14,38 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
-use tidepool_repr::execution_schema::SymbolIdentity;
+use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
-use tidepool_codegen::suspension::{ContinuationId, RealmId, ResumeInput, ValueHandle};
+use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
-    BindingName, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
+    BindingName, DataConId, DataConTable, Generation, MonotonicIdIssuer, SessionModule,
+    SessionVarId,
 };
 
 use crate::render::EvalResult;
 use crate::timing;
-use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+use crate::{NominalHead, RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+
+enum ResidentResumeInput {
+    Response(Response),
+    Handle(ValueHandle),
+    FramedHandle {
+        handle: ValueHandle,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<HaskellValue>,
+    },
+    FramedHandleSources {
+        handle: ValueHandle,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<Box<dyn tidepool_bridge::ToHaskell + Send>>,
+    },
+    Abort(String),
+}
 
 /// Immutable compiler provenance that travels with live Haskell programs.
 /// Sites are globally stable, while the map makes accidental hash collisions
@@ -81,7 +98,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::PrincipalId;
 
 use super::persistent::{PersistentSession, ScopeRetirement};
-use super::turn::{BoundBinder, ValueTier};
+use super::turn::{BoundBinder, HostBindingAuthority, ValueTier};
 use super::OutputSink;
 use super::{SessionError, SessionLib, SourceImports};
 
@@ -98,6 +115,80 @@ pub struct SessionRunContext {
     pub resource_scope: RealmId,
     pub lexical_scope: ScopeId,
     pub principal: PrincipalId,
+}
+
+/// A compiler-issued host mount must have this exact outer nominal type. The
+/// unit is authenticated by [`BoundBinder::host_authority`]; module and type
+/// constructor identify the shipped surface the host builder knows how to
+/// construct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostBindingType {
+    authority: HostBindingAuthority,
+    module: &'static str,
+    name: &'static str,
+    constructors: &'static [&'static str],
+}
+
+impl HostBindingType {
+    pub const JSON_VALUE: Self = Self {
+        authority: HostBindingAuthority::JsonValue,
+        module: "Tidepool.Aeson.Value",
+        name: "Value",
+        constructors: &[],
+    };
+    pub const TEXT: Self = Self {
+        authority: HostBindingAuthority::Text,
+        module: "Data.Text.Internal",
+        name: "Text",
+        constructors: &["Data.Text.Text"],
+    };
+    pub const COMMAND_JOB: Self = Self {
+        authority: HostBindingAuthority::CommandJob,
+        module: "Tidepool.Command.Types",
+        name: "Job",
+        constructors: &["Tidepool.Command.Types.Job"],
+    };
+}
+
+fn json_runtime_layout_optional(prepared: &PreparedProgram) -> Option<JsonLayout<DataConId>> {
+    prepared.json_layout().and_then(|layout| {
+        let constructors = prepared.constructors();
+        (*layout)
+            .try_map(|constructor| {
+                constructors
+                    .get(constructor.0 as usize)
+                    .map(|row| row.host_id)
+                    .ok_or(())
+            })
+            .ok()
+    })
+}
+
+fn json_runtime_layout(prepared: &PreparedProgram) -> Result<JsonLayout<DataConId>, ResidentError> {
+    json_runtime_layout_optional(prepared).ok_or_else(|| {
+        ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+            "compiled host mount has no authenticated JSON layout".into(),
+        )))
+    })
+}
+
+/// Require the compiler-issued sidecar before any host mount can merge a
+/// constructor table or install its carrier program. A same-spelling type from
+/// another unit has no sidecar, because the extractor compares its exact GHC
+/// module identity while minting this tag.
+fn require_host_binding_authority(
+    binder: &BoundBinder,
+    expected: HostBindingType,
+) -> Result<(), ResidentError> {
+    if binder.host_authority == Some(expected.authority) {
+        return Ok(());
+    }
+    Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+        format!(
+            "compiled binder `{}` has host authority {:?}; host mount requires {:?}",
+            binder.name, binder.host_authority, expected.authority,
+        ),
+    ))))
 }
 
 impl SessionRunContext {
@@ -498,6 +589,25 @@ pub enum ResidentOutcome {
     },
 }
 
+/// The rendered metadata from one compiler-produced display bundle.
+///
+/// The page itself is installed in the value plane before this metadata is
+/// forced.  Consequently a renderer failure leaves the captured observation
+/// available to the caller, while the compiler-provided `cellDisplay` alias is
+/// only published after metadata observation succeeds.
+#[derive(Debug)]
+pub struct ResidentDisplayBundle {
+    result: EvalResult,
+}
+
+impl ResidentDisplayBundle {
+    /// The strict `(Text, Bool, Bool)` display summary produced by the bundle.
+    #[must_use]
+    pub fn result(&self) -> &EvalResult {
+        &self.result
+    }
+}
+
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
@@ -544,6 +654,26 @@ pub enum ResidentError {
     /// The prepared engine refused or failed the turn.
     #[error("prepared engine: {0}")]
     Prepared(#[from] PreparedRuntimeError),
+}
+
+/// A failed continuation response classified by the parked frame's ground
+/// truth. `Rejected` leaves the original frame available for retry or abort;
+/// `Consumed` means delivery crossed the continuation boundary before the
+/// resumed computation failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ResidentResumeError {
+    #[error("resident response was rejected before consuming its continuation: {0}")]
+    Rejected(ResidentError),
+    #[error("resident computation failed after consuming its response: {0}")]
+    Consumed(ResidentError),
+}
+
+impl ResidentResumeError {
+    pub fn into_inner(self) -> ResidentError {
+        match self {
+            Self::Rejected(error) | Self::Consumed(error) => error,
+        }
+    }
 }
 
 impl ResidentError {
@@ -601,6 +731,15 @@ pub(crate) enum PreparedRun {
     },
     /// A projected tuple split into one retained handle per binder.
     Projected { fields: Vec<PreparedHandle> },
+    /// A display bundle has three compiler-owned tuple fields: the retained
+    /// page, its lazy metadata tuple, and a fresh alias identity for the page.
+    /// The session binds and observes them in that order so metadata failure
+    /// cannot lose the already-captured observation.
+    Display {
+        page: PreparedHandle,
+        metadata: PreparedHandle,
+        alias: PreparedHandle,
+    },
     /// The turn requested a typed effect: its continuation is parked under
     /// `id` in the machine's ledger and `request` is the observed request,
     /// ready for the host to route.
@@ -658,6 +797,10 @@ pub(crate) enum SettlePlan {
     Bind(ValueTier),
     /// A projected tuple: one binder per field, each at its tier.
     Project(Vec<ValueTier>),
+    /// Project a compiler-generated `(page, metadata, alias)` tuple.  Only
+    /// the page receives the normal bind-tier forcing here; metadata remains
+    /// lazy until the page has entered the value plane.
+    Display(ValueTier),
 }
 
 /// Run `program`'s settled scaffold on the eval thread and finish it there:
@@ -758,27 +901,6 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
     Ok((program, run))
 }
 
-/// The bridge value a handler's [`Response`] delivers as a host-built
-/// answer. A list response arrives as a flat item vector so that no deep
-/// spine exists on the handler side; the answer plan walks the rebuilt spine
-/// iteratively per row, and the spine's own `Drop` is the bridge `HaskellValue`'s
-/// (frame-based, not recursive).
-fn response_value(response: Response) -> HaskellValue {
-    match response {
-        Response::Complete(value) => value,
-        Response::List {
-            items,
-            cons_id,
-            nil_id,
-        } => items
-            .into_iter()
-            .rev()
-            .fold(HaskellValue::Con(nil_id, Vec::new()), |rest, item| {
-                HaskellValue::Con(cons_id, vec![item, rest])
-            }),
-    }
-}
-
 /// The one completion routine for a settled layer, whichever entry produced
 /// it (the initial scaffold or a resume): a completed value is prepared per
 /// binder tier; a suspension is parked with the run's policy, then offered to
@@ -833,8 +955,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 request: parked.request,
             });
         };
-        let answer = response_value(response);
-        let resumed = match engine.resume_with_answer(parked.id, &answer, table) {
+        let resumed = match engine.resume_with_structural_answer(parked.id, &response, table) {
             Ok(resumed) => resumed,
             Err(error) => {
                 // A refusal before the take leaves the frame parked; a
@@ -945,6 +1066,56 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
             }
             Ok(PreparedRun::Projected { fields })
         }
+        SettlePlan::Display(page_tier) => {
+            let fields = engine.fields(handle, realm, 3);
+            engine.release(handle);
+            let mut fields = fields?;
+            let Some(alias) = fields.pop() else {
+                return Err(PreparedRuntimeError::ProjectionShape {
+                    binders: 3,
+                    fields: 0,
+                });
+            };
+            let Some(metadata) = fields.pop() else {
+                engine.release(alias);
+                return Err(PreparedRuntimeError::ProjectionShape {
+                    binders: 3,
+                    fields: 1,
+                });
+            };
+            let Some(page) = fields.pop() else {
+                engine.release_all([metadata, alias]);
+                return Err(PreparedRuntimeError::ProjectionShape {
+                    binders: 3,
+                    fields: 2,
+                });
+            };
+            if !fields.is_empty() {
+                engine.release_all(fields.into_iter().chain([page, metadata, alias]));
+                return Err(PreparedRuntimeError::ProjectionShape {
+                    binders: 3,
+                    fields: 4,
+                });
+            }
+            if page_tier == ValueTier::ForceData {
+                let forced = match engine.observe(program, page) {
+                    Ok(value) => Ok(value),
+                    Err(error) if is_observation_budget_exhausted(&error) => {
+                        engine.observe_bounded(program, page)
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = forced {
+                    engine.release_all([page, metadata, alias]);
+                    return Err(error);
+                }
+            }
+            Ok(PreparedRun::Display {
+                page,
+                metadata,
+                alias,
+            })
+        }
     }
 }
 
@@ -995,6 +1166,14 @@ pub struct ResidentSession<H, O> {
     parked: Vec<(String, ContinuationId)>,
     parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
     binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
+    /// Host-owned text identities for materialized bindings whose equality is
+    /// meaningful to a caller (currently retained command jobs). The binding
+    /// table remains the owner of reachability and scope retirement; this map
+    /// only records a payload identity for deduplication.
+    host_text_bindings: HashMap<SessionVarId, String>,
+    /// Private request carriers remain rooted for closures that captured them,
+    /// but never become ordinary unqualified workbench vocabulary.
+    hidden_host_bindings: HashMap<SessionVarId, ()>,
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
@@ -1032,6 +1211,8 @@ where
             parked: Vec::new(),
             parked_provenance: HashMap::new(),
             binding_provenance: HashMap::new(),
+            host_text_bindings: HashMap::new(),
+            hidden_host_bindings: HashMap::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
@@ -1155,6 +1336,20 @@ where
         }
     }
 
+    /// The materialized bindings visible while a compiled cell waits to run.
+    /// A later item in that same cell may still import one of these identities
+    /// after an earlier item shadows its public name, so preparation retains
+    /// this exact source environment through the cell's execution prefix.
+    #[must_use]
+    pub fn visible_binding_ids_in(&self, scope: ScopeId) -> Vec<tidepool_repr::VarId> {
+        self.state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .map(|(_, entry)| entry.id.var())
+            .collect()
+    }
+
     /// Publish a GHC-typed alias of an already captured value in this actor's
     /// lexical scope. The compiled alias interface supplies the new name,
     /// identity, module and type; this path shares the source's registered
@@ -1271,7 +1466,17 @@ where
     /// Immutable compile environment for `scope`, suitable for carrying out of
     /// a registry peek before a blocking GHC invocation.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<super::SessionCompileView> {
-        self.state.compile_view_in(scope)
+        let hidden = self
+            .state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .filter(|(_, entry)| self.hidden_host_bindings.contains_key(&entry.id))
+            .map(|(name, _)| name.0.clone())
+            .collect::<Vec<_>>();
+        self.state
+            .compile_view_in(scope)
+            .map(|view| view.hide_value_names(&hidden))
     }
 
     /// Capture an exact, selective declaration surface from `scope` for a
@@ -1561,6 +1766,17 @@ where
         hole: ResidentHole,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_handle_classified(hole, custody)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_handle`] retaining whether the parked frame consumed
+    /// the delivered custody before a failure.
+    pub fn resume_handle_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: RootCustody,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         self.settle_dropped_custody();
         let seed = hole.seed();
         let cont_id = match hole {
@@ -1584,7 +1800,7 @@ where
         let provenance = Arc::clone(&transfer.provenance);
         let result = self.reenter(
             &cont_id,
-            ResumeInput::Handle(transfer.handle),
+            ResidentResumeInput::Handle(transfer.handle),
             seed,
             Some(&provenance),
         );
@@ -1652,6 +1868,395 @@ where
         self.mount_compiled_binding_prepared(scope, binder, gen, custody)
     }
 
+    /// Build and mount a compiler-typed JSON value without putting the
+    /// payload into generated Haskell source. `binder` is the one binder the
+    /// compiler produced for the payload-independent `Aeson.Value` interface;
+    /// its `Val.G<gen>` module remains the sole type authority.
+    pub fn mount_json_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        value: &serde_json::Value,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(
+            scope,
+            binder,
+            gen,
+            &code,
+            HostBindingType::JSON_VALUE,
+        )?;
+        let layout = json_runtime_layout(&code.prepared)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
+            engine.build_host_json(realm, value, &layout)
+        })
+    }
+
+    /// The `Text` sibling of [`Self::mount_json_binding_in`]. It is for host
+    /// strings whose compiler-produced binder has type `Text`; the UTF-8
+    /// bytes stream directly into the same managed builder and never become a
+    /// Haskell source literal.
+    pub fn mount_text_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        text: &str,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
+        self.validate_text_runtime_constructor(&code)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
+            engine.build_host_text(realm, text, table)
+        })
+    }
+
+    /// Build and mount a compiler-typed structural host value. The caller's
+    /// compiler-issued binder and constructor table are the type authority;
+    /// the host value is never rendered as Haskell source.
+    pub fn mount_typed_binding_in<T>(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        expected: HostBindingType,
+        value: &T,
+    ) -> Result<(), ResidentError>
+    where
+        T: tidepool_bridge::ToHaskell,
+    {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
+            engine.build_host_value(realm, value, table)
+        })
+    }
+
+    /// Record a host `Text` identity after its freshly minted compiler binder
+    /// has been mounted. This supports deduplication without comparing source
+    /// text. The identity disappears when its value binding leaves the live
+    /// table.
+    pub fn tag_host_text_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        text: String,
+    ) -> Result<(), ResidentError> {
+        let id = SessionVarId::from_extract(binder.var_id);
+        let current = self
+            .state
+            .resolve_in(scope, &binder.name)
+            .filter(|entry| entry.scope == scope && entry.id == id)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host text binding `{}` is not current in its lexical scope",
+                    binder.name
+                ))))
+            })?;
+        if current.id != id {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host text binding identity changed before tagging".into(),
+            ))));
+        }
+        self.host_text_bindings.insert(id, text);
+        Ok(())
+    }
+
+    /// Make a freshly mounted request carrier private to the source preamble
+    /// that aliases it. It remains injected and rooted for closures compiled
+    /// during that request, but ordinary future cells cannot name it.
+    pub fn hide_host_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        let id = SessionVarId::from_extract(binder.var_id);
+        let current = self
+            .state
+            .resolve_in(scope, &binder.name)
+            .filter(|entry| entry.scope == scope && entry.id == id)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host binding `{}` is not current in its lexical scope",
+                    binder.name
+                ))))
+            })?;
+        if current.id != id {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host binding identity changed before hiding".into(),
+            ))));
+        }
+        self.hidden_host_bindings.insert(id, ());
+        Ok(())
+    }
+
+    /// Withdraw a private request carrier from future source views while any
+    /// prepared work that already leased it retains its exact generation.
+    pub fn retire_host_binding_owner(&mut self, binder: &BoundBinder) {
+        let id = SessionVarId::from_extract(binder.var_id);
+        self.state.retire_binding_owner(id);
+        self.hidden_host_bindings.remove(&id);
+    }
+
+    /// The current materialized binding in `scope` carrying this exact host
+    /// text identity. This compares retained host data, never rendered source.
+    #[must_use]
+    pub fn host_text_binding_in(&self, scope: ScopeId, text: &str) -> Option<String> {
+        self.state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .find_map(|(name, entry)| {
+                (entry.scope == scope
+                    && self
+                        .host_text_bindings
+                        .get(&entry.id)
+                        .is_some_and(|identity| identity == text))
+                .then(|| name.0.clone())
+            })
+    }
+
+    fn validate_compiled_mount_target(
+        &self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: &TurnCode<'_>,
+        expected: HostBindingType,
+    ) -> Result<(), ResidentError> {
+        if !self.state.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        let expected_module = SessionModule::val(gen).module_name();
+        if binder.module != expected_module {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` belongs to {}, expected {expected_module}",
+                    binder.name, binder.module
+                ),
+            ))));
+        }
+        require_host_binding_authority(binder, expected)?;
+        let Some(root) = &binder.root_head else {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` has no nominal root type evidence",
+                    binder.name
+                ),
+            ))));
+        };
+        if root.unit.is_empty() || root.module != expected.module || root.name != expected.name {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` has root {}:{}:{}; host mount requires {}.{}",
+                    binder.name, root.unit, root.module, root.name, expected.module, expected.name,
+                ),
+            ))));
+        }
+        if expected == HostBindingType::JSON_VALUE {
+            return self.validate_json_mount_layout(&code.prepared, root, binder);
+        }
+        for qualified in expected.constructors {
+            let id = self
+                .host_constructor_id(&code.table, expected, qualified)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                        "host mount requires compiler constructor {qualified}"
+                    ))))
+                })?;
+            let family = code
+                .prepared
+                .constructors()
+                .iter()
+                .find(|declaration| declaration.host_id == id)
+                .map(|declaration| &declaration.family)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                        "host mount constructor {qualified} has no prepared family identity"
+                    ))))
+                })?;
+            if family.unit != root.unit
+                || family.module != root.module
+                || family.namespace != "type"
+                || family.occurrence != root.name
+                || family.record_parent.is_some()
+            {
+                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    format!(
+                        "compiled binder `{}` root {}:{}:{} does not match constructor family {}:{}:{}:{}",
+                        binder.name,
+                        root.unit,
+                        root.module,
+                        root.name,
+                        family.unit,
+                        family.module,
+                        family.namespace,
+                        family.occurrence,
+                    ),
+                ))));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_json_mount_layout(
+        &self,
+        prepared: &PreparedProgram,
+        root: &NominalHead,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        let layout = json_runtime_layout(prepared)?;
+        let check = |host_id: DataConId| {
+            let family = prepared
+                .constructors()
+                .iter()
+                .find(|declaration| declaration.host_id == host_id)
+                .map(|declaration| &declaration.family)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                        "authenticated JSON layout names no prepared constructor".into(),
+                    )))
+                })?;
+            if family.unit != root.unit
+                || family.module != root.module
+                || family.namespace != "type"
+                || family.occurrence != root.name
+                || family.record_parent.is_some()
+            {
+                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    format!(
+                        "compiled binder `{}` root evidence disagrees with authenticated JSON layout",
+                        binder.name,
+                    ),
+                ))));
+            }
+            Ok(())
+        };
+        check(layout.object)?;
+        check(layout.array)?;
+        check(layout.string)?;
+        check(layout.number)?;
+        check(layout.bool_)?;
+        check(layout.null)
+    }
+
+    /// `Text` is authenticated by both its compiler table id and prepared
+    /// family identity before a direct host mount allocates it.
+    fn validate_text_runtime_constructor(&self, code: &TurnCode<'_>) -> Result<(), ResidentError> {
+        let qualified = "Data.Text.Text";
+        let id = self
+            .host_constructor_id(&code.table, HostBindingType::TEXT, qualified)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host Text mount requires compiler constructor {qualified}"
+                ))))
+            })?;
+        let family = code
+            .prepared
+            .constructors()
+            .iter()
+            .find(|declaration| declaration.host_id == id)
+            .map(|declaration| &declaration.family)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    "host Text constructor has no prepared family identity".into(),
+                )))
+            })?;
+        if family.unit.is_empty()
+            || family.module != "Data.Text.Internal"
+            || family.namespace != "type"
+            || family.occurrence != "Text"
+            || family.record_parent.is_some()
+        {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "host Text constructor has unexpected family {}:{}:{}:{}",
+                    family.unit, family.module, family.namespace, family.occurrence,
+                ),
+            ))));
+        }
+        Ok(())
+    }
+
+    fn host_constructor_id(
+        &self,
+        table: &DataConTable,
+        expected: HostBindingType,
+        qualified: &str,
+    ) -> Option<DataConId> {
+        table.get_by_qualified_name(qualified).or_else(|| {
+            (expected == HostBindingType::TEXT && qualified == "Data.Text.Text")
+                .then(|| table.get_by_qualified_name("Data.Text.Internal.Text"))
+                .flatten()
+        })
+    }
+
+    /// Install, build, bind, and unpin one payload-independent interface as
+    /// one transaction. A carrier program is needed to bootstrap a fresh
+    /// machine, but it owns no live value after the handle is adopted by the
+    /// binding table, so its install pin must never escape this method.
+    fn mount_host_value_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        build: impl FnOnce(
+            &mut super::prepared::PreparedEngine,
+            RealmId,
+            &DataConTable,
+        ) -> Result<PreparedHandle, PreparedRuntimeError>,
+    ) -> Result<(), ResidentError> {
+        let table = code
+            .table
+            .with_json_layout(json_runtime_layout_optional(&code.prepared));
+        self.state
+            .merge_table(&table)
+            .map_err(ResidentError::TableCollision)?;
+        let program = self.state.install_prepared(code.prepared.into_owned())?;
+        let realm = self.run_context.resource_scope;
+        let mounted = (|| {
+            let handle = {
+                let engine = self.state.require_prepared()?;
+                build(engine, realm, &table)?
+            };
+            self.mount_host_handle_prepared(scope, binder, gen, handle)
+        })();
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
+        mounted
+    }
+
+    /// Install a just-built host handle. Unlike externally supplied custody,
+    /// this method owns the handle outright, so each failure releases it in
+    /// this same checkout instead of relying on deferred custody cleanup.
+    fn mount_host_handle_prepared(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        handle: PreparedHandle,
+    ) -> Result<(), ResidentError> {
+        let engine = self.state.require_prepared()?;
+        let Some(program) = engine.hosting_program(handle) else {
+            engine.release(handle);
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host binding mount produced a handle with no hosting program".into(),
+            ))));
+        };
+        if let Err(error) = self.bind_prepared(program, scope, gen, &[(binder, handle)]) {
+            return Err(error);
+        }
+        self.binding_provenance
+            .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
+        Ok(())
+    }
+
     /// The prepared arm of [`Self::mount_compiled_binding_in`]: the handle
     /// becomes a prepared binding under the binder's value-module identity,
     /// exactly as a prepared bind turn records it ([`Self::bind_prepared`]).
@@ -1674,7 +2279,6 @@ where
                 "compiled binding mount received an unknown or already-consumed handle".into(),
             ))));
         };
-        self.state.retract_in(scope, &binder.name)?;
         // `bind_prepared` owns the handle from here, releasing it on failure.
         transfer.commit();
         self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
@@ -1692,6 +2296,19 @@ where
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_framed_custody_classified(hole, custody, constructor, prefix)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_framed_custody`] retaining whether the parked frame
+    /// consumed the framed handle before a failure.
+    pub fn resume_framed_custody_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<HaskellValue>,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
         };
@@ -1703,10 +2320,48 @@ where
         };
         self.reenter(
             &cont_id,
-            ResumeInput::FramedHandle {
+            ResidentResumeInput::FramedHandle {
                 handle,
                 constructor,
                 prefix,
+            },
+            seed,
+            Some(&custody.provenance),
+        )
+    }
+
+    /// Structurally build each owned prefix field directly into the framed
+    /// answer, then append the borrowed custody field. This keeps the prefix
+    /// out of a collected `HaskellValue` tree while preserving the existing
+    /// frame-consumption classification and borrowed-root lifetime.
+    pub fn resume_framed_custody_sources_classified<T>(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<T>,
+    ) -> Result<ResidentOutcome, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        let Some(handle) = custody.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let seed = hole.seed();
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => hole.id,
+            ResidentHole::Binding(hole) => hole.id,
+            ResidentHole::ProjectedBinding(hole) => hole.id,
+        };
+        self.reenter(
+            &cont_id,
+            ResidentResumeInput::FramedHandleSources {
+                handle,
+                constructor,
+                prefix: prefix
+                    .into_iter()
+                    .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
+                    .collect(),
             },
             seed,
             Some(&custody.provenance),
@@ -1808,6 +2463,7 @@ where
             .bindings()
             .iter_current_in(self.state.scope_tree(), scope)
             .into_iter()
+            .filter(|(_, entry)| !self.hidden_host_bindings.contains_key(&entry.id))
             .map(|(name, _)| name.0.clone())
             .collect()
     }
@@ -1950,7 +2606,12 @@ where
     /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
-        self.state.retire_scope(scope)
+        let retirement = self.state.retire_scope(scope);
+        self.host_text_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        self.hidden_host_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        retirement
     }
 
     fn provenance_for(&self, sites: &[YieldSite]) -> Result<Arc<ProgramProvenance>, ResidentError> {
@@ -2027,9 +2688,9 @@ where
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let prepared = code.prepared;
-        let provenance = self.provenance_for(code.sites)?;
+        let provenance = self.provenance_for(&code.sites)?;
         self.state
-            .merge_table(code.table)
+            .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
@@ -2038,7 +2699,7 @@ where
             self.state.set_val_gen(*generation);
         }
         let install_prepared_started = std::time::Instant::now();
-        let program = self.state.install_prepared(prepared.clone())?;
+        let program = self.state.install_prepared(prepared.into_owned())?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -2153,6 +2814,20 @@ where
                         .insert(binder.var_id, Arc::clone(&provenance));
                 }
                 self.classify_parked(ParkedRun::CompletedProject, resumed, seed, provenance)
+            }
+            PreparedRun::Display {
+                page,
+                metadata,
+                alias,
+            } => {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all([page, metadata, alias]);
+                }
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "a display bundle reached the ordinary turn completion path",
+                }
+                .into());
             }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
@@ -2291,6 +2966,183 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let _ = effectful;
         self.run_binding_with_sites("actor_observation", code, binder, gen, Some(Vec::new()))
+    }
+
+    /// Run one generated display bundle.  The compiler supplies all three
+    /// binder identities in one `Val.G<generation>` interface: a captured
+    /// page, its `(Text, hasMore, unavailable)` metadata, and `cellDisplay`.
+    ///
+    /// The page is bound before metadata is forced.  This preserves the
+    /// workbench promise that a display failure never loses an expression that
+    /// has already run.  The final alias is deliberately published through
+    /// [`Self::publish_captured_alias_in`] rather than materializing the tuple's
+    /// third field: it must share the page's existing root and dependency edge.
+    pub fn run_display_bundle_with_sites(
+        &mut self,
+        code: TurnCode<'_>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+    ) -> Result<ResidentDisplayBundle, ResidentError> {
+        if page.module != metadata.module || page.module != alias.module {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "display bundle binders do not share one compiler value module".into(),
+            ))));
+        }
+        let prepared = code.prepared;
+        let provenance = self.provenance_for(&code.sites)?;
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        self.state.set_val_gen(generation);
+        let install_prepared_started = std::time::Instant::now();
+        let program = self.state.install_prepared(prepared.into_owned())?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_INSTALL_PREPARED,
+            install_prepared_started.elapsed(),
+            0,
+        );
+        let realm = self.run_context.resource_scope;
+        let lexical_scope = self.run_context.lexical_scope;
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
+        };
+        let run_exec_started = std::time::Instant::now();
+        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
+            Ok(settle_prepared(
+                engine,
+                program,
+                realm,
+                None,
+                SettlePlan::Display(page.tier),
+                park,
+                table,
+                handlers,
+                captured,
+            ))
+        });
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_RUN_EXEC,
+            run_exec_started.elapsed(),
+            0,
+        );
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
+        let (page_handle, metadata_handle, alias_handle) = match ran?? {
+            PreparedRun::Display {
+                page,
+                metadata,
+                alias,
+            } => (page, metadata, alias),
+            PreparedRun::Done { handle, .. } => {
+                self.on_eval_thread(move |engine, _, _, _| {
+                    engine.release(handle);
+                    Ok(())
+                })?;
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "display bundle settled as a whole value",
+                }
+                .into());
+            }
+            PreparedRun::Projected { fields } => {
+                self.on_eval_thread(move |engine, _, _, _| {
+                    engine.release_all(fields);
+                    Ok(())
+                })?;
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "display bundle settled as an ordinary projected bind",
+                }
+                .into());
+            }
+            PreparedRun::Suspended { id, .. } => {
+                self.on_eval_thread(move |engine, _, _, _| {
+                    engine
+                        .abort_parked(id)
+                        .map_err(|error| EffectError::Handler(error.to_string()))?;
+                    Ok(())
+                })?;
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "display bundle suspended while constructing a pure page",
+                }
+                .into());
+            }
+        };
+        if let Err(error) =
+            self.bind_prepared(program, lexical_scope, generation, &[(page, page_handle)])
+        {
+            self.release_display_fields(metadata_handle, alias_handle)?;
+            return Err(error);
+        }
+        self.binding_provenance
+            .insert(page.var_id, Arc::clone(&provenance));
+        self.finish_observation(page, &[]);
+
+        let metadata_value =
+            self.observe_display_metadata(program, metadata_handle, alias_handle)?;
+        let lease = self.lease_bindings(&[tidepool_repr::VarId(page.var_id)]);
+        self.publish_captured_alias_in(
+            lexical_scope,
+            SessionVarId::from_extract(page.var_id),
+            alias,
+            generation,
+            &lease,
+        )?;
+        self.binding_provenance.insert(alias.var_id, provenance);
+        self.settle_dropped_custody();
+        if let Some(engine) = self.state.prepared_mut() {
+            if engine.disposition() == tidepool_codegen::machine::MachineDisposition::Reusable {
+                engine.quiesce_and_collect()?;
+            }
+        }
+        Ok(ResidentDisplayBundle {
+            result: EvalResult::new(
+                metadata_value,
+                self.state.session_table().clone(),
+                Vec::new(),
+            ),
+        })
+    }
+
+    fn release_display_fields(
+        &mut self,
+        metadata: PreparedHandle,
+        alias: PreparedHandle,
+    ) -> Result<(), ResidentError> {
+        self.on_eval_thread(move |engine, _, _, _| {
+            engine.release_all([metadata, alias]);
+            Ok(())
+        })
+    }
+
+    fn observe_display_metadata(
+        &mut self,
+        program: ProgramId,
+        metadata: PreparedHandle,
+        alias: PreparedHandle,
+    ) -> Result<HaskellValue, ResidentError> {
+        self.on_eval_thread(move |engine, _, _, _| {
+            let observed = match engine.observe(program, metadata) {
+                Ok(value) => Ok(value),
+                Err(error) if is_observation_budget_exhausted(&error) => {
+                    engine.observe_bounded(program, metadata)
+                }
+                Err(error) => Err(error),
+            };
+            engine.release_all([metadata, alias]);
+            Ok(observed)
+        })?
+        .map_err(Into::into)
     }
 
     fn run_binding_with_sites(
@@ -2551,18 +3403,58 @@ where
     /// nothing extra. There is no external "is this pending a bind" flag left
     /// for a caller to get out of sync with which method it calls — there is
     /// only this one method, and the hole itself says what it owes.
-    pub fn resume(
+    pub fn resume<T>(
         &mut self,
         hole: ResidentHole,
-        answer: HaskellValue,
+        answer: T,
+    ) -> Result<ResidentOutcome, ResidentError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        self.resume_classified(hole, answer)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume`] with authoritative pre-consume versus post-consume
+    /// failure classification for callers that publish effect disposition.
+    pub fn resume_classified<T>(
+        &mut self,
+        hole: ResidentHole,
+        answer: T,
+    ) -> Result<ResidentOutcome, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        self.resume_response_classified(hole, Response::new(answer))
+    }
+
+    /// Resume a suspended turn from one owned structural source. Conversion
+    /// errors are classified at the validate-before-consume boundary, while
+    /// the parked continuation is still available to retry or abort.
+    pub fn resume_response(
+        &mut self,
+        hole: ResidentHole,
+        answer: Response,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_response_classified(hole, answer)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_response`] retaining whether the original continuation
+    /// was consumed. The resident registry is the sole authority for this
+    /// distinction; callers must not infer it from error text or variants.
+    pub fn resume_response_classified(
+        &mut self,
+        hole: ResidentHole,
+        answer: Response,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         let seed = hole.seed();
         let id = match hole {
             ResidentHole::Plain(h) => h.id,
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
-        self.reenter(&id, ResumeInput::Answer(answer), seed, None)
+        self.reenter(&id, ResidentResumeInput::Response(answer), seed, None)
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -2576,24 +3468,32 @@ where
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Abort(reason), HoleSeed::Plain, None)
+        self.reenter(
+            cont_id,
+            ResidentResumeInput::Abort(reason),
+            HoleSeed::Plain,
+            None,
+        )
+        .map_err(ResidentResumeError::into_inner)
     }
 
     fn reenter(
         &mut self,
         cont_id: &str,
-        input: ResumeInput,
+        input: ResidentResumeInput,
         seed: HoleSeed,
         additional_provenance: Option<&ProgramProvenance>,
-    ) -> Result<ResidentOutcome, ResidentError> {
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
         // we). A mismatch leaves every parked frame intact.
         let Some(&(_, frame_id)) = self.parked.iter().find(|(h, _)| h == cont_id) else {
-            return Err(ResidentError::WrongContinuation {
-                attempted: cont_id.to_string(),
-                pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
-            });
+            return Err(ResidentResumeError::Rejected(
+                ResidentError::WrongContinuation {
+                    attempted: cont_id.to_string(),
+                    pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
+                },
+            ));
         };
         let mut provenance = self
             .parked_provenance
@@ -2601,7 +3501,10 @@ where
             .map(|value| (**value).clone())
             .unwrap_or_default();
         if let Some(additional) = additional_provenance {
-            provenance.merge(additional)?;
+            provenance
+                .merge(additional)
+                .map_err(ResidentError::from)
+                .map_err(ResidentResumeError::Rejected)?;
         }
         let provenance = Arc::new(provenance);
         // The machine is authoritative on whether the frame was actually
@@ -2615,6 +3518,13 @@ where
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
         self.reenter_prepared(cont_id, frame_id, input, seed, provenance)
+            .map_err(|error| {
+                if self.state.parked_ids().contains(&frame_id) {
+                    ResidentResumeError::Rejected(error)
+                } else {
+                    ResidentResumeError::Consumed(error)
+                }
+            })
     }
 
     /// Move the machine onto a stack-sized eval thread, run `body`, and move the
@@ -2716,6 +3626,10 @@ where
         }
         released.extend(self.state.bindings_mut().collect_observations());
         let binding_count = self.state.release_binding_roots(released);
+        self.host_text_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        self.hidden_host_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
         if let Some(engine) = self.state.prepared_mut() {
@@ -2801,12 +3715,12 @@ where
         &mut self,
         cont_id: &str,
         frame_id: ContinuationId,
-        input: ResumeInput,
+        input: ResidentResumeInput,
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let input = match input {
-            ResumeInput::Abort(reason) => {
+            ResidentResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
                     Ok(engine.abort_parked(frame_id))
                 });
@@ -2855,14 +3769,27 @@ where
         };
         let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
             let outcome = match input {
-                ResumeInput::Answer(value) => engine.resume_with_answer(frame_id, &value, table),
-                ResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
-                ResumeInput::FramedHandle {
+                ResidentResumeInput::Response(response) => {
+                    engine.resume_with_structural_answer(frame_id, &response, table)
+                }
+                ResidentResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
+                ResidentResumeInput::FramedHandle {
                     handle,
                     constructor,
                     prefix,
                 } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
-                ResumeInput::Abort(_) => {
+                ResidentResumeInput::FramedHandleSources {
+                    handle,
+                    constructor,
+                    prefix,
+                } => engine.resume_with_framed_handle_sources(
+                    frame_id,
+                    handle,
+                    constructor,
+                    &prefix,
+                    table,
+                ),
+                ResidentResumeInput::Abort(_) => {
                     unreachable!("Abort is handled before the frame is touched")
                 }
             };
@@ -2925,6 +3852,31 @@ where
             self.parked_provenance.remove(id);
         }
         self.parked.retain(|(name, _)| name != hole);
+    }
+}
+
+#[cfg(test)]
+mod host_binding_authority_tests {
+    use super::*;
+    use crate::NominalHead;
+
+    #[test]
+    fn same_name_from_an_untrusted_unit_cannot_mount_as_json() {
+        let binder = BoundBinder {
+            name: "input".into(),
+            var_id: 1,
+            module: "Tidepool.Session.Val.G1".into(),
+            tier: ValueTier::ForceData,
+            type_display: "Tidepool.Aeson.Value.Value".into(),
+            root_head: Some(NominalHead {
+                unit: "shadowed-value-0.1".into(),
+                module: "Tidepool.Aeson.Value".into(),
+                name: "Value".into(),
+            }),
+            // The extractor refuses to mint JsonValue for the wrong unit.
+            host_authority: None,
+        };
+        assert!(require_host_binding_authority(&binder, HostBindingType::JSON_VALUE).is_err());
     }
 }
 

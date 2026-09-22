@@ -3,7 +3,10 @@
 //! This is not an app-server API. The host and the already-running TUI use it
 //! over the actor-private Unix socket selected during hosted registration.
 
-use serde::{Deserialize, Serialize};
+use codex_shoal_protocol::{
+    Envelope as InputEnvelopeWire, InputControlRequest, InputControlResponse, Mode as ModeWire,
+    Outcome as OutcomeWire, Purpose as PurposeWire, Target as TargetWire, INPUT_CONTROL_PATH,
+};
 
 use crate::interactive::{
     InputAdmission, InputEnvelopeError, InputOperationId, InputProducerControlOutcome,
@@ -12,164 +15,36 @@ use crate::interactive::{
 };
 use crate::BackendThreadId;
 
-pub(crate) const INPUT_CONTROL_PROTOCOL_VERSION: u32 = 4;
+use super::super::controller;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct BindingWire {
-    pub protocol_version: u32,
-    pub launch_id: String,
-    pub instance_id: String,
-    pub generation: u64,
-    pub nonce: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct InputEnvelopeWire {
-    pub producer_id: String,
-    pub sequence: u64,
-    pub purpose: PurposeWire,
-    pub mode: ModeWire,
-    pub target: TargetWire,
-    pub payload: Vec<u8>,
-    pub content_digest: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum PurposeWire {
-    Bootstrap,
-    Assignment,
-    RequestUpdate,
-    Notification,
-    OperatorInput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum ModeWire {
-    QueueOnly,
-    StartOrSteer,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct TargetWire {
-    pub conversation: String,
-    pub actor: String,
-    pub correlation: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) enum InputControlRequest {
-    Bind {
-        binding: BindingWire,
-    },
-    Submit {
-        binding: BindingWire,
-        envelope: InputEnvelopeWire,
-    },
-    Query {
-        binding: BindingWire,
-        producer_id: String,
-        sequence: u64,
-    },
-    Withdraw {
-        binding: BindingWire,
-        producer_id: String,
-        sequence: u64,
-    },
-    Seal {
-        binding: BindingWire,
-        producer_id: String,
-    },
-    Acknowledge {
-        binding: BindingWire,
-        producer_id: String,
-        through_sequence: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum OutcomeWire {
-    Admitted,
-    Dispatching,
-    Presented,
-    Withdrawn,
-    Rejected,
-    Unknown,
-    Compacted,
-    EvidenceUnavailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct InputControlResponse {
-    pub binding: BindingWire,
-    pub outcome: OutcomeWire,
-}
-
-fn binding(thread: &QueueReadyThread) -> Result<BindingWire, InteractiveInputError> {
-    let value = thread.session_binding().ok_or_else(|| {
-        InteractiveInputError::NotSubmitted(
-            "bound TUI has not completed the generation/nonce challenge".into(),
-        )
-    })?;
-    Ok(BindingWire {
-        protocol_version: INPUT_CONTROL_PROTOCOL_VERSION,
-        launch_id: value.launch_id.clone(),
-        instance_id: value.instance_id.clone(),
-        generation: value.generation.get(),
-        nonce: value.nonce.clone(),
-    })
+fn binding(
+    thread: &QueueReadyThread,
+) -> Result<codex_shoal_protocol::Binding, InteractiveInputError> {
+    controller::binding(thread).map_err(map_failure)
 }
 
 async fn send(
     thread: &QueueReadyThread,
     request: InputControlRequest,
 ) -> Result<InputAdmission, InteractiveInputError> {
-    let socket = thread.input_control_socket().ok_or_else(|| {
-        InteractiveInputError::NotSubmitted("bound TUI did not advertise input control".into())
-    })?;
     let expected = binding(thread)?;
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .http1_only()
-        .build()
-        .map_err(|e| InteractiveInputError::NotSubmitted(e.to_string()))?;
-    let response = client
-        .post("http://localhost/v1/input/control")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_connect() {
-                InteractiveInputError::NotSubmitted(e.to_string())
-            } else {
-                InteractiveInputError::Unconfirmed(e.to_string())
-            }
-        })?;
-    if !response.status().is_success() {
+    let response = controller::post(
+        thread,
+        INPUT_CONTROL_PATH,
+        &request,
+        codex_shoal_protocol::MAX_INPUT_CONTROL_REPLY_BYTES,
+    )
+    .await
+    .map_err(map_failure)?;
+    if !response.status.is_success() {
         return Err(InteractiveInputError::Unconfirmed(format!(
             "native input control returned HTTP {}",
-            response.status()
+            response.status
         )));
     }
-    let response: InputControlResponse = response
-        .json()
-        .await
-        .map_err(|e| InteractiveInputError::Unconfirmed(e.to_string()))?;
-    if response.binding != expected {
-        return Err(InteractiveInputError::Unconfirmed(
-            "native input response binding does not match the challenged generation".into(),
-        ));
-    }
+    let response: InputControlResponse = serde_json::from_slice(&response.body)
+        .map_err(|error| InteractiveInputError::Unconfirmed(error.to_string()))?;
+    controller::validate_reply_binding(&expected, &response.binding).map_err(map_failure)?;
     Ok(match response.outcome {
         OutcomeWire::Admitted => InputAdmission::Admitted,
         OutcomeWire::Dispatching => InputAdmission::Dispatching,
@@ -179,6 +54,13 @@ async fn send(
         OutcomeWire::Compacted => InputAdmission::Compacted,
         OutcomeWire::Unknown | OutcomeWire::EvidenceUnavailable => InputAdmission::Unknown,
     })
+}
+
+fn map_failure(error: controller::Failure) -> InteractiveInputError {
+    match error {
+        controller::Failure::NotSubmitted(detail) => InteractiveInputError::NotSubmitted(detail),
+        controller::Failure::Unconfirmed(detail) => InteractiveInputError::Unconfirmed(detail),
+    }
 }
 
 pub(super) async fn bind(
@@ -277,8 +159,13 @@ pub(super) async fn acknowledge(
     })
 }
 
-impl InputEnvelopeWire {
-    pub(crate) fn from_envelope(value: &InteractiveInputEnvelope) -> Self {
+trait InputEnvelopeWireExt: Sized {
+    fn from_envelope(value: &InteractiveInputEnvelope) -> Self;
+    fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError>;
+}
+
+impl InputEnvelopeWireExt for InputEnvelopeWire {
+    fn from_envelope(value: &InteractiveInputEnvelope) -> Self {
         Self {
             producer_id: value.id().producer.as_str().to_string(),
             sequence: value.id().sequence.get(),
@@ -304,7 +191,7 @@ impl InputEnvelopeWire {
     }
 
     /// Recompute the canonical digest before this operation can cross native admission.
-    pub(crate) fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError> {
+    fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError> {
         let sequence =
             std::num::NonZeroU64::new(self.sequence).ok_or(InputControlWireError::ZeroSequence)?;
         let digest = decode_digest(&self.content_digest)?;
@@ -435,8 +322,8 @@ mod tests {
 
     fn bind_response(generation: u64, outcome: OutcomeWire) -> InputControlResponse {
         InputControlResponse {
-            binding: BindingWire {
-                protocol_version: INPUT_CONTROL_PROTOCOL_VERSION,
+            binding: codex_shoal_protocol::Binding {
+                protocol_version: codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
                 launch_id: "launch-1".into(),
                 instance_id: "instance-2".into(),
                 generation,
@@ -504,7 +391,7 @@ mod tests {
                 serde_json::json!({
                     "operation": "bind",
                     "binding": {
-                        "protocolVersion": 4,
+                        "protocolVersion": 5,
                         "launchId": "launch-1",
                         "instanceId": "instance-2",
                         "generation": 7,
@@ -616,7 +503,7 @@ mod tests {
 
     #[test]
     fn compacted_outcome_matches_native_wire_vector() {
-        let json = r#"{"binding":{"protocolVersion":4,"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"},"outcome":"compacted"}"#;
+        let json = r#"{"binding":{"protocolVersion":5,"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"},"outcome":"compacted"}"#;
         let response: InputControlResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.outcome, OutcomeWire::Compacted);
         assert_eq!(serde_json::to_string(&response).unwrap(), json);

@@ -76,6 +76,70 @@ async fn notebook_display_pages_large_text_and_exhausts_continuation() {
 }
 
 #[tokio::test]
+async fn notebook_display_compiles_one_expression_and_one_display_bundle() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    // Put startup work behind the counter.  A displayed expression still has
+    // its whole-cell check and expression compilation, followed by exactly one
+    // generated page/metadata/alias bundle.
+    committed(policy, "0 :: Int").await;
+    tidepool_extract_cmd::reset_extract_spawn_count();
+
+    let shown = committed(policy, "sum [1 .. 10 :: Int]").await;
+    assert_eq!(shown["items"][0]["output"], "55", "{shown}");
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        3,
+        "one cell check, one expression, and one display bundle: {shown}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_failure_keeps_the_value_but_not_the_new_alias() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let initial = committed(policy, "\"previous display\" :: Text").await;
+    assert_eq!(
+        initial["items"][0]["output"], "previous display",
+        "{initial}"
+    );
+
+    let failed = committed(
+        policy,
+        "import Tidepool.Inspection (Display (..))\n\
+         data FailingDisplay = FailingDisplay\n\
+         instance Display FailingDisplay where displayTree _ = error \"display bottom\"\n\
+         broken <- pure FailingDisplay\n\
+         broken",
+    )
+    .await;
+    let failure = failed["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(failure.contains("Display failed"), "{failed}");
+    assert!(failure.contains("Value remains bound"), "{failed}");
+
+    let old_alias = committed(policy, "cellDisplay.text").await;
+    assert_eq!(
+        old_alias["items"][0]["output"], "previous display",
+        "a failed page must not publish its new alias: {old_alias}"
+    );
+    let recovered = committed(
+        policy,
+        "case broken of FailingDisplay -> \"still bound\" :: Text",
+    )
+    .await;
+    assert_eq!(
+        recovered["items"][0]["output"], "still bound",
+        "{recovered}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn notebook_display_shares_one_allowance_between_console_and_result() {
     let campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.as_ref();

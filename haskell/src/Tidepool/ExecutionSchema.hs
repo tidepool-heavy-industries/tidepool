@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 
 -- | The prepared-STG execution schema. GHC values are projected into these
 -- finite semantic types before bytes cross into Rust; this is not an
@@ -11,7 +12,7 @@ module Tidepool.ExecutionSchema
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
   , AlternativePattern(..), Alternative(..), CaseKind(..), Expr(..), FieldLayout(..)
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
-  , OperationIdentity(..), WiredInErrorKind(..), ForeignConvention(..)
+  , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..)
   ) where
@@ -22,8 +23,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 11
-executionAbiVersion = 5
+schemaVersion = 14
+executionAbiVersion = 7
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -88,9 +89,18 @@ data GlobalDecl = GlobalDecl
 -- Catalogued missing capabilities have their own identity; other unresolved
 -- foreign calls remain projection errors, never primop names.
 data ForeignConvention = CCall deriving stock (Eq, Ord, Show, Generic)
+data JsonLayout a = JsonLayout
+  { jsonObject :: a, jsonArray :: a, jsonString :: a, jsonNumber :: a
+  , jsonBool :: a, jsonNull :: a, jsonMapBin :: a, jsonMapTip :: a
+  , jsonTrue :: a, jsonFalse :: a, jsonCons :: a, jsonNil :: a
+  , jsonScientific :: a, jsonIntegerSmall :: a, jsonIntegerPositive :: a
+  , jsonIntegerNegative :: a, jsonText :: a, jsonInt :: a
+  } deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 data OperationIdentity
   = PrimOpIdentity Text
   | IntrinsicIdentity Text ForeignConvention
+  | JsonDecodeIdentity ConstructorId ConstructorId
+  | JsonEncodeIdentity
   | CapabilityIdentity Text
   | WiredInErrorIdentity WiredInErrorKind
   deriving stock (Eq, Ord, Show, Generic)
@@ -174,4 +184,7 @@ data WireProgram = WireProgram
   -- 'programSites': an ordinary effect request carries no dynamic site, so
   -- the host classifies it by its outer constructor.
   , programVerbSites :: [(ConstructorId, Word64)]
+  -- | Compiler-authenticated JSON constructor roles. Kept independently of
+  -- intrinsic operations because typed host mounts and answers also need it.
+  , programJsonLayout :: Maybe (JsonLayout ConstructorId)
   } deriving stock (Eq, Show, Generic)

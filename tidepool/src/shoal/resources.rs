@@ -29,10 +29,6 @@ pub(super) async fn connect(
     // One startup owner; this guard is not held during command admission.
     lock.lock()?;
     let socket = directory.join("resources.sock");
-    if socket.exists() {
-        verify_service_slice(slice).await?;
-        return Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?);
-    }
     let active = tokio::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", UNIT])
         .status()
@@ -51,8 +47,10 @@ pub(super) async fn connect(
                 "--expand-environment=no",
                 "--property=Delegate=yes",
                 "--property=KillMode=process",
-                "--property=Restart=no",
-                "--property=ExitType=cgroup",
+                "--property=Restart=on-failure",
+                "--property=RestartSec=2s",
+                "--property=StartLimitIntervalSec=60s",
+                "--property=StartLimitBurst=5",
                 "--unit",
                 UNIT,
             ])
@@ -74,13 +72,21 @@ pub(super) async fn connect(
         }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut last_error = None;
     loop {
         if socket.exists() {
             verify_service_slice(slice).await?;
-            return Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?);
+            match CommandResourceClient::connect(socket.clone(), run.into(), &policy).await {
+                Ok(client) => return Ok(client),
+                Err(error) => last_error = Some(error),
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("shared command resource service did not become ready; existing allocations must be reconciled before restarting it".into());
+            let detail = last_error.map_or_else(
+                || "endpoint was not published".into(),
+                |error| error.to_string(),
+            );
+            return Err(format!("shared command resource service did not become ready after reconciliation: {detail}").into());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -99,10 +105,73 @@ async fn verify_service_slice(slice: &tidepool_node::systemd_slice::SystemdSlice
 }
 
 pub async fn serve(socket: PathBuf, policy: PathBuf) -> Result<()> {
+    let directory = socket
+        .parent()
+        .ok_or("resource socket has no parent directory")?;
+    let ownership = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join("service.lock"))?;
+    ownership.try_lock().map_err(|error| {
+        std::io::Error::other(format!("another command resource owner is active: {error}"))
+    })?;
     let policy: CommandResourcePolicy = toml::from_str(&std::fs::read_to_string(policy)?)?;
-    let owner = CommandResources::delegated(policy)?;
-    // Bind exclusively: never unlink a potentially live owner's endpoint.
+    let journal = directory.join("ownership.v1.jsonl");
+    let owner = CommandResources::delegated_with_journal(policy, journal)?;
+    clear_stale_resource_socket(&socket)?;
     let listener = tokio::net::UnixListener::bind(socket)?;
     tidepool_node::command_resources::service::serve(listener, owner).await?;
+    drop(ownership);
     Ok(())
+}
+
+/// Called only after journal/cgroup reconciliation and while holding the
+/// service ownership lock, so a refused endpoint is known to be stale.
+fn clear_stale_resource_socket(socket: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    if socket.exists() {
+        if !std::fs::symlink_metadata(socket)?.file_type().is_socket() {
+            return Err("refusing to replace a non-socket resource endpoint".into());
+        }
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Ok(_) => return Err("refusing to replace a live resource endpoint".into()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                std::fs::remove_file(socket)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_removes_only_a_stale_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("resources.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(clear_stale_resource_socket(&socket).is_err());
+        drop(listener);
+        clear_stale_resource_socket(&socket).unwrap();
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn restart_refuses_to_replace_non_socket_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("resources.sock");
+        std::fs::write(&socket, b"ownership evidence").unwrap();
+        assert!(clear_stale_resource_socket(&socket).is_err());
+        assert_eq!(std::fs::read(socket).unwrap(), b"ownership evidence");
+    }
 }

@@ -104,14 +104,16 @@ judgeChanges task = do
 
 `Cmd.stdout` returns complete successful stdout or an explicit issue. For failed
 commands, inspect outcome and stderr; `Cmd.quiet` suppresses routine display.
-`reflect n` returns your last `n` completed conversation turns, oldest first;
-reuse that evidence across questions. `me` is lexically captured; `parentAgent`
+`reflect n` returns your latest `n` conversation turns including the active turn,
+oldest first; reuse that evidence across questions. `me` is lexically captured; `parentAgent`
 is the spawning actor or `Nothing` for a root.
 
 ## Discover missing information
 
 Start from this guide and the assignment; no startup inventory ritual.
 `lookup` accepts names, modules, and Hoogle-like types such as `:: Cmd.Command -> _`.
+It may attach up to four Jev-selected related declarations or alternatives;
+original failures remain failures. Look up qualified names explicitly for more detail.
 `polymorphic` is usable with call-site constraints; `unknown` needs more type
 information. Use `doc topics` for guides and workspace modules; inspect their
 exports/source where needed. `status` offers `summary`, `detailed`, `recovery`,

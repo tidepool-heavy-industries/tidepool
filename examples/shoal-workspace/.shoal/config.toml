@@ -11,7 +11,8 @@ systemd_slice = "swarm.slice"
 
 [haskell]
 source_roots = ["."]
-modules = ["Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Plan", "Project.Observe"]
+modules = ["Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Plan", "Project.Observe", "Project.Shell", "Project.Lookup"]
+spec = "AgentSpec.agentSpec"
 checks = [
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",

@@ -6,7 +6,7 @@ on this page is what happens around those two.
 
 ## What you need
 
-Linux, with Nix, systemd user services on cgroup v2, Bubblewrap and tmux. Shoal
+Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and tmux. Shoal
 drives a pinned Tidepool fork of the Codex client as each agent's interface, so
 authenticate that client before starting model work. For Jev, put a TypeSafe
 key in `TYPESAFE_API_KEY` before launching.
@@ -27,7 +27,7 @@ workspace config names a different slice.
 ## Build
 
 ```bash
-git clone https://github.com/tidepool-heavy-industries/tidepool.git
+git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
 nix build .#shoal
 ./result/bin/shoal --help
@@ -35,6 +35,11 @@ nix build .#shoal
 
 There is no public binary cache yet, so the first build compiles everything,
 GHC-side and Rust-side, and takes a good while.
+The matched Codex package uses its `local` Cargo profile: no LTO, no debug
+information, and unoptimized code with release runtime semantics. This reduces
+compiler memory and build work; runtime throughput may be lower than a release
+build. An optimized distribution build remains available with
+`nix build ./vendor/codex#codex-rs-release`.
 The wrapper selects the matched extractor and client itself; it does not replace
 `codex` on your `PATH`.
 
@@ -62,7 +67,8 @@ nothing, when a workspace is already there. It writes:
 | `.shoal/config.toml` | models, effort, the Haskell source roots, and the jev-dsl source pin |
 | `.shoal/Jev/Operators.hs` | the Jev operators, fixed to Tidepool's value type; cells reach it as `J` |
 | `.shoal/AgentSpec.hs` | the agent spec: which tools the agent is offered and what runs after each tool call |
-| `.shoal/Project/Tools.hs` | the tools record: the shell tools, and one starter tool of your own |
+| `.shoal/Project/Tools.hs` | the tools record: shell and lookup, extended with your own tools |
+| `.shoal/Project/Lookup.hs` | lookup enrichment policy: Jev-selected related declarations and alternatives |
 | `.shoal/skills/` | the workspace skills an agent loads by name |
 | `.agents/skills/` | links into `.shoal/skills/`, which is where the client looks for skills |
 | `flake.nix`, `flake.lock` | only when the project has none: one input, pinning jev-dsl |
@@ -77,6 +83,18 @@ resolves, a session still starts, without `J`, and the agent is told so.
 
 Child agents are launched from committed checkouts. Commit the package before
 you ask an agent to delegate.
+
+## Migrating an existing workspace lookup
+
+`lookup` is now supplied by the workspace agent spec rather than installed
+as a special hosted tool. Existing workspaces must copy `Project/Lookup.hs`
+from the shipped template and register its tool in their `Project.Tools` and
+`AgentSpec`, following the template
+[`Project.Tools`](../examples/shoal-workspace/.shoal/Project/Tools.hs).
+Use the argument object `{"queries": ["name", "Module.name"]}`.
+The tool preserves original lookup results and may add up to four related
+declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
+remain raw. Run `shoal check` before reloading the agent spec.
 
 ## `shoal check`: typecheck the workspace without starting anything
 
@@ -103,10 +121,11 @@ after the project, and prints where things are:
 log:     …/.shoal/logs/<run>.jsonl
 status:  ~/.cache/tidepool/shoal/runs/<run>/status.json
 attach:  tmux attach -t shoal-<project>
-stop:    tmux kill-session -t shoal-<project>
+stop:    shoal stop --run-id <run> --session shoal-<project>
 ```
 
-The session has a `Host` window running the actor host, a `Compiler` window
+The host is a restart-bounded per-run systemd user service. The session has a
+`Host` window following that service, a `Compiler` window
 running the Haskell compile service, and a `shoal-root` window with the root
 agent's client. Give the root a task there. Each child agent gets a window of its own
 when it starts.
@@ -146,8 +165,29 @@ full. `SHOAL_TRACE=info` leaves content out. The directory is ignored by Git.
 
 ## Stopping and cleaning up
 
-`tmux kill-session -t <session>` stops a run. A stopped run's live heap, jobs
-and handles are gone; what survives is what was committed or written to files.
+Use `shoal stop --run-id <run> --session <session>` for intentional shutdown;
+stopping only tmux leaves the supervised host running. A host failure restarts
+with backoff and a finite retry limit. Recovery reopens the same run under its
+exclusive incarnation lock, stops every predecessor application whose exact
+supervisor identity can be proven, resumes the recorded conversation, reloads
+the last accepted source, and sends a recovery notice before new work. Child
+conversations resume independently when their accepted source, process stop,
+lineage, launch policy, and optional worktree custody all verify. Their logical
+actor IDs remain stable and their incarnations advance. Actors whose evidence
+cannot be verified remain visibly unavailable. Run status records recovered
+predecessor and successor identities, lost live state, and a bounded resource
+service snapshot with retained allocations and cleanup failures. It also
+samples run-directory storage through a bounded walk and reports when that
+sample was truncated.
+Runs created before hosted-operation ownership journals existed remain
+inspectable, but their conversations are not resumed automatically.
+Live Haskell values, requests, watches, and bindings are reported lost rather
+than reconstructed. Unresolved tool calls are not replayed automatically.
+
+A stopped run's live heap and handles are gone. Durable command ownership,
+cleanup failures, accepted source, and process evidence remain until retirement
+is confirmed. The resource service reconciles its journal with delegated
+cgroups before granting new work.
 `shoal cleanup` inspects a stopped run's build storage and never touches source
 or Git state. `shoal run-map` reads a run's recorded artifacts without starting
 or attaching to anything.

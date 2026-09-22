@@ -123,6 +123,13 @@ enum Command {
         #[arg(long, value_enum)]
         effort: Option<Effort>,
     },
+    /// Intentionally stop a supervised run, then close its tmux diagnostics session.
+    Stop {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        session: String,
+    },
     /// Run the resident actor host inside a Shoal tmux session.
     Host {
         #[arg(long)]
@@ -316,6 +323,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             })
             .await
         }
+        Command::Stop { run_id, session } => tidepool::shoal::stop(&run_id, &session).await,
         Command::Host {
             workspace,
             session,

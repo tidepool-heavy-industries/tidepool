@@ -136,6 +136,7 @@ pub fn forks() -> Effect {
                         "EffectJev",
                         "EffectActor",
                         "EffectReflect",
+                        "EffectLookup",
                         "EffectSource",
                     ]
                     .into_iter()

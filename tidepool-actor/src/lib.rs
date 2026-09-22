@@ -37,6 +37,7 @@ pub use jev::{unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure};
 mod kernel;
 mod lineage;
 mod local_actor;
+mod lookup;
 pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;
@@ -46,6 +47,7 @@ mod prompt_catalog;
 pub(crate) mod reload_spec_tool;
 mod request;
 pub use request::sources::SourceDelivery;
+mod recovery;
 mod request_effect;
 mod resident_actor;
 mod resident_interactive;
@@ -61,6 +63,7 @@ pub use hosted_lifecycle::{
 };
 mod typed_request;
 mod usage_pointer;
+pub use usage_pointer::UsagePointerTable;
 mod wait;
 mod workbench_display;
 pub use after_tool::AFTER_TOOL_WAIT_ENV;
@@ -108,6 +111,10 @@ pub use notification::{
 };
 pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;
+pub use recovery::{
+    ActorRecoveryJournal, DurableActorAdmission, DurableActorApplication, DurableActorRecord,
+    DurableActorTerminal,
+};
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
     DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, ReplyError,
@@ -131,7 +138,7 @@ pub use resident_tools::{
 };
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
-    ResidentActorWorkbenchError,
+    ResidentActorWorkbenchError, ResidentMachineMeasurement,
 };
 pub use role::{
     render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,
@@ -155,6 +162,6 @@ pub use termination::{
 pub use tidepool_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
-pub use wait::{actor_terminal_value, ActorWaitError};
+pub use wait::ActorWaitError;
 
 pub mod command_jobs;

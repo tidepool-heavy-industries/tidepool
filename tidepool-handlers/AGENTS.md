@@ -9,8 +9,9 @@ crates.
   constructor. Dispatch is nominal; union position is not a handler slot.
 - Add operations at the single-source schema/definition first, then implement
   the generated request here. Never hand-copy a parallel wire contract.
-- Choose `respond`, `respond_list`, or a typed per-verb failure from the result
-  shape. Ordinary domain refusal is data; corruption remains `EffectError`.
+- Return owned values through `respond`; its structural visitor handles ordinary
+  containers and generated records. Ordinary domain refusal is data; corruption
+  remains `EffectError`.
 - Stack/profile assembly is the capability boundary. Definitions convey no
   resource authority; handler configuration and runtime-issued handles do.
 - Filesystem read/write share the canonicalized rooted backend. `Exec` is an

@@ -104,6 +104,7 @@ mod tests {
             types: vec![],
             sites: vec![],
             verb_sites: vec![],
+            json_layout: None,
         })
     }
 

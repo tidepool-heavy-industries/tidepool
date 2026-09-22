@@ -2,12 +2,15 @@
 
 module Main where
 
-import Control.Monad (unless)
+import Control.Monad (forM_, unless, when)
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, tails)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, tails)
+import Data.Char (isDigit)
 import GHC
+import GHC.Builtin.Types (intTy)
+import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
@@ -16,6 +19,14 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
+import Tidepool.ExtractRequest (InspectionRequest(..))
+import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
+import Tidepool.DependencyEvidence
+import Tidepool.Session
+  ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
+  , mkThinSessionIface, writeSessionIface )
+import Tidepool.Timing
+  ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
   , removeFile, removeDirectoryRecursive )
@@ -41,11 +52,192 @@ main = do
       prologuePlans flags
       automaticGenericPlans flags
       noStandaloneDerivingLeavesCellUntouched flags
+  interfaceMeasurementDiagnostics
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
+    ["--prepared-session"] -> preparedSessionLeafCompilation
+    ["--dependency-evidence"] -> dependencyEvidenceCompilation
+    ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
+    ["--validation-memo"] -> validationMemoCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+
+untrackedCompileTimeCompilation :: IO ()
+untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let dependency = root </> "QuasiQuoteDependency.hs"
+      templateDependency = root </> "TemplateDependency.hs"
+      target = root </> "QuasiQuoteTarget.hs"
+  writeFile dependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module QuasiQuoteDependency (value) where"
+    , "value :: Int"
+    , "value = 42"
+    ]
+  writeFile templateDependency $ unlines
+    [ "{-# LANGUAGE TemplateHaskell #-}"
+    , "module TemplateDependency (other) where"
+    , "other :: Int"
+    , "other = 1"
+    ]
+  writeFile target $ unlines
+    [ "module QuasiQuoteTarget where"
+    , "import QuasiQuoteDependency (value)"
+    , "import TemplateDependency (other)"
+    , "result = value + other"
+    ]
+  direct <- runPipelineSelected PreparedStg target [root]
+  let evidence = pprDependencies direct
+  when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
+    fail "QuasiQuotes source produced complete dependency evidence"
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      (_, warmLog) <- captureStderr root "quasiquote-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "QuasiQuotes source remains conservatively uncacheable"
+        "tidepool-memo-miss module=QuasiQuoteDependency reason=untracked-compile-time-execution"
+        warmLog
+      assertContains "TemplateHaskell source remains conservatively uncacheable"
+        "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
+        warmLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-untracked-compile-time"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+dependencyEvidenceCompilation :: IO ()
+dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let home = root </> "WitnessA.hs"
+      boot = root </> "WitnessA.hs-boot"
+      sibling = root </> "WitnessB.hs"
+      types = root </> "WitnessTypes.hs"
+      target = root </> "WitnessTarget.hs"
+  writeFile types "module WitnessTypes where\ndata T = T\n"
+  writeFile boot $ unlines
+    [ "module WitnessA where"
+    , "import WitnessTypes (T)"
+    , "value :: T"
+    ]
+  writeFile home $ unlines
+    [ "module WitnessA where"
+    , "import WitnessB (helper)"
+    , "import WitnessTypes (T)"
+    , "value :: T"
+    , "value = helper"
+    ]
+  writeFile sibling $ unlines
+    [ "module WitnessB where"
+    , "import {-# SOURCE #-} WitnessA (value)"
+    , "helper = value"
+    ]
+  writeFile target $ unlines
+    [ "module WitnessTarget where"
+    , "import qualified Data.Text as Text"
+    , "import WitnessA (value)"
+    , "result = (Text.length (Text.pack \"x\"), value)"
+    ]
+  prepared <- runPipelineSelected PreparedStg target [root]
+  let evidence = pprDependencies prepared
+      resolutions = dependencyResolutions evidence
+      selectedPaths = [path | resolution <- resolutions
+                            , Just path <- [dependencyResolutionSelected resolution]]
+      packageWitnesses = [resolution | resolution <- resolutions
+        , dependencyResolutionModule resolution == "Data.Text"]
+  unless (any (isSuffixOf "WitnessA.hs-boot") selectedPaths) $
+    fail "SOURCE import did not retain its selected boot-interface witness"
+  unless (any (isSuffixOf "WitnessA.hs") selectedPaths) $
+    fail "ordinary home import did not retain its selected source witness"
+  unless (case packageWitnesses of
+      [resolution] -> dependencyResolutionSelected resolution == Nothing
+        && any (isSuffixOf ("Data" </> "Text.hs"))
+          (dependencyResolutionCandidates resolution)
+      _ -> False) $
+    fail "package import did not retain absent higher-priority home candidates"
+  unless ("Data.Text" `elem` dependencyPackages evidence) $
+    fail "package import was not recorded in dependency evidence"
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      appendFile boot "\n-- boot-only mutation\n"
+      (_, changedLog) <- captureStderr root "boot-changed" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "boot-only mutation invalidates its SOURCE importer"
+        "tidepool-memo-miss module=WitnessB" changedLog
+      assertContains "boot fingerprint participates in home dependency validity"
+        "same-home-dependencies=False" changedLog
+      appendFile types "\n-- transitive boot dependency mutation\n"
+      (_, transitiveLog) <- captureStderr root "boot-dependency-changed" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "dependency imported by boot interface invalidates SOURCE importer"
+        "tidepool-memo-miss module=WitnessB" transitiveLog
+      assertContains "transitive boot dependency fingerprint participates in validity"
+        "same-home-dependencies=False" transitiveLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-dependency-evidence"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+validationMemoCompilation :: IO ()
+validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let base = root </> "WarmBase.hs"
+      reexport = root </> "WarmReexport.hs"
+      child = root </> "WarmChild.hs"
+      target = root </> "WarmTarget.hs"
+      chainLength = 16 :: Int
+      chainName index = "WarmChain" ++ show index
+  writeFile base "module WarmBase (value) where\nvalue :: Int\nvalue = 42\n"
+  writeFile reexport "module WarmReexport (value) where\nimport WarmBase (value)\n"
+  writeFile child "module WarmChild (value) where\nimport WarmReexport (value)\n"
+  forM_ [1 .. chainLength] $ \index -> do
+    let previous = if index == 1 then "WarmChild" else chainName (index - 1)
+    writeFile (root </> chainName index ++ ".hs") $ unlines
+      [ "module " ++ chainName index ++ " (value) where"
+      , "import " ++ previous ++ " (value)"
+      ]
+  writeFile target $ unlines
+    [ "module WarmTarget where"
+    , "import " ++ chainName chainLength ++ " (value)"
+    , "result = value"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      (_, coldLog) <- captureStderr root "validation-cold" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "chain dependency witnesses are computed once per node"
+        "tidepool-dependency-witness nodes=20 direct_edges=19 digest_computations=20"
+        coldLog
+      (_, warmLog) <- captureStderr root "validation-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      forM_ ["WarmReexport", "WarmChild"] $ \name ->
+        when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
+          fail ("unchanged validation-only module was recompiled: " ++ name)
+      when ("tidepool-memo-miss module=WarmChain" `isInfixOf` warmLog) $
+        fail "unchanged validation-only chain was recompiled"
+      assertContains "warm compile prepares only its evicted target"
+        "front_compiles=1 core_compiles=1 prepared_compiles=1" warmLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-validation-memo"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 -- Metadata compilation must not enter the target's executable pipeline.
 -- A changed dependency must still be checked on the following request.
@@ -71,10 +263,27 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       (checked, output) <- captureStderr root "metadata-check" $
         runRequest $ \compiler ->
           compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-      assertContains "metadata captures the checked target's types" "Box Int"
-        (show (crCapturedTypes checked))
+      inspected <- runInspection
+        (crHscEnv checked)
+        (crTargetTcGblEnv checked)
+        (crTargetRdrEnv checked)
+        (crInspectionProbes checked)
+        [InspectTypeOf "value", InspectModule "MetadataTarget" False]
+      case inspected of
+        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
+          assertContains "inspection resolves a local probe without a target HPT interface"
+            "Box Int" rendered
+          unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
+            fail "metadata inspection could not browse the checked target module"
+        _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
+      assertContains "metadata leaf skips its unused HPT interface"
+        "tidepool-checked-interface-elided module=MetadataTarget reason=no-later-home-importer"
+        output
+      when (any (isInfixOf "module=MetadataTarget")
+            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
+        fail "metadata leaf constructed an unused target interface"
       unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
         fail "metadata target entered the executable pipeline"
       writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
@@ -91,6 +300,50 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-metadata"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- A source-less value interface activates the session pipeline. Its target is
+-- the final source consumer, so it must prepare successfully without creating
+-- a registration interface solely for itself.
+preparedSessionLeafCompilation :: IO ()
+preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let scopeRoot = root </> "session"
+      valueModule = SessionModule ValMod (Generation 1)
+      seed = root </> "SessionSeed.hs"
+      target = root </> "PreparedSessionLeaf.hs"
+      scope = SessionScope scopeRoot [valueModule]
+  writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
+  seeded <- runPipelineSelected PreparedStg seed [root]
+  let environment = prHscEnv (pprPipelineResult seeded)
+  iface <- mkThinSessionIface environment valueModule [(mkVarOcc "prior", intTy)]
+  writeSessionIface environment scopeRoot valueModule iface
+  writeFile target $ unlines
+    [ "module PreparedSessionLeaf where"
+    , "import Tidepool.Session.Val.G1 (prior)"
+    , "__result = prior + 1"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+      (prepared, output) <- captureStderr root "prepared-session-leaf" $
+        runRequest $ \compiler ->
+          compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
+      when (null (pprModules prepared)) $
+        fail "prepared session leaf produced no prepared module"
+      assertContains "prepared session leaf skips its unused registration interface"
+        "tidepool-prepared-interface-elided module=PreparedSessionLeaf reason=no-later-home-importer"
+        output
+      when (any (isInfixOf "module=PreparedSessionLeaf")
+            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
+        fail "prepared session leaf constructed an unused target interface")
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-prepared-session-leaf"
       hClose handle
       removeFile path
       createDirectory path
@@ -239,6 +492,53 @@ captureStderr root label action = do
   output <- readFile' path
   removeFile path
   pure (result, output)
+
+interfaceMeasurementDiagnostics :: IO ()
+interfaceMeasurementDiagnostics = bracket temporary removeDirectoryRecursive $ \root -> do
+  (_, output) <- captureStderr root "interface-measurements" $ do
+    _ <- measureModuleInterface True 101 "Checked" CheckedEnvironmentInterface HptMiss (pure ())
+    _ <- measureModuleInterface True 102 "Registered" SessionRegistrationInterface MemoMiss (pure ())
+    pure ()
+  case filter (isPrefixOf "tidepool-timing-module-detail ") (lines output) of
+    [checked, registered] -> do
+      validateInterfaceMeasurement "Checked" "checked_environment" "hpt_miss" checked
+      validateInterfaceMeasurement "Registered" "session_registration" "memo_miss" registered
+    rows -> fail ("expected two interface measurement rows, got " ++ show rows)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-interface-measurements"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+validateInterfaceMeasurement :: String -> String -> String -> String -> IO ()
+validateInterfaceMeasurement expectedModule expectedStage expectedReuse row = do
+  assertEqual "interface measurement module" (Just expectedModule) (field "module")
+  assertEqual "interface measurement parent" (Just "module_interface") (field "parent")
+  assertEqual "interface measurement phase" (Just "make_iface") (field "phase")
+  assertEqual "interface measurement stage" (Just expectedStage) (field "stage")
+  assertEqual "interface measurement reuse" (Just expectedReuse) (field "reuse")
+  forM_ ["request", "ms", "wall_ns", "cpu_ns"] assertDecimal
+  assertEqual "RTS counter scope" (Just "process_delta") (field "rts_scope")
+  case field "rts" of
+    Just "enabled" -> forM_ rtsCounters assertDecimal
+    Just "unavailable" -> forM_ rtsCounters $ \name ->
+      assertEqual ("unavailable RTS counter " ++ name) (Just "unavailable") (field name)
+    status -> fail ("unexpected RTS availability in interface measurement: " ++ show status)
+  where
+    fields =
+      [ (name, drop 1 value)
+      | token <- words row
+      , let (name, value) = break (== '=') token
+      , not (null value)
+      ]
+    field name = lookup name fields
+    assertDecimal name = case field name of
+      Just value | not (null value) && all isDigit value -> pure ()
+      value -> fail ("non-decimal interface measurement field " ++ name ++ ": " ++ show value)
+    rtsCounters = ["allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs"]
 
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do

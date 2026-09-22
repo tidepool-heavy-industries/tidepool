@@ -4,10 +4,24 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 metadata_mode="${1:-check}"
-if [[ $# -gt 1 || ( "$metadata_mode" != check && "$metadata_mode" != update ) ]]; then
-  echo "usage: $0 [check|update]" >&2
+if [[ "$metadata_mode" != check && "$metadata_mode" != update ]]; then
+  echo "usage: $0 [check|update] [COHORT...]" >&2
   exit 2
 fi
+if [[ $# -gt 0 ]]; then shift; fi
+selected_cohorts=("$@")
+if [[ "$metadata_mode" == update && ${#selected_cohorts[@]} -gt 0 ]]; then
+  echo "fixture updates require the full corpus" >&2
+  exit 2
+fi
+selected_cohort() {
+  [[ ${#selected_cohorts[@]} -eq 0 ]] && return 0
+  local requested
+  for requested in "${selected_cohorts[@]}"; do
+    [[ "$requested" == "$1" ]] && return 0
+  done
+  return 1
+}
 
 output_root="$repo_root/target/prepared-corpus"
 mkdir -p "$output_root"
@@ -177,11 +191,88 @@ assert_suite_report() {
 jq -r '.source_tops[]' "$repo_root/tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json" \
   | LC_ALL=C sort >"$suite_targets"
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
-echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
-"$projection_probe" \
+priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
+priority_include="$priority_root/source"
+mkdir -p "$priority_include/Project"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
+  "$priority_include/Project/Work.hs"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
+  "$priority_include/Project/Types.hs"
+actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
+projection_requests=()
+registered_cohorts=()
+queue_projection() {
+  local cohort="$1"
+  shift
+  registered_cohorts+=("$cohort")
+  selected_cohort "$cohort" || return 0
+  if [[ ${#projection_requests[@]} -gt 0 ]]; then projection_requests+=(--next); fi
+  projection_requests+=("$@")
+}
+queue_projection suite \
   --metadata-targets 'con_left con_right con_just con_nothing showInt' \
   --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
   "$repo_root/haskell/lib"
+queue_projection project-work-candidate \
+  "$priority_source" ProjectWorkCandidate \
+  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
+  "$repo_root/haskell/lib" "$priority_include"
+queue_projection agent-watch-await-settled \
+  "$actor_source" AwaitSettledDependencies \
+  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
+  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
+queue_projection recovered-base-contract \
+  "$repo_root/haskell/test-prepared-stg/RecoveredBody.hs" RecoveredBody \
+  "$repo_root/haskell/test-prepared-stg/RecoveredBodyTargets" "$recovered_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+queue_projection formatting-execution-contract \
+  "$repo_root/haskell/test-prepared-stg/FormattingExecutionContract.hs" FormattingExecutionContract \
+  "$repo_root/haskell/test-prepared-stg/FormattingExecutionTargets" "$formatting_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+queue_projection formatting-dependency-shadow \
+  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadow.hs" FormattingDependencyShadow \
+  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowTargets" "$formatting_shadow_root" \
+  "$repo_root/haskell/test-prepared-stg/formatting-dependency-shadow" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+queue_projection fingerprint-execution-contract \
+  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionContract.hs" FingerprintExecutionContract \
+  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionTargets" "$fingerprint_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+queue_projection time-intrinsic-contract \
+  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicContract.hs" TimeIntrinsicContract \
+  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicTargets" "$time_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+for cohort_module in ContainersContract BignumContract UserTypesContract TextContract; do
+  case "$cohort_module" in
+    ContainersContract) cohort_root="$containers_root" ;;
+    BignumContract) cohort_root="$bignum_root" ;;
+    UserTypesContract) cohort_root="$usertypes_root" ;;
+    TextContract) cohort_root="$text_root" ;;
+  esac
+  queue_projection "$(basename "$cohort_root")" \
+    "$repo_root/haskell/test-prepared-stg/${cohort_module}.hs" "$cohort_module" \
+    "$repo_root/haskell/test-prepared-stg/${cohort_module}Targets" "$cohort_root" \
+    "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+done
+for requested_cohort in "${selected_cohorts[@]}"; do
+  found=false
+  for known_cohort in "${registered_cohorts[@]}"; do
+    if [[ "$requested_cohort" == "$known_cohort" ]]; then found=true; break; fi
+  done
+  if [[ "$found" == false ]]; then
+    echo "unknown corpus cohort: $requested_cohort" >&2
+    exit 2
+  fi
+done
+if [[ ${#projection_requests[@]} -eq 0 ]]; then
+  echo "no known corpus cohorts selected" >&2
+  exit 2
+fi
+echo "==> preparing selected corpus cohorts in one resident compiler process"
+"$projection_probe" --batch "${projection_requests[@]}"
+
+if selected_cohort suite; then
+echo "==> checking prepared Suite.hs prepared corpus ($suite_count targets)"
 if [[ "$metadata_mode" == update ]]; then
   cp "$suite_root/meta.cbor" "$metadata"
 elif ! cmp -s "$suite_root/meta.cbor" "$metadata"; then
@@ -198,106 +289,99 @@ jq -e '.source_tops | type == "array"' "$suite_oracle" >/dev/null || {
 }
 "$prepared_runner" run \
   "$suite_root/manifest.json" "$suite_oracle" \
-  "$metadata" "$suite_report"
-assert_suite_report suite "$suite_report" "$suite_oracle" "$suite_root/manifest.json" "$suite_count"
+  "$metadata" "$suite_root/results.json"
+assert_suite_report suite "$suite_root/results.json" "$suite_oracle" "$suite_root/manifest.json" "$suite_count"
 jq -r '[.stage_totals[] | select(.stage == "execution")][0]
   | "  Suite execution: \(.passed) passed, \(.failed) failed;"
     + " classified: not_closed=\(.not_closed) no_finite_observation=\(.no_finite_observation)"
-    + " function_valued=\(.function_valued)"' "$suite_report"
+    + " function_valued=\(.function_valued)"' "$suite_root/results.json"
 
-priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
-priority_include="$priority_root/source"
-mkdir -p "$priority_include/Project"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
-  "$priority_include/Project/Work.hs"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
-  "$priority_include/Project/Types.hs"
-echo "==> projecting priority Project.Work.candidate structural probe"
-"$projection_probe" \
-  "$priority_source" ProjectWorkCandidate \
-  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
-  "$repo_root/haskell/lib" "$priority_include"
+fi
+
+if selected_cohort project-work-candidate; then
+
+echo "==> checking prepared priority Project.Work.candidate structural probe"
 priority_report="$priority_root/results.json"
 "$prepared_runner" run \
   "$priority_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
-  "$priority_report"
-assert_contract_report priority-project-work 1 "$priority_report"
+  "$priority_root/results.json"
+assert_contract_report priority-project-work 1 "$priority_root/results.json"
 
-echo "==> projecting actor awaitSettled dependency probe"
-actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
-"$projection_probe" \
-  "$actor_source" AwaitSettledDependencies \
-  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
-  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
+fi
+
+if selected_cohort agent-watch-await-settled; then
+
+echo "==> checking prepared actor awaitSettled dependency probe"
 actor_report="$actor_root/results.json"
 "$prepared_runner" run \
   "$actor_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
-  "$actor_report"
-assert_contract_report actor-await-settled-dependencies 1 "$actor_report"
+  "$actor_root/results.json"
+assert_contract_report actor-await-settled-dependencies 1 "$actor_root/results.json"
 
 
-echo "==> projecting recovered base-call contract (1 target)"
-"$projection_probe" \
-  "$repo_root/haskell/test-prepared-stg/RecoveredBody.hs" RecoveredBody \
-  "$repo_root/haskell/test-prepared-stg/RecoveredBodyTargets" "$recovered_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fi
+
+if selected_cohort recovered-base-contract; then
+
+echo "==> checking prepared recovered base-call contract (1 target)"
 recovered_report="$recovered_root/results.json"
 "$prepared_runner" run \
   "$recovered_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/RecoveredBodyExpectations.json" \
-  "$metadata" "$recovered_report"
-assert_contract_report recovered-base 1 "$recovered_report"
+  "$metadata" "$recovered_root/results.json"
+assert_contract_report recovered-base 1 "$recovered_root/results.json"
 
-echo "==> projecting formatting execution contract (5 targets)"
-"$projection_probe" \
-  "$repo_root/haskell/test-prepared-stg/FormattingExecutionContract.hs" FormattingExecutionContract \
-  "$repo_root/haskell/test-prepared-stg/FormattingExecutionTargets" "$formatting_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fi
+
+if selected_cohort formatting-execution-contract; then
+
+echo "==> checking prepared formatting execution contract (5 targets)"
 formatting_report="$formatting_root/results.json"
 "$prepared_runner" run \
   "$formatting_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/FormattingExecutionExpectations.json" \
-  "$metadata" "$formatting_report"
-assert_contract_report formatting-execution 5 "$formatting_report"
+  "$metadata" "$formatting_root/results.json"
+assert_contract_report formatting-execution 5 "$formatting_root/results.json"
 
-echo "==> projecting formatting dependency-shadow contract (1 target)"
-"$projection_probe" \
-  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadow.hs" FormattingDependencyShadow \
-  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowTargets" "$formatting_shadow_root" \
-  "$repo_root/haskell/test-prepared-stg/formatting-dependency-shadow" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fi
+
+if selected_cohort formatting-dependency-shadow; then
+
+echo "==> checking prepared formatting dependency-shadow contract (1 target)"
 formatting_shadow_report="$formatting_shadow_root/results.json"
 "$prepared_runner" run \
   "$formatting_shadow_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowExpectations.json" \
-  "$metadata" "$formatting_shadow_report"
-assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_report"
+  "$metadata" "$formatting_shadow_root/results.json"
+assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_root/results.json"
 
-echo "==> projecting fingerprint execution contract (3 targets)"
-"$projection_probe" \
-  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionContract.hs" FingerprintExecutionContract \
-  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionTargets" "$fingerprint_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fi
+
+if selected_cohort fingerprint-execution-contract; then
+
+echo "==> checking prepared fingerprint execution contract (3 targets)"
 fingerprint_report="$fingerprint_root/results.json"
 "$prepared_runner" run \
   "$fingerprint_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/FingerprintExecutionExpectations.json" \
-  "$metadata" "$fingerprint_report"
-assert_contract_report fingerprint-execution 3 "$fingerprint_report"
+  "$metadata" "$fingerprint_root/results.json"
+assert_contract_report fingerprint-execution 3 "$fingerprint_root/results.json"
 
-echo "==> projecting time intrinsic contract (4 targets)"
-"$projection_probe" \
-  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicContract.hs" TimeIntrinsicContract \
-  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicTargets" "$time_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fi
+
+if selected_cohort time-intrinsic-contract; then
+
+echo "==> checking prepared time intrinsic contract (4 targets)"
 time_report="$time_root/results.json"
 "$prepared_runner" run \
   "$time_root/manifest.json" \
   "$repo_root/haskell/test-prepared-stg/TimeIntrinsicExpectations.json" \
-  "$metadata" "$time_report"
-assert_contract_report time-intrinsic 4 "$time_report"
+  "$metadata" "$time_root/results.json"
+assert_contract_report time-intrinsic 4 "$time_root/results.json"
+
+fi
 
 # Pure-evaluation cohorts. Each probe is a nullary monomorphic top whose value
 # comes from an oracle compiled by the pinned GHC, so a stage failure here is an
@@ -307,11 +391,8 @@ run_pure_cohort() {
   local module="$2"
   local root="$3"
   local expected="$4"
-  echo "==> projecting $cohort pure-eval cohort ($expected targets)"
-  "$projection_probe" \
-    "$repo_root/haskell/test-prepared-stg/${module}.hs" "$module" \
-    "$repo_root/haskell/test-prepared-stg/${module}Targets" "$root" \
-    "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  selected_cohort "$(basename "$root")" || return 0
+  echo "==> checking prepared $cohort pure-eval cohort ($expected targets)"
   "$prepared_runner" run \
     "$root/manifest.json" \
     "$repo_root/haskell/test-prepared-stg/${module}Expectations.json" \
@@ -330,6 +411,7 @@ echo "==> checking pure-eval cohort probes against the committed opacity manifes
 report_totals() {
   local cohort="$1"
   local report="$2"
+  [[ -f "$report" ]] || return 0
   echo "  $cohort stage totals:"
   jq -r '.stage_totals[] |
     "    \(.stage): passed=\(.passed) failed=\(.failed) not_closed=\(.not_closed) no_finite_observation=\(.no_finite_observation) function_valued=\(.function_valued) missing_expectation=\(.missing_expectation) no_oracle=\(.no_oracle) not_reached=\(.not_reached)"' \
@@ -353,14 +435,14 @@ echo "  usertypes cohort: $usertypes_root"
 echo "  text cohort: $text_root"
 echo "  comparison expectations are historical and may be missing; inspect result rows"
 echo "  named limitation: awaitSettled's continuation is not executed by this dependency-only probe"
-report_totals priority "$priority_report"
-report_totals actor-stdlib "$actor_report"
-report_totals suite "$suite_report"
+report_totals priority "$priority_root/results.json"
+report_totals actor-stdlib "$actor_root/results.json"
+report_totals suite "$suite_root/results.json"
 echo "  separate acceptance contracts (not part of Suite or source counts):"
-report_totals recovered-base "$recovered_report"
-report_totals formatting-execution "$formatting_report"
-report_totals formatting-dependency-shadow "$formatting_shadow_report"
-report_totals fingerprint-execution "$fingerprint_report"
+report_totals recovered-base "$recovered_root/results.json"
+report_totals formatting-execution "$formatting_root/results.json"
+report_totals formatting-dependency-shadow "$formatting_shadow_root/results.json"
+report_totals fingerprint-execution "$fingerprint_root/results.json"
 echo "  pure-evaluation cohorts (oracle-backed, pinned GHC 9.12.2):"
 report_totals containers "$containers_root/results.json"
 report_totals bignum "$bignum_root/results.json"
@@ -370,6 +452,7 @@ report_totals text "$text_root/results.json"
 report_source_totals() {
   local cohort="$1"
   local manifest="$2"
+  [[ -f "$manifest" ]] || return 0
   jq -r --arg cohort "$cohort" '
     ([.source_targets[] | select(.identity != null)] | length) as $mapped
     | ([.source_targets[] | select(.identity == null)] | length) as $unmapped
@@ -381,3 +464,9 @@ report_source_totals() {
 report_source_totals priority "$priority_root/manifest.json"
 report_source_totals actor-stdlib "$actor_root/manifest.json"
 report_source_totals suite "$suite_root/manifest.json"
+
+# Only a full successful run replaces the complete fixture inventory.
+if [[ ${#selected_cohorts[@]} -eq 0 ]]; then
+  python3 scripts/fixture_dependencies.py "$work_root" "$repo_root" \
+    "$output_root/dependencies.json" "${registered_cohorts[@]}"
+fi

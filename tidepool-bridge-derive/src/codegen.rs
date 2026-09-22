@@ -332,11 +332,11 @@ pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
             }
         };
 
-        let field_to_values = field_bindings
+        let field_visits = field_bindings
             .iter()
             .filter(|(_, is_phantom)| !is_phantom)
             .map(|(ident, _)| {
-                quote! { tidepool_bridge::ToHaskell::to_value(#ident, table)? }
+                quote! { tidepool_bridge::ToHaskell::visit(#ident, table, visitor)?; }
             });
 
         let lookup = emit_datacon_lookup(
@@ -350,7 +350,9 @@ pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
         match_arms.push(quote! {
             #pattern => {
                 let id = #lookup;
-                Ok(tidepool_bridge::HaskellValue::Con(id, vec![#(#field_to_values),*]))
+                visitor.begin_constructor(id, #haskell_arity)?;
+                #(#field_visits)*
+                visitor.end_constructor()
             }
         });
     }
@@ -359,7 +361,11 @@ pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
-            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::HaskellValue, tidepool_bridge::BridgeError> {
+            fn visit(
+                &self,
+                table: &tidepool_repr::DataConTable,
+                visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+            ) -> Result<(), tidepool_bridge::BridgeError> {
                 match self {
                     #(#match_arms)*
                 }
@@ -490,11 +496,11 @@ pub fn generate_struct_to_haskell(info: &StructInfo) -> TokenStream {
         }
     });
 
-    let field_to_values: Vec<_> = field_bindings
+    let field_visits: Vec<_> = field_bindings
         .iter()
         .filter(|(_, _, is_phantom)| !is_phantom)
         .map(|(f, _, _)| {
-            quote! { tidepool_bridge::ToHaskell::to_value(#f, table)? }
+            quote! { tidepool_bridge::ToHaskell::visit(#f, table, visitor)?; }
         })
         .collect();
 
@@ -516,10 +522,16 @@ pub fn generate_struct_to_haskell(info: &StructInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
-            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::HaskellValue, tidepool_bridge::BridgeError> {
+            fn visit(
+                &self,
+                table: &tidepool_repr::DataConTable,
+                visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+            ) -> Result<(), tidepool_bridge::BridgeError> {
                 let #destructure = self;
                 let id = #lookup;
-                Ok(tidepool_bridge::HaskellValue::Con(id, vec![#(#field_to_values),*]))
+                visitor.begin_constructor(id, #haskell_arity)?;
+                #(#field_visits)*
+                visitor.end_constructor()
             }
         }
     }

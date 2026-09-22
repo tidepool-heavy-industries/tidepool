@@ -9,6 +9,9 @@
   };
 
   inputs = {
+    # Nix 2.27+ honors this self attribute when the Tidepool flake is fetched,
+    # so the matched Codex source is present in recursive and remote builds.
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
@@ -18,7 +21,7 @@
     # Codex owns its own locked compiler/package graph. Do not force it onto
     # Tidepool's Rust overlay: the two workspaces intentionally have distinct
     # MSRV/toolchain timelines.
-    codex.url = "github:inanna-malick/codex/fc8e158d582d9f28767a94a76ccb45976e845977";
+    codex.url = "./vendor/codex";
     # Haskell this workspace compiles but does not carry: jev-dsl, pinned to
     # the same revision `examples/shoal-workspace/flake.nix` pins. Nothing is
     # built from it here; `[haskell.flake_sources]` in `.shoal/config.toml`
@@ -39,6 +42,9 @@
       codex,
       jev-dsl,
     }:
+    if builtins.compareVersions builtins.nixVersion "2.27" < 0 then
+      throw "Tidepool requires Nix 2.27 or newer so the matched Codex submodule is included"
+    else
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -153,6 +159,7 @@
             freer-simple
             lens
             errors
+            cryptohash-sha256
             witherable
             safe
             random
@@ -160,6 +167,24 @@
           ]
         );
         interactiveCodex = codex.packages.${system}.default;
+        # Tidepool consumes only the standalone private wire crate from the
+        # matched Codex checkout. Keep the rest of Codex in its independent
+        # flake/toolchain graph so implementation-only client edits do not
+        # invalidate the Shoal host derivation.
+        shoalSource = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            let
+              relative = pkgs.lib.removePrefix (toString ./.) (toString path);
+              protocol = "/vendor/codex/codex-rs/shoal-protocol";
+              inProtocol = pkgs.lib.hasPrefix protocol relative;
+              protocolAncestor = pkgs.lib.hasPrefix relative protocol;
+              inCodex = pkgs.lib.hasPrefix "/vendor/codex" relative;
+            in
+            if inProtocol || protocolAncestor then true
+            else if inCodex then false
+            else pkgs.lib.cleanSourceFilter path type;
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -272,7 +297,7 @@
         packages.shoal-unwrapped = tidepoolRustPlatform.buildRustPackage {
           pname = "shoal-unwrapped";
           version = "0.1.0";
-          src = ./.;
+          src = shoalSource;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [
             "-p"
@@ -412,14 +437,9 @@
             ${interactiveCodex}/bin/codex --version
             test -x ${interactiveCodex}/bin/codex-code-mode-host
             ${interactiveCodex}/bin/codex-code-mode-host --help
-            ${interactiveCodex}/bin/codex --help | grep --fixed-strings -- '--host-dynamic-tools-socket'
-            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--destination-local'
-            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--after-call'
-            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--thread'
-            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--message'
-            ${interactiveCodex}/bin/codex app-server --help | grep --fixed-strings -- '--controller-token-file'
-            ${interactiveCodex}/bin/codex observe --help | grep --fixed-strings -- '--remote'
-            ${interactiveCodex}/bin/codex archive --help
+            ${interactiveCodex}/bin/codex --shoal-protocol-manifest \
+              | ${pkgs.jq}/bin/jq --exit-status \
+                  '.hostProtocolVersion == 5 and .inputControlProtocolVersion == 5 and .maxCommandReplyBytes == 819200 and .maxWorkspaceReplyBytes == 16384 and .maxInputControlReplyBytes == 16384 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
             touch "$out"
           '';
 

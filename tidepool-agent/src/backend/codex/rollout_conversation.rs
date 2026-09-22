@@ -1,4 +1,4 @@
-//! Completed conversation turns, projected from one durable rollout.
+//! Recent conversation turns, projected from one durable rollout.
 //!
 //! The sibling of `rollout_usage.rs`: same file, same turn boundaries
 //! (`task_started`/`turn_started` opens, `task_complete`/`turn_complete`
@@ -22,14 +22,13 @@ struct Turn {
     started_at: Option<String>,
     completed_at: Option<String>,
     items: Vec<TurnItem>,
+    calls: BTreeSet<String>,
 }
 
-/// The last `count` COMPLETED turns of `thread`, oldest first.
-///
-/// The turn in progress is excluded: it has no completion record, which is
-/// the only evidence this reader accepts that a turn is finished. An aborted
-/// turn is excluded for the same reason. Fewer completed turns than asked for
-/// returns the ones that exist; `count` of zero returns nothing.
+/// The last `count` recorded turns of `thread`, oldest first, including the
+/// active turn. An active turn has no completion timestamp and contains only
+/// items already present in the rollout; a pending tool result is never
+/// invented. Aborted turns are excluded. `count` of zero returns nothing.
 pub(super) fn read_conversation(
     reader: impl BufRead,
     thread: &str,
@@ -39,11 +38,10 @@ pub(super) fn read_conversation(
         return Ok(Vec::new());
     }
     let mut own_thread = false;
-    // Turn identifiers in the order the file first mentions them; `turns` holds
-    // their contents and `completed` the subset a completion record closed.
+    // Turn identifiers in the order the file first mentions them.
     let mut order = Vec::<String>::new();
     let mut turns = BTreeMap::<String, Turn>::new();
-    let mut completed = BTreeSet::<String>::new();
+    let mut aborted = BTreeSet::<String>::new();
     for line in reader.lines() {
         let line = line?;
         // A torn tail becomes readable on a later read. Skipping it can only
@@ -57,7 +55,7 @@ pub(super) fn read_conversation(
             own_thread = payload.get("id").and_then(Value::as_str) == Some(thread);
             continue;
         }
-        if !own_thread || kind != Some("event_msg") {
+        if kind != Some("event_msg") {
             continue;
         }
         let Some(turn) = payload.get("turn_id").and_then(Value::as_str) else {
@@ -68,10 +66,12 @@ pub(super) fn read_conversation(
             .and_then(Value::as_str)
             .map(str::to_owned);
         let event = payload.get("type").and_then(Value::as_str);
-        // An item belonging to another conversation in this same file is not
-        // this caller's, whichever turn it names.
-        if event == Some("item_completed")
-            && payload.get("thread_id").and_then(Value::as_str) != Some(thread)
+        let item_event = matches!(event, Some("item_started" | "item_completed"));
+        // Items carry their own thread id and remain attributable even when a
+        // later session_meta in the inherited rollout changed the boundary
+        // owner. Boundary events have no thread id, so they use own_thread.
+        if (item_event && payload.get("thread_id").and_then(Value::as_str) != Some(thread))
+            || (!item_event && !own_thread)
         {
             continue;
         }
@@ -83,10 +83,16 @@ pub(super) fn read_conversation(
             Some("task_started" | "turn_started") => state.started_at = timestamp,
             Some("task_complete" | "turn_complete") => {
                 state.completed_at = timestamp;
-                completed.insert(turn.to_owned());
             }
-            Some("item_completed") => {
-                if let Some(items) = project_item(&payload["item"]) {
+            Some("turn_aborted") => {
+                aborted.insert(turn.to_owned());
+            }
+            Some("item_started" | "item_completed") => {
+                if let Some(items) = project_item(
+                    &payload["item"],
+                    event == Some("item_completed"),
+                    &mut state.calls,
+                ) {
                     state.items.extend(items);
                 }
             }
@@ -95,7 +101,7 @@ pub(super) fn read_conversation(
     }
     let mut selected: Vec<ConversationTurn> = order
         .into_iter()
-        .filter(|turn| completed.contains(turn))
+        .filter(|turn| !aborted.contains(turn))
         .filter_map(|turn| {
             let state = turns.remove(&turn)?;
             Some(ConversationTurn {
@@ -117,13 +123,17 @@ pub(super) fn read_conversation(
 ///
 /// A backend record that holds both a call and its result becomes two items
 /// sharing one `call` identifier, so the pair survives as a pair.
-fn project_item(item: &Value) -> Option<Vec<TurnItem>> {
+fn project_item(
+    item: &Value,
+    completed: bool,
+    calls: &mut BTreeSet<String>,
+) -> Option<Vec<TurnItem>> {
     match item.get("type").and_then(Value::as_str)? {
-        "UserMessage" => Some(vec![TurnItem::Message {
+        "UserMessage" if completed => Some(vec![TurnItem::Message {
             role: Role::User,
             text: joined_text(item.get("content")?),
         }]),
-        "AgentMessage" => Some(vec![TurnItem::Message {
+        "AgentMessage" if completed => Some(vec![TurnItem::Message {
             role: Role::Assistant,
             text: joined_text(item.get("content")?),
         }]),
@@ -136,13 +146,16 @@ fn project_item(item: &Value) -> Option<Vec<TurnItem>> {
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
                 .join(" ");
-            Some(vec![
-                TurnItem::ToolCall {
+            let mut projected = Vec::new();
+            if calls.insert(call.clone()) {
+                projected.push(TurnItem::ToolCall {
                     call: call.clone(),
                     tool: "command".into(),
                     arguments: command,
-                },
-                TurnItem::ToolResult {
+                });
+            }
+            if completed {
+                projected.push(TurnItem::ToolResult {
                     call,
                     output: item
                         .get("aggregated_output")
@@ -150,8 +163,9 @@ fn project_item(item: &Value) -> Option<Vec<TurnItem>> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
-                },
-            ])
+                });
+            }
+            Some(projected)
         }
         "DynamicToolCall" => {
             let call = item.get("id")?.as_str()?.to_owned();
@@ -160,19 +174,23 @@ fn project_item(item: &Value) -> Option<Vec<TurnItem>> {
                     .as_str()
                     .map_or_else(|| value.to_string(), str::to_owned)
             });
-            Some(vec![
-                TurnItem::ToolCall {
+            let mut projected = Vec::new();
+            if calls.insert(call.clone()) {
+                projected.push(TurnItem::ToolCall {
                     call: call.clone(),
                     tool: item.get("tool")?.as_str()?.to_owned(),
                     arguments,
-                },
-                TurnItem::ToolResult {
+                });
+            }
+            if completed {
+                projected.push(TurnItem::ToolResult {
                     call,
                     output: item
                         .get("content_items")
                         .map_or_else(String::new, joined_text),
-                },
-            ])
+                });
+            }
+            Some(projected)
         }
         _ => None,
     }
@@ -246,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn last_completed_turns_arrive_oldest_first_and_exclude_the_turn_in_progress() {
+    fn latest_turns_arrive_oldest_first_and_include_the_turn_in_progress() {
         let mut lines = vec![own("me")];
         for turn in ["one", "two", "three"] {
             lines.extend([
@@ -262,13 +280,13 @@ mod tests {
         let all = read(&lines, "me", 10);
         assert_eq!(
             all.iter().map(|t| t.turn.as_str()).collect::<Vec<_>>(),
-            ["one", "two", "three"],
-            "the unfinished turn is not a completed turn"
+            ["one", "two", "three", "now"],
+            "the unfinished active turn is included"
         );
         let last_two = read(&lines, "me", 2);
         assert_eq!(
             last_two.iter().map(|t| t.turn.as_str()).collect::<Vec<_>>(),
-            ["two", "three"],
+            ["three", "now"],
             "the last N are the newest N, still oldest first"
         );
         assert_eq!(
@@ -276,7 +294,7 @@ mod tests {
             vec![
                 TurnItem::Message {
                     role: Role::User,
-                    text: "two".into()
+                    text: "three".into()
                 },
                 TurnItem::Message {
                     role: Role::Assistant,
@@ -285,6 +303,7 @@ mod tests {
             ]
         );
         assert!(read(&lines, "me", 0).is_empty());
+        assert_eq!(last_two[1].completed_at, None);
     }
 
     #[test]
@@ -373,6 +392,35 @@ mod tests {
         assert_eq!(
             turn.completed_at.as_deref(),
             Some("2026-09-17T00:00:01.000Z")
+        );
+    }
+
+    #[test]
+    fn active_tool_call_is_visible_without_a_fabricated_result() {
+        let lines = vec![
+            own("me"),
+            started("now"),
+            user("me", "now", "inspect it"),
+            json!({"type":"event_msg","payload":{"type":"item_started",
+                "thread_id":"me","turn_id":"now",
+                "item":{"type":"DynamicToolCall","id":"pending","tool":"bash",
+                    "arguments":{"cmd":"just quick"}}}}),
+        ];
+        let turn = read(&lines, "me", 1).remove(0);
+        assert_eq!(turn.completed_at, None);
+        assert_eq!(
+            turn.items,
+            vec![
+                TurnItem::Message {
+                    role: Role::User,
+                    text: "inspect it".into()
+                },
+                TurnItem::ToolCall {
+                    call: "pending".into(),
+                    tool: "bash".into(),
+                    arguments: json!({"cmd":"just quick"}).to_string(),
+                },
+            ]
         );
     }
 }

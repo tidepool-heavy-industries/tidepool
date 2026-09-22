@@ -275,10 +275,10 @@ impl SelfHarnessDriver {
 
     /// Deliver a serviced green suspension's own resume per
     /// [`GreenDelivery`] — see that type's doc for the plane split.
-    pub(crate) async fn deliver_green_resume(
+    pub(crate) async fn deliver_green_resume<T: ToHaskell + Send + 'static>(
         &self,
         site: &GreenResumeSite<'_>,
-        answer: HaskellValue,
+        answer: T,
         ready: &mut VecDeque<GreenReady>,
         what: &str,
     ) -> Result<(), DriverError> {
@@ -391,18 +391,8 @@ impl SelfHarnessDriver {
                 // with the fresh id, then start the thread; either push lands
                 // on `ready` so both eventually run regardless.
                 //
-                // Boxed via `i64: ToHaskell` (an `I#` Con looked up in THIS
-                // compile's own table) — NOT `engine::json_answer_to_value`
-                // (which bridges to `Tidepool.Aeson.Value`, the wrong TYPE
-                // for a plain `Int` `send` delivers natively — that generic
-                // wire path is for an `askUser` submission's `FromJSON`
-                // decode) and NOT a bare `HaskellValue::Lit` (unboxed; only
-                // tolerated by the JIT's OWN synthesized `App` in
-                // `run_rooted_entry`, not by arbitrary compiled
-                // Haskell that pattern-matches `case x of I# n#`).
-                let tid_value = tid
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
+                // `i64: ToHaskell` supplies the boxed Int constructor expected
+                // by the authored continuation.
                 // Spawner-continues-first: the spawner's resume lands (Raw:
                 // pushed to `ready` ahead of the thread; Node: the node's own
                 // pending record refreshes) before the fresh thread's first
@@ -415,7 +405,7 @@ impl SelfHarnessDriver {
                         chain,
                         hole,
                     },
-                    tid_value,
+                    tid,
                     ready,
                     "AsyncSpawnWith spawner",
                 )
@@ -452,7 +442,7 @@ impl SelfHarnessDriver {
                     .get(&tid)
                     .is_some_and(|t| matches!(t.state, GreenThreadState::Running));
                 if !records_result {
-                    self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                    self.wake_green_waiters(host, tid, sid, waiters, ready)
                         .await?;
                     return Ok(false);
                 }
@@ -477,7 +467,7 @@ impl SelfHarnessDriver {
                         .await
                         .map_err(|e| DriverError::Session(e.to_string()))?;
                 }
-                self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                self.wake_green_waiters(host, tid, sid, waiters, ready)
                     .await?;
                 Ok(false)
             }
@@ -490,9 +480,6 @@ impl SelfHarnessDriver {
                 });
                 match winner {
                     Some(winner) => {
-                        let winner_value = winner.to_value(table).map_err(|e| {
-                            DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
-                        })?;
                         self.deliver_green_resume(
                             &GreenResumeSite {
                                 host,
@@ -501,7 +488,7 @@ impl SelfHarnessDriver {
                                 chain,
                                 hole,
                             },
-                            winner_value,
+                            winner,
                             ready,
                             "AsyncJoinAnyWith",
                         )
@@ -537,9 +524,6 @@ impl SelfHarnessDriver {
                     Some(GreenThreadState::Cancelled) => 2,
                     _ => 0,
                 };
-                let code_value = code
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
                 self.deliver_green_resume(
                     &GreenResumeSite {
                         host,
@@ -548,7 +532,7 @@ impl SelfHarnessDriver {
                         chain,
                         hole,
                     },
-                    code_value,
+                    code,
                     ready,
                     "AsyncStatusWith",
                 )
@@ -573,14 +557,11 @@ impl SelfHarnessDriver {
                         if let Some(h) = self.handlers.lock().event.as_mut() {
                             h.registry_mut().publish_async_done(tid);
                         }
-                        self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                        self.wake_green_waiters(host, tid, sid, waiters, ready)
                             .await?;
                     }
                     // Idempotent: a terminal thread's cancel is a no-op.
                 }
-                let unit = ()
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
                 self.deliver_green_resume(
                     &GreenResumeSite {
                         host,
@@ -589,7 +570,7 @@ impl SelfHarnessDriver {
                         chain,
                         hole,
                     },
-                    unit,
+                    (),
                     ready,
                     "AsyncCancelWith",
                 )
@@ -610,7 +591,6 @@ impl SelfHarnessDriver {
         &self,
         host: Option<NodeId>,
         tid: i64,
-        table: &DataConTable,
         sid: tidepool_repr::SessionId,
         waiters: &mut HashMap<i64, Vec<(GreenChain, String)>>,
         ready: &mut VecDeque<GreenReady>,
@@ -618,13 +598,10 @@ impl SelfHarnessDriver {
         let Some(parked) = waiters.remove(&tid) else {
             return Ok(());
         };
-        let tid_value = tid
-            .to_value(table)
-            .map_err(|e| DriverError::Session(format!("green wake tid box: {e}")))?;
         for (wchain, whole) in parked {
             let next = self
                 .with_session_for_host(host, sid, |s| {
-                    s.resume(ResidentHole::plain(whole.clone()), tid_value.clone())
+                    s.resume(ResidentHole::plain(whole.clone()), tid)
                 })
                 .await
                 .map_err(|e| DriverError::Session(e.to_string()))?
@@ -1017,7 +994,7 @@ impl SelfHarnessDriver {
         let batch_ref = &batch;
         let cap = self.concurrency_cap;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<HaskellValue, DriverError>)> =
+        let results: Vec<(usize, Result<tidepool_effect::Response, DriverError>)> =
             drive_concurrent(cap, batch.len(), |idx| {
                 let (_, _, request) = &batch_ref[idx];
                 async move {
@@ -1125,13 +1102,10 @@ impl SelfHarnessDriver {
             )),
             SuspensionRouting::Note { text } => {
                 self.announce_note(FormSource::Answerer { node }, &text);
-                let unit = ()
-                    .to_value(&table)
-                    .map_err(|e| DriverError::Session(format!("note () bridge: {e}")))?;
                 let next = self
                     .agent
                     .with_session_waiting(sid, |s| {
-                        s.resume(ResidentHole::plain(hole.cont_id()), unit)
+                        s.resume(ResidentHole::plain(hole.cont_id()), ())
                     })
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
@@ -1144,12 +1118,10 @@ impl SelfHarnessDriver {
             }
             SuspensionRouting::ReadState => {
                 let state = self.loop_state_snapshot();
-                let value = engine::json_answer_to_value(&state, &table)
-                    .map_err(|e| DriverError::Session(format!("getStateJson bridge: {e}")))?;
                 let next = self
                     .agent
                     .with_session_waiting(sid, |s| {
-                        s.resume(ResidentHole::plain(hole.cont_id()), value)
+                        s.resume(ResidentHole::plain(hole.cont_id()), state)
                     })
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?

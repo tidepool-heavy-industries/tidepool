@@ -36,18 +36,6 @@ pub fn normalize_workbench_input(value: &serde_json::Value) -> serde_json::Value
     }
 }
 
-/// Render the optional transport input as the canonical @input ::
-/// Aeson.Value@ source binding used by every resident workbench frontend.
-#[must_use]
-pub fn workbench_input_binding(input: Option<&serde_json::Value>) -> String {
-    input.map_or_else(String::new, |value| {
-        format!(
-            "input :: Aeson.Value\ninput = {}\n\n",
-            workbench_json_to_haskell(value)
-        )
-    })
-}
-
 pub fn escape_workbench_haskell_string(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
@@ -64,46 +52,6 @@ pub fn escape_workbench_haskell_string(value: &str) -> String {
         }
     }
     output
-}
-
-pub fn workbench_json_to_haskell(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "Aeson.Null".into(),
-        serde_json::Value::Bool(value) => {
-            format!("Aeson.Bool {}", if *value { "True" } else { "False" })
-        }
-        serde_json::Value::Number(value) => {
-            let (coefficient, exponent) =
-                tidepool_bridge::shapes::parse_decimal_token(&value.to_string());
-            format!("Aeson.Number (Aeson.scientific ({coefficient}) ({exponent}))")
-        }
-        serde_json::Value::String(value) => {
-            format!(
-                "Aeson.String \"{}\"",
-                escape_workbench_haskell_string(value)
-            )
-        }
-        serde_json::Value::Array(values) => format!(
-            "toJSON [{}]",
-            values
-                .iter()
-                .map(workbench_json_to_haskell)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        serde_json::Value::Object(values) => format!(
-            "object [{}]",
-            values
-                .iter()
-                .map(|(key, value)| format!(
-                    "\"{}\" .= {}",
-                    escape_workbench_haskell_string(key),
-                    workbench_json_to_haskell(value)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
 }
 
 /// Exact hosted invocation coordinates supplied by the trusted transport.
@@ -1644,14 +1592,10 @@ mod tests {
     }
 
     #[test]
-    fn input_normalization_and_source_are_frontend_neutral() {
+    fn input_normalization_is_frontend_neutral() {
         let encoded = serde_json::Value::String("{\"name\":\"shoal\"}".into());
         let normalized = normalize_workbench_input(&encoded);
         assert_eq!(normalized, serde_json::json!({"name": "shoal"}));
-        assert_eq!(
-            workbench_input_binding(Some(&normalized)),
-            "input :: Aeson.Value\ninput = object [\"name\" .= Aeson.String \"shoal\"]\n\n"
-        );
         assert_eq!(
             normalize_workbench_input(&serde_json::Value::String("42".into())),
             serde_json::Value::String("42".into())

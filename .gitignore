@@ -18,6 +18,7 @@ target/
 /target-*/
 dist-newstyle/
 dist-newstyle-*/
+haskell/dist-fixtures-final/
 # scripts/bench-turn.sh results (timestamped, machine-specific — not committed)
 bench/
 *.hi
@@ -113,3 +114,6 @@ haskell/spike-build-products/work/
 # before harness runs, so the dir appears in every worktree.
 .cache/
 .cache-bisect*/
+# Python test/import caches
+__pycache__/
+*.pyc

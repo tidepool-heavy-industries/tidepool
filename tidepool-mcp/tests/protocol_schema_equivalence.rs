@@ -374,6 +374,14 @@ fn worktree_integration_decl_matches_the_schema_exactly() {
     );
 }
 
+#[test]
+fn lookup_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::lookup_decl(),
+        &tidepool_protocol::effects::lookup::lookup(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -400,17 +408,21 @@ fn every_schema_effect_is_reachable() {
             "Actor",
             "ActorContext",
             "Introspection",
+            "Lookup",
             "ActorKernel",
             "ActorLocal",
             "Sleep",
             "AgentControl",
             "Commands",
             "Notifications",
+            "Jev",
             "AgentInspection",
             "AgentLaunch",
             "Forks",
             "AgentTools",
             "AgentSession",
+            "Reflect",
+            "Source",
             "BoundWorktree",
             "WorktreeRegistry",
             "WorktreeAllocation",

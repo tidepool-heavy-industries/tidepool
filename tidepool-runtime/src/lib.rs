@@ -21,7 +21,6 @@ use thiserror::Error;
 pub use tidepool_bridge::HaskellValue;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::machine::CancelHandle;
-pub use tidepool_codegen::suspension::ResumeInput;
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_effect::EffectError;
 pub use tidepool_extract_cmd::{
@@ -107,20 +106,6 @@ pub fn compile_haskell(
     target: &str,
     include: &[&Path],
 ) -> Result<CompileResult, CompileError> {
-    compile_haskell_salted(source, target, include, None)
-}
-
-/// As [`compile_haskell`], but mixes `cache_salt` into the cache key. The
-/// declaration-accumulation lane ([`session::SessionLib`]) passes its
-/// `(session, generation)` salt so per-session, per-generation compilations
-/// never collide and a generation bump invalidates correctly. With `None` this
-/// is byte-for-byte identical to [`compile_haskell`].
-pub fn compile_haskell_salted(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    cache_salt: Option<&str>,
-) -> Result<CompileResult, CompileError> {
     let include_owned: Vec<PathBuf> = include.iter().map(|p| p.to_path_buf()).collect();
     let inv = artifacts::CompileInvocation {
         source,
@@ -128,7 +113,7 @@ pub fn compile_haskell_salted(
         include: &include_owned,
         bin: None,
         fallback_module_name: "Input",
-        cache: artifacts::CacheStrategy::Eval { salt: cache_salt },
+        cache: artifacts::CacheStrategy::Immutable,
         stable_val: None,
         session_inject: None,
     };
@@ -169,7 +154,7 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// * `preamble` - Module header, pragmas, and imports (e.g. from
 ///   `tidepool_mcp::build_preamble`) — everything before the compiled
 ///   binding. Must NOT itself import `Tidepool.Internal.Resume` or define
-///   anything named `__resume`/`__decodeValue`/`__applyEntry`/
+///   anything named `__resume`/`__applyEntry`/
 ///   `__applyValue`/`__prepared`/`__tidepoolInEffectRow`/`__workbenchValue`:
 ///   [`session::assemble_expression_module`] owns those names.
 /// * `target` - Name for the assembled top-level binding (only used inside
@@ -267,7 +252,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
     let value = run_prepared_program(
-        prepared.prepared().clone(),
+        prepared.into_prepared(),
         &table,
         nursery_size,
         handlers,
@@ -349,6 +334,9 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
         }
         PreparedRun::Projected { .. } => {
             unreachable!("SettlePlan::Observe never produces a projected run")
+        }
+        PreparedRun::Display { .. } => {
+            unreachable!("SettlePlan::Observe never produces a display bundle")
         }
     }
 }

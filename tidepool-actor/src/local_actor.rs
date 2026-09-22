@@ -132,6 +132,15 @@ pub(crate) enum ResourceCleanup {
 pub struct LocalActorDirectory {
     actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
+    identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
+}
+
+#[derive(Default)]
+struct DirectoryIdentities {
+    next_logical_id: u64,
+    runtime: HashMap<ractor::ActorId, ActorRef>,
+    fenced: std::collections::HashSet<crate::ActorId>,
+    claimed: HashMap<crate::ActorId, ActorRef>,
 }
 
 struct DirectoryEntry {
@@ -142,6 +151,62 @@ struct DirectoryEntry {
 }
 
 impl LocalActorDirectory {
+    fn reserve(&self, incarnation: crate::Incarnation) -> Result<ActorRef, String> {
+        let mut identities = self.identities.lock();
+        loop {
+            identities.next_logical_id = identities
+                .next_logical_id
+                .checked_add(1)
+                .ok_or_else(|| "logical actor identity space exhausted".to_owned())?;
+            let id = crate::ActorId(identities.next_logical_id);
+            if !identities.fenced.contains(&id) && !identities.claimed.contains_key(&id) {
+                let actor = ActorRef { id, incarnation };
+                identities.claimed.insert(id, actor);
+                return Ok(actor);
+            }
+        }
+    }
+
+    pub(crate) fn fence_logical_ids(
+        &self,
+        actors: impl IntoIterator<Item = crate::ActorId>,
+    ) -> Result<(), String> {
+        let mut identities = self.identities.lock();
+        for actor in actors {
+            if identities.claimed.contains_key(&actor) {
+                return Err(format!("logical actor {} is already active", actor.0));
+            }
+            identities.next_logical_id = identities.next_logical_id.max(actor.0);
+            identities.fenced.insert(actor);
+        }
+        Ok(())
+    }
+
+    fn claim_exact(&self, actor: ActorRef) -> Result<(), String> {
+        let mut identities = self.identities.lock();
+        if let Some(previous) = identities.claimed.get(&actor.id).copied() {
+            let predecessor_is_terminal = self
+                .actors
+                .read()
+                .get(&previous)
+                .is_some_and(|entry| entry.actor.terminal().get().is_some());
+            if !predecessor_is_terminal || actor.incarnation <= previous.incarnation {
+                return Err(format!(
+                    "logical actor {} is already active as {previous}",
+                    actor.id.0
+                ));
+            }
+        }
+        identities.fenced.remove(&actor.id);
+        identities.claimed.insert(actor.id, actor);
+        identities.next_logical_id = identities.next_logical_id.max(actor.id.0);
+        Ok(())
+    }
+
+    fn runtime_identity(&self, actor: ractor::ActorId) -> Option<ActorRef> {
+        self.identities.lock().runtime.get(&actor).copied()
+    }
+
     #[must_use]
     pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
         self.actors
@@ -156,6 +221,10 @@ impl LocalActorDirectory {
     }
 
     fn insert(&self, actor: LocalActorRef, context: std::sync::Weak<KernelContext>) {
+        self.identities
+            .lock()
+            .runtime
+            .insert(actor.address().get_id(), actor.identity());
         self.actors
             .write()
             .insert(actor.identity(), DirectoryEntry { actor, context });
@@ -212,10 +281,7 @@ impl KernelContext {
         self.myself
             .get_cell()
             .try_get_supervisor()
-            .map(|supervisor| ActorRef {
-                id: crate::ActorId(supervisor.get_id().pid()),
-                incarnation: self.identity.incarnation,
-            })
+            .and_then(|supervisor| self.directory.runtime_identity(supervisor.get_id()))
     }
     pub(crate) async fn spawn_successor<B: KernelBehavior>(
         &self,
@@ -392,11 +458,17 @@ impl KernelContext {
         };
         let terminal = RetainedActorExit::new();
         let mailbox_admission = crate::kernel::MailboxAdmission::default();
+        let identity = self
+            .directory
+            .reserve(self.identity.incarnation)
+            .map_err(|error| {
+                ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into())
+            })?;
         let arguments = LocalActorArguments {
             behavior,
             terminal: terminal.clone(),
             directory: self.directory.clone(),
-            incarnation: self.identity.incarnation,
+            identity,
             mailbox_admission: mailbox_admission.clone(),
         };
         let spawned = match lifetime {
@@ -424,12 +496,8 @@ impl KernelContext {
             }
         };
         drop(task);
-        let child = LocalActorRef::with_admission(
-            address,
-            terminal,
-            self.identity.incarnation,
-            mailbox_admission,
-        );
+        let child =
+            LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission);
         if lifetime == crate::WorkerLifetime::ParentOwned {
             self.children
                 .lock()
@@ -695,12 +763,9 @@ pub struct LocalActorArguments<B> {
     pub behavior: B,
     pub terminal: RetainedActorExit,
     pub directory: LocalActorDirectory,
-    /// Durable runtime epoch shared by every actor in one local host.
-    ///
-    /// Ractor process IDs may be reused after a host restart. Pairing them
-    /// with the host epoch prevents an old exact handle from addressing a new
-    /// actor that happens to receive the same process ID.
-    pub incarnation: crate::Incarnation,
+    /// Logical identity is allocated by the routing owner before scheduler
+    /// admission. It deliberately does not reuse Ractor's process ID.
+    pub identity: ActorRef,
     pub(crate) mailbox_admission: crate::kernel::MailboxAdmission,
 }
 
@@ -751,10 +816,7 @@ where
         myself: RactorRef<Self::Msg>,
         arguments: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let identity = ActorRef {
-            id: crate::ActorId(myself.get_id().pid()),
-            incarnation: arguments.incarnation,
-        };
+        let identity = arguments.identity;
         let context = std::sync::Arc::new(KernelContext {
             identity,
             myself,
@@ -778,10 +840,10 @@ where
             hosted_admission: HostedAdmission::Open,
         };
         state.context.directory.insert(
-            LocalActorRef::with_admission(
+            LocalActorRef::with_identity_admission(
                 state.context.myself.clone(),
                 state.terminal.clone(),
-                state.context.identity.incarnation,
+                state.context.identity,
                 state.mailbox_admission.clone(),
             ),
             std::sync::Arc::downgrade(&state.context),
@@ -1397,6 +1459,36 @@ pub(crate) async fn spawn_local_actor_in_directory<B>(
 where
     B: KernelBehavior,
 {
+    let identity = directory
+        .reserve(incarnation)
+        .map_err(|error| ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into()))?;
+    spawn_reserved_local_actor(name, behavior, identity, directory).await
+}
+
+pub(crate) async fn spawn_local_actor_in_directory_with_identity<B>(
+    name: Option<String>,
+    behavior: B,
+    identity: ActorRef,
+    directory: LocalActorDirectory,
+) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
+where
+    B: KernelBehavior,
+{
+    directory
+        .claim_exact(identity)
+        .map_err(|error| ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into()))?;
+    spawn_reserved_local_actor(name, behavior, identity, directory).await
+}
+
+async fn spawn_reserved_local_actor<B>(
+    name: Option<String>,
+    behavior: B,
+    identity: ActorRef,
+    directory: LocalActorDirectory,
+) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
+where
+    B: KernelBehavior,
+{
     let terminal = RetainedActorExit::new();
     let mailbox_admission = crate::kernel::MailboxAdmission::default();
     let (address, task) = Actor::spawn(
@@ -1406,13 +1498,13 @@ where
             behavior,
             terminal: terminal.clone(),
             directory,
-            incarnation,
+            identity,
             mailbox_admission: mailbox_admission.clone(),
         },
     )
     .await?;
     Ok((
-        LocalActorRef::with_admission(address, terminal, incarnation, mailbox_admission),
+        LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission),
         task,
     ))
 }
@@ -2782,6 +2874,73 @@ mod tests {
             .await
             .expect("retire sibling");
         sibling_task.await.expect("sibling task");
+    }
+
+    #[tokio::test]
+    async fn logical_identity_recovery_requires_terminal_predecessor_and_rejects_old_handle() {
+        let directory = LocalActorDirectory::default();
+        let first_behavior = behavior(false);
+        let (first, first_task) = spawn_local_actor_in_directory(
+            None,
+            first_behavior.behavior,
+            crate::Incarnation::FIRST,
+            directory.clone(),
+        )
+        .await
+        .expect("first incarnation");
+        let successor = crate::ActorRef {
+            id: first.identity().id,
+            incarnation: crate::Incarnation(2),
+        };
+        assert!(spawn_local_actor_in_directory_with_identity(
+            None,
+            behavior(false).behavior,
+            successor,
+            directory.clone(),
+        )
+        .await
+        .is_err());
+
+        first
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Failed,
+                summary: "recoverable failure".into(),
+            })
+            .await
+            .expect("retire predecessor");
+        first_task.await.expect("predecessor task");
+        let (second, second_task) = spawn_local_actor_in_directory_with_identity(
+            None,
+            behavior(false).behavior,
+            successor,
+            directory.clone(),
+        )
+        .await
+        .expect("successor incarnation");
+        assert_eq!(second.identity(), successor);
+        assert_eq!(
+            directory
+                .resolve(first.identity())
+                .map(|actor| actor.identity()),
+            Some(first.identity())
+        );
+        assert_eq!(
+            directory.resolve(successor).map(|actor| actor.identity()),
+            Some(successor)
+        );
+        assert!(first
+            .address()
+            .send_message(KernelMessage::DrainMailbox)
+            .is_err());
+
+        second
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "test complete".into(),
+            })
+            .await
+            .expect("retire successor");
+        second_task.await.expect("successor task");
     }
 
     #[tokio::test]

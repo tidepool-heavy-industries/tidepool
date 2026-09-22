@@ -478,6 +478,20 @@ impl LocalActorRef {
         }
     }
 
+    pub(crate) fn with_identity_admission(
+        address: RactorRef<KernelMessage>,
+        terminal: RetainedActorExit,
+        identity: ActorRef,
+        admission: MailboxAdmission,
+    ) -> Self {
+        Self {
+            identity,
+            address,
+            terminal,
+            admission,
+        }
+    }
+
     /// Admission and queue insertion share the close fence. Accepted payloads
     /// belong to the existing Ractor mailbox even while execution is paused.
     fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
