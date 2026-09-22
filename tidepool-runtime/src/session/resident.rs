@@ -1641,6 +1641,108 @@ where
         self.mount_compiled_binding_prepared(scope, binder, gen, custody)
     }
 
+    /// Build and mount a compiler-typed JSON value without putting the
+    /// payload into generated Haskell source. `binder` is the one binder the
+    /// compiler produced for the payload-independent `Aeson.Value` interface;
+    /// its `Val.G<gen>` module remains the sole type authority.
+    pub fn mount_json_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        table: &DataConTable,
+        value: &serde_json::Value,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen)?;
+        self.state
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let realm = self.run_context.resource_scope;
+        let handle = self
+            .state
+            .require_prepared()?
+            .build_host_json(realm, value, table)?;
+        self.mount_host_handle_prepared(scope, binder, gen, handle)
+    }
+
+    /// The `Text` sibling of [`Self::mount_json_binding_in`]. It is for host
+    /// strings whose compiler-produced binder has type `Text`; the UTF-8
+    /// bytes stream directly into the same managed builder and never become a
+    /// Haskell source literal.
+    pub fn mount_text_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        table: &DataConTable,
+        text: &str,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen)?;
+        self.state
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let realm = self.run_context.resource_scope;
+        let handle = self
+            .state
+            .require_prepared()?
+            .build_host_text(realm, text, table)?;
+        self.mount_host_handle_prepared(scope, binder, gen, handle)
+    }
+
+    fn validate_compiled_mount_target(
+        &self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+    ) -> Result<(), ResidentError> {
+        if !self.state.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        let expected_module = SessionModule::val(gen).module_name();
+        if binder.module != expected_module {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` belongs to {}, expected {expected_module}",
+                    binder.name, binder.module
+                ),
+            ))));
+        }
+        Ok(())
+    }
+
+    /// Install a just-built host handle. Unlike externally supplied custody,
+    /// this method owns the handle outright, so each failure releases it in
+    /// this same checkout instead of relying on deferred custody cleanup.
+    fn mount_host_handle_prepared(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        handle: PreparedHandle,
+    ) -> Result<(), ResidentError> {
+        let engine = self.state.require_prepared()?;
+        let Some(program) = engine.hosting_program(handle) else {
+            engine.release(handle);
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host binding mount produced a handle with no hosting program".into(),
+            ))));
+        };
+        if let Err(error) = self.state.retract_in(scope, &binder.name) {
+            if let Some(engine) = self.state.prepared_mut() {
+                engine.release(handle);
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = self.bind_prepared(program, scope, gen, &[(binder, handle)]) {
+            return Err(error);
+        }
+        self.binding_provenance
+            .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
+        Ok(())
+    }
+
     /// The prepared arm of [`Self::mount_compiled_binding_in`]: the handle
     /// becomes a prepared binding under the binder's value-module identity,
     /// exactly as a prepared bind turn records it ([`Self::bind_prepared`]).

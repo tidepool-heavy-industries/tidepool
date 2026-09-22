@@ -155,6 +155,10 @@ pub enum PreparedRuntimeError {
     /// frame stays parked.
     #[error("resume delivered a handle that is not live in this engine's ledger")]
     UnknownHandle,
+    /// A host value could not be streamed into the authenticated managed
+    /// builder. No binding root is published on this path.
+    #[error("host value mount rejected: {detail}")]
+    HostMount { detail: String },
     /// [`PreparedEngine::run_rooted_entry`]/[`PreparedEngine::run_rooted_application`]
     /// found no installed program that both owns the rooted closure's object
     /// and admits the generic apply roots, and no OTHER installed program
@@ -207,6 +211,7 @@ impl PreparedRuntimeError {
             | Self::AnswerUnconstructible { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
+            | Self::HostMount { .. }
             | Self::NoHostingProgram
             | Self::NoApplyEntryEntry { .. }
             | Self::NoApplyValueEntry { .. }
@@ -917,6 +922,138 @@ fn build_structural_node(
     })
 }
 
+/// A deliberately small structural sink for values whose Haskell type is
+/// fixed by a compiler-produced binding interface. It does not make a
+/// `HaskellValue` tree: every completed child is immediately handed to the
+/// machine's one managed builder. The builder authenticates constructor
+/// descriptors and field representations before it allocates.
+struct ManagedMountVisitor<'builder, 'machine, 'code> {
+    builder: &'builder mut ManagedBuilder<'machine, 'code>,
+    frames: Vec<MountFrame>,
+    root: Option<ManagedNode>,
+}
+
+struct MountFrame {
+    host_id: DataConId,
+    expected: usize,
+    fields: Vec<ManagedField>,
+}
+
+impl ManagedMountVisitor<'_, '_, '_> {
+    fn rejected(expected: impl Into<String>, got: impl Into<String>) -> BridgeError {
+        BridgeError::TypeMismatch {
+            expected: expected.into(),
+            got: got.into(),
+        }
+    }
+
+    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+        if let Some(frame) = self.frames.last_mut() {
+            if frame.fields.len() == frame.expected {
+                return Err(Self::rejected(
+                    format!("constructor with {} fields", frame.expected),
+                    "too many visitor fields",
+                ));
+            }
+            frame.fields.push(field);
+            return Ok(());
+        }
+        let ManagedField::Node(node) = field else {
+            return Err(Self::rejected("one managed value root", "a scalar field"));
+        };
+        if self.root.replace(node).is_some() {
+            return Err(Self::rejected("one visitor root", "multiple visitor roots"));
+        }
+        Ok(())
+    }
+
+    fn scalar(literal: Literal) -> Result<[u8; 16], BridgeError> {
+        let word = match literal {
+            Literal::LitInt(value) => value as u128,
+            Literal::LitWord(value) => u128::from(value),
+            Literal::LitChar(value) => u128::from(value as u32),
+            Literal::LitFloat(bits) | Literal::LitDouble(bits) => u128::from(bits),
+            literal => {
+                return Err(Self::rejected(
+                    "a scalar literal supported by managed construction",
+                    format!("{literal:?}"),
+                ))
+            }
+        };
+        Ok(word.to_ne_bytes())
+    }
+
+    fn finish(self) -> Result<ManagedNode, BridgeError> {
+        if !self.frames.is_empty() {
+            return Err(Self::rejected(
+                "closed visitor constructors",
+                "unfinished constructor",
+            ));
+        }
+        self.root
+            .ok_or_else(|| Self::rejected("one visitor root", "no visitor root"))
+    }
+}
+
+impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
+    fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
+        self.frames.push(MountFrame {
+            host_id: id,
+            expected: fields,
+            fields: Vec::with_capacity(fields),
+        });
+        Ok(())
+    }
+
+    fn end_constructor(&mut self) -> Result<(), BridgeError> {
+        let frame = self.frames.pop().ok_or_else(|| {
+            Self::rejected(
+                "an open visitor constructor",
+                "constructor end without begin",
+            )
+        })?;
+        if frame.fields.len() != frame.expected {
+            return Err(BridgeError::ArityMismatch {
+                con: frame.host_id,
+                expected: frame.expected,
+                got: frame.fields.len(),
+            });
+        }
+        let fields = frame
+            .fields
+            .into_iter()
+            .map(|field| match field {
+                ManagedField::Node(node) => ManagedField::Consume(node),
+                field => field,
+            })
+            .collect::<Vec<_>>();
+        let node = self
+            .builder
+            .constructor(frame.host_id, &fields)
+            .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+        self.attach(ManagedField::Node(node))
+    }
+
+    fn literal(&mut self, literal: Literal) -> Result<(), BridgeError> {
+        if let Literal::LitByteArray(bytes) = literal {
+            let node = self
+                .builder
+                .bytes(&bytes)
+                .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+            return self.attach(ManagedField::Node(node));
+        }
+        self.attach(ManagedField::Scalar(Self::scalar(literal)?))
+    }
+
+    fn byte_array(&mut self, bytes: Vec<u8>) -> Result<(), BridgeError> {
+        let node = self
+            .builder
+            .bytes(&bytes)
+            .map_err(|error| BridgeError::InternalError(error.to_string()))?;
+        self.attach(ManagedField::Node(node))
+    }
+}
+
 /// Whether two site rows from two programs carry the same evidence: the same
 /// delivery mode and structurally equal wire and input type graphs, compared
 /// by family and constructor identity with ordered arguments, never by local
@@ -1308,6 +1445,92 @@ fn resolve_prepared_import<'a>(
 }
 
 impl PreparedEngine {
+    /// Stream a host JSON document into the resident heap. The caller supplies
+    /// the compiler-authenticated table for the binding it will mount; this
+    /// method deliberately has no source-text representation or parser path.
+    pub fn build_host_json(
+        &mut self,
+        realm: RealmId,
+        value: &serde_json::Value,
+        table: &DataConTable,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let ids =
+            tidepool_bridge::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
+                PreparedRuntimeError::HostMount {
+                    detail: "the compiler table does not declare the JSON construction family"
+                        .into(),
+                }
+            })?;
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = {
+            let mut visitor = ManagedMountVisitor {
+                builder: &mut builder,
+                frames: Vec::new(),
+                root: None,
+            };
+            tidepool_bridge::json_builder::visit_json(value, &ids, &mut visitor).map_err(
+                |error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                },
+            )?;
+            visitor
+                .finish()
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?
+        };
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// Stream host UTF-8 text into the worker `Text` representation. A
+    /// qualified constructor identity is required when it is present, so a
+    /// same-named user constructor cannot silently become host text.
+    pub fn build_host_text(
+        &mut self,
+        realm: RealmId,
+        text: &str,
+        table: &DataConTable,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let text_id = table
+            .get_by_qualified_name("Data.Text.Internal.Text")
+            .or_else(|| table.get_by_name_arity_checked("Text", 3).ok().flatten())
+            .ok_or_else(|| PreparedRuntimeError::HostMount {
+                detail: "the compiler table does not declare Data.Text.Internal.Text".into(),
+            })?;
+        let length = i64::try_from(text.len()).map_err(|_| PreparedRuntimeError::HostMount {
+            detail: "host Text exceeds the worker Int length range".into(),
+        })?;
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let bytes = builder
+            .bytes(text.as_bytes())
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut zero = [0_u8; 16];
+        zero[..8].copy_from_slice(&0_i64.to_ne_bytes());
+        let mut len = [0_u8; 16];
+        len[..8].copy_from_slice(&length.to_ne_bytes());
+        let root = builder
+            .constructor(
+                text_id,
+                &[
+                    ManagedField::Consume(bytes),
+                    ManagedField::Scalar(zero),
+                    ManagedField::Scalar(len),
+                ],
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Create the session's machine from its first turn's program and
     /// install that program. The first turn can import nothing: no prepared
     /// binding exists before the machine does. Uses the default nursery
@@ -2849,8 +3072,10 @@ mod tests {
     use tidepool_codegen::machine_state::MachineFailure;
     use tidepool_repr::execution_schema::{
         testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
-        GlobalDecl, GlobalId, ResultContract, ScalarLiteral, SignatureId, UpdatePolicy, ValueRef,
+        GlobalDecl, GlobalId, ResultContract, ScalarLiteral, SignatureId, StorageLayout,
+        UpdatePolicy, ValueRef,
     };
+    use tidepool_repr::DataCon;
 
     #[test]
     fn integrity_failure_is_typed_independently_from_its_cause() {
@@ -3176,6 +3401,395 @@ mod tests {
             &[(identity, handle, forced)],
         )
         .expect("the same binding now satisfies required_evaluated");
+    }
+
+    fn mount_constructor(
+        module: &str,
+        occurrence: &str,
+        family_module: &str,
+        family_occurrence: &str,
+        id: u64,
+        tag: u32,
+        family_size: u32,
+        fields: Vec<RuntimeRep>,
+    ) -> ConstructorDecl {
+        let layout = StorageLayout::for_reps(&testing::target(), &fields)
+            .expect("mount fixture field layout");
+        ConstructorDecl {
+            identity: testing::identity(module, occurrence),
+            family: testing::identity(family_module, family_occurrence),
+            host_id: DataConId(id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag,
+            family_size,
+            strict_fields: vec![true; fields.len()],
+            field_reps: fields,
+            layout: CheckedLayout {
+                fields: layout
+                    .fields()
+                    .iter()
+                    .map(|field| FieldLayout {
+                        rep: field.rep(),
+                        offset: field.offset(),
+                    })
+                    .collect(),
+                alignment: layout.alignment(),
+                payload_size: layout.payload_size(),
+                root_mask: layout
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn mount_table_row(id: u64, name: &str, arity: u32, qualified_name: Option<&str>) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: Vec::new(),
+            qualified_name: qualified_name.map(str::to_owned),
+            type_name: String::new(),
+        }
+    }
+
+    fn canonical_mount_value(value: &HaskellValue, output: &mut String) {
+        match value {
+            HaskellValue::Lit(Literal::LitByteArray(bytes)) => {
+                output.push_str(&format!("B{bytes:?};"));
+            }
+            HaskellValue::Lit(literal) => output.push_str(&format!("L{literal:?};")),
+            HaskellValue::ByteArray(bytes) => {
+                output.push_str(&format!("B{:?};", *bytes.lock().expect("byte array lock")));
+            }
+            HaskellValue::Con(id, fields) => {
+                output.push_str(&format!("C{}(", id.0));
+                for field in fields {
+                    canonical_mount_value(field, output);
+                }
+                output.push_str(");");
+            }
+        }
+    }
+
+    /// The whole family the JSON bridge emits, plus `BadText`: it deliberately
+    /// has three scalar fields so its table row passes name/arity lookup but
+    /// descriptor validation rejects it after the byte array was built.
+    fn json_mount_program() -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors = vec![
+            mount_constructor(
+                "Fixture.Mount",
+                "Unit",
+                "Fixture.Mount",
+                "Unit",
+                1,
+                1,
+                1,
+                vec![],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Object",
+                "Tidepool.Aeson.Value",
+                "Value",
+                100,
+                1,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Array",
+                "Tidepool.Aeson.Value",
+                "Value",
+                101,
+                2,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "String",
+                "Tidepool.Aeson.Value",
+                "Value",
+                102,
+                3,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Number",
+                "Tidepool.Aeson.Value",
+                "Value",
+                103,
+                4,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Bool",
+                "Tidepool.Aeson.Value",
+                "Value",
+                104,
+                5,
+                6,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Value",
+                "Null",
+                "Tidepool.Aeson.Value",
+                "Value",
+                105,
+                6,
+                6,
+                vec![],
+            ),
+            mount_constructor(
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+                110,
+                1,
+                1,
+                vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IS",
+                "GHC.Num.Integer",
+                "Integer",
+                120,
+                1,
+                3,
+                vec![RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IP",
+                "GHC.Num.Integer",
+                "Integer",
+                121,
+                2,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            mount_constructor(
+                "GHC.Num.Integer",
+                "IN",
+                "GHC.Num.Integer",
+                "Integer",
+                122,
+                3,
+                3,
+                vec![RuntimeRep::UnliftedRef],
+            ),
+            mount_constructor(
+                "GHC.Internal.Types",
+                "True",
+                "GHC.Internal.Types",
+                "Bool",
+                130,
+                1,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "GHC.Internal.Types",
+                "False",
+                "GHC.Internal.Types",
+                "Bool",
+                131,
+                2,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "Data.Map.Internal",
+                "Bin",
+                "Data.Map.Internal",
+                "Map",
+                140,
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef; 5],
+            ),
+            mount_constructor(
+                "Data.Map.Internal",
+                "Tip",
+                "Data.Map.Internal",
+                "Map",
+                141,
+                2,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "GHC.Internal.Types",
+                "I#",
+                "GHC.Internal.Types",
+                "Int",
+                150,
+                1,
+                1,
+                vec![RuntimeRep::Int(64)],
+            ),
+            mount_constructor(
+                "Data.Text.Internal",
+                "Text",
+                "Data.Text.Internal",
+                "Text",
+                160,
+                1,
+                1,
+                vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Int(64),
+                ],
+            ),
+            mount_constructor(
+                "GHC.Internal.Types",
+                ":",
+                "GHC.Internal.Types",
+                "[]",
+                170,
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef; 2],
+            ),
+            mount_constructor(
+                "GHC.Internal.Types",
+                "[]",
+                "GHC.Internal.Types",
+                "[]",
+                171,
+                2,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "Fixture.Mount",
+                "BadText",
+                "Fixture.Mount",
+                "BadText",
+                900,
+                1,
+                1,
+                vec![RuntimeRep::Int(64); 3],
+            ),
+        ];
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        testing::prepare(wire).expect("JSON mount fixture")
+    }
+
+    fn json_mount_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        for (id, name, arity, qualified_name) in [
+            (100, "Object", 1, Some("Tidepool.Aeson.Value.Object")),
+            (101, "Array", 1, Some("Tidepool.Aeson.Value.Array")),
+            (102, "String", 1, Some("Tidepool.Aeson.Value.String")),
+            (103, "Number", 1, Some("Tidepool.Aeson.Value.Number")),
+            (104, "Bool", 1, Some("Tidepool.Aeson.Value.Bool")),
+            (105, "Null", 0, Some("Tidepool.Aeson.Value.Null")),
+            (
+                110,
+                "Scientific",
+                2,
+                Some("Tidepool.Aeson.Scientific.Scientific"),
+            ),
+            (120, "IS", 1, Some("GHC.Num.Integer.IS")),
+            (121, "IP", 1, Some("GHC.Num.Integer.IP")),
+            (122, "IN", 1, Some("GHC.Num.Integer.IN")),
+            (130, "True", 0, Some("GHC.Internal.Types.True")),
+            (131, "False", 0, Some("GHC.Internal.Types.False")),
+            (140, "Bin", 5, Some("Data.Map.Bin")),
+            (141, "Tip", 0, Some("Data.Map.Tip")),
+            (150, "I#", 1, Some("GHC.Internal.Types.I#")),
+            (160, "Text", 3, Some("Data.Text.Internal.Text")),
+            (170, ":", 2, Some("GHC.Internal.Types.:")),
+            (171, "[]", 0, Some("GHC.Internal.Types.[]")),
+        ] {
+            table
+                .insert_checked(mount_table_row(id, name, arity, qualified_name))
+                .unwrap();
+        }
+        table
+    }
+
+    #[test]
+    fn host_json_and_text_mount_stream_through_tiny_nursery_and_recover_after_rejection() {
+        let (mut engine, program) =
+            PreparedEngine::bootstrap_with_nursery_bytes(json_mount_program(), 64)
+                .expect("bootstrap JSON mount fixture");
+        let table = json_mount_table();
+        let ids =
+            tidepool_bridge::json_builder::JsonConIds::from_table(&table).expect("JSON mount ids");
+        let payload = serde_json::json!({
+            "nested": [[{"key": "value", "n": serde_json::Value::Number("1000000000000000000000000000001".parse().expect("large JSON number"))}], [true, null]],
+            "large": (0..128).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),
+        });
+
+        let initial_handles = engine.handle_count();
+        let initial_roots = engine.persistent_roots_count();
+        let json = engine
+            .build_host_json(RealmId::ROOT, &payload, &table)
+            .expect("large nested JSON mounts under a tiny nursery");
+        let observed = engine.observe(program, json).expect("observe mounted JSON");
+        let expected = tidepool_bridge::json_builder::json_to_value(&payload, &ids)
+            .expect("reference JSON value");
+        let mut observed_shape = String::new();
+        canonical_mount_value(&observed, &mut observed_shape);
+        let mut expected_shape = String::new();
+        canonical_mount_value(&expected, &mut expected_shape);
+        assert_eq!(observed_shape, expected_shape);
+        assert!(engine.release(json));
+
+        let mut wrong_text = DataConTable::new();
+        wrong_text
+            .insert_checked(mount_table_row(900, "Text", 3, None))
+            .unwrap();
+        let error = engine
+            .build_host_text(RealmId::ROOT, "must not publish", &wrong_text)
+            .expect_err("wrong Text descriptor is rejected after byte construction");
+        assert!(matches!(error, PreparedRuntimeError::Run(_)));
+        assert_eq!(engine.handle_count(), initial_handles);
+        assert_eq!(engine.persistent_roots_count(), initial_roots);
+
+        let text = engine
+            .build_host_text(RealmId::ROOT, "reusable after rejection", &table)
+            .expect("a later Text mount succeeds");
+        assert!(matches!(
+            engine.observe(program, text).expect("observe mounted Text"),
+            HaskellValue::Con(id, ref fields)
+                if id == DataConId(160)
+                    && matches!(fields.as_slice(), [HaskellValue::Lit(Literal::LitByteArray(bytes)), HaskellValue::Lit(Literal::LitInt(0)), HaskellValue::Lit(Literal::LitInt(24))] if bytes == b"reusable after rejection")
+        ));
+        assert!(engine.release(text));
+        assert_eq!(engine.handle_count(), initial_handles);
+        assert_eq!(engine.persistent_roots_count(), initial_roots);
     }
 
     /// A program that constructs nothing but declares an effect request
