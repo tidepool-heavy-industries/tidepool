@@ -19,7 +19,7 @@ main = do
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
   assert (first == second) "prepared execution encoding is not deterministic"
-  assert (BS.take 7 first == BS.pack [0x90, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
+  assert (BS.take 7 first == BS.pack [0x91, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
     "prepared execution schema version differs from the producer contract"
@@ -27,7 +27,14 @@ main = do
       familyTerm = TList
         [ TString "m3-fixture", TString "Fixture", TString "type"
         , TString "Recursive", TList [TInt 0] ]
-  assert (length evidenceFields == 16) "schema 11 requires sixteen program fields"
+  assert (length evidenceFields == 17) "prepared schema requires seventeen program fields"
+  assert (evidenceFields !! 16 == TList [TInt 0])
+    "absent program JSON layout must use the explicit Nothing tag"
+  let layout = fmap ConstructorId (JsonLayout 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+      jsonFields = termList (decode (encodeWireProgram
+        representative { programJsonLayout = Just layout }))
+  assert (jsonFields !! 16 == TList [TInt 1, TList (map TInt [0 .. 17])])
+    "program JSON layout must preserve all eighteen named roles in wire order"
   assert (evidenceFields !! 13 == TList
       [ TList [TInt 0, familyTerm, TList [TInt 2, TInt 1]
           , TList [TList [TInt 0, TList [TInt 0, TInt 1]]]]
@@ -176,7 +183,7 @@ representative = representativeWith result
 
 representativeWith :: Expr -> WireProgram
 representativeWith body = WireProgram envelope signatures globals constructors operations bindings
-  (ValueId 0) [] [] []
+  (ValueId 0) [] [] [] Nothing
  where
   exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
   target = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
