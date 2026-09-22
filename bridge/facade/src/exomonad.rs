@@ -2136,7 +2136,7 @@ mod tests {
             ),
             (
                 ".exomonad/Project/Watchdog.hs",
-                include_str!("../../../.exomonad/Project/Watchdog.hs"),
+                include_str!("../../../exomonad/examples/workspace/.exomonad/Project/Watchdog.hs"),
             ),
         ] {
             assert_eq!(
