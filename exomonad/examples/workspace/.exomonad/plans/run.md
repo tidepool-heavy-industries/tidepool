@@ -175,9 +175,10 @@ with the updated assignment, not the original sessionInput after its contract ch
 
 Project.Work owns solTask, implement, reviewCandidate, reviewAgain, repair,
 designQuestion, consultDesign, withDecision. Project.Routing owns followWork, workDefinition and notification
-policy. Project.Plan owns
-componentLead/componentLeadFrom and the optional graph allocation. These qualified
-module names work; unqualified imports do not move a definition to another module.
+policy. Use these operations to express the current task's allocation; the
+template does not ship campaign-specific plan constructors.
+These qualified module names work; unqualified imports do not move a definition
+to another module.
 Source integration uses native git merge/cherry-pick/rebase and focused checks;
 there is no integrateFork or integrateCandidate Haskell operation. settledValue
 is the shared public Settlement projection; retain the original receipt for evidence.

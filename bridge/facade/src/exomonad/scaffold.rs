@@ -12,9 +12,9 @@ use exomonad_worktree::GitCli;
 
 include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 
-/// The configuration `exomonad new` writes: today's agent and research defaults,
-/// plus the Haskell package — this workspace's own `.exomonad` as a source root,
-/// and the Jev core the project's `flake.nix` pins.
+/// The configuration `exomonad new` writes. Its module and recipe list matches
+/// the shipped workspace; plans, prompts and the repository's custom settings
+/// stay in that workspace rather than being copied into a new project.
 const CONFIG: &str = r#"[defaults]
 model = "gpt-6-sol"
 effort = "medium"
@@ -25,8 +25,26 @@ maximum_depth = 8
 
 [haskell]
 source_roots = ["."]
-modules = ["Project.Shell", "Project.Lookup"]
+modules = [
+  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
+  "Project.Shell", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
+  "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
+  "Project.Service", "Project.Repository",
+]
 spec = "AgentSpec.agentSpec"
+checks = [
+  "Project.RoutingChecks.routing",
+  "Project.RoutingChecks.candidateHistory",
+  "Project.RoutingChecks.notificationRetention",
+  "Project.RoutingChecks.automaticReview",
+  "Project.RoutingChecks.requestRecovery",
+  "Project.RoutingChecks.declaredRepair",
+  "Project.RoutingChecks.forwardingFailure",
+  "Project.RoutingChecks.handlerCall",
+  "Project.Checks.workbench",
+  "Project.CollaborationChecks.collaboration",
+  "Project.SkillChecks.skills",
+]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
 # this project. Only `core` is named: it is the JSON-polymorphic library, and

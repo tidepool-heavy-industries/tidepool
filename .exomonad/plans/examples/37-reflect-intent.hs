@@ -45,7 +45,7 @@ diagsOnly t = T.unlines (take 24
       , not (T.isInfixOf "could not compile" l) ])
 
 do
-  let fxp n = ".exomonad/examples/fixtures/" <> n
+  let fxp n = ".exomonad/plans/examples/fixtures/" <> n
   asn <- sh ["cat", fxp "assign-14.txt"]
   hist <- sh ["cat", fxp "trajectory.txt"]
   chk <- diagsOnly <$> sh ["cat", fxp "f726882-check.out"]

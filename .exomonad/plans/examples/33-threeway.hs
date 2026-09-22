@@ -64,5 +64,5 @@ diagLines t = T.unlines (take 40
       , not (T.isInfixOf "could not compile" l) ])
 
 do
-  let fx n = ".exomonad/examples/fixtures/" <> n <> "-check.out"
+  let fx n = ".exomonad/plans/examples/fixtures/" <> n <> "-check.out"
   sh ["cat", fx "53ad43c"] >>= routeCheck "53ad43c" . diagLines

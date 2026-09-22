@@ -4,8 +4,9 @@ Every module below is compiled into every session in this workspace, verified by
 `exomonad check --workspace .` from the run directory. `lookup <name>` browses any
 of them and is authoritative over this file.
 
-All eleven are canonical here — `.exomonad/Project/` in this repository, tracked in
-git, arriving in a worktree by checkout rather than by being copied.
+The shipped template is the canonical source for these modules. This repository's
+`.exomonad/config.toml` points at `exomonad/examples/workspace/.exomonad`, so the
+modules and recipe checks are maintained once and arrive in worktrees by checkout.
 
 ## Orchestration
 
@@ -28,17 +29,21 @@ git, arriving in a worktree by checkout rather than by being copied.
 | `Project.Merge` | yes | `mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects`, started as `R.start (mergeInto (worktreeId tree) (Just "exomonad/integration") ["just","test-lib","exomonad-actor","test(request::updates)"])`. The check is an argument: name the narrowest command that would catch a regression in the change at hand, never `just verify`. Checks a merged head before publishing and rolls a red one back. |
 | `Project.Review` | yes | `reviewOf :: Contract -> (Response ImplReport, Progress ImplNote) -> MergeTarget -> ActorSpec Review ReviewEffects`, started as `R.start (reviewOf contract worker (MergeTarget merge))`. |
 
+The same source root supplies `Project.Shell` and `Project.Lookup` for typed tool
+selection, plus `Project.Search`, `Project.History`, `Project.Service` and
+`Project.Repository` for the repository-reading examples. `AgentSpec.agentSpec`
+installs `Project.Watchdog.watchBy` as its after-tool handler: children labelled
+`escalate-child` get an out-of-scope escalation, children labelled `nudge-child`
+get repeating-failure advice, and other actors abstain.
+
 ## Not installed, deliberately
 
 `Project.Plan` generated assignments for one graph-UI feature. It was retired
 rather than carried forward as though it were a general tool. Its campaign
 tree is in Git history.
 
-`checks` is unset in `config.toml`. The recipe modules that were configured
-(`Project.Checks.workbench`, `Project.CollaborationChecks.collaboration`,
-`Project.RoutingChecks.routing`) import a retired API generation, so
-`exomonad check --recipes` cannot run until they are ported. That is real available
-work, not a hidden failure.
+The recipe list is shared with the shipped template. Its current-head status is
+pending the Nix-backed Exomonad checks after the toolchain fork is pushed.
 
 ## Prompts and skills
 
@@ -56,12 +61,13 @@ originals in this repository rather than at a second copy.
 
 ## Worked cells
 
-`.exomonad/examples/` holds six cells with the fixtures they read — reference to
-copy from, not modules to import. Its README says which run here unchanged and
-which were repointed at this repository and not re-run.
+`.exomonad/plans/examples/` holds six cells with the fixtures they read —
+reference to copy from, not modules to import. Its README says which run here
+unchanged and which were repointed at this repository and not re-run.
 
 ## Verification boundary
 
-`exomonad check --workspace .` compiles all eleven against this revision with no
-models or providers. That is what has been established. The cells have not been
-executed since being adapted, and `--recipes` cannot run for the reason above.
+The prior configuration was checked before this source consolidation. The
+consolidated workspace and its recipes must be checked against the current head
+after the Nix toolchain becomes available; the moved examples have not been
+executed since being adapted.

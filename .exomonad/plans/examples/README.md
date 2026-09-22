@@ -2,7 +2,7 @@
 
 Six cells, each kept because it shows a technique rather than a result. They are
 reference to copy from, not modules to import — the programs themselves are in
-`.exomonad/Project/`.
+`exomonad/examples/workspace/.exomonad/Project/`.
 
 Every one of them assumes this helper. Declare it once in your session:
 
@@ -65,15 +65,13 @@ The cells that read those fixtures run here unchanged, and ask about those
 artifacts, which is coherent — the questions are about a compiler's own words and
 the fixtures are where those words are.
 
-The cells that walked live git could **not** be carried over by repointing them.
-A first attempt substituted a commit and a path mechanically, which left a cell
-asking whether an item limit had been requested while reading a commit about
-request updates: the artifacts moved and the question did not. Those experiments
-are kept exactly as they ran, with their recorded numbers, in
-`plans/jev-lab/breadth/` — `10-dispatch.hs`, `11-dispatch-loop.hs` and
-`32-traverse-content.hs`. `dispatch-tidepool.hs` here is a coherent invocation of
-the same pattern against this repository, written rather than substituted. It has
-not been executed, so its wording is deliberate and its numbers are unmeasured.
+The cells that walked live git were not carried over by repointing them. A prior
+attempt substituted a commit and path mechanically but left the question about
+an item limit while reading a commit about request updates. Those unrun cells
+were retired in plan triage because they had no production consumer.
+`dispatch-tidepool.hs` is a coherent invocation of the same pattern against this
+repository, written rather than substituted. It has not been executed, so its
+wording is deliberate and its numbers are unmeasured.
 
 Read `.exomonad/plans/README.md` for what is specific to working in this repository,
 and load the `exomonad-jev` skill for the question-writing rules.

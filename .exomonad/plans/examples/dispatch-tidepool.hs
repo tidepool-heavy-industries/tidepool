@@ -13,9 +13,8 @@
 -- currently lacks, so satisfying one removes its own reason to be chosen — which
 -- is why a loop built from this does not repeat itself.
 --
--- The original and its recorded numbers are in plans/jev-lab/breadth/10-dispatch.hs
--- and 11-dispatch-loop.hs. Those are kept as they ran; this is the invocation to
--- copy from.
+-- Earlier live-git experiments were retired during plan triage because they
+-- had no production consumer; this is the invocation to copy from.
 import Tidepool.Effects.Core (Jev, Commands)
 
 sh :: Member Commands effs => [Text] -> Eff effs Text

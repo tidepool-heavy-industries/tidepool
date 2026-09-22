@@ -57,7 +57,7 @@ without repeating this initial interview or inventing more approval stages.
 - [launch.md](launch.md): operator-only launch and package validation.
 - [language.md](language.md): compact shared distinctions; add project vocabulary
   where it helps collaborators make the same consequential choices.
-- [../examples/README.md](../examples/README.md): eight worked Jev cells with the
+- [examples/README.md](examples/README.md): eight worked Jev cells with the
   real fixtures they read. Reference to copy from, not modules to import.
 
 ## What is installed
@@ -76,9 +76,9 @@ precedence-ordered table, with no model turn. `Project.Evidence` types what a
 check actually established, keeping what a child reported separate from what was
 run here. `Project.Contract` carries a task agreement. `Project.Investigate`
 reads a failed build. `Project.Merge` holds an integration worktree and checks a
-merged head before publishing, rolling a red one back; the command it runs is
-`projectCheck`, named once in that module. `Project.Review` runs the loop around
-them.
+merged head before publishing, rolling a red one back. The caller supplies the
+check command for the change under review.
+`Project.Review` runs the loop around them.
 
 There is no `Project.Plan`: it generated assignments for one graph-UI feature and
 was retired rather than carried forward as if it were a general tool. Its
@@ -123,3 +123,12 @@ servers and is not part of testing a change.
 `git grep`, a pattern on `git ls-files` — rather than walking the tree.
 
 **`checkpointContext` remains proposed work**, not an installed capability.
+
+## Opening a repository session
+
+Start with the human's current task and the selected workspace's plans. Use a
+real change to explore a small Haskell program that combines available commands,
+evidence and Jev judgments, then keep its runnable example and observed result.
+The productivity ambition is 10×; it is not a measured result or a target quota.
+Use actual run evidence to choose the next friction point, and preserve failures
+with their source and output so the program can improve from what happened.

@@ -55,12 +55,9 @@ routine cross-lane decisions; fresh Astra specialists handle explicit hard quest
 - [launch.md](launch.md): operator-only launch and package validation.
 - [language.md](language.md): compact shared distinctions; add project vocabulary
   where it helps collaborators make the same consequential choices.
-- [graph/README.md](graph/README.md): a worked graph-view feature allocation using
-  Project.Plan. It is an example, not the default goal or next-run instruction.
-
 Project.Types, Project.Work and Project.Observe support ordinary project Tasks.
-Project.Plan includes the checked graph allocation and a reusable componentLead;
-its example constructors do not restrict which project can use the workbench.
+The installed modules are generic tools; choose a goal from the current task and
+the repository's own acceptance requirements.
 Use the actual task/result contracts and callable signatures. Importing a module
 or binding a composition starts no worker.
 
