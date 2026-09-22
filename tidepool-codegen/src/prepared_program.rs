@@ -48,6 +48,7 @@ mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;
 mod answer;
+mod construction;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
 pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};

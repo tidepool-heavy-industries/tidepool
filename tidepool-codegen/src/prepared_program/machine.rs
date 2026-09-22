@@ -56,9 +56,7 @@ use super::{
     CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, Unsupported,
 };
 use crate::context::VMContext;
-use crate::descriptor_bridge::{
-    marshal_descriptor_object, DescriptorMarshalError, DescriptorValue,
-};
+use crate::descriptor_bridge::{DescriptorMarshalError, DescriptorValue};
 use crate::host_fns::{prepared_gc_trigger, RuntimeError};
 use crate::machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
@@ -75,7 +73,6 @@ use std::sync::Arc;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
 use tidepool_repr::{DataConId, PrincipalId};
@@ -266,8 +263,7 @@ pub struct PreparedHandle {
 /// meaningful only to that builder and never escapes as a heap address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManagedNode {
-    owner: u64,
-    index: usize,
+    node: super::construction::ConstructionNode,
 }
 
 /// One logical constructor field for incremental managed construction.
@@ -282,14 +278,12 @@ pub enum ManagedField {
 /// roots. Each completed object is rooted before another collection can run.
 pub struct ManagedBuilder<'machine, 'code> {
     machine: &'machine mut PreparedMachine<'code>,
-    owner: u64,
-    roots: Vec<RootWords>,
-    roots_mark: usize,
+    core: super::construction::ConstructionCore,
 }
 
 impl Drop for ManagedBuilder<'_, '_> {
     fn drop(&mut self) {
-        self.machine.machine.truncate_rust_roots(self.roots_mark);
+        self.core.release(&self.machine.machine);
     }
 }
 
@@ -308,58 +302,8 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             .next_builder
             .checked_add(1)
             .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
-        let roots_mark = machine.machine.rust_roots_len();
-        Ok(Self {
-            machine,
-            owner,
-            roots: Vec::new(),
-            roots_mark,
-        })
-    }
-
-    fn ensure_capacity(&mut self, extent: usize) -> Result<(), ExecutionError> {
-        let free = (self.machine.vmctx.alloc_limit as usize)
-            .saturating_sub(self.machine.vmctx.alloc_ptr as usize);
-        if free < extent {
-            collect_on(
-                &self.machine.machine,
-                &mut self.machine.vmctx,
-                &self.machine.old_space,
-                extent,
-            )?;
-            let free = (self.machine.vmctx.alloc_limit as usize)
-                .saturating_sub(self.machine.vmctx.alloc_ptr as usize);
-            if free < extent {
-                return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
-            }
-        }
-        Ok(())
-    }
-
-    fn push_root(&mut self, word: usize) -> Result<ManagedNode, ExecutionError> {
-        let root = RootWords::new(1)?;
-        root.write(0, word as u64)?;
-        let source = root
-            .slot_address(0)
-            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
-        self.machine.machine.register_rust_root(source);
-        self.roots.push(root);
-        Ok(ManagedNode {
-            owner: self.owner,
-            index: self.roots.len() - 1,
-        })
-    }
-
-    fn node_word(&self, node: ManagedNode) -> Result<usize, ExecutionError> {
-        if node.owner != self.owner {
-            return Err(super::answer::AnswerBuildError::ForeignNode.into());
-        }
-        self.roots
-            .get(node.index)
-            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?
-            .read(0)
-            .map(|word| word as usize)
-            .map_err(|cause| runtime_error(&self.machine.machine, cause))
+        let core = super::construction::ConstructionCore::new(&machine.machine, owner);
+        Ok(Self { machine, core })
     }
 
     pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode, ExecutionError> {
@@ -373,41 +317,33 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 ))?
                 .bytes_array,
         );
-        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        self.ensure_capacity(extent)?;
-        let payload = self
-            .machine
-            .machine
-            .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
-            .and_then(|payload| {
-                self.machine
-                    .machine
-                    .store_external_bytes(payload, 0, bytes)
-                    .map(|()| payload)
-            })
-            .map_err(super::answer::AnswerBuildError::Storage)?;
-        let pointer = self.machine.vmctx.alloc_ptr;
-        // SAFETY: capacity above reserves `extent` bytes at the cursor and no
-        // collection can run before the wrapper is initialized and rooted.
-        let written = unsafe {
-            marshal_descriptor_object(
-                pointer,
-                descriptor.allocation_extent() as usize,
+        let machine = &self.machine.machine;
+        let old_space = &self.machine.old_space;
+        let node = self
+            .core
+            .bytes(
+                machine,
+                &mut self.machine.vmctx,
                 &descriptor,
-                &[DescriptorValue::Address(payload.cast_const())],
+                bytes,
+                |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
             )
-        };
-        if let Err(error) = written {
-            if !self.machine.machine.release_external_storage(payload) {
-                return Err(runtime_error(
-                    &self.machine.machine,
-                    RuntimeError::BadPointer,
-                ));
-            }
-            return Err(super::answer::AnswerBuildError::Wrapper(error).into());
-        }
-        self.machine.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+            .map_err(|error| match error {
+                super::construction::ConstructionError::Runtime(cause) => {
+                    runtime_error(machine, cause)
+                }
+                super::construction::ConstructionError::Operation(error) => error,
+                super::construction::ConstructionError::TooLarge(extent) => {
+                    super::answer::AnswerBuildError::TooLarge(extent).into()
+                }
+                super::construction::ConstructionError::Marshal(error) => {
+                    super::answer::AnswerBuildError::Wrapper(error).into()
+                }
+                super::construction::ConstructionError::Storage(error) => {
+                    super::answer::AnswerBuildError::Storage(error).into()
+                }
+            })?;
+        Ok(ManagedNode { node })
     }
 
     pub fn constructor(
@@ -438,47 +374,72 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             }
             .into());
         }
-        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        self.ensure_capacity(extent)?;
-        let values = fields
-            .iter()
-            .map(|field| match field {
-                ManagedField::Node(node) => self
-                    .node_word(*node)
-                    .map(|word| DescriptorValue::Managed(word as *mut u8)),
-                ManagedField::Scalar(bits) => Ok(DescriptorValue::Bits(*bits)),
-                ManagedField::Handle(handle) => self
-                    .machine
-                    .handles
-                    .handle(handle.raw)
-                    .map(|entry| unsafe { entry.slot.current() } as usize)
-                    .filter(|word| *word != 0)
-                    .map(|word| DescriptorValue::Managed(word as *mut u8))
-                    .ok_or_else(|| super::answer::AnswerBuildError::UnknownHandle.into()),
-            })
-            .collect::<Result<Vec<_>, ExecutionError>>()?;
-        let pointer = self.machine.vmctx.alloc_ptr;
-        // SAFETY: capacity above reserves `extent` bytes at the cursor and
-        // all managed inputs were refreshed after the last possible GC.
-        unsafe {
-            marshal_descriptor_object(
-                pointer,
-                descriptor.allocation_extent() as usize,
+        let machine = &self.machine.machine;
+        let old_space = &self.machine.old_space;
+        let handles = &self.machine.handles;
+        let node = self
+            .core
+            .constructor(
+                machine,
+                &mut self.machine.vmctx,
                 &descriptor,
-                &values,
+                fields.len(),
+                |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
+                |core, values| {
+                    for (index, field) in fields.iter().enumerate() {
+                        values[index] = match field {
+                            ManagedField::Node(node) => core
+                                .word(node.node)
+                                .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                .map_err(|error| match error {
+                                    super::construction::NodeAccessError::Foreign => {
+                                        super::answer::AnswerBuildError::ForeignNode.into()
+                                    }
+                                    super::construction::NodeAccessError::Invalid => {
+                                        runtime_error(machine, RuntimeError::BadPointer)
+                                    }
+                                })?,
+                            ManagedField::Scalar(bits) => DescriptorValue::Bits(*bits),
+                            ManagedField::Handle(handle) => handles
+                                .handle(handle.raw)
+                                .map(|entry| unsafe { entry.slot.current() } as usize)
+                                .filter(|word| *word != 0)
+                                .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                .ok_or_else(|| {
+                                    ExecutionError::from(
+                                        super::answer::AnswerBuildError::UnknownHandle,
+                                    )
+                                })?,
+                        };
+                    }
+                    Ok(())
+                },
             )
-        }
-        .map_err(|error| super::answer::AnswerBuildError::Field {
-            host_id,
-            index: match &error {
-                DescriptorMarshalError::Representation { index, .. }
-                | DescriptorMarshalError::ManagedReference { index } => *index,
-                _ => 0,
-            },
-            error,
-        })?;
-        self.machine.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+            .map_err(|error| match error {
+                super::construction::ConstructionError::Runtime(cause) => {
+                    runtime_error(machine, cause)
+                }
+                super::construction::ConstructionError::Operation(error) => error,
+                super::construction::ConstructionError::TooLarge(extent) => {
+                    super::answer::AnswerBuildError::TooLarge(extent).into()
+                }
+                super::construction::ConstructionError::Marshal(error) => {
+                    super::answer::AnswerBuildError::Field {
+                        host_id,
+                        index: match &error {
+                            DescriptorMarshalError::Representation { index, .. }
+                            | DescriptorMarshalError::ManagedReference { index } => *index,
+                            _ => 0,
+                        },
+                        error,
+                    }
+                    .into()
+                }
+                super::construction::ConstructionError::Storage(error) => {
+                    super::answer::AnswerBuildError::Storage(error).into()
+                }
+            })?;
+        Ok(ManagedNode { node })
     }
 
     pub fn finish(
@@ -486,14 +447,15 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         realm: RealmId,
         root: ManagedNode,
     ) -> Result<PreparedHandle, ExecutionError> {
-        if root.owner != self.owner {
-            return Err(super::answer::AnswerBuildError::ForeignNode.into());
-        }
-        let source = self
-            .roots
-            .get(root.index)
-            .and_then(|root| root.slot_address(0))
-            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
+        let source = self.core.slot(root.node).map_err(|error| match error {
+            super::construction::NodeAccessError::Foreign => {
+                super::answer::AnswerBuildError::ForeignNode.into()
+            }
+            super::construction::NodeAccessError::Invalid => {
+                runtime_error(&self.machine.machine, RuntimeError::BadPointer)
+            }
+        })?;
+        let source = source.cast::<*mut u8>();
         unsafe {
             self.machine
                 .machine
@@ -7130,7 +7092,7 @@ mod tests {
         let fresh = builder
             .constructor(DataConId(900), &[])
             .expect("second builder constructs Unit at the same local index");
-        assert_ne!(stale.owner, fresh.owner);
+        assert_ne!(stale, fresh);
         assert!(matches!(
             builder.finish(RealmId::ROOT, stale),
             Err(ExecutionError::Answer(AnswerBuildError::ForeignNode))
