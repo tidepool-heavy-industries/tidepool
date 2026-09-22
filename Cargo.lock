@@ -1111,6 +1111,7 @@ dependencies = [
  "tidepool-runtime",
  "tidepool-test-data",
  "tidepool-testing",
+ "tidepool-toolchain",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3383,6 +3384,7 @@ dependencies = [
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
+ "tidepool-toolchain",
  "tokio",
  "toml",
  "tracing",
@@ -3561,6 +3563,7 @@ dependencies = [
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-toolchain",
 ]
 
 [[package]]
