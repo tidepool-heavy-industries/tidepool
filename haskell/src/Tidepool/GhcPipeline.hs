@@ -148,6 +148,32 @@ data PipelineSelection result where
 
 data PreparationKind = CheckOnly | PrepareStg
 
+-- | Type-only compilation only needs a freshly built home interface while a
+-- later source module in this same dependency-ordered pass imports it. The
+-- checked target is returned directly to metadata consumers, so it is a leaf
+-- unless another source module still has to typecheck against it.
+data CheckedInterfaceUse
+  = CheckedInterfaceLeaf
+  | CheckedInterfaceNeededBy ModuleName
+
+checkedInterfaceUse :: ModSummary -> Map.Map ModuleName ModuleName -> CheckedInterfaceUse
+checkedInterfaceUse summary laterConsumers =
+  maybe CheckedInterfaceLeaf CheckedInterfaceNeededBy
+    (Map.lookup (ms_mod_name summary) laterConsumers)
+
+-- | The consumer maps line up with summaries: each map records normal home
+-- imports from only the modules after that position. Building them in one
+-- reverse pass avoids rescanning every remaining suffix for every module.
+checkedInterfaceConsumers :: [ModSummary] -> [Map.Map ModuleName ModuleName]
+checkedInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries)
+  where
+    addConsumer summary laterConsumers
+      | ms_hsc_src summary /= HsSrcFile = laterConsumers
+      | otherwise = foldr addImport laterConsumers (ms_textual_imps summary)
+      where
+        addImport (_, imported) = Map.insertWith keepNearest (unLoc imported) (ms_mod_name summary)
+        keepNearest new _ = new
+
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.
 data PreparedPipelineResult = PreparedPipelineResult
@@ -1494,7 +1520,11 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
         -- metadata target. Restore the full graph for instance visibility.
         environment <- getSession
         setSession environment { hsc_mod_graph = modGraphRaw }
-        checked <- forM summaries $ \summary -> do
+        -- The list is topologically ordered, so only an unprocessed source
+        -- module can consume an interface we build here. Completed modules no
+        -- longer consult the HPT, while the returned target environment owns
+        -- its types and reader scope directly.
+        checked <- forM (zip summaries (checkedInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
           cpBeforeModule plan summary
           current <- getSession
           let isTarget = ms_mod_name summary == targetName
@@ -1508,16 +1538,27 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
               parsed <- parseModule summary
               typed <- typecheckModule (pvTransformParsed variant summary parsed)
               let tcg = fst (tm_internals_ typed)
-              -- Both deferred dependencies and the target need interfaces:
-              -- GHC lookupName resolves local names through the target HPT.
-              -- These type-only interfaces require neither Core nor STG.
-              env <- getSession
-              details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
-              (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
-                (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
-                  mkIfaceTc env Sf_None details summary Nothing tcg
-              let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
-              setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+              case checkedInterfaceUse summary laterConsumers of
+                CheckedInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
+                  "tidepool-checked-interface-elided module="
+                    ++ moduleNameString (ms_mod_name summary)
+                    ++ " reason=no-later-home-importer"
+                CheckedInterfaceNeededBy consumer -> do
+                  -- A later source module's normal home import resolves via
+                  -- this HPT entry. SOURCE imports keep using the boot iface
+                  -- installed by GHC's load phase, and no returned metadata
+                  -- consumer reads the target back through HPT.
+                  env <- getSession
+                  details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
+                  (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
+                    (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
+                      mkIfaceTc env Sf_None details summary Nothing tcg
+                  let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+                  setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+                  when timing $ liftIO $ hPutStrLn stderr $
+                    "tidepool-checked-interface-retained module="
+                      ++ moduleNameString (ms_mod_name summary)
+                      ++ " consumer=" ++ moduleNameString consumer
               pure (if isTarget then Just tcg else Nothing)
         errors <- liftIO (nub . reverse <$> readIORef errorRef)
         cpBeforeMerge plan loadFlag errors

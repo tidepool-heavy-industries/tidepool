@@ -259,11 +259,12 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         (show (crCapturedTypes checked))
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
-      case filter (isInfixOf "module=MetadataTarget")
-            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output)) of
-        row : _ -> validateInterfaceMeasurement
-          "MetadataTarget" "checked_environment" "hpt_miss" row
-        [] -> fail "metadata compile omitted its interface measurement"
+      assertContains "metadata leaf skips its unused HPT interface"
+        "tidepool-checked-interface-elided module=MetadataTarget reason=no-later-home-importer"
+        output
+      when (any (isInfixOf "module=MetadataTarget")
+            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
+        fail "metadata leaf constructed an unused target interface"
       unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
         fail "metadata target entered the executable pipeline"
       writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
