@@ -31,11 +31,9 @@ tidepool-tool.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tidepool-extract-cmd.workspace = true
 frunk.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tidepool-handlers.workspace = true
 tidepool-mcp.workspace = true
 tidepool-testing.workspace = true
 tidepool-test-data.workspace = true

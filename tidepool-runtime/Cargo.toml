@@ -33,19 +33,15 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 static_assertions.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 trybuild.workspace = true
 tidepool-testing.workspace = true
 frunk.workspace = true
-tidepool-bridge-effects.workspace = true
 tidepool-bridge.workspace = true
 tidepool-effect.workspace = true
 tidepool-mcp.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "test-util"] }
 serial_test.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-filetime = "0.2"
-glob.workspace = true
 
 [[test]]
 name = "compile_fail"

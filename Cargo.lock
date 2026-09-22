@@ -1113,16 +1113,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3493,8 +3483,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-extract-cmd",
- "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-model",
  "tidepool-repr",
@@ -3672,7 +3660,6 @@ dependencies = [
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
- "tidepool-codegen",
  "tidepool-effect",
  "tidepool-mcp",
  "tidepool-repr",
@@ -3744,7 +3731,6 @@ dependencies = [
  "parking_lot",
  "proptest",
  "serde_json",
- "tempfile",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-effect",
@@ -3823,12 +3809,9 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
- "filetime",
  "frunk",
- "glob",
  "log",
  "parking_lot",
- "proptest",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -3839,7 +3822,6 @@ dependencies = [
  "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
- "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-extract-cmd",
@@ -3889,7 +3871,6 @@ name = "tidepool-toolchain"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "filetime",
  "schemars 1.2.2",
  "serde",
  "serde_json",

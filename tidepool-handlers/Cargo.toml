@@ -58,7 +58,3 @@ reqwest.workspace = true
 tidepool-testing.workspace = true
 tidepool-test-data.workspace = true
 tempfile.workspace = true
-# The standalone acceptance driver enters the parked path directly
-# (`run_suspendable_parked`/`resume_parked`) rather than through the resident
-# session or the harness engine.
-tidepool-codegen.workspace = true

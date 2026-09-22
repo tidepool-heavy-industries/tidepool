@@ -26,4 +26,3 @@ tracing.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
-filetime = "0.2"

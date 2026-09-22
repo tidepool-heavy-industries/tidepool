@@ -26,4 +26,3 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest.workspace = true
-tempfile.workspace = true
