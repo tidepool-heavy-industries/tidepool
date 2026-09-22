@@ -42,6 +42,9 @@
       codex,
       jev-dsl,
     }:
+    if builtins.compareVersions builtins.nixVersion "2.27" < 0 then
+      throw "Tidepool requires Nix 2.27 or newer so the matched Codex submodule is included"
+    else
     flake-utils.lib.eachDefaultSystem (
       system:
       let
