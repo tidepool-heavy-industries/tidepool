@@ -252,7 +252,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
     let value = run_prepared_program(
-        prepared.prepared().clone(),
+        prepared.into_prepared(),
         &table,
         nursery_size,
         handlers,

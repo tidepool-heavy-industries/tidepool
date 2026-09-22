@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -596,7 +597,7 @@ pub fn compile_targets_with_session_inject(
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
     asks_bytes: Vec<u8>,
-    prepared_bytes: Vec<u8>,
+    prepared_bytes: Arc<Vec<u8>>,
 }
 
 /// Spawn `cmd` (already fully configured — input, output-dir, target(s),
@@ -674,7 +675,7 @@ pub(crate) fn extract_and_read(
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
             asks_bytes,
-            prepared_bytes,
+            prepared_bytes: Arc::new(prepared_bytes),
         });
     }
     on_stage(
@@ -820,9 +821,16 @@ pub(crate) fn assemble(
 ) -> Result<CompiledArtifacts, CompileError> {
     let deserialize_start = Instant::now();
     let (table, warnings) = read_metadata(meta_bytes)?;
+    let requirements = crate::prepared_artifact::production_requirements()?;
     let prepared: Vec<PreparedArtifact> = raw
         .iter()
-        .map(|r| PreparedArtifact::parse(r.prepared_bytes.clone(), DecodeLimits::default()))
+        .map(|r| {
+            PreparedArtifact::parse_shared(
+                Arc::clone(&r.prepared_bytes),
+                &requirements,
+                DecodeLimits::default(),
+            )
+        })
         .collect::<Result<_, _>>()?;
     for (r, artifact) in raw.iter().zip(&prepared) {
         check_constructor_identity_agreement(&r.target, artifact, &table)?;
@@ -936,7 +944,7 @@ fn load_memo(
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
             asks_bytes,
-            prepared_bytes,
+            prepared_bytes: Arc::new(prepared_bytes),
         });
     }
     Some((meta_bytes, raw))
@@ -1127,7 +1135,7 @@ mod constructor_identity_tests {
         RawTargetOutput {
             target: target.to_string(),
             asks_bytes: b"[]".to_vec(),
-            prepared_bytes,
+            prepared_bytes: Arc::new(prepared_bytes),
         }
     }
 
