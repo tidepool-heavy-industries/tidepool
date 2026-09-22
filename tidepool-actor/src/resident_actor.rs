@@ -183,6 +183,7 @@ struct ResidentEnvironment<H, O> {
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
     conversation_reader: Option<crate::ConversationReader>,
     usage_pointers: crate::UsagePointerTable,
+    recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
 
 #[derive(Clone)]
@@ -196,6 +197,7 @@ struct ResidentActorRecord {
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    scheduler_root: bool,
 }
 
 #[derive(tidepool_bridge_derive::ToHaskell)]
@@ -352,6 +354,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             usage_pointers: self.usage_pointers,
+            recovery: self.recovery.clone(),
         }
     }
 }
@@ -729,6 +732,7 @@ pub struct ResidentKernelBehavior<H, O> {
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    scheduler_root: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -1270,6 +1274,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         boot: ResidentBoot,
         launch_worktrees: Vec<String>,
     ) -> Self {
+        let scheduler_root = matches!(&boot, ResidentBoot::Workbench | ResidentBoot::Prepared(_));
         Self {
             replacement_transfer: None,
             retained_replacements: Vec::new(),
@@ -1301,6 +1306,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
+            scheduler_root,
             workbench_executions: Arc::default(),
             active_route: None,
             active_fork_boundary: None,
@@ -1390,6 +1396,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        if let Some(recovery) = &self.environment.recovery {
+            if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
+                // The actor is already terminal. Retain the earlier admission
+                // as active so restart reconciliation remains conservative.
+                tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
+            }
+        }
         self.environment.fork_groups.retire_actor(actor);
         if let Some(record) = self.environment.actors.lock().get_mut(&actor) {
             record.terminal = Some(terminal.clone());
@@ -6752,6 +6765,11 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            if let Some(recovery) = &self.environment.recovery {
+                recovery
+                    .admit(context.actor, &self.descriptor, &self.launch_worktrees)
+                    .map_err(Self::failure)?;
+            }
             kernel.install_session_context(context.clone())?;
             self.environment.actors.lock().insert(
                 context.actor,
@@ -6765,6 +6783,7 @@ where
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
+                    scheduler_root: self.scheduler_root,
                 },
             );
             if self.descriptor.fork_boundary().is_some() {
@@ -7789,6 +7808,14 @@ pub struct ResidentForest<H, O> {
     incarnation: crate::Incarnation,
 }
 
+#[derive(Default)]
+struct PreparedRootAdmission {
+    replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+    identity: Option<ActorRef>,
+    launch_worktrees: Vec<String>,
+    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+}
+
 impl<H, O> ResidentForest<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -7879,6 +7906,7 @@ where
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
             usage_pointers: &[],
+            recovery: None,
         };
         (
             Self {
@@ -7897,6 +7925,23 @@ where
     pub fn with_conversation_reader(mut self, reader: crate::ConversationReader) -> Self {
         self.environment.conversation_reader = Some(reader);
         self
+    }
+
+    /// Persist actor-owned identity and lifecycle transitions before they are
+    /// published to the host or an authored program.
+    #[must_use]
+    pub fn with_recovery_journal(mut self, journal: Arc<crate::ActorRecoveryJournal>) -> Self {
+        self.environment.recovery = Some(journal);
+        self
+    }
+
+    /// Keep logical IDs from being consumed by unrelated new actors while
+    /// restart reconciliation decides which durable actors can be restored.
+    pub fn fence_recovery_identities(
+        &self,
+        actors: impl IntoIterator<Item = crate::ActorId>,
+    ) -> Result<(), String> {
+        self.directory.fence_logical_ids(actors)
     }
 
     /// Observe only actors the exact requester can inspect. This does not enter
@@ -7956,8 +8001,86 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        self.new_program_root_with_replay(label, role, compiled, None)
+        self.new_program_root_with_replay(label, role, compiled, None, None)
             .await
+    }
+
+    /// Rebuild a durable logical actor as an independent scheduler root in the
+    /// new host incarnation. Haskell heap state is fresh; the caller supplies
+    /// only replayable source and launch configuration.
+    pub async fn recover_durable_program_root(
+        &self,
+        durable: &crate::DurableActorAdmission,
+        role: crate::EffectiveRole,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+        worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    ) -> Result<
+        (LocalActorRef, ractor::concurrency::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(std::io::Error::other("swarm root admission is closed").into());
+        }
+        let (placement, outcome) = self
+            .environment
+            .runner
+            .prepare_root_program(self.session, compiled)
+            .await?;
+        let current = |actor: ActorRef| ActorRef {
+            id: actor.id,
+            incarnation: self.incarnation,
+        };
+        let mut descriptor = ActorDescriptor::new(&durable.label, placement)
+            .with_effective_role(role)
+            .with_model(durable.model.clone().map(crate::Model::Literal))
+            .with_instructions(durable.instructions.clone())
+            .with_fork_effort(durable.effort.as_deref().and_then(|effort| match effort {
+                "low" => Some(crate::ForkEffort::Low),
+                "medium" => Some(crate::ForkEffort::Medium),
+                "high" => Some(crate::ForkEffort::High),
+                _ => None,
+            }))
+            .with_source_layer(durable.source_layer.clone());
+        if let Some(creator) = durable.creator {
+            descriptor = descriptor.with_creator(current(creator));
+        }
+        descriptor = descriptor.with_supervisor_parent(durable.supervisor_parent.map(current));
+        if let Some(parent) = durable.context_parent {
+            descriptor = descriptor.with_context_parent(current(parent));
+        }
+        let identity =
+            ActorRef {
+                id: durable.actor.id,
+                incarnation: crate::Incarnation(
+                    durable.actor.incarnation.0.checked_add(1).ok_or_else(|| {
+                        std::io::Error::other("actor incarnation space exhausted")
+                    })?,
+                ),
+            };
+        match self
+            .admit_prepared_root(
+                descriptor,
+                outcome,
+                &admission,
+                PreparedRootAdmission {
+                    identity: Some(identity),
+                    launch_worktrees: durable.launch_worktrees.clone(),
+                    worktree_custody,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(actor) => Ok(actor),
+            Err(error) => {
+                self.environment
+                    .runner
+                    .retire_root_placement(placement)
+                    .await?;
+                Err(Box::new(error))
+            }
+        }
     }
 
     /// Recover a failed root in this resident forest without replaying its
@@ -8014,8 +8137,17 @@ where
             record.recovery_claimed = true;
             record.workbench_executions.clone()
         };
+        let identity =
+            ActorRef {
+                id: predecessor.id,
+                incarnation: crate::Incarnation(
+                    predecessor.incarnation.0.checked_add(1).ok_or_else(|| {
+                        std::io::Error::other("actor incarnation space exhausted")
+                    })?,
+                ),
+            };
         let result = self
-            .new_program_root_with_replay(label, role, compiled, Some(journal))
+            .new_program_root_with_replay(label, role, compiled, Some(journal), Some(identity))
             .await;
         if result.is_err() {
             if let Some(record) = self.environment.actors.lock().get_mut(&predecessor) {
@@ -8031,6 +8163,7 @@ where
         role: crate::EffectiveRole,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+        identity: Option<ActorRef>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
@@ -8049,7 +8182,11 @@ where
                 ActorDescriptor::new(label, placement).with_effective_role(role),
                 outcome,
                 &admission,
-                replay,
+                PreparedRootAdmission {
+                    replay,
+                    identity,
+                    ..Default::default()
+                },
             )
             .await
         {
@@ -8071,7 +8208,7 @@ where
             .actors
             .lock()
             .iter()
-            .filter(|(_, record)| record.descriptor.supervisor_parent().is_none())
+            .filter(|(_, record)| record.scheduler_root)
             .filter_map(|(actor, _)| self.directory.resolve(*actor))
             .collect::<Vec<_>>();
         for root in roots {
@@ -8144,8 +8281,34 @@ where
                 std::io::Error::other("swarm root admission is closed").into(),
             ));
         }
-        self.admit_prepared_root(descriptor, outcome, &admission, None)
+        self.admit_prepared_root(descriptor, outcome, &admission, Default::default())
             .await
+    }
+
+    /// Admit the run root with a durable logical identity selected by the
+    /// host recovery owner. The identity must already have been fenced.
+    pub async fn admit_root_with_identity(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        identity: ActorRef,
+    ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("swarm root admission is closed").into(),
+            ));
+        }
+        self.admit_prepared_root(
+            descriptor,
+            outcome,
+            &admission,
+            PreparedRootAdmission {
+                identity: Some(identity),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     async fn admit_prepared_root(
@@ -8153,11 +8316,18 @@ where
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
-        replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+        recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        let PreparedRootAdmission {
+            replay,
+            identity,
+            launch_worktrees,
+            worktree_custody,
+        } = recovery;
         if descriptor.placement().session != self.session
-            || descriptor.supervisor_parent().is_some()
-            || descriptor.context_parent().is_some()
+            || (identity.is_none()
+                && (descriptor.supervisor_parent().is_some()
+                    || descriptor.context_parent().is_some()))
         {
             return Err(ractor::SpawnErr::StartupFailed(Box::new(
                 std::io::Error::new(
@@ -8168,16 +8338,31 @@ where
         }
         let mut behavior =
             ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+        behavior.launch_worktrees = launch_worktrees;
+        behavior.worktree_custody = worktree_custody;
         if let Some(replay) = replay {
             behavior.workbench_executions = replay;
         }
-        crate::local_actor::spawn_local_actor_in_directory(
-            None,
-            behavior,
-            self.incarnation,
-            self.directory.clone(),
-        )
-        .await
+        match identity {
+            Some(identity) => {
+                crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                    None,
+                    behavior,
+                    identity,
+                    self.directory.clone(),
+                )
+                .await
+            }
+            None => {
+                crate::local_actor::spawn_local_actor_in_directory(
+                    None,
+                    behavior,
+                    self.incarnation,
+                    self.directory.clone(),
+                )
+                .await
+            }
+        }
     }
 }
 

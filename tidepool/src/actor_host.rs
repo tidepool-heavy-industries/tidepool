@@ -72,11 +72,11 @@ use tidepool_actor::{
 };
 use tidepool_agent::interactive::InputProducerId;
 use tidepool_agent::{
-    native_interactive_backend, read_interactive_binding, BackendThreadId, InputOperationId,
-    InputPurpose, InteractiveAgentBackend, InteractiveAgentInstallation, InteractiveAgentSpec,
-    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode,
-    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread, ReasoningEffort,
+    copy_interactive_binding, native_interactive_backend, read_interactive_binding,
+    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
+    InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveInputEnvelope,
+    InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode, InteractiveNativeSandbox,
+    InteractiveNativeToolPolicy, InteractivePolicyMount, QueueReadyThread, ReasoningEffort,
 };
 
 include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
@@ -277,6 +277,63 @@ impl Drop for ActorWorkspaceCustody {
 }
 
 impl ActorForkWorkspaceAdmission {
+    fn recover_workspace(
+        &self,
+        predecessor: ActorRef,
+        successor: ActorRef,
+        worktree: &str,
+        role: tidepool_actor::ActorRole,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        if !WorktreeId::is_path_safe(worktree) {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "invalid recovery worktree id".into(),
+            });
+        }
+        let worktree = WorktreeId::from_raw(worktree);
+        if self
+            .manager
+            .lookup(&worktree)
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?
+            .is_none()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "recovery worktree is not registered".into(),
+            });
+        }
+        let predecessor_principal = WorktreePrincipal::exact_actor(
+            &self.runtime,
+            predecessor.id.0,
+            predecessor.incarnation.0,
+        );
+        let successor_principal =
+            WorktreePrincipal::exact_actor(&self.runtime, successor.id.0, successor.incarnation.0);
+        let binding = self
+            .bindings
+            .lock()
+            .recover_active(
+                &worktree,
+                &predecessor_principal,
+                &successor_principal,
+                current_time_ms(),
+            )
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
+        self.authority
+            .install_grant(successor.into(), worktree_grant(role));
+        Ok(Arc::new(ActorWorkspaceCustody {
+            runtime: self.runtime.clone(),
+            bindings: self.bindings.clone(),
+            binding: Mutex::new(Some(binding)),
+            actor: successor,
+            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
+            workspace: None,
+            inheritance_notice: None,
+        }))
+    }
+
     fn bind_workspace(
         &self,
         actor: ActorRef,
@@ -613,6 +670,228 @@ pub(crate) fn stop_predecessor_processes(
     Ok(report)
 }
 
+fn recovery_role(
+    durable: &tidepool_actor::DurableActorAdmission,
+    research_policy: tidepool_actor::ResearchPolicy,
+) -> Option<tidepool_actor::EffectiveRole> {
+    let role = match durable.role.as_str() {
+        "research" => tidepool_actor::EffectiveRole::research(),
+        "coding" => tidepool_actor::EffectiveRole::coding(),
+        "scaffolding" => {
+            tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
+                maximum_depth: durable.descendant_depth,
+                maximum_active_children: durable.descendant_active_children,
+            })
+        }
+        "integration" => tidepool_actor::EffectiveRole::integration(),
+        // A second root or an inherited role carries authority that cannot be
+        // reconstructed from the compact durable role name alone.
+        "root" | "inherited" => return None,
+        _ => return None,
+    };
+    Some(role.with_research_policy(research_policy))
+}
+
+fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
+    let path = run_root
+        .join(format!("{}-{}", actor.id.0, actor.incarnation.0))
+        .join(PROCESS_RECOVERY_RECORD);
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProcessRecoveryRecord>(&bytes).ok())
+        .is_some_and(|record| record.version == 1 && record.retired)
+}
+
+fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
+    Ok(ActorRef {
+        id: actor.id,
+        incarnation: tidepool_actor::Incarnation(
+            actor
+                .incarnation
+                .0
+                .checked_add(1)
+                .ok_or_else(|| runtime_error("actor incarnation space exhausted"))?,
+        ),
+    })
+}
+
+fn durable_root_identity(
+    records: &[tidepool_actor::DurableActorRecord],
+) -> Result<Option<ActorRef>, Box<dyn std::error::Error>> {
+    records
+        .iter()
+        .filter(|record| {
+            record.admission.role == "root"
+                && record.admission.creator.is_none()
+                && record.admission.supervisor_parent.is_none()
+                && record.admission.context_parent.is_none()
+        })
+        .max_by_key(|record| record.admission.actor.incarnation)
+        .map(|record| next_actor_incarnation(record.admission.actor))
+        .transpose()
+}
+
+async fn recover_prior_actors(
+    forest: &Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
+    run_root: &Path,
+    root: ActorRef,
+    incarnation: tidepool_actor::Incarnation,
+    records: &[tidepool_actor::DurableActorRecord],
+    program: Arc<tidepool_runtime::session::CompiledTurn>,
+    research_policy: tidepool_actor::ResearchPolicy,
+    worktree_admission: &ActorForkWorkspaceAdmission,
+    accepted_source: Option<&str>,
+) -> BTreeMap<ActorRef, (ActorRef, QueueReadyThread)> {
+    if incarnation == tidepool_actor::Incarnation::FIRST {
+        return BTreeMap::new();
+    }
+    let mut pending = records
+        .iter()
+        .filter(|record| {
+            record.terminal.is_none()
+                && record.admission.actor.incarnation != incarnation
+                && record.admission.actor.id != root.id
+                && record
+                    .application
+                    .as_ref()
+                    .is_some_and(|application| application.conversation.is_some())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    pending.sort_by_key(|record| record.admission.actor.id);
+    let mut recovered = BTreeMap::new();
+    let mut recovered_ids = std::collections::BTreeSet::from([root.id]);
+    loop {
+        let mut progressed = false;
+        let mut remaining = Vec::new();
+        for record in pending {
+            let durable = &record.admission;
+            let parents_ready = [
+                durable.creator,
+                durable.supervisor_parent,
+                durable.context_parent,
+            ]
+            .into_iter()
+            .flatten()
+            .all(|parent| recovered_ids.contains(&parent.id));
+            if !parents_ready {
+                remaining.push(record);
+                continue;
+            }
+            let Some(application) = &record.application else {
+                continue;
+            };
+            let Some(expected_conversation) = application.conversation.as_deref() else {
+                continue;
+            };
+            if application.accepted_source.as_deref() != accepted_source {
+                tracing::warn!(actor = %durable.actor,
+                    recorded_source = ?application.accepted_source,
+                    current_source = ?accepted_source,
+                    "durable actor accepted-source identity cannot be verified");
+                continue;
+            }
+            let Some(role) = recovery_role(durable, research_policy) else {
+                tracing::warn!(actor = %durable.actor, role = %durable.role,
+                    "durable actor role cannot be reconstructed");
+                continue;
+            };
+            if durable.launch_worktrees.len() > 1
+                || durable.source_layer.iter().any(|path| !path.exists())
+                || !predecessor_process_was_retired(run_root, durable.actor)
+            {
+                tracing::warn!(actor = %durable.actor,
+                    "durable actor resources are not independently recoverable");
+                continue;
+            }
+            let thread = match read_interactive_binding(&application.binding_path).await {
+                Ok(thread) if thread.id().0 == expected_conversation => thread,
+                Ok(_) => {
+                    tracing::warn!(actor = %durable.actor,
+                        "durable actor conversation binding changed identity");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor conversation binding is unavailable");
+                    continue;
+                }
+            };
+            let successor = match next_actor_incarnation(durable.actor) {
+                Ok(successor) => successor,
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor incarnation cannot advance");
+                    continue;
+                }
+            };
+            let custody = match durable.launch_worktrees.as_slice() {
+                [] => None,
+                [worktree] => match worktree_admission.recover_workspace(
+                    durable.actor,
+                    successor,
+                    worktree,
+                    role.role(),
+                ) {
+                    Ok(custody) => Some(custody),
+                    Err(error) => {
+                        tracing::warn!(actor = %durable.actor, detail = %error.detail,
+                            "durable actor worktree custody could not be recovered");
+                        continue;
+                    }
+                },
+                _ => {
+                    tracing::warn!(actor = %durable.actor,
+                        "durable actor names more than one launch worktree");
+                    continue;
+                }
+            };
+            let (actor, task) = match forest
+                .recover_durable_program_root(durable, role, program.clone(), custody)
+                .await
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    tracing::warn!(actor = %durable.actor, %error,
+                        "durable actor program could not be reconstructed");
+                    continue;
+                }
+            };
+            drop(task);
+            let binding = run_root
+                .join(format!(
+                    "{}-{}",
+                    actor.identity().id.0,
+                    actor.identity().incarnation.0
+                ))
+                .join("binding.json");
+            if let Err(error) = copy_interactive_binding(&binding, &thread).await {
+                tracing::warn!(actor = %durable.actor, %error,
+                    "recovered actor binding could not be republished");
+                let _ = actor
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: "recovered conversation binding could not be republished".into(),
+                    })
+                    .await;
+                continue;
+            }
+            recovered_ids.insert(actor.identity().id);
+            recovered.insert(actor.identity(), (durable.actor, thread));
+            progressed = true;
+        }
+        if remaining.is_empty() || !progressed {
+            for record in remaining {
+                tracing::warn!(actor = %record.admission.actor,
+                    "durable actor lineage has an unavailable predecessor");
+            }
+            break;
+        }
+        pending = remaining;
+    }
+    recovered
+}
+
 impl ActorHostConfig {
     /// Whether this run's captured workspace supplies the Jev authoring
     /// surface. Jev is pinned source a project opts into through
@@ -771,6 +1050,18 @@ pub enum ActorHostReadiness {
     Ready {
         root: ActorRef,
         thread: QueueReadyThread,
+    },
+    /// One predecessor conversation was independently verified and attached
+    /// to the same logical actor in this host incarnation.
+    ActorRecovered {
+        predecessor: ActorRef,
+        actor: ActorRef,
+    },
+    /// Durable evidence was insufficient to reconstruct one actor. This is
+    /// reported even when the actor had no native-process directory.
+    ActorUnavailable {
+        predecessor: ActorRef,
+        reason: String,
     },
 }
 
@@ -1575,6 +1866,8 @@ struct InteractiveFleet {
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
     source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
+    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
 #[derive(Clone)]
@@ -1587,6 +1880,8 @@ struct InteractiveLaunchContext {
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
+    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
 pub(crate) async fn run(
@@ -1612,6 +1907,9 @@ pub(crate) async fn run(
     let backend = native_interactive_backend(config.interactive_agent.clone());
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
+    let actor_recovery =
+        tidepool_actor::ActorRecoveryJournal::open(run_root.join("actor-lifecycle.v1.jsonl"))?;
+    let prior_actor_records = actor_recovery.records();
     let (source, root, program) = compile_root(
         &config,
         &run_root,
@@ -1620,42 +1918,44 @@ pub(crate) async fn run(
         source_layers.as_ref(),
     )?;
     let (descriptor, machine, outcome) = root.into_parts();
+    let worktree_admission = fork_workspace_admission(
+        worktrees.clone(),
+        worktree_authority.clone(),
+        bindings.clone(),
+        runtime_namespace(&run_root),
+        Some(NativeForkAdmission {
+            owners: application_owners.clone(),
+            backend: backend.clone(),
+            layout: Some(WorkspaceLayout {
+                run_namespace: runtime_namespace(&run_root),
+                source_root: config.workspace.clone(),
+                source_exclude: config.source_exclude.clone(),
+                root_imports: Arc::default(),
+                worktrees: worktrees.clone(),
+                backend: backend.clone(),
+                base_prompt: FrozenBasePrompt::materialize_selected(
+                    &run_root,
+                    config
+                        .workspace_inputs
+                        .as_ref()
+                        .and_then(|inputs| inputs.prompts.get("core"))
+                        .map(String::as_str),
+                    config.jev_surface(),
+                )?,
+            }),
+        }),
+    );
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
         descriptor.placement().session,
         machine,
-        Some(fork_workspace_admission(
-            worktrees.clone(),
-            worktree_authority.clone(),
-            bindings.clone(),
-            runtime_namespace(&run_root),
-            Some(NativeForkAdmission {
-                owners: application_owners.clone(),
-                backend: backend.clone(),
-                layout: Some(WorkspaceLayout {
-                    run_namespace: runtime_namespace(&run_root),
-                    source_root: config.workspace.clone(),
-                    source_exclude: config.source_exclude.clone(),
-                    root_imports: Arc::default(),
-                    worktrees: worktrees.clone(),
-                    backend: backend.clone(),
-                    base_prompt: FrozenBasePrompt::materialize_selected(
-                        &run_root,
-                        config
-                            .workspace_inputs
-                            .as_ref()
-                            .and_then(|inputs| inputs.prompts.get("core"))
-                            .map(String::as_str),
-                        config.jev_surface(),
-                    )?,
-                }),
-            }),
-        )),
+        Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
         .with_usage_pointers(SHOAL_USAGE_POINTERS)
+        .with_recovery_journal(actor_recovery.clone())
         .with_conversation_reader(conversation_reader(
             application_owners.clone(),
             backend.clone(),
@@ -1666,7 +1966,87 @@ pub(crate) async fn run(
     }
     forest.track_resource_release();
     let forest = Arc::new(forest);
-    let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
+    let recovered_root = durable_root_identity(&prior_actor_records)?;
+    forest
+        .fence_recovery_identities(
+            prior_actor_records
+                .iter()
+                .filter(|record| record.terminal.is_none())
+                .map(|record| record.admission.actor.id)
+                .chain(recovered_root.map(|actor| actor.id)),
+        )
+        .map_err(runtime_error)?;
+    let (mut root_actor, mut root_task) = match recovered_root {
+        Some(identity) => {
+            forest
+                .admit_root_with_identity(descriptor, outcome, identity)
+                .await?
+        }
+        None => forest.admit_root(descriptor, outcome).await?,
+    };
+    let recovered_threads = Arc::new(
+        recover_prior_actors(
+            &forest,
+            &run_root,
+            root_actor.identity(),
+            host_incarnation.incarnation(),
+            &prior_actor_records,
+            program.clone(),
+            config.research_policy,
+            &worktree_admission,
+            config
+                .workspace_inputs
+                .as_ref()
+                .map(|inputs| inputs.identity()),
+        )
+        .await,
+    );
+    let recovered_predecessors = recovered_threads
+        .values()
+        .map(|(predecessor, _)| *predecessor)
+        .collect::<std::collections::BTreeSet<_>>();
+    let unavailable_records = prior_actor_records
+        .iter()
+        .filter(|record| {
+            record.terminal.is_none()
+                && record.admission.actor.id != root_actor.identity().id
+                && !recovered_predecessors.contains(&record.admission.actor)
+        })
+        .map(|record| record.admission.actor)
+        .collect::<Vec<_>>();
+    for predecessor in &unavailable_records {
+        let _ = readiness.send(ActorHostReadiness::ActorUnavailable {
+            predecessor: *predecessor,
+            reason: "durable actor resources or replayable launch state could not be verified"
+                .into(),
+        });
+    }
+    if host_incarnation.incarnation() != tidepool_actor::Incarnation::FIRST {
+        let notice_path = run_root.join("host-recovery-notice.txt");
+        let mut notice = std::fs::read_to_string(&notice_path).unwrap_or_default();
+        let recovered = recovered_threads
+            .iter()
+            .map(|(actor, (predecessor, _))| format!("{predecessor}->{actor}"))
+            .collect::<Vec<_>>();
+        let unavailable = unavailable_records
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        notice.push_str(&format!(
+            " Durable actor reconstruction admitted: {}. Durable actors still unavailable: {}.",
+            if recovered.is_empty() {
+                "none".into()
+            } else {
+                recovered.join(", ")
+            },
+            if unavailable.is_empty() {
+                "none".into()
+            } else {
+                unavailable.join(", ")
+            },
+        ));
+        tidepool_atomic_write::write_durable(&notice_path, notice.as_bytes())?;
+    }
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
     // The run's own layer belongs to the actor that owns the run, named here,
     // before it runs anything. Every other actor is bound as it is admitted.
@@ -1732,6 +2112,8 @@ pub(crate) async fn run(
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
             source_layers,
+            actor_recovery: actor_recovery.clone(),
+            recovered_threads,
         },
         shutdown_rx,
         root_config_rx,
@@ -2581,6 +2963,8 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
         source_layers,
+        actor_recovery,
+        recovered_threads,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -2602,6 +2986,8 @@ async fn run_interactive_applications(
         backend: Arc::clone(&backend),
         worktrees: worktrees.clone(),
         bindings: Arc::clone(&bindings),
+        actor_recovery,
+        recovered_threads: Arc::clone(&recovered_threads),
     };
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
@@ -2754,9 +3140,13 @@ async fn run_interactive_applications(
                             installation.actor.identity().into(),
                             worktree_grant(installation.effective_role.role()),
                         );
-                        let fork_parent_thread = match installation.context_parent {
-                            None => None,
-                            Some(parent) => {
+                        let fork_parent_thread = match (
+                            recovered_threads.contains_key(&installation.actor.identity()),
+                            installation.context_parent,
+                        ) {
+                            (true, _) => None,
+                            (false, None) => None,
+                            (false, Some(parent)) => {
                                 let Some(thread) = deployments
                                     .iter()
                                     .find(|deployment| deployment.actor == parent)
@@ -3162,6 +3552,12 @@ async fn run_interactive_applications(
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                             continue;
                         }
+                        if let Some((predecessor, _)) = recovered_threads.get(&actor) {
+                            let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                                predecessor: *predecessor,
+                                actor,
+                            });
+                        }
                         if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
@@ -3260,6 +3656,14 @@ async fn run_interactive_applications(
                         };
                         if !matches!(deployment.connection, InteractiveConnection::AwaitingBinding) {
                             break Some(format!("interactive application {actor:?} published more than one conversation binding"));
+                        }
+                        if let Err(error) = launch_context.actor_recovery.bind_application(
+                            actor,
+                            thread.id().0.clone(),
+                        ) {
+                            break Some(format!(
+                                "interactive application {actor:?} binding could not be journalled: {error}"
+                            ));
                         }
                         if let Err(error) = retain_input_custody_and_bind(
                             &deployment.service,
@@ -3743,6 +4147,8 @@ async fn launch_prepared_interactive_application(
         backend,
         worktrees,
         bindings: _,
+        actor_recovery,
+        recovered_threads,
     } = context;
     let actor = installation.actor;
     let fork_gate = installation.fork_gate.clone();
@@ -3858,7 +4264,21 @@ async fn launch_prepared_interactive_application(
     } else {
         actor_root.join("binding.json")
     };
-    let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
+    actor_recovery
+        .prepare_application(
+            actor_identity,
+            binding_path.clone(),
+            config
+                .workspace_inputs
+                .as_ref()
+                .map(|inputs| inputs.identity().to_string()),
+        )
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+    let launch_mode = if let Some((_, thread)) = recovered_threads.get(&actor_identity) {
+        InteractiveLaunchMode::Resume(thread.id().clone())
+    } else if let Some(parent) = fork_parent_thread.clone() {
         let boundary = installation
             .fork_boundary
             .as_ref()
@@ -3976,10 +4396,9 @@ async fn launch_prepared_interactive_application(
             launch_effort(&launch_mode, config.effort, installation.fork_effort),
         )
     };
-    let recovery_notice = (actor_identity == root
-        && matches!(launch_mode, InteractiveLaunchMode::Resume(_)))
-    .then(|| std::fs::read_to_string(config.run_root.join("host-recovery-notice.txt")).ok())
-    .flatten();
+    let recovery_notice = matches!(launch_mode, InteractiveLaunchMode::Resume(_))
+        .then(|| std::fs::read_to_string(config.run_root.join("host-recovery-notice.txt")).ok())
+        .flatten();
     let spec = InteractiveAgentSpec {
         shell_tools: tidepool_agent::InteractiveShellTools::Hosted,
         mode: launch_mode,
@@ -6555,6 +6974,46 @@ mod tests {
     };
     use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use tidepool_worktree::WorktreeSpec;
+
+    fn durable_root(actor: ActorRef) -> tidepool_actor::DurableActorRecord {
+        tidepool_actor::DurableActorRecord {
+            admission: tidepool_actor::DurableActorAdmission {
+                actor,
+                label: "shoal-root".into(),
+                creator: None,
+                supervisor_parent: None,
+                context_parent: None,
+                actor_path: None,
+                role: "root".into(),
+                descendant_depth: 8,
+                descendant_active_children: None,
+                model: None,
+                effort: None,
+                instructions: None,
+                launch_worktrees: Vec::new(),
+                source_layer: Vec::new(),
+            },
+            application: None,
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_root_logical_id_and_advances_actor_incarnation() {
+        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let second = ActorRef {
+            id: first.id,
+            incarnation: tidepool_actor::Incarnation(2),
+        };
+        let records = vec![durable_root(first), durable_root(second)];
+        assert_eq!(
+            durable_root_identity(&records).unwrap(),
+            Some(ActorRef {
+                id: first.id,
+                incarnation: tidepool_actor::Incarnation(3),
+            })
+        );
+    }
 
     #[test]
     fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {

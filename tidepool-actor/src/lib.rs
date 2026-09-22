@@ -47,6 +47,7 @@ mod prompt_catalog;
 pub(crate) mod reload_spec_tool;
 mod request;
 pub use request::sources::SourceDelivery;
+mod recovery;
 mod request_effect;
 mod resident_actor;
 mod resident_interactive;
@@ -110,6 +111,10 @@ pub use notification::{
 };
 pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;
+pub use recovery::{
+    ActorRecoveryJournal, DurableActorAdmission, DurableActorApplication, DurableActorRecord,
+    DurableActorTerminal,
+};
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
     DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, ReplyError,

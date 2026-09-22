@@ -1206,6 +1206,42 @@ async fn run_host(
                         "root interactive application ready"
                     );
                 }
+                Some(crate::actor_host::ActorHostReadiness::ActorRecovered { predecessor, actor }) => {
+                    unavailable_actors.retain(|unavailable| {
+                        unavailable
+                            .split_once('-')
+                            .and_then(|(id, _)| id.parse::<u64>().ok())
+                            != Some(predecessor.id.0)
+                    });
+                    match std::fs::read(&options.status_path)
+                        .map_err(Box::<dyn std::error::Error>::from)
+                        .and_then(|bytes| decode_run_status(&bytes))
+                    {
+                        Ok(mut status) if status.host_generation == host_generation => {
+                            status.unavailable_actors = unavailable_actors.clone();
+                            if let Err(error) = write_status(&options.status_path, &status) {
+                                tracing::error!(%error, "could not publish recovered actor status");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "recovered actor became ready before run status could be updated");
+                        }
+                    }
+                    tracing::info!(
+                        predecessor = %predecessor,
+                        actor = %actor,
+                        "actor conversation recovered in a fresh incarnation"
+                    );
+                }
+                Some(crate::actor_host::ActorHostReadiness::ActorUnavailable { predecessor, reason }) => {
+                    let label = format!("{}-{}", predecessor.id.0, predecessor.incarnation.0);
+                    if !unavailable_actors.contains(&label) {
+                        unavailable_actors.push(label);
+                        unavailable_actors.sort();
+                    }
+                    tracing::warn!(actor = %predecessor, %reason, "durable actor remains unavailable");
+                }
                 None => return run.await,
             },
             result = &mut run => return result,
