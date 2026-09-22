@@ -18,13 +18,12 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_error,
-    render_turn_compile_rejection, resident_cell_check_template, resident_workbench_templates,
-    run_inspections, run_turn, run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin,
-    CheckedExpressionPlan, DeclarationReceipt, ExpressionPresentation, InspectionQuery,
-    InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind, TurnRequest,
-    TurnResult,
+    check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
+    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
+    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, CheckedExpressionPlan,
+    DeclarationReceipt, ExpressionPresentation, InspectionQuery, InspectionRequest, OutputSink,
+    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
+    SourceImports, TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -3474,94 +3473,13 @@ fn decode_activation_observation(
     }
 }
 
-fn inspect_rendered_value<H, O, T: FromHaskell>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    type_modules: &[String],
-    expression: &str,
-    renderings: &[String],
-) -> Result<T, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    use tidepool_runtime::session::{
-        assemble_expression_module, ExpressionLift, TemplateSelector, TurnTemplate,
-    };
-    let view = actor_compile_view(session, context, source, type_modules)?;
-    let prepared = source.prepare(&view);
-    let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-    let templates = renderings
-        .iter()
-        .map(|rendering| TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: assemble_expression_module(
-                &preamble,
-                "__result",
-                &context.haskell_effects_alias,
-                rendering,
-                ExpressionLift::Pure,
-            ),
-        })
-        .collect::<Vec<_>>();
-    let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let retained = session.prepared_retained();
-    let result = run_turn(TurnRequest {
-        turn_text: expression,
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &prepared.injected,
-        gen: view.next_value_generation().0,
-        verdict: Some(TurnClassification {
-            kind: TurnKind::Expr,
-            binders: Vec::new(),
-            items: Vec::new(),
-        }),
-        target: None,
-        retained_imports: &retained,
-    })
-    .map_err(|failure| {
-        ResidentActorWorkbenchError::Inspection(render_turn_compile_error(
-            &failure.error,
-            failure.attempted_source.as_deref(),
-            expression,
-            "<inspection>",
-        ))
-    })?;
-    let TurnResult::Expr { compiled, .. } = result else {
-        return Err(ResidentActorWorkbenchError::Inspection(
-            "preview did not compile as an expression".into(),
-        ));
-    };
-    match session
-        .run_inspection_with_sites(compiled.into_code())
-        .map_err(ResidentActorWorkbenchError::Resident)?
-    {
-        ResidentOutcome::Completed { result, .. } => {
-            // A bounded observation cuts what it cannot afford to materialize
-            // and marks the cut. That is a size answer, not a shape one, so
-            // report it as such rather than letting the decoder call it a type
-            // mismatch.
-            if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
-                return Err(ResidentActorWorkbenchError::Inspection(format!(
-                    "reading {expression} exceeded the observation budget; only a selection of it \
-                     could be materialized"
-                )));
-            }
-            T::from_value(result.value(), result.table())
-                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))
-        }
-        _ => Err(ResidentActorWorkbenchError::Inspection(
-            "pure preview unexpectedly suspended".into(),
-        )),
-    }
-}
-
-/// Build a retained page from an already captured result. The two small
-/// generated bindings contain no authored effects: page construction is pure,
-/// and publishing its alias shares the page's existing custody.
+/// Build and present a retained page from an already captured result.
+///
+/// Page construction, the strict metadata tuple, and the fresh `cellDisplay`
+/// identity compile as one generated three-binder turn.  The resident session
+/// binds the page before it forces metadata, then publishes the alias through
+/// its existing captured-alias path.  Thus a renderer failure still leaves the
+/// observation available without running the expression again.
 fn render_cell_observation<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -3582,6 +3500,7 @@ where
             .next_value_generation()
             .0
     );
+    let metadata_name = format!("__tidepoolDisplayMetadata{}", session.val_gen().0);
     let keys = presented
         .iter()
         .map(|key| {
@@ -3599,12 +3518,22 @@ where
         ExpressionPresentation::Rendered => rendered,
         ExpressionPresentation::Opaque => opaque,
     };
+    // `T.copy` is load-bearing. `renderTree` may return a slice into a large
+    // Text backing array, while the host should retain only the bounded page
+    // it presents.
     let block = ParsedBlock {
         ordinal: 1,
         total: 1,
         source: format!(
-            "{page_name} <- pure (({rendering}) :: TidepoolInspection.DisplayPage {})",
-            context.haskell_effects_alias
+            "({page_name}, {metadata_name}, cellDisplay) <- do {{\n\
+             {page_name} <- pure (({rendering}) :: TidepoolInspection.DisplayPage {});\n\
+             {metadata_name} <- pure (T.copy (TidepoolInspection.text {page_name}), \
+             TidepoolInspection.pageHasMore {page_name}, \
+             TidepoolInspection.pageUnavailable {page_name});\n\
+             cellDisplay <- pure {page_name};\n\
+             pure ({page_name}, {metadata_name}, cellDisplay)\n\
+             }}",
+            context.haskell_effects_alias,
         ),
     };
     let ready = match compile_block(
@@ -3615,7 +3544,11 @@ where
         type_modules,
         &block,
         None,
-        Some(&generated_bind_verdict(&page_name)),
+        Some(&generated_binds_verdict(&[
+            page_name.clone(),
+            metadata_name.clone(),
+            "cellDisplay".into(),
+        ])),
     )? {
         CompiledBlock::Ready(ready) => ready,
         CompiledBlock::Rejected(diagnostic) => {
@@ -3627,82 +3560,34 @@ where
     } = ready.result
     else {
         return Err(ResidentActorWorkbenchError::Inspection(
-            "display page did not produce a binding".into(),
+            "display bundle did not produce bindings".into(),
         ));
     };
-    let [page] = bound.as_slice() else {
+    let [page, metadata, cell_display] = bound.as_slice() else {
         return Err(ResidentActorWorkbenchError::Inspection(
-            "display page must bind exactly one value".into(),
+            "display bundle must bind page, metadata, and alias".into(),
         ));
     };
-    let outcome = session
-        .run_observation_with_sites(compiled.into_code(), page, ready.generation, false)
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-    if !matches!(outcome, ResidentOutcome::Completed { .. }) {
-        return Err(ResidentActorWorkbenchError::Inspection(
-            "pure display page construction unexpectedly suspended".into(),
+    if page.name != page_name
+        || metadata.name != metadata_name
+        || cell_display.name != "cellDisplay"
+    {
+        return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+            "display bundle returned compiler binders in an unexpected order".into(),
         ));
     }
-    let lease = session.lease_bindings(&[tidepool_repr::VarId(page.var_id)]);
-    // `T.copy` is load-bearing, not decoration. A page's text is built by
-    // `renderTree`, which ends in `T.concat`, and `T.concat` of a single piece
-    // is the identity — so displaying one big `Text` hands back a SLICE
-    // (`Text ByteArray# off len`) of the whole value's backing array. The host
-    // then has to copy that entire array to read the allowance-sized window,
-    // and a value past the observation budget could never be displayed at all,
-    // however small its bounded rendering was. Crossing a copy means the host
-    // pays for what it shows.
-    let metadata = format!("(T.copy (TidepoolInspection.text {page_name}), TidepoolInspection.pageHasMore {page_name}, TidepoolInspection.pageUnavailable {page_name})");
-    let (text, more, unavailable): (String, bool, bool) = inspect_rendered_value(
-        session,
-        context,
-        source,
-        type_modules,
-        &metadata,
-        std::slice::from_ref(&metadata),
-    )?;
-    let alias_block = ParsedBlock {
-        ordinal: 1,
-        total: 1,
-        source: format!("cellDisplay <- pure {page_name}"),
-    };
-    let alias = match compile_block(
-        session,
-        context,
-        source,
-        &context.haskell_effects_alias,
-        type_modules,
-        &alias_block,
-        None,
-        Some(&generated_bind_verdict("cellDisplay")),
-    )? {
-        CompiledBlock::Ready(ready) => ready,
-        CompiledBlock::Rejected(diagnostic) => {
-            return Err(ResidentActorWorkbenchError::Inspection(diagnostic.output))
-        }
-    };
-    let TurnResult::Bind { bound: aliases, .. } = alias.result else {
-        return Err(ResidentActorWorkbenchError::Inspection(
-            "display alias did not produce a binding".into(),
-        ));
-    };
-    let [cell_display] = aliases.as_slice() else {
-        return Err(ResidentActorWorkbenchError::Inspection(
-            "display alias must bind exactly one value".into(),
-        ));
-    };
-    // All authored items already pin the previous display identity. Publishing at
-    // each successful display therefore preserves that lexical view while
-    // making the display part of the committed prefix, including cancellation.
-    session
-        .publish_captured_alias_in(
-            context.placement.lexical_scope,
-            tidepool_repr::SessionVarId::from_extract(page.var_id),
+    let bundle = session
+        .run_display_bundle_with_sites(
+            compiled.into_code(),
+            page,
+            metadata,
             cell_display,
-            alias.generation,
-            &lease,
+            ready.generation,
         )
         .map_err(ResidentActorWorkbenchError::Resident)?;
+    let (text, more, unavailable): (String, bool, bool) =
+        FromHaskell::from_value(bundle.result().value(), bundle.result().table())
+            .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))?;
     let mut output = text;
     if more {
         // A partial view must never read as the whole one. Say that it is a
@@ -6658,7 +6543,12 @@ where
                 ready: PreparedCellStep::Executable(Box::new(ready)),
             });
         }
-        let dependencies = session.lease_bindings(&[]);
+        // Later items were compiled against this cell's starting value
+        // environment. Keep those exact identities alive until the prepared
+        // prefix finishes, even when an earlier item's display publication
+        // shadows one of their public names.
+        let visible = session.visible_binding_ids_in(context.placement.lexical_scope);
+        let dependencies = session.lease_bindings(&visible);
         Ok(PreparedCell::Ready {
             items: result,
             dependencies,
@@ -6742,9 +6632,16 @@ fn cell_check_evidence(
 /// generator already knows — so a generated block states its shape instead of
 /// asking. Authored source still classifies; only these fixed shapes skip it.
 fn generated_bind_verdict(binder: &str) -> TurnClassification {
+    generated_binds_verdict(&[binder.to_string()])
+}
+
+/// The verdict for a generated pattern bind.  The compiler owns each name's
+/// stable identity and type; Rust supplies only the fixed tuple shape that it
+/// just generated.
+fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
     TurnClassification {
         kind: TurnKind::Bind,
-        binders: vec![binder.to_string()],
+        binders: binders.to_vec(),
         items: Vec::new(),
     }
 }

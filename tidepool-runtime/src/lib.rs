@@ -335,6 +335,9 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
         PreparedRun::Projected { .. } => {
             unreachable!("SettlePlan::Observe never produces a projected run")
         }
+        PreparedRun::Display { .. } => {
+            unreachable!("SettlePlan::Observe never produces a display bundle")
+        }
     }
 }
 

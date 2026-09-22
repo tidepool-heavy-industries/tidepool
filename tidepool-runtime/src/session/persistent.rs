@@ -24,6 +24,31 @@ use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
     SourceImports,
 };
+
+/// Render the unqualified imports for the exact names visible from each live
+/// value interface. A generated `Val.G` module can export helpers that have
+/// not entered the binding table yet, so importing the module wholesale would
+/// publish those helpers through later declaration modules.
+fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
+    let mut grouped = Vec::<(SessionModule, Vec<String>)>::new();
+    for (name, module) in entries {
+        if let Some((_, names)) = grouped.iter_mut().find(|(key, _)| *key == module) {
+            names.push(name);
+        } else {
+            grouped.push((module, vec![name]));
+        }
+    }
+    grouped.sort_by_key(|(module, _)| module.module_name());
+    grouped
+        .into_iter()
+        .map(|(module, mut names)| {
+            names.sort();
+            names.dedup();
+            format!("{} ({})", module.module_name(), names.join(", "))
+        })
+        .collect()
+}
+
 /// Cross-thread custody for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
 /// and is taken only after the session returns to its owning thread.
@@ -505,12 +530,31 @@ impl PersistentSession {
             return None;
         }
         let lib = self.lib.as_ref()?;
-        let visible_values = self
+        let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
+            .collect::<Vec<_>>();
+        let visible_values = visible_entries
+            .iter()
             .map(|(_, entry)| entry.module)
             .collect();
+        // A value interface may carry generated helpers beside its published
+        // binder. Keep the exact visible names so source compilation imports
+        // only bindings that reached the value plane. This deliberately uses
+        // a tiny vector: `SessionModule` has identity equality, not an
+        // ordering contract, and a scope normally has few live modules.
+        let mut visible_value_names = Vec::<(SessionModule, Vec<String>)>::new();
+        for (name, entry) in &visible_entries {
+            if let Some((_, names)) = visible_value_names
+                .iter_mut()
+                .find(|(module, _)| *module == entry.module)
+            {
+                names.push(name.0.clone());
+            } else {
+                visible_value_names.push((entry.module, vec![name.0.clone()]));
+            }
+        }
         let injected_values = self.bindings.live_modules().collect();
         let mut shadowing = lib
             .current_declarations_in(scope)
@@ -533,6 +577,7 @@ impl PersistentSession {
                 persistent_imports: self.workbench_imports_in(scope),
                 library: lib.current_module_in(scope),
                 visible_values,
+                visible_value_names,
                 injected_values,
                 next_value_generation: self.val_gen.next(),
                 shadowing,
@@ -637,7 +682,7 @@ impl PersistentSession {
             .iter()
             .flat_map(super::ExportItem::all_names)
             .collect::<Vec<_>>();
-        let visible_values = self
+        let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
@@ -646,14 +691,16 @@ impl PersistentSession {
                     .iter()
                     .any(|replaced| replaced == &name.0.as_str())
             })
+            .collect::<Vec<_>>();
+        let visible_values = visible_entries
+            .iter()
             .map(|(_, entry)| (entry.id, entry.module.module_name()))
             .collect::<Vec<_>>();
-        let mut import_modules = visible_values
-            .iter()
-            .map(|(_, module)| module.clone())
-            .collect::<Vec<_>>();
-        import_modules.sort();
-        import_modules.dedup();
+        let import_modules = value_import_specs(
+            visible_entries
+                .iter()
+                .map(|(name, entry)| (name.0.clone(), entry.module)),
+        );
         lib.stage_batch_with_receipt_and_vals_in(
             scope,
             &persistent_imports,
@@ -1025,15 +1072,21 @@ impl PersistentSession {
         // their old Val modules unqualified while GHC validates it.  Keep them
         // injected: already-compiled fragments may still need their ifaces,
         // but they are not visible providers in this new source turn.
-        let (captured_values, mut import_modules): (Vec<_>, Vec<_>) = self
+        let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
             .filter(|(name, _)| !replaced_set.contains(name.0.as_str()))
-            .map(|(_, entry)| (entry.id.var(), entry.module.module_name()))
-            .unzip();
-        import_modules.sort();
-        import_modules.dedup();
+            .collect::<Vec<_>>();
+        let captured_values = visible_entries
+            .iter()
+            .map(|(_, entry)| entry.id.var())
+            .collect::<Vec<_>>();
+        let import_modules = value_import_specs(
+            visible_entries
+                .iter()
+                .map(|(name, entry)| (name.0.clone(), entry.module)),
+        );
         let inject_modules = self.live_val_modules();
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let generation = self

@@ -136,6 +136,11 @@ pub struct SessionCompileView {
     pub(super) persistent_imports: SourceImports,
     pub(super) library: Option<SessionModule>,
     pub(super) visible_values: Vec<SessionModule>,
+    /// Names visible from each value interface.  A generated interface can
+    /// carry helper binders beside its published value; importing its whole
+    /// module would accidentally expose those helpers before the value plane
+    /// commits them.
+    pub(super) visible_value_names: Vec<(SessionModule, Vec<String>)>,
     pub(super) injected_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
@@ -145,6 +150,12 @@ pub struct SessionCompileView {
 impl SessionCompileView {
     pub(super) fn canonicalize(mut self) -> Self {
         sort_modules(&mut self.visible_values);
+        self.visible_value_names
+            .sort_by_key(|(module, _)| module.module_name());
+        for (_, names) in &mut self.visible_value_names {
+            names.sort();
+            names.dedup();
+        }
         sort_modules(&mut self.injected_values);
         self
     }
@@ -231,9 +242,17 @@ impl SessionCompileView {
             .into_iter()
             .map(|name| super::ExportItem::Value { name })
             .collect::<Vec<_>>();
+        let visible_names = names
+            .iter()
+            .filter_map(|item| match item {
+                super::ExportItem::Value { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         self.hide_staged_names(&names);
         self.shadowing.extend(names);
         self.visible_values.push(module);
+        self.visible_value_names.push((module, visible_names));
         self.injected_values.push(module);
         self.next_value_generation = module.gen().next();
         self.canonicalize()
@@ -268,6 +287,41 @@ impl SessionCompileView {
         }
     }
 
+    fn visible_value_import(&self, module: SessionModule) -> String {
+        let Some((_, names)) = self
+            .visible_value_names
+            .iter()
+            .find(|(candidate, _)| *candidate == module)
+        else {
+            return self.staged_import(module);
+        };
+        let hidden = self
+            .staged_hiding
+            .iter()
+            .find(|(key, _)| *key == module)
+            .map(|(_, hidden)| hidden.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let names = names
+            .iter()
+            .filter(|name| {
+                !hidden.iter().any(|item| {
+                    matches!(item, super::ExportItem::Value { name: hidden } if hidden == *name)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let module_name = module.module_name();
+        if names.is_empty() {
+            return format!("qualified {module_name}");
+        }
+        let unqualified = format!("{module_name} ({})", names.join(", "));
+        if hidden.is_empty() {
+            unqualified
+        } else {
+            format!("{unqualified}\nqualified {module_name}")
+        }
+    }
+
     /// External imports plus this scope's current declaration and value
     /// modules, ready for a turn template.
     #[must_use]
@@ -280,7 +334,7 @@ impl SessionCompileView {
             specs.extend_text(&self.staged_import(module));
         }
         for module in &self.visible_values {
-            specs.extend_text(&self.staged_import(*module));
+            specs.extend_text(&self.visible_value_import(*module));
         }
         specs.template_text()
     }
@@ -323,6 +377,7 @@ mod tests {
             persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
             library: Some(SessionModule::lib(Generation(3))),
             visible_values: vec![SessionModule::val(Generation(5))],
+            visible_value_names: Vec::new(),
             injected_values: vec![
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(5)),
@@ -359,6 +414,7 @@ mod tests {
             persistent_imports: SourceImports::default(),
             library: None,
             visible_values: vec![SessionModule::val(Generation(5))],
+            visible_value_names: Vec::new(),
             injected_values: vec![SessionModule::val(Generation(5))],
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
