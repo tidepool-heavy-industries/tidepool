@@ -329,9 +329,9 @@ impl HostCommand {
 pub enum HostDirectory {
     /// An explicit directory the command itself named.
     Requested(PathBuf),
-    /// The worktree this actor holds custody of.
+    /// The worktree this actor owns through its lease.
     Custody(PathBuf),
-    /// No custody and no request: the checkout the run was launched from.
+    /// No worktree lease and no request: the checkout the run was launched from.
     Source(PathBuf),
 }
 

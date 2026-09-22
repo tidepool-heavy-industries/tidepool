@@ -40,7 +40,7 @@ pub struct EffectDecl {
     /// surface (`eval_import_lines`) — e.g. `Exec` needs `Tidepool.Shell`/
     /// `Tidepool.Cargo` (its helpers build on `runArgv`), `Git` needs
     /// `Tidepool.Git`, `AskUser` needs `Tidepool.Form` (built on
-    /// `askUserRaw`). Emitted by both the stmt/eval plane
+    /// `askUserRaw`). Emitted by both the statement and evaluation modules
     /// (`preamble::pragmas_and_imports`) and the persistent declaration environment
     /// (`preamble::session_decl_module_env`) via ONE fold over the effect
     /// list, in list order — the single source for what used to be two

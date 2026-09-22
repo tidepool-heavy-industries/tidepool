@@ -710,7 +710,7 @@ impl MachineState {
     /// reason every later entry and observation is refused. A reusable
     /// cause never reaches the latch, so an observation between two calls
     /// (`inspect_outer`) cannot read back a stale `Cancelled` or
-    /// `UnresolvedCallee` from an unrelated realm's earlier call.
+    /// `UnresolvedCallee` from an unrelated resource scope's earlier call.
     fn record_first_cause(&self, cause: RuntimeError, exception: Option<*mut u8>) {
         let disposition = cause.machine_disposition();
         if disposition == MachineDisposition::Unavailable {

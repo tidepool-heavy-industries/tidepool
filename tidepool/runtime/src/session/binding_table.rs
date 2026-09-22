@@ -1,4 +1,4 @@
-//! Incremental indexes over the session's [`BindingTable`] value plane.
+//! Incremental indexes over the session's [`BindingTable`] persistent binding store.
 //!
 //! `tidepool_codegen::binding_table::BindingTable` is a flat, globally-keyed
 //! store; it answers "is this id live" in O(1) but has no cheap answer to
@@ -62,7 +62,7 @@ struct PreparedCandidate {
     id: SessionVarId,
 }
 
-/// Per-session indexes over the value plane, maintained incrementally by
+/// Per-session indexes over the persistent binding store, maintained incrementally by
 /// [`super::persistent::PersistentSession`] alongside every bind and
 /// eviction. Never constructed or mutated anywhere else.
 #[derive(Default)]

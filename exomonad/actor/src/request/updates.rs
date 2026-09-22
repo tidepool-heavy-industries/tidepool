@@ -1,4 +1,4 @@
-//! Presentation custody for updates to an exact existing request.
+//! Ownership of presentation updates for an exact existing request.
 use std::sync::Arc;
 use std::{fmt, num::NonZeroU64};
 
@@ -179,7 +179,7 @@ impl RequestUpdateReconciler {
     }
 }
 
-/// Linear custody of an in-flight presentation. Its existence fences reply
+/// Linear ownership of an in-flight presentation. Its existence fences reply
 /// settlement and cancellation acknowledgement; requesting cancellation and actor
 /// retirement remain possible. Dropping it
 /// without backend evidence leaves an explicit unconfirmed state.
@@ -219,7 +219,7 @@ impl RequestUpdatePresentation {
     }
 
     fn finish(&mut self, outcome: PresentationOutcome) {
-        // Emit at the custody owner so missing applications, backend errors and
+        // Emit at the owning actor so missing applications, backend errors and
         // dropped presentation tasks all retain the same exact correlation.
         let actor = self.delivery.target;
         let request = self.delivery.id.request;

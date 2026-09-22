@@ -13,7 +13,7 @@
 //! Later turns see prior declarations by importing `Tidepool.Session.Lib.G<g>`
 //! through the batch-compile pipeline ([`crate::compile_haskell`]) with the
 //! session dir on the include path at highest precedence. The value and type
-//! planes are handled elsewhere; this module is a standalone, usable
+//! persistent stores are handled elsewhere; this module is a standalone, usable
 //! declaration REPL on its own.
 
 mod binding_table;
@@ -118,7 +118,7 @@ pub use turn::{
 ///
 /// This is an observation, not admission authority: the next operation must
 /// still acquire the registry checkout and pass the machine's own reuse guard.
-/// Source-only recovery is a separate declaration-plane transition and never
+/// Source-only recovery is a separate declaration-environment transition and never
 /// changes an unavailable machine into a reusable one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentSessionState {
@@ -632,7 +632,7 @@ impl SessionLib {
     #[must_use]
     pub fn decl_value_names_in(&self, scope: ScopeId) -> Vec<&str> {
         // Latest-wins with retraction: a name removed by a later retraction turn
-        // (its binding migrated to the value plane) is no longer a persistent declaration environment
+        // (its binding migrated to the persistent binding store) is no longer a persistent declaration environment
         // value, so it drops out.
         let mut live: Vec<&str> = Vec::new();
         for g in self.log.chain_from_root(self.scope_tip(scope)) {
@@ -924,7 +924,7 @@ impl SessionLib {
 
     /// Commit normalized source using the exact GHC receipt returned by
     /// [`Self::declaration_receipt`]. Keeping receipt acquisition separate from
-    /// mutation lets [`PersistentSession`] derive value-plane eviction and
+    /// mutation lets [`PersistentSession`] derive binding-store eviction and
     /// validation imports from the same facts before this atomic commit.
     pub(crate) fn define_batch_with_receipt_and_vals_in(
         &mut self,
@@ -1116,11 +1116,11 @@ impl SessionLib {
     }
 
     /// Retract `name` from the persistent declaration environment: after its binding migrates to the
-    /// value plane, the decl module must stop exporting it, or a later
+    /// persistent binding store, the declaration module must stop exporting it, or a later
     /// `let`/`def` would compile against the stale decl (a value bound
     /// `findings <- pure []` then rebound `findings <- pure (findings ++ xs)`
     /// otherwise leaves `findings = []` defined forever). The dual of
-    /// `tidepool-repl`'s value-plane eviction — call it when a persistent declaration environment name is
+    /// `tidepool-repl`'s binding-store eviction — call it when a persistent declaration environment name is
     /// materialized.
     ///
     /// No-op when `name` is not a current decl head. Otherwise appends a

@@ -18,7 +18,7 @@
 -- present, via @extra_imports_for!(Ask)@ in
 -- @bridge/mcp/src/effect_defs.rs@) forced every Ask-only roster to also
 -- resolve @Llm@'s GADT just to typecheck that one file — a regression an
--- Ask-without-Llm roster (e.g. any @tidepool-repl@ decl-plane test) tripped
+-- Ask-without-Llm roster (e.g. any @tidepool-repl@ declaration-environment test) tripped
 -- over. This module gets its OWN @extra_imports_for!(Llm)@ arm instead, so it
 -- is only ever compiled on a roster that actually has @Llm@.
 module Tidepool.Llm

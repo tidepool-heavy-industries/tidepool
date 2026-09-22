@@ -218,13 +218,13 @@ impl Default for SessionRunContext {
     }
 }
 
-/// Exclusive custody of one machine-rooted value.
+/// Exclusive owned handle for one machine-rooted value.
 ///
-/// The session creates custody when a finalized value leaves a parked frame.
+/// The session creates this handle when a finalized value leaves a parked frame.
 /// Consuming operations may deliver it once, adopt it into a binding, move it
 /// to another resource scope, or discard it. Raw [`ValueHandle`] access stays
 /// inside this module, so external callers cannot duplicate an ownership
-/// token through a numeric ID. Dropping custody queues its root for release
+/// token through a numeric ID. Dropping the handle queues its root for release
 /// at the next mutable entry into its originating session; resource-scope or
 /// machine teardown remains the final cleanup backstop if the session is
 /// never entered again.
@@ -238,12 +238,12 @@ pub struct RootCustody {
     /// `true` when this token ALIASES a handle another owner (a live
     /// binding, at present -- see [`ResidentSession::prepared_binding_handle`])
     /// already keeps rooted, rather than exclusively owning it. An ordinary
-    /// (non-shared) custody's whole contract is "abandon it and its root is
+    /// (non-shared) handle's whole contract is "abandon it and its root is
     /// released" -- exactly wrong for an alias, since abandoning the ALIAS
     /// must not touch the root the other owner still needs. Sharing only
     /// changes what an unconsumed drop does; every consuming operation
     /// (delivery, mount, discard) behaves exactly as it does for an
-    /// exclusive custody.
+    /// exclusive ownership.
     shared: bool,
 }
 
@@ -311,9 +311,9 @@ impl Drop for RootCustody {
 }
 
 /// Retains exact binding identities while compiled work waits to execute.
-/// Drop uses the session's custody cleanup queue, including cancellation before
+/// Drop uses the session's handle cleanup queue, including cancellation before
 /// prepared work is returned. Reclamation occurs on the next session entry or
-/// at teardown, as it does for dropped value custody.
+/// at teardown, as it does for a dropped value handle.
 #[must_use]
 #[derive(Debug)]
 pub struct BindingLease {
@@ -375,7 +375,7 @@ struct CustodyTransfer {
     committed: bool,
     /// Carried from the source [`RootCustody`] — see that type's `shared`
     /// field doc. A transfer that fails before `commit` drops uncommitted,
-    /// same as an ordinary abandoned custody, so this must agree.
+    /// same as an ordinary abandoned handle, so this must agree.
     shared: bool,
 }
 
@@ -413,7 +413,7 @@ impl Drop for CustodyTransfer {
 /// A parked turn's own completion obligation, carried on the token
 /// [`ResidentSession::run_with_sites`]/[`ResidentSession::run_bind_with_sites`]/[`ResidentSession::run_rooted_entry`]
 /// hand back on suspension: a value turn's hole needs nothing extra to resume;
-/// a binding turn's hole must materialize its binder into the value plane on
+/// a binding turn's hole must materialize its binder into the persistent binding store on
 /// completion; and a projected hole must atomically materialize every
 /// GHC-reported pattern binder. Binding
 /// obligations retain the SAME binder metadata, generation, and lexical scope
@@ -527,7 +527,7 @@ impl ResidentHole {
     /// this API otherwise hands back. NOT a backdoor around the
     /// completion-obligation guarantee: the one failure mode this type
     /// exists to prevent — a `Binding` hole silently resumed as `Plain`,
-    /// dropping its value-plane materialization — is still impossible
+    /// dropping its binding-store materialization — is still impossible
     /// through this constructor, because it can only ever produce `Plain`.
     /// There is no way to fabricate a `Binding` hole from a bare string; a
     /// real suspension through `run_bind` is the only source of one.
@@ -591,7 +591,7 @@ pub enum ResidentOutcome {
 
 /// The rendered metadata from one compiler-produced display bundle.
 ///
-/// The page itself is installed in the value plane before this metadata is
+/// The page itself is installed in the persistent binding store before this metadata is
 /// forced.  Consequently a renderer failure leaves the captured observation
 /// available to the caller, while the compiler-provided `cellDisplay` alias is
 /// only published after metadata observation succeeds.
@@ -648,7 +648,7 @@ pub enum ResidentError {
     #[error(transparent)]
     ProgramProvenance(#[from] ProgramProvenanceError),
     /// A persistent declaration environment operation failed while materializing a value bind — the
-    /// cross-plane shadow retract (a value bind evicting a same-name decl head).
+    /// cross-store shadow retract (a value bind evicting a same-name declaration head).
     #[error(transparent)]
     Session(#[from] SessionError),
     /// The prepared engine refused or failed the turn.
@@ -708,7 +708,7 @@ impl ResidentError {
 enum PreparedTurnMode<'a> {
     /// Observe the value and return it as the turn's result.
     Value,
-    /// Observe the value and bind it into the value plane as `binder`.
+    /// Observe the value and bind it into the persistent binding store as `binder`.
     Binding {
         binder: &'a BoundBinder,
         generation: Generation,
@@ -799,13 +799,13 @@ pub(crate) enum SettlePlan {
     Project(Vec<ValueTier>),
     /// Project a compiler-generated `(page, metadata, alias)` tuple.  Only
     /// the page receives the normal bind-tier forcing here; metadata remains
-    /// lazy until the page has entered the value plane.
+    /// lazy until the page has entered the persistent binding store.
     Display(ValueTier),
 }
 
 /// Run `program`'s settled scaffold on the eval thread and finish it there:
 /// a completed value is prepared under `plan`, a suspension is parked under
-/// `park`. The invocation's realm cancel flag governs the run and any forcing
+/// `park`. The invocation's resource-scope cancellation flag governs the run and any forcing
 /// observation.
 fn settle_prepared<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
@@ -1139,7 +1139,7 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
 }
 
 /// A resident JIT session: one long-lived [`PreparedEngine`] whose heap and
-/// effect-plane state persist across turns.
+/// effect state persist across turns.
 ///
 /// Generic over the effect handler stack `H` and the output sink `O` so it
 /// stays below the server crate that owns the concrete buffer, exactly like
@@ -1147,7 +1147,7 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
     /// The shared persistent session state (machine + accumulated table + the two
-    /// planes). The harness does not (yet) accumulate on the decl/value planes —
+    /// stores). The harness does not (yet) accumulate declarations or value bindings —
     /// they sit empty here until enabled — but the machine lifecycle + table
     /// merge + fragment-run primitives all live in the session state, shared with the
     /// repl's resident session.
@@ -1177,7 +1177,7 @@ pub struct ResidentSession<H, O> {
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
-    /// Deferred releases produced when affine custody is dropped away from a
+    /// Deferred releases produced when an affine handle is dropped away from a
     /// machine checkout. The next mutable session entry settles them.
     custody_cleanup: Arc<CustodyCleanup>,
 }
@@ -1221,7 +1221,7 @@ where
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
     /// `Session::define_scoped`): a declaration turn appends to the gen-versioned
     /// `Lib.G<g>` module a later turn imports. Requires a persistent declaration environment (`Some(lib)`
-    /// at bootstrap). Each node's plane is independent, so a parent's accumulated
+    /// at bootstrap). Each node's declaration environment is independent, so a parent's accumulated
     /// declarations survive across a child run on a different node.
     pub fn define_scoped(
         &mut self,
@@ -1601,7 +1601,7 @@ where
     /// surviving frame ids — the machine is the ground truth, so holes whose
     /// frames the close dropped disappear here too, and sibling realms'
     /// holes are untouched. Returns `(frames_dropped, handles_released)`;
-    /// `(0, 0)` when the machine is not yet booted or the realm owns
+    /// `(0, 0)` when the machine is not yet booted or the resource scope owns
     /// nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.settle_dropped_custody();
@@ -1668,11 +1668,11 @@ where
     /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
     /// the frame's OWN realm: mint the handle owned by `realm` instead (a
     /// green thread's `AsyncDoneWith` payload, owned by the SESSION's realm
-    /// so a waiter's handle survives the thread's own realm later closing —
+    /// so a waiter's handle survives the thread's own resource scope later closing —
     /// see [`ResidentSession::run_rooted_entry`]). Same
     /// frame-stays-parked semantics; `None` under the same conditions.
     /// Returns a [`RootCustody`] token, exactly as [`Self::live_payload_handle`]
-    /// does: minting under a different realm changes WHO owns the root, never
+    /// does: minting under a different resource scope changes WHO owns the root, never
     /// whether the handle needs consuming exactly once.
     pub fn live_payload_handle_owned_by(
         &mut self,
@@ -1755,12 +1755,12 @@ where
     /// turn a suspended bind into a plain fragment.
     ///
     /// Takes the [`RootCustody`] token by value — this IS the consuming half
-    /// of the custody crossing (see that type's doc): the delivery itself
+    /// of the owned-handle crossing (see that type's doc): the delivery itself
     /// does not release the handle from the machine's own registry (a resume
     /// is a scope-owned BORROW at the machine layer, same as `observe_handle`),
     /// so without the token nothing at this layer stops a caller from also
     /// mounting the same raw handle. The token is unwrapped once, here, at
-    /// the moment its custody is spent.
+    /// the moment its handle is spent.
     pub fn resume_handle(
         &mut self,
         hole: ResidentHole,
@@ -1771,7 +1771,7 @@ where
     }
 
     /// [`Self::resume_handle`] retaining whether the parked frame consumed
-    /// the delivered custody before a failure.
+    /// the delivered handle before a failure.
     pub fn resume_handle_classified(
         &mut self,
         hole: ResidentHole,
@@ -1829,16 +1829,16 @@ where
     /// without evaluating a throwaway placeholder of that type.
     ///
     /// `run_turn` writes the binder's thin `Val.G<gen>` interface and returns
-    /// its exact identity. This operation joins that type-plane identity to a
+    /// its exact identity. This operation joins that type-module identity to a
     /// same-typed in-heap value supplied under affine custody. It is the mount
     /// path for actor inputs and messages: the authoritative value already
     /// exists, so running `undefined`, a guessed inhabitant, or a second copy
     /// merely to create the binding would be both wasteful and semantically
     /// wrong.
     ///
-    /// Validation and table merge happen before custody is consumed. On
+    /// Validation and table merge happen before ownership transfers. On
     /// success ownership transfers from the handle registry to the scoped
-    /// value plane exactly once.
+    /// persistent binding store exactly once.
     pub fn mount_compiled_binding_in(
         &mut self,
         scope: ScopeId,
@@ -2287,7 +2287,7 @@ where
     }
 
     /// Borrow a retained value as the final field of a typed constructor.
-    /// The caller keeps custody alive through resumption; the resulting heap
+    /// The caller keeps the handle alive through resumption; the resulting heap
     /// value has ordinary Haskell reachability independent of that root.
     pub fn resume_framed_custody(
         &mut self,
@@ -2405,7 +2405,7 @@ where
     /// accounting read: a handle minted over a finalize payload
     /// ([`Self::live_payload_handle`]) counts here until a compiled-binding mount
     /// ([`Self::mount_compiled_binding_in`]), an ordinary bind completion, or
-    /// a realm close releases it.
+    /// a resource-scope close releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
         self.state.value_handle_count()
@@ -2422,7 +2422,7 @@ where
         self.state.heap_stats()
     }
 
-    /// The CURRENT value-plane binding names (newest gen per name) — what a
+    /// The CURRENT persistent binding names (newest gen per name) — what a
     /// machine rotation would lose (enumerated, legible loss, never silent).
     pub fn binding_names(&self) -> Vec<String> {
         self.state
@@ -2455,7 +2455,7 @@ where
         self.state.mint_isolated_scope()
     }
 
-    /// The value-plane names visible at `scope`: its own mutable frame over
+    /// The persistent binding names visible at `scope`: its own mutable frame over
     /// the immutable inherited tip captured when the scope was minted.
     /// `binding_names_in(ScopeId::ROOT)` is [`Self::binding_names`]'s set.
     pub fn binding_names_in(&self, scope: ScopeId) -> Vec<String> {
@@ -2600,7 +2600,7 @@ where
         self.state.parked_count()
     }
 
-    /// Retire `scope` and its subtree: drop their value-plane frames and
+    /// Retire `scope` and its subtree: drop their binding-store frames and
     /// release the GC roots those bindings solely owned. See
     /// [`PersistentSession::retire_scope`] for the sole-ownership rule and the
     /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
@@ -2671,7 +2671,7 @@ where
     /// The prepared arm of every resident turn: install the turn's program
     /// against the session's live prepared bindings, run its settled scaffold
     /// on the eval thread, and either return the observed value, bind it
-    /// into the value plane, or report the suspension whose frame the machine
+    /// into the persistent binding store, or report the suspension whose frame the machine
     /// parked.
     fn run_prepared(
         &mut self,
@@ -2860,13 +2860,13 @@ where
         Ok(outcome)
     }
 
-    /// Bind retained prepared handles into the value plane at `scope`, one
+    /// Bind retained prepared handles into the persistent binding store at `scope`, one
     /// entry per `(binder, handle)`, all at `generation`. Every handle is
-    /// adopted into the machine's ROOT scope first (no realm close releases
+    /// adopted into the machine's ROOT scope first (no resource-scope close releases
     /// it), so the binding owns its lifetime and scope retirement releases
     /// it. The lexical scope is validated before any handle is adopted; a
     /// failure releases every handle not yet bound, so nothing is left rooted
-    /// outside both the realm ledger and the binding table.
+    /// outside both the resource-scope registry and the binding table.
     fn bind_prepared(
         &mut self,
         program: ProgramId,
@@ -2936,10 +2936,10 @@ where
         self.run_prepared(code, PreparedTurnMode::Value)
     }
 
-    /// Run a value-plane BIND turn (`x <- e`): seed the env from prior bindings,
+    /// Run a persistent-binding BIND turn (`x <- e`): seed the env from prior bindings,
     /// add the fragment, and drive it through the suspendable BIND path
     /// (tenure-on-completion). On completion, materialize `binder` into the value
-    /// plane at `gen` (the SAME generation the extract stamped into
+    /// store at `gen` (the SAME generation the extract stamped into
     /// `binder.module` — mint it once at compile, thread it here). A fork bind
     /// SUSPENDS here (no value yet); the returned [`ResidentHole::Binding`]
     /// carries `binder`/`gen` forward, so the eventual [`Self::resume`] on
@@ -3365,7 +3365,7 @@ where
     /// Finish a rooted apply's settled layer through the same
     /// [`Self::complete_prepared`] a turn's own settled scaffold finishes
     /// through, in [`PreparedTurnMode::Value`]: a `Done` value is observed
-    /// and returned (never bound into the value plane — a rooted apply is
+    /// and returned (never bound into the persistent binding store — a rooted apply is
     /// not a session turn), and a `Suspended` frame is classified exactly
     /// like any other prepared suspension. `program` is the rooted apply's
     /// hosting program, carried only for `complete_prepared`'s own
@@ -3398,7 +3398,7 @@ where
     /// The ONE consuming entry point — replaces the old `resume`/`resume_bind`
     /// split. `hole` carries its own completion obligation ([`ResidentHole`]'s
     /// doc): a [`ResidentHole::Binding`] materializes its binder into the
-    /// value plane on completion, using the SAME binder/generation its
+    /// persistent binding store on completion, using the SAME binder/generation its
     /// initiating [`Self::run_bind`] carried; a [`ResidentHole::Plain`] does
     /// nothing extra. There is no external "is this pending a bind" flag left
     /// for a caller to get out of sync with which method it calls — there is
@@ -3616,7 +3616,7 @@ where
         }
     }
 
-    /// Release affine roots whose custody was dropped while the machine was
+    /// Release affine roots whose handles were dropped while the machine was
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
         let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());

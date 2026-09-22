@@ -244,7 +244,7 @@ pub(crate) use opt_prompt_card_or_none;
 /// expansion, means adding a companion import never touches that sibling
 /// crate. This is the ONE place per effect a companion import is declared —
 /// see `preamble.rs`'s import fold, which is the other half of the old
-/// two-planes-must-be-kept-in-sync-by-hand gate (friction #23).
+/// two-projections-must-be-kept-in-sync-by-hand gate (friction #23).
 macro_rules! extra_imports_for {
     (Git) => {
         &["import qualified Tidepool.Git as Git"]

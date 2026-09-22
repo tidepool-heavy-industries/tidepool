@@ -110,7 +110,7 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
 /// `effects`: the session's actual effect stack. Each effect's own
 /// [`EffectDecl::extra_imports`] (Exec → `Tidepool.Shell`/`Tidepool.Cargo`,
 /// Git → `Tidepool.Git`, …) is folded in, in list order — the SAME fold
-/// [`pragmas_and_imports`] runs, so the decl and stmt/eval planes structurally
+/// [`pragmas_and_imports`] runs, so the declaration and statement/evaluation modules structurally
 /// cannot diverge on this surface (previously two hand-mirrored `type_name ==
 /// "..."` gates that had to be kept in sync by hand; friction #23 is the bug
 /// that produced when they drifted). Passing the wrong (e.g.
@@ -166,7 +166,7 @@ pub fn session_decl_module_env_with_companions(
         }
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
-    // stmt plane gets these via the expr module's imports; without this the
+    // statement module gets these via the expression module's imports; without this the
     // persistent declaration environment's import surface diverges — a decl using `readGlob` failed
     // "not in scope" with no hint (friction #23, found live 2026-07-01).
     imports.push("import Tidepool.Orchestrate".into());
@@ -198,7 +198,7 @@ pub fn session_decl_module_env_hiding(
 /// `Tidepool.Effects.Authored` facade instead. Persistent effectful helpers
 /// must therefore state their real row-polymorphic contract with `Member`
 /// constraints. Their source is compiled exactly as authored; the declaration
-/// plane never rewrites or discards type signatures.
+/// module never rewrites or discards type signatures.
 ///
 /// Effect companion imports (`Tidepool.Form` etc.) are still excluded, since
 /// they depend on the shim's row being genuinely present. Everything else —
@@ -345,7 +345,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     // generated Tidepool.Effects/Core modules — MAY import authored library
     // modules (Tidepool.Prelude above is one already), so it takes the
     // import directly rather than through `extra_imports` (which reaches
-    // only the eval/decl planes).
+    // only the evaluation/declaration modules).
     if names.contains("Ask") {
         out.push_str("import Tidepool.Form.Schema\n");
     }

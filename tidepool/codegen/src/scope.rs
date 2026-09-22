@@ -21,7 +21,7 @@
 //! ## Flat sessions are the root scope
 //!
 //! [`ScopeId::ROOT`] is the flat session every pre-C2 caller already lives
-//! in. Each scope-taking API in either plane has a no-arg sibling meaning
+//! in. Each scope-taking API in either store has a no-arg sibling meaning
 //! ROOT, and that sibling keeps its exact prior behavior — the back-compat
 //! contract, discharged by the proof obligations in the design doc's §5.
 
@@ -114,7 +114,7 @@ impl ScopeTree {
     }
 
     /// `scope` then each ancestor up to its lexical root — the resolution order
-    /// both planes walk (local first, parent last). An ordinary chain ends at
+    /// both stores walk (local first, parent last). An ordinary chain ends at
     /// [`ScopeId::ROOT`]; an isolated chain ends at its isolated root. Empty
     /// for a non-live scope.
     #[must_use]

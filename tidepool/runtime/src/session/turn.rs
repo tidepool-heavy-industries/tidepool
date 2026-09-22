@@ -924,7 +924,7 @@ fn refutable_binds(cell_text: &str) -> Vec<(usize, String, Option<String>)> {
 /// them from GHC's own wording rather than treating every hit as a type:
 /// - "the field `f' of record `M.T'" (or "the method … of class `M.C'") is a
 ///   genuine TYPE/class re-declaration — the harder case: values already
-///   bound in the session's value plane were built against the OLD shape, so
+///   bound in the session's persistent binding store were built against the OLD shape, so
 ///   re-declaring it stays refused (see the module doc on `redeclared_type_advice`).
 /// - a bare `M.name` occurrence (no "of record"/"of class" framing) is a
 ///   plain VALUE re-declared across generations. A value redeclaration is

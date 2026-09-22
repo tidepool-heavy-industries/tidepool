@@ -1,4 +1,4 @@
-//! Lightweight native-command actors. The backend retains OS-process custody.
+//! Lightweight native-command actors. The backend retains ownership of OS processes.
 use crate::{ActorRef, KernelContext};
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
@@ -265,7 +265,7 @@ impl CommandJobs {
     /// The job is owned — started, observed, cancelled — by the exact actor
     /// that raised it. Where it then *runs* is the deployment owner's
     /// decision: an actor with a native application of its own runs it there,
-    /// and one without runs it in the host, inside its own custody.
+    /// and one without runs it in the host, inside its own owned resources.
     pub(crate) async fn start(
         &self,
         parent: &KernelContext,

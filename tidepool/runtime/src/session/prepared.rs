@@ -1,4 +1,4 @@
-//! Runtime custody for validated prepared-STG execution artifacts.
+//! Runtime ownership for validated prepared-STG execution artifacts.
 //!
 //! Here `prepared` refers to the GHC prepared-STG handoff. It is distinct from
 //! cell preparation in `workbench.rs` and `resident_workbench.rs`.
@@ -19,7 +19,7 @@ use tidepool_codegen::prepared_program::{
     PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
     PreparedResult, PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
 };
-// Re-exported: callers of this module's realm-scoped cancellation API
+// Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
 // separate `tidepool_codegen` dependency of their own.
 pub use tidepool_codegen::machine::CancelHandle;
@@ -1450,7 +1450,7 @@ struct CodeExport {
 const CODE_EXPORT_GENERATION: u64 = 0;
 
 /// GHC's unit id for everything compiled from source in this session: the
-/// turn target, the session decl/value planes, the workspace source layer,
+/// turn target, the session declaration environment and binding store, the workspace source layer,
 /// and the Tidepool library modules on the include path. All of it can
 /// differ from one turn to the next, so none of it is ever exported.
 const HOME_UNIT: &str = "main";
@@ -1546,7 +1546,7 @@ pub struct PreparedParked {
 }
 
 /// A parked frame re-entered by [`PreparedEngine::resume_parked`]: the
-/// settled layer the resume produced, under the frame's realm, by the runner
+/// settled layer the resume produced, under the frame's resource scope, by the runner
 /// program whose entry re-entered it (the program a further suspension is
 /// parked against).
 pub struct PreparedResumed {
@@ -1564,7 +1564,7 @@ static_assertions::assert_impl_all!(PreparedEngine: Send);
 
 /// One turn's settled computation, read from the `Settled` layer its
 /// `__prepared` scaffold produced. Every handle is retained under the run's
-/// realm until the caller adopts or releases it.
+/// resource scope until the caller adopts or releases it.
 #[derive(Debug)]
 pub enum PreparedSettlement {
     /// The computation completed; `value` is in weak head normal form.
@@ -2084,7 +2084,7 @@ impl PreparedEngine {
 
     /// The one settled-layer decoder: read `outer` (a `Settled` value some
     /// entry of `program` returned) as `Done`/`Suspended`, releasing `outer`
-    /// and retaining its fields under `realm`. Initial runs
+    /// and retaining its fields under the given resource scope. Initial runs
     /// ([`Self::run_settled`]) and resumed runs ([`Self::resume_parked`]) both
     /// pass through here.
     fn decode_settled(
@@ -2304,7 +2304,7 @@ impl PreparedEngine {
     /// engine enforces no capacity limit (e.g. "one outstanding turn") and no
     /// actor-local grant or principal check; those remain the caller's, same
     /// as on `PreparedEngine`. A parked frame is a registered GC root until
-    /// resumed or its realm closes; an unresumed park that the caller drops
+    /// resumed or its resource scope closes; an unresumed park that the caller drops
     /// on the floor leaks a root until [`Self::close_realm`].
     pub fn park_suspension(
         &mut self,
@@ -2499,7 +2499,7 @@ impl PreparedEngine {
         Ok(root)
     }
 
-    /// Peek at a parked frame's evidence and realm without consuming it.
+    /// Peek at a parked frame's evidence and resource-scope id without consuming it.
     #[must_use]
     pub fn parked(&self, id: ContinuationId) -> Option<(RealmId, PreparedFrameEvidence)> {
         self.machine
@@ -2532,8 +2532,8 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
-    /// [`Self::live_payload_handle`] with the handle owned by `realm` rather
-    /// than the frame's own realm (see `PreparedMachine::take_live_payload_handle_owned_by`).
+    /// [`Self::live_payload_handle`] with the handle owned by the given resource scope rather
+    /// than the frame's own resource scope (see `PreparedMachine::take_live_payload_handle_owned_by`).
     pub fn live_payload_handle_owned_by(
         &mut self,
         id: ContinuationId,
@@ -2546,11 +2546,11 @@ impl PreparedEngine {
 
     /// Re-enter the frame parked under `id` with `answer`, a handle the
     /// caller has already validated against the frame's site evidence and
-    /// retained under the frame's realm: take the frame, enter the runner's
+    /// retained under the frame's resource scope: take the frame, enter the runner's
     /// resume entry with the continuation and the answer, and read the
     /// settled layer through the shared settlement reader. `answer` is consumed on
     /// every path. Every failure before the take (unknown id, an answer from
-    /// another realm, cancellation) leaves the frame parked and rooted; a
+    /// another resource scope, cancellation) leaves the frame parked and rooted; a
     /// failure after the take is a run failure.
     pub fn resume_parked(
         &mut self,
@@ -2588,12 +2588,12 @@ impl PreparedEngine {
 
     /// [`Self::resume_parked`], but `answer` is BORROWED rather than
     /// consumed: it is delivered to the resume entry and left exactly as
-    /// live afterward, custody unchanged — borrowed-handle delivery
+    /// live afterward, ownership unchanged — borrowed-handle delivery
     /// (`docs/continuation-parking-contract.md`), which reads a handle's
-    /// current heap pointer without releasing its root. No realm check: a
+    /// current heap pointer without releasing its root. No resource-scope check: a
     /// handle is meant to move between parked continuations across resource
     /// scopes (see `ValueHandle`'s own doc), unlike a freshly built answer,
-    /// which is always realm-scoped to the frame it answers.
+    /// which is always scoped to the frame's resource scope.
     fn resume_parked_borrowed(
         &mut self,
         id: ContinuationId,
@@ -2620,7 +2620,7 @@ impl PreparedEngine {
             realm,
         );
         self.machine.release(continuation);
-        // `answer` stays live: its custody is the caller's, before and after.
+        // `answer` stays live: the caller owns it before and after.
         let batch = batch.map_err(PreparedRuntimeError::Run)?;
         let settlement = self.settle_batch(evidence.runner, realm, batch)?;
         Ok(PreparedResumed {
@@ -2747,7 +2747,7 @@ impl PreparedEngine {
     }
 
     /// The pre-take checks of a resume, then the take: the frame exists,
-    /// `answer` is live under its realm, the realm is not cancelled.
+    /// `answer` is live under its resource scope, the scope is not cancelled.
     fn take_for_resume(
         &mut self,
         id: ContinuationId,
@@ -2857,7 +2857,7 @@ impl PreparedEngine {
     }
 
     /// The managed fields of one constructor layer of a retained value,
-    /// each retained as its own handle under `realm`, without forcing. The
+    /// each retained as its own handle under the given resource scope, without forcing. The
     /// pattern-bind lane reads a settled tuple this way: the extractor
     /// projects `(x, y) <- ...` as one tuple entry, so the tuple's fields ARE
     /// the binders, in order. `handle` itself stays retained; the caller
@@ -2890,8 +2890,8 @@ impl PreparedEngine {
         Ok(managed)
     }
 
-    /// Hand a run result to the session value plane: the handle moves into
-    /// the machine's ROOT scope (no realm close releases it) and its
+    /// Hand a run result to the session binding store: the handle moves into
+    /// the machine's ROOT scope (no resource-scope close releases it) and its
     /// persistent root slot is returned for the binding to load through.
     pub fn adopt(
         &mut self,

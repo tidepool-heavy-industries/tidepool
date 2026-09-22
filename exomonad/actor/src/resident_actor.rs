@@ -3408,7 +3408,7 @@ where
                     Ok(successor) => successor,
                     Err(error) => {
                         // A failed send never transferred the candidate. A lost
-                        // reply may follow cutover and must retain its custody.
+                        // reply may follow cutover and must retain its owned handle.
                         if matches!(error, crate::KernelInvocationFailure::ActorExited(_)) {
                             if let Err(cleanup) = self
                                 .environment

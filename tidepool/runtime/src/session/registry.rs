@@ -3,7 +3,7 @@
 //! A session is idle, checked out and running, suspended with one or more
 //! parked holes, or terminally wedged. Checkout moves the machine out under a
 //! short lock; compilation and execution happen after the lock is released.
-//! Machine custody stays boxed across slot transitions and detached settlement,
+//! Machine ownership stays boxed across slot transitions and detached settlement,
 //! so moving a checkout never copies a large resident machine onto an async stack.
 //! Settlement restores the machine together with the hole set reported by the
 //! session itself.
@@ -507,7 +507,7 @@ pub struct Checkout<'r, M, H: Clone + PartialEq + std::fmt::Debug> {
     holes: Vec<H>,
 }
 
-// Settlement consumes the checkout. Cloning custody would allow the same
+// Settlement consumes the checkout. Cloning ownership would allow the same
 // epoch to be settled twice; the representative types catch blanket derives.
 static_assertions::assert_not_impl_any!(Checkout<'static, (), ()>: Clone, Copy);
 
@@ -549,7 +549,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
         self.machine = Some(machine);
     }
 
-    /// Split boxed machine custody from an owned settlement receipt so a
+    /// Split boxed machine ownership from an owned settlement receipt so a
     /// detached task can settle the turn through a fresh registry borrow.
     pub fn into_parts(mut self) -> (Box<M>, CheckoutReceipt) {
         #[allow(clippy::expect_used, reason = "machine present until settled")]

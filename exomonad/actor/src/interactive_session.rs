@@ -113,7 +113,7 @@ pub struct ResidentInteractiveSession {
 
 /// Parked fixed-program continuation after its authoritative input has been
 /// mounted into the actor workbench. Unlike the captured boundary, this value
-/// owns no duplicate input custody.
+/// owns no duplicate input handle.
 pub(crate) struct ResidentInteractiveAwait {
     pub(crate) request: InteractiveSessionRequest,
     pub(crate) hole: ResidentHole,

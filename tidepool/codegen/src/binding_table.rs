@@ -3,9 +3,9 @@
 //! GHCi splits a binding's identity into a *type* half (`ic_tythings`) and a
 //! *value* half (the linker's `closure_env`), keyed by one `Name`. Our
 //! [`BindingTable`] is exactly that bridge: keyed by one [`SessionVarId`], the
-//! type half is the thin `Tidepool.Session.Val.G<g>` iface on disk (GHC's plane)
+//! type half is the thin `Tidepool.Session.Val.G<g>` interface on disk (GHC's generated module)
 //! and the value half is the live, GC-rooted [`BoundValue`] in the resident
-//! machine's heap (the JIT's plane).
+//! machine's heap (the JIT's managed storage).
 //!
 //! ## The two-layer shape (domain model §4)
 //!
@@ -70,9 +70,9 @@ struct BindingTip {
 
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
 /// deep-forced, so its preparation policy is Tier-1's), rooted by `root` for
-/// the machine's life. `handle` is the machine's own custody of that same root
+/// the machine's life. `handle` is the machine's own ownership handle for that root
 /// (what a later program's `ImportBindings` names), held under the machine's
-/// ROOT scope so no realm close releases it; `identity` is what a later
+/// ROOT scope so no resource-scope close releases it; `identity` is what a later
 /// program links against when it imports this binding.
 #[derive(Clone, Debug)]
 pub struct BoundValue {
@@ -404,7 +404,7 @@ impl BindingTable {
     /// Drop `name` from the ROOT frame so `iter_current`/`resolve` no longer
     /// see it (its `live` entry + root are retained for fragments compiled
     /// against the old gen). Used when a pure decl of the same name supersedes
-    /// a materialized value binding (cross-plane shadow, GHCi-environment
+    /// a materialized value binding (cross-store shadow, GHCi-environment
     /// model). No-op if `name` isn't current.
     pub fn remove_current(&mut self, name: &str) {
         self.remove_current_in(ScopeId::ROOT, name);

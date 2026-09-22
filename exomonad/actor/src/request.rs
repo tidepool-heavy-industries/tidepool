@@ -264,7 +264,7 @@ struct RequestRecord {
     settlement_notified: bool,
 }
 
-/// Snapshots share custody, not a consumption cursor. Replacing the latest
+/// Snapshots share ownership, not a consumption cursor. Replacing the latest
 /// publication drops only the registry's reference; an observer can retain it.
 #[derive(Clone, Debug)]
 pub(crate) struct ProgressSnapshot {
@@ -460,7 +460,7 @@ impl Drop for RequestCleanupGuard {
 }
 
 impl RequestRegistry {
-    /// Replacement moves request/watch custody, not the immutable actor a
+    /// Replacement moves request/watch ownership, not the immutable actor a
     /// request was originally submitted to. Existing handles keep their IDs.
     pub(crate) fn transfer_owner(&self, predecessor: ActorRef, successor: &crate::LocalActorRef) {
         let mut state = self.state.lock();
@@ -1131,7 +1131,7 @@ impl RequestRegistry {
             notification.watermark = sequence;
             notification
         });
-        // Target custody stays live until cancellation or exit closes it;
+        // Target ownership stays live until cancellation or exit closes it;
         // releasing the owner's wait must not require target cooperation.
         (notification, reevaluate_watches(&mut state))
     }
@@ -1171,7 +1171,7 @@ impl RequestRegistry {
         };
         // Closing this request would allow the same conversation to accept its
         // next assignment while old input can still arrive. Cancellation may be
-        // requested immediately; acknowledgement waits for presentation custody.
+        // requested immediately; acknowledgement waits for presentation ownership.
         if record
             .updates
             .iter()

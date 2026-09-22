@@ -25,7 +25,7 @@ pub struct KernelBehaviorError {
 
 /// One shutdown budget computed once by `finish_actor` and threaded to every
 /// component that can otherwise wait unbounded for a busy or hung resource:
-/// hook admission and realm/placement checkout race this deadline, and
+/// hook admission and resource-scope/placement checkout race this deadline, and
 /// supervised children receive `deadline - SHUTDOWN_CHILD_MARGIN` so a
 /// child's own budget always expires before the parent's, and it can report
 /// its own `Unconfirmed` outcome instead of being killed by W3.
@@ -41,7 +41,7 @@ pub(crate) enum ExitAuthority<'a> {
     /// The actor's own `finish_actor`: an ordinary stop (W1) or a
     /// replacement fence (W2). Carries the children snapshot taken after
     /// child admission closed; empty for a replaced predecessor, since
-    /// custody of every child already moved to the successor.
+    /// ownership of every child already moved to the successor.
     Own { children: &'a [LocalActorRef] },
     /// The direct supervisor publishes on behalf of a child whose task is
     /// gone or was killed (W3, W4). No cleanup proof is retained; the
@@ -50,7 +50,7 @@ pub(crate) enum ExitAuthority<'a> {
 }
 
 /// What `finish_actor` is settling: an ordinary stop, or a replacement
-/// fence handing this actor's identity and custody to a successor.
+/// fence handing this actor's identity and owned handles to a successor.
 enum Disposition {
     Stop(ActorTerminal),
     Replaced {
@@ -615,7 +615,7 @@ pub trait KernelBehavior: Send + 'static {
     }
 
     /// Whether the installed behavior is currently parked on its authored
-    /// mailbox receiver. The wrapper retains cast/call custody while an
+    /// mailbox receiver. The wrapper retains cast/call ownership while an
     /// external interaction temporarily occupies that continuation.
     fn accepts_mailbox(&self) -> bool {
         true
@@ -718,7 +718,7 @@ pub trait KernelBehavior: Send + 'static {
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>>;
 
     /// Explicit component evidence. Generic behavior success cannot attest a
-    /// resident realm it does not own; resident behavior overrides this
+    /// resident resource scope it does not own; resident behavior overrides this
     /// method. `deadline` is the one shutdown deadline `finish_actor`
     /// computes for this retirement; a behavior that checks out a shared
     /// resource races that checkout against it instead of waiting unbounded.
@@ -1597,7 +1597,7 @@ where
     *state.context.child_admission_closed.write().await = true;
     match disposition {
         Disposition::Stop(requested) => {
-            // One shutdown deadline, computed once: hook admission and realm
+            // One shutdown deadline, computed once: hook admission and resource-scope
             // checkout race it directly, and children get the remainder minus
             // a margin so a child's own budget always expires first and it
             // reports its own `Unconfirmed` outcome instead of being killed.
@@ -1640,7 +1640,7 @@ where
             // Custody of every child and resource already moved to the
             // successor before this call (the replacement fence transfers
             // them under `child_admission_closed`); cleanup is confirmed by
-            // that transfer, not by a hook or realm this actor still owns.
+            // that transfer, not by a hook or resource scope this actor still owns.
             state
                 .terminal
                 .retain_cleanup(crate::ResidentCleanupOutcome {
@@ -1670,7 +1670,7 @@ where
 /// The only caller of [`RetainedActorExit::publish`] outside `termination`'s
 /// own tests. `Own` asserts that every child already has an exit: the
 /// snapshot is valid because `child_admission_closed` was set before it was
-/// taken, and `shutdown_children`/the replacement fence's custody transfer
+/// taken, and `shutdown_children`/the replacement fence's ownership transfer
 /// both already guarantee the property. A violation does not withhold
 /// publication — an owner with no exit at all is worse — it only records the
 /// invariant break.
@@ -3145,7 +3145,7 @@ mod tests {
             }
             let outcome =
                 shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await;
-            // Probe behavior cannot prove realm cleanup even on successful startup.
+            // Probe behavior cannot prove resource-scope cleanup even on successful startup.
             assert!(!matches!(
                 outcome,
                 crate::CleanupComponentOutcome::Confirmed
@@ -3458,7 +3458,7 @@ mod tests {
         ));
     }
 
-    /// Q2-B: unconfirmed hook/realm cleanup no longer rewrites the exit kind
+    /// Q2-B: unconfirmed hook/resource-scope cleanup no longer rewrites the exit kind
     /// to `Failed`. The requested kind is preserved and cleanup uncertainty
     /// stays a separate, already-retained fact.
     #[tokio::test(start_paused = true)]
@@ -3649,7 +3649,7 @@ mod tests {
         assert!(child_exit < parent_exit);
     }
 
-    /// One shutdown deadline: a realm checkout that never confirms on its own
+    /// One shutdown deadline: a resource-scope checkout that never confirms on its own
     /// is still bounded by `finish_actor`'s deadline, so exit publication
     /// cannot be delayed unboundedly by a busy machine.
     #[tokio::test(start_paused = true)]

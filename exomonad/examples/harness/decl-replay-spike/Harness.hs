@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | Fixture for the driver-level decl-plane replay regression
+-- | Fixture for the driver-level declaration-environment replay regression
 -- (@exomonad-harness\/tests\/selfharness_decl_plane_replay.rs@): THREE
 -- sequential @runLLMTurn \@(State -> State)@ windows in ONE loop, so a
 -- single cycle exercises three distinct answerer holes on the SAME

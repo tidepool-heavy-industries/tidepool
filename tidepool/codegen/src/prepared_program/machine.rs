@@ -182,7 +182,7 @@ pub struct PreparedMachine<'code> {
     /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
     pins: BTreeSet<ProgramId>,
     nursery_bytes: usize,
-    /// HaskellValue handles, parked continuations AND realm-scoped cancellation
+    /// HaskellValue handles, parked continuations AND resource-scope cancellation
     /// flags for this machine, shared exactly as `PreparedMachine` shares
     /// its own [`ResourceLedger`]. A parked frame ([`Self::park`]) owns its
     /// continuation's root slot as a stowed root until [`Self::take_parked`]
@@ -1676,21 +1676,21 @@ impl<'code> PreparedMachine<'code> {
     /// Obtain a clone-able cancellation handle scoped to ONE runtime
     /// resource scope, lazily minting that scope's flag on first request.
     /// Cancelling this handle aborts only runs/calls made with `realm` --
-    /// a sibling realm's run on the same machine is unaffected, because
+    /// a sibling resource scope's run on the same machine is unaffected, because
     /// [`Self::run_entry`]/[`Self::run_entry_retained`] install the ACTIVE
     /// call's flag (via [`ResourceLedger::cancel_flag`]) into the shared
     /// `MachineState`, not a machine-wide flag.
     ///
-    /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
+    /// A cancelled resource scope's flag is NOT auto-cleared after the cancelled run
     /// completes -- same discipline as `PreparedMachine`'s own
     /// [`CancelHandle`] (whose own doc says "call `reset` between runs if
-    /// you intend to reuse"): the caller decides when a realm is done
+    /// you intend to reuse"): the caller decides when a resource scope is done
     /// retrying and calls [`CancelHandle::reset`] explicitly.
     pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
         CancelHandle::from_flag(self.handles.cancel_flag(realm))
     }
 
-    /// SCOPE EXIT: close `realm`, releasing every parked frame and value
+    /// SCOPE EXIT: close resource scope `realm`, releasing every parked frame and value
     /// handle it owns. Mirrors `PreparedMachine::close_realm`'s contract:
     ///
     /// - every frame parked under `realm` ([`Self::park`]) is removed and
@@ -1700,13 +1700,13 @@ impl<'code> PreparedMachine<'code> {
     ///   persistent-root registration deregistered (the slot cell stays
     ///   with `OldSpace` for the machine's life; the VALUE it pinned becomes
     ///   collectable once nothing else reaches it);
-    /// - the realm's cancel flag entry is dropped;
-    /// - sibling realms and their frames/handles are untouched;
+    /// - the resource scope's cancel flag entry is dropped;
+    /// - sibling resource scopes and their frames/handles are untouched;
     /// - `RealmId::ROOT`-tagged handles ([`Self::retain_top`]'s session-level
     ///   bindings) are never affected by any `close_realm` call -- they are
-    ///   not part of any realm a caller can close this way.
+    ///   not part of any resource scope a caller can close this way.
     ///
-    /// Returns `(frames_dropped, handles_released)`. Closing a realm that
+    /// Returns `(frames_dropped, handles_released)`. Closing a resource scope that
     /// owns nothing is a no-op `(0, 0)` -- idempotent by construction, so a
     /// retirement path that can race a wholesale teardown stays safe.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
@@ -1748,7 +1748,7 @@ impl<'code> PreparedMachine<'code> {
     /// handle ledger and its root slot moves from the persistent-root list to
     /// the stowed-root list: the frame now owns the value's liveness, and
     /// only [`Self::take_parked`] or [`Self::close_realm`] ends it. The
-    /// handle must be live under `realm`; a foreign, released or other-realm
+    /// handle must be live under `realm`; a foreign, released or other-scope
     /// handle is [`ExecutionError::UnknownPreparedHandle`]. This call consumes
     /// the supplied continuation handle on every outcome. The minted
     /// [`ContinuationId`] is the only token that names a successful frame
@@ -1809,7 +1809,7 @@ impl<'code> PreparedMachine<'code> {
         Ok(id)
     }
 
-    /// Peek at a parked frame without consuming it: its realm and the
+    /// Peek at a parked frame without consuming it: its resource scope and the
     /// evidence a resume validates against. `None` for an unknown id.
     #[must_use]
     pub fn parked(&self, id: ContinuationId) -> Option<(RealmId, &PreparedFrameEvidence)> {
@@ -1843,10 +1843,10 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// Consume the frame parked under `id`: its continuation returns to the
-    /// handle ledger under the frame's realm (the root slot moves back to the
+    /// handle registry under the frame's resource scope (the root slot moves back to the
     /// persistent-root list) so it can be passed to the runner's resume entry
     /// as a `Managed` argument, alongside the frame's evidence. Every failure
-    /// leaves the frame parked and rooted. The frame's realm cancel flag is
+    /// leaves the frame parked and rooted. The frame's resource-scope cancel flag is
     /// the same flag the resumed call installs, since both come from this
     /// ledger.
     pub fn take_parked(
@@ -1884,7 +1884,7 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// Take the frame parked under `id`'s stowed live payload root and mint
-    /// a [`ValueHandle`] over it under the frame's realm, mirroring
+    /// a [`ValueHandle`] over it under the frame's resource scope, mirroring
     /// `PreparedMachine::handle_from_live_payload` on the Core route. The
     /// frame itself stays parked and rooted -- only the payload's root moves
     /// from the frame's own stash into the handle ledger, which now owns its
@@ -1901,9 +1901,9 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// [`Self::take_live_payload_handle`] with the minted handle owned by
-    /// `owner` instead of the frame's own realm (`None`): a payload that must
-    /// outlive the parked frame's realm, such as a green thread's completion
-    /// value owned by the session's realm, mirroring Core's
+    /// `owner` instead of the frame's own resource scope (`None`): a payload that must
+    /// outlive the parked frame's resource scope, such as a green thread's completion
+    /// value owned by the session's resource scope, mirroring Core's
     /// `mint_handle_from_root(slot, realm)`.
     pub fn take_live_payload_handle_owned_by(
         &mut self,
@@ -2341,8 +2341,8 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// Move a retained handle into the machine's own ROOT scope, so closing
-    /// the realm it was minted under no longer releases it. The session value
-    /// plane calls this when it binds a run's result: from then on the
+    /// the resource scope it was minted under no longer releases it. The session value
+    /// session calls this when it binds a run's result: from then on the
     /// binding owns the value's lifetime and ends it through [`Self::release`].
     /// `false` for an unknown or already released handle.
     pub fn adopt_handle(&mut self, handle: PreparedHandle) -> bool {
@@ -2359,7 +2359,7 @@ impl<'code> PreparedMachine<'code> {
 
     /// Materialize a retained value as a bridge `HaskellValue`, forcing its lazy
     /// fields through program `id`'s force adapter under the value's own
-    /// realm cancel flag. The handle stays retained: forcing may evaluate and
+    /// resource-scope cancel flag. The handle stays retained: forcing may evaluate and
     /// move the graph it roots, and the handle's root slot follows the move.
     /// `budget` bounds observed nodes and copied payload bytes together, and
     /// exhausting it fails the whole observation.
@@ -2490,7 +2490,7 @@ impl<'code> PreparedMachine<'code> {
     /// live in this machine's ledger. Every handle this engine mints roots a
     /// lifted reference, so `rep` is always `RuntimeRep::LiftedRef` — the
     /// only check possible on this route, matching Core's own lack of a
-    /// deeper type check for a bare handle delivery. No realm check: a
+    /// deeper type check for a bare handle delivery. No resource-scope check: a
     /// handle is meant to move between parked continuations across resource
     /// scopes.
     #[must_use]
@@ -2618,13 +2618,13 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// [`Self::run_entry`]'s primitive, taking an externally-owned cancel
-    /// flag directly instead of minting one from a realm. `pub` (not
+    /// flag directly instead of minting one from a resource scope. `pub` (not
     /// crate-internal): both [`CompiledProgram::run_entry`] (`run.rs`)'s
     /// one-shot ephemeral-machine convenience API and callers in other
     /// crates that construct and control their own `Arc<AtomicBool>`
     /// directly (e.g. from a watchdog thread, or to pre-cancel a call before
-    /// any realm/machine exists) use this instead of a realm -- that
-    /// contract predates realm-scoped cancellation and is out of C1's scope
+    /// any resource scope/machine exists) use this instead of a resource scope -- that
+    /// contract predates resource-scope cancellation and is out of C1's scope
     /// to migrate (dozens of existing test call sites).
     pub fn run_entry_with_raw_cancel(
         &mut self,
@@ -6971,8 +6971,8 @@ mod tests {
     /// A parked frame owns its continuation's root for the whole park: the
     /// handle leaves the ledger and the persistent-root class, the value
     /// survives a forced collection while parked, `take_parked` hands it back
-    /// as a realm-owned handle that observes to the same value, a taken id
-    /// is unknown afterwards, and closing the realm drops a parked frame and
+    /// as a resource-scope-owned handle that observes to the same value, a taken id
+    /// is unknown afterwards, and closing the resource scope drops a parked frame and
     /// its stowed root. The rooting receipt holds at every step.
     #[test]
     fn a_parked_frame_roots_its_continuation_until_taken_or_its_realm_closes() {
@@ -7000,7 +7000,7 @@ mod tests {
         let handles_before = machine.handle_count();
         let roots_before = machine.total_persistent_roots();
 
-        // A handle from another realm is refused. Both inputs are consumed:
+        // A handle from another resource scope is refused. Both inputs are consumed:
         // the continuation and any already-tenured live payload are released
         // because no parked frame took custody of them.
         let rejected_batch = machine

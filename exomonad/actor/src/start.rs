@@ -183,7 +183,7 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
     }
 }
 
-/// One parked parent continuation paired with exclusive custody of its child
+/// One parked parent continuation paired with exclusive ownership of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
 pub struct ResidentActorStart {
     pub(crate) parent_hole: ResidentHole,
@@ -241,7 +241,7 @@ pub enum ActorStartCaptureError {
 impl ResidentActorStart {
     /// Decode and claim a newly suspended start request while the resident
     /// machine is checked out. The entry root is born in the unpublished
-    /// child's realm so parent cleanup cannot revoke a successfully accepted
+    /// child's resource scope so parent cleanup cannot revoke a successfully accepted
     /// child computation.
     pub fn capture<H, O>(
         session: &mut ResidentSession<H, O>,

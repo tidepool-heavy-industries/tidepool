@@ -73,7 +73,7 @@ impl fmt::Display for SessionId {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BindingName(pub String);
 
-/// Which session plane a gen-versioned module belongs to.
+/// Which session module family a gen-versioned module belongs to.
 ///
 /// - `Lib`: user-written declarations, accumulated as source text.
 /// - `Val`: synthesized value-binding ifaces; construction lives in
@@ -174,7 +174,7 @@ impl fmt::Display for SessionModule {
 /// Both the bind turn (the binder's `Name` in the synthesized `Val.G<g>` iface)
 /// and every later reference turn (the imported `Name` from that injected iface)
 /// hash `"<module>:<occ>"` identically, so the reference Core's `NVar` matches
-/// the stored id by raw equality — the value-plane key.
+/// the stored id by raw equality — the persistent-binding key.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SessionVarId(VarId);
 

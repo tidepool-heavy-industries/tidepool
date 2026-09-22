@@ -2,7 +2,7 @@
 //!
 //! This protocol is deliberately process-local and non-serializable. JSON is
 //! reserved for real external boundaries; live Haskell roots move directly
-//! through these messages under Rust custody.
+//! through these messages under Rust ownership.
 
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use tidepool_repr::SessionId;
@@ -16,7 +16,7 @@ use crate::{
 /// The exact synchronous-call path currently occupying a chain of actors.
 ///
 /// A callee extends the path before running its handler. Re-entering any actor
-/// already in the path is rejected before request custody changes hands.
+/// already in the path is rejected before request ownership changes hands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallAncestry {
     actors: Vec<ActorRef>,

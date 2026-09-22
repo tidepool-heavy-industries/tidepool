@@ -66,11 +66,11 @@ pub(crate) struct HandleEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HandleClass {
     /// A turn's own retained value: bound, delivered, parked or observed.
-    /// Released when its owner releases it, or with its realm.
+    /// Released when its owner releases it, or when its resource scope closes.
     Value,
     /// An installed program's top, retained for the machine's lifetime so
     /// later programs can import it instead of compiling their own copy.
-    /// Owned by no realm's lifetime and never taken by scope closure.
+    /// Owned independently of resource-scope lifetimes and never taken by scope closure.
     CodeExport,
 }
 
@@ -158,7 +158,7 @@ impl RootHandleLedger {
     }
 
     /// Every [`HandleClass::Value`] handle owned by `realm`. A code export
-    /// outlives every realm -- it is the machine's own root on installed
+    /// outlives every resource scope -- it is the machine's own root on installed
     /// code, not a turn's lease -- so scope closure never takes one, and the
     /// export count this removal path never touches stays correct.
     pub(crate) fn take_realm(&mut self, realm: RealmId) -> Vec<HandleEntry> {
@@ -209,7 +209,7 @@ pub struct ResourceCounts {
 ///
 /// The flag is per-scope (per-`PreparedMachine`, or per-`RealmId` on the
 /// prepared route), not per-run: call [`Self::reset`] between runs if you
-/// intend to reuse the machine/realm after a cancellation.
+/// intend to reuse the machine/resource scope after a cancellation.
 #[derive(Clone, Debug)]
 pub struct CancelHandle(Arc<AtomicBool>);
 
@@ -352,7 +352,7 @@ impl ResourceLedger {
         self.handles.rehome(handle, realm)
     }
 
-    /// ROOT is the machine's own scope, not a closable realm: its handles,
+    /// ROOT is the machine's own scope, not a closable resource scope: its handles,
     /// frames and cancellation flag live until the machine is torn down.
     /// Closing it releases nothing, whichever engine or session asks.
     pub(crate) fn close_realm(&mut self, realm: RealmId) -> ClosedRealm {

@@ -519,7 +519,7 @@ impl ResidentMachineMeasurement {
 /// fragments and installed actor programs differ above this layer, but use
 /// exactly the same admission and settlement mechanism. Every checkout
 /// installs the supplied actor context before invoking its operation, so a
-/// child cannot leak its lexical scope, resource realm, or principal into the
+/// child cannot leak its lexical scope, runtime resource scope, or principal into the
 /// next parent or sibling entry.
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
@@ -688,7 +688,7 @@ impl<H, O> Clone for ResidentActorRunner<H, O> {
 
 /// A private readiness continuation validated while its actor is still
 /// unpublished. Construction proves both the nominal request and owning
-/// resource realm; consuming it is the only way the runner enters the
+    /// runtime resource scope; consuming it is the only way the runner enters the
 /// installed program.
 pub(crate) struct ResidentActorReadiness {
     hole: ResidentHole,
@@ -3254,7 +3254,7 @@ where
     }
 
     /// Every workbench binding visible at `context`'s scope, generation
-    /// included — the value-plane half of the status tool's what-is-live
+    /// included — the binding-store half of the status tool's what-is-live
     /// view. A structured read of [`ResidentSession::workbench_bindings_in`];
     /// it retains nothing new of its own.
     pub(crate) async fn live_bindings(
@@ -3513,7 +3513,7 @@ where
     }
 
     /// Settle a resumed fragment outcome. Nominal suspensions retain
-    /// the same realm and return to the host for nominal actor dispatch.
+    /// the same runtime resource scope and return to the host for nominal actor dispatch.
     pub(crate) async fn settle_item(
         &self,
         context: crate::ActorSessionContext,
@@ -4811,7 +4811,7 @@ where
     /// Claim and seal the live child entry carried by one public `startActor`
     /// suspension. The same checked-out operation derives its exact source
     /// facade, mints an isolated lexical scope, and rehomes the entry into the
-    /// unpublished child's fresh resource realm.
+    /// unpublished child's fresh runtime resource scope.
     pub async fn capture_start(
         &self,
         context: crate::ActorSessionContext,

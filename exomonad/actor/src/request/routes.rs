@@ -1,5 +1,5 @@
 //! Watch-owned Haskell continuations. Readiness enqueues work on the exact
-//! existing actor; the request registry retains status and root custody.
+//! existing actor; the request registry retains status and the root handle.
 
 use super::{
     ReplyError, RequestRegistry, WatchId, WatchNotification, WatchStateProjection, WatchTransition,

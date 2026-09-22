@@ -148,9 +148,9 @@ pub struct DeclTurn {
     /// fill those entries after one batched inspection, fenced by generation.
     pub value_types: BTreeMap<String, String>,
     /// Names this turn REMOVES from the persistent declaration environment (no replacement). A name is
-    /// retracted when its binding migrates to the value plane (e.g. a
+    /// retracted when its binding migrates to the persistent binding store (e.g. a
     /// self-referential `n <- pure (n+1)` that must materialize) — the decl
-    /// plane must then stop exporting it, or a later `let`/`def` would compile
+    /// declaration module must then stop exporting it, or a later `let`/`def` would compile
     /// against the stale decl. A pure-retraction turn carries empty
     /// `sources`/`items` and one or more `retracts`. Honored by every scoping
     /// fold (`cumulative_exports_before`, `current_heads`, `replayable_sources`,
@@ -477,7 +477,7 @@ fn import_is_qualified(line: &str) -> bool {
 /// carries a `hiding` clause, or has no list) — callers fall back to their
 /// `hiding`-clause handling. Shared by the session decl-module renderer
 /// ([`hide_session_heads`]) and `tidepool-repl`'s per-turn eval-preamble
-/// patching, so the two shadowing planes can't drift on this shape again.
+/// patching, so the two shadowing stores can't drift on this shape again.
 #[must_use]
 pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> {
     let t = line.trim_start();
@@ -592,7 +592,7 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
 }
 
 /// [`render_module`] plus `import`ing each of `val_modules` unqualified —
-/// the live `Tidepool.Session.Val.G<g>` value-plane bindings (one per still-live
+/// the live `Tidepool.Session.Val.G<g>` persistent bindings (one per still-live
 /// name, newest gen only) — so a decl can reference a prior `x <- e`/`let x = e`
 /// session value the same way a genuine GHCi top-level definition would. The
 /// caller must ALSO pass the same module names as `--inject-val` to the extract
@@ -1265,7 +1265,7 @@ mod tests {
         let before = cumulative_exports_before(&log, log.turns.len() + 1);
         assert!(before.iter().any(|e| e.head_name() == "findings"));
 
-        // findings migrates to the value plane → retract it.
+        // findings migrate to the persistent binding store → retract them.
         push_chained(&mut log, retract_turn(&["findings"]));
 
         // current_heads, cumulative exports, and decl replay all drop it;

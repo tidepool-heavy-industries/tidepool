@@ -138,7 +138,7 @@ pub struct SessionCompileView {
     pub(super) visible_values: Vec<SessionModule>,
     /// Names visible from each value interface.  A generated interface can
     /// carry helper binders beside its published value; importing its whole
-    /// module would accidentally expose those helpers before the value plane
+    /// module would accidentally expose those helpers before the binding store
     /// commits them.
     pub(super) visible_value_names: Vec<(SessionModule, Vec<String>)>,
     pub(super) injected_values: Vec<SessionModule>,

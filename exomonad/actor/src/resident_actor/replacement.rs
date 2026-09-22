@@ -15,7 +15,7 @@ pub(super) struct PreparedSuccessor {
     custody: tokio::sync::oneshot::Receiver<ReplacementCustody>,
 }
 
-/// Code and captured values can still reference a predecessor's realm. Keep
+/// Code and captured values can still reference a predecessor's resource scope. Keep
 /// its roots and placement until the successor's resource owner retires them.
 pub(super) struct RetainedHandler {
     pub(super) placement: crate::ActorPlacement,

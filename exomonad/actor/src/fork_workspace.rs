@@ -1,7 +1,7 @@
 //! Narrow workspace reservation used only by atomic context-fork admission.
 //!
 //! The actor kernel owns the admission transaction, while the injected
-//! service delegates Git and custody mechanics to the existing Worktree
+//! service delegates Git and ownership mechanics to the existing Worktree
 //! owner. This capability is intentionally not the general model-facing
 //! allocation effect.
 
@@ -32,9 +32,9 @@ pub struct ForkWorkspaceAdmissionError {
     pub detail: String,
 }
 
-/// Exact actor/worktree custody shared by the kernel and its host.
+/// Exact actor/worktree ownership shared by the kernel and its host.
 /// Before process submission, the last owner settles its binding generation.
-/// After submission may have occurred, custody is conservatively retained.
+/// After submission may have occurred, owned resources are conservatively retained.
 /// Legacy tmux cannot prove exact termination. A service namespace witness
 /// alone also cannot establish host HTTP/resident-work quiescence.
 pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
@@ -53,7 +53,7 @@ pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
 }
 
 /// Installer invoked once, on the exact successor incarnation, to bind
-/// retained host resources and produce the custody handle for that actor.
+/// retained host resources and produce the owned handle for that actor.
 type ForkWorkspaceInstall = dyn FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
     + Send
     + Sync;
@@ -99,12 +99,12 @@ pub type ForkWorkspaceAdmissionFuture<'a> = Pin<
 >;
 
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
-    /// Install custody before executing the child entry. This is separate from
+    /// Install owned resources before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
     /// `role` is the actor's resolved role: an actor that holds a worktree
     /// without a native application (a record actor started with a worktree)
     /// never sees a policy installation, so the worktree grant that goes with
-    /// its role is installed here, alongside custody.
+    /// its role is installed here, alongside the owned resources.
     fn install_custody(
         &self,
         actor: ActorRef,

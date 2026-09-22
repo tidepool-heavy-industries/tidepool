@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 
--- | Cheap control-plane projections. Reading these values never asks a model
+-- | Cheap control-flow projections. Reading these values never asks a model
 -- to summarize its work. Usage is deduplicated by provider thread identity.
 module Tidepool.Actors.Observe
   ( SwarmSnapshot (..)

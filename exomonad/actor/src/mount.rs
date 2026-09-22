@@ -330,7 +330,7 @@ impl ActorSessionContext {
 }
 
 /// What retiring one placement released: the parked-frame half from closing
-/// its resource realm plus the value-plane half from retiring its lexical
+/// its runtime resource scope plus the binding-store half from retiring its lexical
 /// scope. Mirrors the union of `ResidentSession::close_realm`'s
 /// `(frames, handles)` pair and `ResidentSession::retire_scope`'s
 /// `ScopeRetirement`; an engine with no lexical-scope frames of its own (the
@@ -338,11 +338,11 @@ impl ActorSessionContext {
 /// value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlacementRetirement {
-    /// Parked continuation frames dropped by closing the resource realm.
+    /// Parked continuation frames dropped when the runtime resource scope closes.
     pub frames: usize,
-    /// Value handles/roots released by closing the resource realm.
+    /// Value handles/roots released when the runtime resource scope closes.
     pub handles: usize,
-    /// Import leases released by closing the resource realm.
+    /// Import leases released when the runtime resource scope closes.
     pub leases: usize,
     /// Persistent GC roots released by retiring the lexical scope.
     pub scope_roots: usize,
@@ -364,7 +364,7 @@ pub trait ActorRunTarget {
         live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error>;
 
-    /// Retire one actor placement: release everything its resource realm and
+    /// Retire one actor placement: release everything its runtime resource scope and
     /// lexical scope solely owned. Idempotent on an already-retired
     /// placement, mirroring `close_realm`/`retire_scope`'s own all-zero
     /// no-op receipts.

@@ -83,7 +83,7 @@ pub struct LostDeclaration {
     pub reason: String,
 }
 
-/// Exact declaration-plane facts established while starting a successor.
+/// Exact declaration-environment facts established while starting a successor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationRecoveryReport {
     pub source_session: Option<u64>,

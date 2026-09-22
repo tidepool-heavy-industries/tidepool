@@ -4,7 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Fixture for the driver-level decl-plane replay regression
+-- | Fixture for the driver-level declaration-environment replay regression
 -- (@exomonad-harness\/tests\/selfharness_decl_plane_replay.rs@): same tiny
 -- @State@\/@render@ split as @examples\/harness\/fn-finalize-spike@, kept
 -- independent of that fixture so this test's three-window @loop@ (below)

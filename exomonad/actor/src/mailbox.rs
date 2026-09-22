@@ -9,7 +9,7 @@ use crate::ActorRef;
 ///
 /// The parked authored continuation consumes `next`; the rooted rank-N
 /// handler consumes the next protocol request. Both have move-only Rust
-/// custody and therefore live in the actor behavior, not in a parallel
+/// owned handles and therefore live in the actor behavior, not in a parallel
 /// program table; this imposes no linearity discipline on authored Haskell.
 pub(crate) struct InstalledReceiver {
     pub(crate) site: u64,
@@ -45,10 +45,10 @@ pub(crate) struct ResidentWaitRequest {
     pub(crate) continuation: ResidentHole,
 }
 
-/// One live Haskell value under exclusive machine-root custody.
+/// One live Haskell value under an exclusive machine-root handle.
 ///
 /// The session tag lets the actor kernel reject a cross-machine delivery
-/// before the custody token leaves its envelope. Dropping this value drops
+/// before the handle leaves its envelope. Dropping this value drops
 /// [`RootCustody`], which queues the underlying root for release by its
 /// originating resident session.
 #[must_use = "a live mailbox value must be delivered or deliberately dropped"]
@@ -78,7 +78,7 @@ impl MailboxValue {
         self.session
     }
 
-    /// Recover custody after the actor kernel has validated the destination
+    /// Recover the handle after the actor kernel has validated the destination
     /// session. This consumes the envelope's ownership token exactly once.
     pub fn into_custody(self) -> RootCustody {
         match self.root {

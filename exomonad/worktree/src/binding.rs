@@ -42,7 +42,7 @@ impl AgentRef {
     /// degraded teardown deliberately retains its `Active` row rather than
     /// manufacturing cleanup evidence. A `runtime` shared by two runs would
     /// therefore let the next run's actor 0 inherit the previous run's retained
-    /// custody. The actor host passes its run id (see
+    /// ownership. The actor host passes its run id (see
     /// `tidepool::actor_host::runtime_namespace`).
     pub fn exact_actor(runtime: &str, identity: u64, incarnation: u64) -> Self {
         Self(format!("actor:{runtime}:{identity}:{incarnation}"))
@@ -139,7 +139,7 @@ impl Binding {
     }
 }
 
-/// Move-only custody of one active binding generation. Settlement consumes
+/// Move-only lease for one active binding generation. Settlement consumes
 /// the receipt; transfer updates it to the successor's generation. A stale
 /// receipt cannot settle a later occupant of the same worktree.
 ///
@@ -298,7 +298,7 @@ impl BindingTable {
 
     /// The exact worktree currently owned by `agent`, if any. Actor admission
     /// uses this to resolve the typed `boundHead` placement without exposing
-    /// filesystem paths or asking Haskell to rediscover custody. An uncertain
+    /// filesystem paths or asking Haskell to rediscover ownership. An uncertain
     /// table returns no authority, even when it retains Active diagnostic rows.
     pub fn active_for_agent(&self, agent: &AgentRef) -> Option<&WorktreeId> {
         if self.write_uncertain {
@@ -364,7 +364,7 @@ impl BindingTable {
             // `generations`.
             generations.resize(generations.len() + rows.len(), None);
             // Reopening is the reconciliation boundary: the loaded bytes and
-            // pathname must be durable before these rows can authorize custody.
+            // pathname must be durable before these rows can authorize ownership.
             fs::File::open(&path)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| storage_failure(&path, e))?;
@@ -492,7 +492,7 @@ impl BindingTable {
         Ok(())
     }
 
-    /// Confirmed active custody only. An uncertain table grants no authority;
+    /// Only confirmed active bindings. An uncertain table grants no authority;
     /// retained rows are diagnostic until exclusive reopen reconciles disk.
     pub fn current(&self, worktree: &WorktreeId) -> Option<&Binding> {
         if self.write_uncertain {
@@ -517,7 +517,7 @@ mod tests {
     /// `ActorWorkspaceCustody`'s drop). The next RUN's actors restart from the
     /// same identities and incarnations, so the run id in the principal is the
     /// only thing standing between them and the previous run's retained
-    /// custody — which is how a previous run's child worktree reached a later
+    /// lease — which is how a previous run's child worktree reached a later
     /// run's root through `boundWorktree`.
     #[test]
     fn a_retained_row_from_another_run_is_not_custody_for_the_same_actor() {

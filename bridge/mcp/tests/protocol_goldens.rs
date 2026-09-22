@@ -195,7 +195,7 @@ fn hardcoded_pins_survive_a_blind_regen() {
 
 // ---------------------------------------------------------------------------
 // Import-gating pin: the generated eval-module text (both the
-// stmt/eval plane's `build_preamble` and the decl plane's
+// statement/evaluation module's `build_preamble` and the declaration module's
 // `session_decl_module_env`) is a content-addressed compile-cache key
 // (`ensure_effects_module_at`) — a single changed byte invalidates every
 // cached compile for every user. Byte-exact golden files over the FULL

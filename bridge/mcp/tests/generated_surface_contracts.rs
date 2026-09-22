@@ -144,7 +144,7 @@ fn generated_module_does_not_redefine_the_relocated_worktree_helpers() {
 /// The import lands in the AUTHOR's preamble, not inside `Tidepool.Effects` —
 /// which is the only direction that can work, since `Tidepool.Worktree` imports
 /// `Tidepool.Effects` and the reverse would be a module cycle. Both author-
-/// facing planes fold `EffectDecl::extra_imports` the same way, so both are
+/// facing modules fold `EffectDecl::extra_imports` the same way, so both are
 /// asserted here.
 #[test]
 fn worktree_decl_imports_the_module_that_defines_the_relocated_helpers() {

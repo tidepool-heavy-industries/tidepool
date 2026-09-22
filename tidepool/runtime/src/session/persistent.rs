@@ -1,7 +1,7 @@
 //! Persistent prepared-STG session state shared by resident consumers.
 //!
 //! A session owns one prepared machine, accumulated constructor metadata,
-//! declaration and value planes, scoped bindings, and parked continuations.
+//! persistent declarations and bindings, scoped bindings, and parked continuations.
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
@@ -49,7 +49,7 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
         .collect()
 }
 
-/// Cross-thread custody for one completed bind root. The root never moves
+/// Cross-thread owned handle for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
 /// and is taken only after the session returns to its owning thread.
 // ---------------------------------------------------------------------------
@@ -58,12 +58,12 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
 
 /// The resident-session substrate: one live [`PreparedEngine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
-/// [`DataConTable`], the [`SessionLib`] persistent declaration environment, the [`BindingTable`] value
-/// plane, and the value-binding generation.
+/// [`DataConTable`], the [`SessionLib`] persistent declaration environment, the [`BindingTable`] persistent
+/// binding store, and the value-binding generation.
 ///
 /// The consumers keep their own higher-level turn orchestration (source
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
-/// and delegate the machine + plane operations here.
+/// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
@@ -78,7 +78,7 @@ pub struct PersistentSession {
     /// `None` for a session with no persistent declaration environment; `Some` for the repl and the
     /// accumulating harness.
     lib: Option<SessionLib>,
-    /// The value plane: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
+    /// The persistent binding store: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
     /// Incremental indexes over `bindings`' live set (prepared-import
@@ -92,7 +92,7 @@ pub struct PersistentSession {
     /// without clobbering the prior root.
     val_gen: Generation,
     /// The scope forest — one per session, shared by BOTH
-    /// planes. The value plane hangs [`BindingTable`] frames off these ids and
+    /// stores. The binding store hangs [`BindingTable`] frames off these ids and
     /// the persistent declaration environment keys its per-scope tips off the SAME ids, which is why
     /// neither owns a forest of its own: two forests would be two answers to "is
     /// this scope live", and a scoped decl and a scoped binding would drift.
@@ -106,7 +106,7 @@ pub struct PersistentSession {
     nursery_size: usize,
 }
 
-/// The committed fact from moving one name to the materialized value plane.
+/// The committed fact from moving one name into the persistent binding store.
 /// Callers use this rather than inferring success from a partly-mutated view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValuePlaneCommit {
@@ -121,7 +121,7 @@ pub struct MaterializationSetCommit {
 }
 
 /// The committed fact from adding declarations and evicting their same-scope
-/// value-plane names.
+/// persistent binding names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclarationPlaneCommit {
     pub generation: Generation,
@@ -134,7 +134,7 @@ pub struct DeclarationPlaneCommit {
 
 impl PersistentSession {
     /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
-    /// and the accumulating harness; `None` for a value-plane-only session). The
+    /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
@@ -170,11 +170,11 @@ impl PersistentSession {
     pub fn has_lib(&self) -> bool {
         self.lib.is_some()
     }
-    /// The value-plane binding table (read).
+    /// The persistent binding table (read).
     pub fn bindings(&self) -> &BindingTable {
         &self.bindings
     }
-    /// The value-plane binding table (mutate).
+    /// The persistent binding table (mutate).
     pub fn bindings_mut(&mut self) -> &mut BindingTable {
         &mut self.bindings
     }
@@ -304,13 +304,13 @@ impl PersistentSession {
     /// [`MachineDisposition::Reusable`], while failures that make heap or code
     /// integrity uncertain monotonically make it
     /// [`MachineDisposition::Unavailable`]. Source recovery is a separate
-    /// declaration-plane report and never changes this decision.
+    /// declaration-environment report and never changes this decision.
     #[must_use]
     pub fn machine_disposition(&self) -> Option<MachineDisposition> {
         self.machine.as_ref().map(PreparedEngine::disposition)
     }
 
-    /// Cancellation handle for this capacity-one registry realm.
+    /// Cancellation handle for this capacity-one registry resource scope.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine
             .as_mut()
@@ -326,7 +326,7 @@ impl PersistentSession {
 
     /// Close a runtime resource scope on the resident machine:
     /// `(frames, handles_released)`. `(0, 0)` when the
-    /// machine is not yet booted or the realm owns nothing (idempotent).
+    /// machine is not yet booted or the resource scope owns nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.machine
             .as_mut()
@@ -444,7 +444,7 @@ impl PersistentSession {
         let mut retained = self.binding_index.prepared_retained();
         if let Some(engine) = self.machine.as_ref() {
             // Package tops the machine already carries compiled code for.
-            // A value binding wins any collision: the value plane's own
+            // A value binding wins any collision: the binding store's own
             // generation is what a turn that reads `x` must link against.
             let bound: std::collections::BTreeSet<&SymbolIdentity> =
                 retained.iter().map(|(identity, _)| identity).collect();
@@ -490,12 +490,12 @@ impl PersistentSession {
     // There is deliberately no `drop_machine`: tearing a session down means
     // dropping the whole `PersistentSession` (which frees the heap through the
     // machine's own `Drop`). A method that emptied the machine slot in place
-    // would leave a live session whose value-plane `RootSlot`s all dangle — a
+    // would leave a live session whose binding-store `RootSlot`s all dangle — a
     // state with no legitimate use and no way to detect from the outside.
 
-    // -- value-plane bookkeeping ------------------------------------------
+    // -- persistent binding bookkeeping ----------------------------------
 
-    /// Record a materialized value binding on the value plane.
+    /// Record a materialized value binding in the persistent binding store.
     pub fn bind(&mut self, entry: BindingEntry) {
         self.binding_index.on_bind(&entry);
         self.bindings.bind(entry);
@@ -544,7 +544,7 @@ impl PersistentSession {
     /// Snapshot the exact source-side environment visible from `scope` so a
     /// caller can release its machine borrow before invoking GHC. Returns
     /// `None` for a dead scope or a session without a declaration/include
-    /// plane.
+    /// persistent binding store.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
         if !self.scopes.is_live(scope) {
             return None;
@@ -561,7 +561,7 @@ impl PersistentSession {
             .collect();
         // A value interface may carry generated helpers beside its published
         // binder. Keep the exact visible names so source compilation imports
-        // only bindings that reached the value plane. This deliberately uses
+        // only bindings that reached the persistent binding store. This deliberately uses
         // a tiny vector: `SessionModule` has identity equality, not an
         // ordering contract, and a scope normally has few live modules.
         let mut visible_value_names = Vec::<(SessionModule, Vec<String>)>::new();
@@ -627,12 +627,12 @@ impl PersistentSession {
 
     /// The persistent declaration environment include directory (where `Lib.G<g>.hs` modules live), for
     /// a later turn's compile search path. `None` when the session has no decl
-    /// plane.
+    /// persistent declaration environment.
     /// Move the persistent declaration environment OUT (machine rotation, one-session living
-    /// structure): the plane is SOURCE-side state (gen modules on disk +
+    /// structure): the declaration environment is source-side state (gen modules on disk +
     /// the in-memory decl log), independent of any machine's heap, so it
     /// transfers wholesale into a freshly-built session while the old
-    /// machine (and its value plane, whose roots die with its heap) drops.
+    /// machine (and its binding store, whose roots die with its heap) drops.
     /// KNOWN EDGE: a gen module that imports `Val.G<g>` (a decl rendered
     /// while value binds were live) will fail its next recompile after the
     /// transfer with an ordinary module-not-found — legible, not silent.
@@ -683,7 +683,7 @@ impl PersistentSession {
     }
 
     /// Render and validate the exact next declaration module without changing
-    /// the live log, scope tip, recovery manifest, or value plane.
+    /// the live log, scope tip, recovery manifest, or binding store.
     pub fn stage_declarations_in(
         &self,
         scope: ScopeId,
@@ -794,8 +794,8 @@ impl PersistentSession {
         }
     }
 
-    /// Retract `name` from the persistent declaration environment (its binding migrated to the value
-    /// plane). No-op when `name` is not a current decl head.
+    /// Retract `name` from the persistent declaration environment (its binding migrated to the
+    /// binding store). No-op when `name` is not a current declaration head.
     pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
         self.retract_in(ScopeId::ROOT, name)
     }
@@ -803,8 +803,8 @@ impl PersistentSession {
     /// Scoped [`Self::retract`]: retract `name` from `scope`'s decl tip only.
     /// `retract(n) == retract_in(ScopeId::ROOT, n)`.
     ///
-    /// A name lives in at most one plane per scope, so a CHILD binding
-    /// `helper` on the value plane must not retract the PARENT's persistent declaration environment
+    /// A name lives in at most one store per scope, so a child binding
+    /// `helper` must not retract the parent's persistent declaration environment
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
@@ -819,7 +819,7 @@ impl PersistentSession {
 
     /// Retract a set of declaration heads through one durable declaration
     /// generation. Used by set materialization so a later name cannot fail
-    /// after an earlier name has already entered the value plane.
+    /// after an earlier name has already entered the persistent binding store.
     fn retract_many_in(&mut self, scope: ScopeId, names: &[String]) -> Result<(), SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
@@ -836,9 +836,9 @@ impl PersistentSession {
     /// (never minted, or already retired) — a scope is never born under a dead
     /// ancestor.
     ///
-    /// This is also where both planes freeze the new scope's inherited
+    /// This is also where both stores freeze the new scope's inherited
     /// environment. The persistent declaration environment captures its parent's generation;
-    /// the binding plane captures an immutable name-to-value tip with root
+    /// the binding store captures an immutable name-to-value tip with root
     /// leases. Capturing both here prevents parent or sibling progress between
     /// mint and first use from leaking into the child.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
@@ -867,9 +867,9 @@ impl PersistentSession {
         self.scopes.mint_isolated()
     }
 
-    /// The session's one scope forest — read by both planes for their lookup
+    /// The session's one scope forest — read by both stores for their lookup
     /// walks. There is no `_mut` sibling on purpose: minting and retiring are
-    /// the only writes, and both go through this type so the value plane's
+    /// the only writes, and both go through this type so the binding store's
     /// frames and roots are released in the same step as the tree edge.
     pub fn scope_tree(&self) -> &ScopeTree {
         &self.scopes
@@ -883,7 +883,7 @@ impl PersistentSession {
     /// would sit in a frame no lookup chain ever walks and
     /// [`Self::retire_scope`] can never drain — for a mounted persistent
     /// root, a permanent GC root by construction. Every caller must check
-    /// liveness before consuming whatever custody transfer led here (a
+    /// liveness before consuming whatever ownership transfer led here (a
     /// [`super::resident::RootCustody`] or an adopted
     /// [`ValueHandle`](tidepool_codegen::suspension::ValueHandle)) — this
     /// check is the backstop, not the first line, since `bind_in` failing here
@@ -898,7 +898,7 @@ impl PersistentSession {
     }
 
     /// Atomically move `entry.name` from this scope's persistent declaration environment to its
-    /// materialized value plane.  Durable retraction is the commit point: if
+    /// materialized value store. Durable retraction is the commit point: if
     /// it fails, the binding table is untouched and the caller must report the
     /// failure rather than a successful bind.
     pub fn bind_replacing_decl_in(
@@ -959,7 +959,7 @@ impl PersistentSession {
         self.bind_replacing_decl_in(ScopeId::ROOT, entry)
     }
 
-    /// Atomically materialize a whole binding set.  The declaration-plane
+    /// Atomically materialize a whole binding set. The declaration-environment
     /// retraction is one durable generation for every affected name; only after
     /// it succeeds are entries installed in the value table.  On any failure,
     /// every produced root is retired before the error returns, so none becomes
@@ -1002,7 +1002,7 @@ impl PersistentSession {
     }
 
     /// Dispose roots that were produced by a completed materialization but
-    /// could not enter the value plane. They are registered persistent roots,
+    /// could not enter the persistent binding store. They are registered persistent roots,
     /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
     /// leak them until session teardown.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
@@ -1207,7 +1207,7 @@ impl PersistentSession {
             .map_or(0, PreparedEngine::parked_count)
     }
 
-    /// Retire `scope` and its whole subtree: drop each scope's value-plane
+    /// Retire `scope` and its whole subtree: drop each scope's binding-store
     /// frame and RELEASE the GC roots those bindings solely owned.
     ///
     /// Walks [`ScopeTree::retire`]'s deepest-first order so a child's frames
