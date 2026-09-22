@@ -62,3 +62,32 @@ wideArray = Array (map lazyValue [1 .. 2048])
 
 wideObject :: Value
 wideObject = Object (Map.fromList [(Data.Text.pack (show n), lazyValue n) | n <- [1 .. 512]])
+
+cycleFailure :: Data.Text.Text
+cycleFailure = encodeValue (Array values)
+ where
+  values = Null : values
+
+valueCycleFailure :: Data.Text.Text
+valueCycleFailure = encodeValue value
+ where
+  value = Array [value]
+
+depthFailure :: Data.Text.Text
+depthFailure = encodeValue (nest 130)
+ where
+  nest 0 = Null
+  nest n = Array [nest (n - 1)]
+
+bottomFailure :: Data.Text.Text
+bottomFailure = encodeValue (Array [Null, error "JSON child bottom"])
+
+headBottomFailure :: Data.Text.Text
+headBottomFailure = encodeValue (Array (error "JSON head bottom" : divergent))
+ where
+  divergent = divergent
+
+sharedValue :: Data.Text.Text
+sharedValue = encodeValue (Array [shared, shared])
+ where
+  shared = Array [Bool True, Null]

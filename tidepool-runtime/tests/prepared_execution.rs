@@ -238,7 +238,7 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
     ));
     command
         .input(&source)
-        .targets(["result"])
+        .targets(["result", "cycleFailure", "valueCycleFailure", "depthFailure", "bottomFailure", "headBottomFailure", "sharedValue"])
         .include(root.join("haskell/lib"))
         .output_dir(output.path());
     let extracted = command
@@ -264,6 +264,41 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
     )
     .expect("native JSON fixture runs");
     assert_eq!(observed_int(&result.values[0]), 1);
+    let read_program = |target: &str| {
+        let bytes = std::fs::read(output.path().join(format!("{target}.prepared.cbor"))).unwrap();
+        parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap()
+    };
+    let shared = read_program("sharedValue");
+    let shared_entry = shared.entry();
+    let linked = link_program(shared, &MachineImports::default()).unwrap();
+    let compiled = CompiledProgram::compile(&linked).unwrap();
+    let (mut machine, shared_program) = PreparedMachine::new(compiled,
+        PreparedMachineOptions { nursery_bytes: 4096 }).unwrap();
+    for (target, expected) in [
+        ("cycleFailure", RuntimeError::BlackHole),
+        ("valueCycleFailure", RuntimeError::BlackHole),
+        ("depthFailure", RuntimeError::StackOverflow),
+        ("bottomFailure", RuntimeError::RaisedExceptionMessage("JSON child bottom".into())),
+        ("headBottomFailure", RuntimeError::RaisedExceptionMessage("JSON head bottom".into())),
+    ] {
+        let prepared = read_program(target);
+        let entry = prepared.entry();
+        let linked = link_program(prepared, &MachineImports::default()).unwrap();
+        let compiled = machine.compile_for_install(&linked).unwrap();
+        let program = machine.install_program(compiled, ImportBindings::new()).unwrap();
+        let error = machine.run_entry(program, entry, &[], call_options(true), RealmId::ROOT)
+            .expect_err("a nested encoder failure must not publish partial JSON");
+        assert!(matches!(error, ExecutionError::Runtime(ref failure)
+            if failure.cause == expected), "{target}: {error:?}");
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(machine.handle_count(), 0);
+        let success = machine.run_entry(shared_program, shared_entry, &[], call_options(true), RealmId::ROOT)
+            .expect("same machine encodes shared acyclic values after failure and collection");
+        let HaskellValue::Con(_, fields) = &success.values[0] else { panic!("encoded Text") };
+        let HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)) = &fields[0] else { panic!("Text bytes") };
+        assert_eq!(bytes, b"[[true,null],[true,null]]");
+        assert_eq!(machine.handle_count(), 0);
+    }
 }
 
 #[test]

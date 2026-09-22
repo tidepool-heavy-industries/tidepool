@@ -1133,7 +1133,7 @@ impl JsonEncoder<'_, '_> {
             self.finish_nodes(result, fields.into_iter().map(|field| field.0))
         })();
         let leave = self.ancestors.leave(node).map_err(EncodeFailure::from);
-        result.or(leave)
+        result.and(leave)
     }
 
     fn write_bool(
