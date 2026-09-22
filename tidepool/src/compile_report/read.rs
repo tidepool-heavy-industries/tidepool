@@ -61,7 +61,7 @@ pub struct RunEvidence {
 #[derive(Debug)]
 pub enum EvidenceReadError {
     Io(std::io::Error),
-    TornMidFile {
+    MalformedRow {
         path: PathBuf,
         line_no: usize,
         detail: String,
@@ -72,14 +72,11 @@ impl std::fmt::Display for EvidenceReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EvidenceReadError::Io(e) => write!(f, "{e}"),
-            EvidenceReadError::TornMidFile {
+            EvidenceReadError::MalformedRow {
                 path,
                 line_no,
                 detail,
-            } => write!(
-                f,
-                "{path:?} corrupted at line {line_no} (not the final line): {detail}"
-            ),
+            } => write!(f, "{path:?} corrupted at line {line_no}: {detail}"),
         }
     }
 }
@@ -126,11 +123,13 @@ pub fn read_evidence_file(path: &Path) -> Result<RunEvidence, EvidenceReadError>
     )
     .map_err(|e| match e {
         jsonl::JsonlReadError::Io(io) => EvidenceReadError::Io(io),
-        jsonl::JsonlReadError::TornMidFile { line_no, detail } => EvidenceReadError::TornMidFile {
-            path: path.to_path_buf(),
-            line_no,
-            detail,
-        },
+        jsonl::JsonlReadError::MalformedRow { line_no, detail } => {
+            EvidenceReadError::MalformedRow {
+                path: path.to_path_buf(),
+                line_no,
+                detail,
+            }
+        }
     })?;
     if let Some(torn) = torn {
         eprintln!(

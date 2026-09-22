@@ -109,7 +109,7 @@ impl JournalEntry {
 }
 
 /// Why one journal line failed to parse into a [`JournalEntry`] — the
-/// line/field context [`JournalLoadError::TornMidFile`] carries, and the same
+/// line/field context [`JournalLoadError::MalformedRow`] carries, and the same
 /// detail a torn FINAL line's `tracing::warn!` reports (that one is never an
 /// error — see [`load_journal`]).
 #[derive(Debug)]
@@ -151,7 +151,7 @@ pub enum JournalLoadError {
     /// append-only and every write but the last is complete by
     /// construction, so this means real corruption — never silently
     /// absorbed the way a torn final line is.
-    TornMidFile {
+    MalformedRow {
         path: PathBuf,
         /// ONE-based file line number (the first line is `1`), matching what
         /// an operator sees in a text editor or `sed -n '<n>p'` — not the
@@ -185,14 +185,11 @@ impl fmt::Display for JournalLoadError {
             JournalLoadError::Io { path, source } => {
                 write!(f, "journal I/O error on {path:?}: {source}")
             }
-            JournalLoadError::TornMidFile {
+            JournalLoadError::MalformedRow {
                 path,
                 line_no,
                 detail,
-            } => write!(
-                f,
-                "journal {path:?} corrupted at line {line_no} (not the final line): {detail}"
-            ),
+            } => write!(f, "journal {path:?} corrupted at line {line_no}: {detail}"),
             JournalLoadError::BelowFloor { path, found, floor } => write!(
                 f,
                 "journal segment {path:?} version {found} is below the floor this build still \
@@ -225,7 +222,7 @@ fn ladder_err_to_load_err(e: LadderError, path: &Path) -> JournalLoadError {
             found,
             current,
         },
-        LadderError::Migration { from, source } => JournalLoadError::TornMidFile {
+        LadderError::Migration { from, source } => JournalLoadError::MalformedRow {
             path: path.to_path_buf(),
             line_no: 0,
             detail: format!("migration from version {from} failed: {}", source.0),
@@ -247,24 +244,12 @@ impl std::error::Error for JournalLoadError {}
 /// an empty journal (`Ok(vec![])`), not an error — a run that has not
 /// recorded anything yet has no file on disk. A torn FINAL line (a crash
 /// mid-append) is skipped with a `tracing::warn!`; a torn line anywhere else
-/// is loud (`Err(JournalLoadError::TornMidFile)`) — the journal is
+/// is loud (`Err(JournalLoadError::MalformedRow)`) — the journal is
 /// append-only, so only the very last write can ever be incomplete.
 pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> {
-    // `TailPolicy::Observe`: a fold reads SEGMENT files it does not own (see
-    // `tidepool_harness::selfharness::resume`), so a torn tail is reported
-    // but never truncated — see `tidepool_repr::jsonl`'s module doc.
-    //
-    // Parsed as raw `Value` first, not directly into `JournalEntry`: a
-    // segment written by a stamping `JournalHandler` has a header line
-    // (`{"version": N}`) as line one that an OLDER segment (predating this
-    // scheme) never had — every line in a pre-scheme segment is a plain
-    // entry — and `read_tail`'s single `parse` closure has no way to know
-    // in advance which shape a given line is. A shape-level (valid JSON,
-    // wrong fields) failure on the true final line therefore no longer
-    // benefits from `read_tail`'s own torn-tail forgiveness — only
-    // JSON-syntax corruption does — the loop below restores that
-    // forgiveness itself, so the net behavior for a torn write is
-    // unchanged.
+    // Observation never rewrites foreign segments. Decode raw JSON before
+    // migration because the optional version header and entries have different
+    // schemas. A complete entry with the wrong shape remains corruption.
     let (raw_lines, torn) = jsonl::read_tail(
         path,
         |l| serde_json::from_str::<serde_json::Value>(l).map_err(|e| e.to_string()),
@@ -275,7 +260,7 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
             path: path.to_path_buf(),
             source,
         },
-        jsonl::JsonlReadError::TornMidFile { line_no, detail } => JournalLoadError::TornMidFile {
+        jsonl::JsonlReadError::MalformedRow { line_no, detail } => JournalLoadError::MalformedRow {
             path: path.to_path_buf(),
             line_no,
             detail,
@@ -324,16 +309,7 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
         match JournalEntry::from_json(&migrated) {
             Ok(entry) => entries.push(entry),
             Err(parse_err) => {
-                let is_final_and_untorn = i == n - 1 && torn.is_none();
-                if is_final_and_untorn {
-                    tracing::warn!(
-                        "journal {:?}: torn final line skipped (shape, crash mid-append?): {}",
-                        path,
-                        parse_err
-                    );
-                    break;
-                }
-                return Err(JournalLoadError::TornMidFile {
+                return Err(JournalLoadError::MalformedRow {
                     path: path.to_path_buf(),
                     line_no: header_lines + i + 1,
                     detail: parse_err.to_string(),
@@ -972,6 +948,18 @@ mod tests {
     }
 
     #[test]
+    fn complete_wrong_shape_tail_is_not_a_torn_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        assert!(matches!(
+            load_journal(&path),
+            Err(JournalLoadError::MalformedRow { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}\n");
+    }
+
+    #[test]
     fn torn_mid_file_line_is_loud_not_absorbed() {
         let path = tmp_file("torn_mid");
         let _ = std::fs::remove_file(&path);
@@ -988,9 +976,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(JournalLoadError::TornMidFile { line_no: 1, .. })
+                Err(JournalLoadError::MalformedRow { line_no: 1, .. })
             ),
-            "expected TornMidFile at ONE-based line 1 (the first line in the \
+            "expected MalformedRow at ONE-based line 1 (the first line in the \
              file, an operator's \"line 1\"), got {:?}",
             result
         );

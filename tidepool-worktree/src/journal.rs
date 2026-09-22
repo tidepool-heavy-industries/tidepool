@@ -161,13 +161,9 @@ impl EventJournal {
         )
         .map_err(|e| match e {
             jsonl::JsonlReadError::Io(io) => storage_failure(&path, io),
-            jsonl::JsonlReadError::TornMidFile { line_no, detail } => storage_failure(
+            jsonl::JsonlReadError::MalformedRow { line_no, detail } => storage_failure(
                 &path,
-                format!(
-                    "malformed journal row at line {line_no} is followed by more data — a \
-                     corrupted receipt in the middle of the journal is not a torn write and \
-                     must not be silently skipped: {detail}"
-                ),
+                format!("malformed journal row at line {line_no}: {detail}"),
             ),
         })?;
         if let Some(repair) = &torn {

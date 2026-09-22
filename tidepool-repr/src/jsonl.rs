@@ -6,10 +6,11 @@
 //! Directory creation remains explicit: durable store owners use
 //! `tidepool_atomic_write::create_dir_all_durable` before first publication.
 //!
-//! [`TailPolicy::Repair`] truncates a malformed final row for a single-owner
+//! [`TailPolicy::Repair`] truncates an incomplete final row for a single-owner
 //! journal. [`TailPolicy::Observe`] leaves artifacts untouched for read-only or
 //! retain-first consumers. Malformed rows before another row are corruption and
-//! fail under either policy. Parsing and repair are not version-migration policy.
+//! fail under either policy. Complete rows rejected by the schema or version also
+//! fail without mutation; tail repair never performs a version migration.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -77,10 +78,9 @@ pub fn write_line(file: &mut File, line: &str, sync_policy: SyncPolicy) -> std::
 #[derive(Debug)]
 pub enum JsonlReadError {
     Io(std::io::Error),
-    /// A malformed row before the last line — never the torn-write shape, so
-    /// never silently absorbed. `line_no` is ONE-based (an operator's "line
-    /// 1", matching what a text editor or `sed -n '<n>p'` shows).
-    TornMidFile {
+    /// Corruption or an unsupported complete row, never silently absorbed.
+    /// `line_no` is one-based, matching text editors and command-line tools.
+    MalformedRow {
         line_no: usize,
         detail: String,
     },
@@ -90,11 +90,9 @@ impl std::fmt::Display for JsonlReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JsonlReadError::Io(e) => write!(f, "{e}"),
-            JsonlReadError::TornMidFile { line_no, detail } => write!(
-                f,
-                "malformed row at line {line_no} is followed by more data — not the final line: \
-                 {detail}"
-            ),
+            JsonlReadError::MalformedRow { line_no, detail } => {
+                write!(f, "malformed row at line {line_no}: {detail}")
+            }
         }
     }
 }
@@ -103,7 +101,7 @@ impl std::error::Error for JsonlReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             JsonlReadError::Io(e) => Some(e),
-            JsonlReadError::TornMidFile { .. } => None,
+            JsonlReadError::MalformedRow { .. } => None,
         }
     }
 }
@@ -127,18 +125,10 @@ pub struct TornTail {
     pub reason: String,
 }
 
-/// Read every row in `path`, in file order, parsing each with the caller's
-/// own `parse` (so this stays schema-agnostic: a caller like `load_journal`
-/// applies its own field-level validation on top of the raw JSON, exactly as
-/// it did before this consolidation). A torn FINAL row is always forgiven —
-/// see the module doc for what `policy` does to the bytes on disk. A missing
-/// file reads as `Ok((vec![], None))` — an empty journal, not an error.
-///
-/// "Malformed" is judged by `parse`'s own verdict — a syntactically valid
-/// JSON line that doesn't match the caller's expected shape is exactly as
-/// malformed as invalid JSON, matching what every consolidated consumer
-/// already did (both `EventJournal` and `load_journal` treated a
-/// wrong-shaped row as bad, not just a syntactically invalid one).
+/// Read rows in file order with caller-owned schema validation. A missing file
+/// reads as an empty journal. Only a malformed unterminated final row can be
+/// repaired or skipped; a newline-terminated row or complete
+/// JSON value rejected by the caller is corruption, even at EOF.
 pub fn read_tail<T>(
     path: &Path,
     parse: impl Fn(&str) -> Result<T, String>,
@@ -156,7 +146,7 @@ pub fn read_tail<T>(
     // doc. Bytes are counted (hence `read_until`, not `lines()`) so the
     // eventual truncation lands exactly at the start of the bad row.
     let mut pending_bad: Option<(usize, String, u64)> = None;
-    let not_final = |bad: (usize, String, u64), next: usize| JsonlReadError::TornMidFile {
+    let not_final = |bad: (usize, String, u64), next: usize| JsonlReadError::MalformedRow {
         line_no: bad.0,
         detail: format!(
             "a corrupted row in the middle of the file is not a torn write and must not be \
@@ -195,6 +185,14 @@ pub fn read_tail<T>(
                         entries.push(entry);
                     }
                     Err(reason) => {
+                        if buf.ends_with(b"\n")
+                            || serde_json::from_str::<serde_json::Value>(l).is_ok()
+                        {
+                            return Err(JsonlReadError::MalformedRow {
+                                line_no: lineno,
+                                detail: reason,
+                            });
+                        }
                         if let Some(bad) = pending_bad.take() {
                             return Err(not_final(bad, lineno));
                         }
@@ -205,6 +203,12 @@ pub fn read_tail<T>(
             // Non-UTF-8 bytes are the same torn-write shape as a truncated
             // JSON row, so they get the same final-row-only treatment.
             Err(err) => {
+                if buf.ends_with(b"\n") {
+                    return Err(JsonlReadError::MalformedRow {
+                        line_no: lineno,
+                        detail: format!("invalid utf-8: {err}"),
+                    });
+                }
                 if let Some(bad) = pending_bad.take() {
                     return Err(not_final(bad, lineno));
                 }
@@ -355,10 +359,26 @@ mod tests {
 
         let err = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap_err();
         assert!(
-            matches!(err, JsonlReadError::TornMidFile { line_no: 1, .. }),
-            "expected TornMidFile at line 1, got {err:?}"
+            matches!(err, JsonlReadError::MalformedRow { line_no: 1, .. }),
+            "expected MalformedRow at line 1, got {err:?}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn complete_invalid_final_rows_are_never_repaired() {
+        let path = tmp_file("complete_invalid_final");
+        for bytes in [b"1\nwrong\n".as_slice(), b"1\n{}\n", b"1\n{}", b"1\n\xff\n"] {
+            for policy in [TailPolicy::Repair, TailPolicy::Observe] {
+                std::fs::write(&path, bytes).unwrap();
+                assert!(matches!(
+                    read_tail(&path, parse_u64, policy),
+                    Err(JsonlReadError::MalformedRow { line_no: 2, .. })
+                ));
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
