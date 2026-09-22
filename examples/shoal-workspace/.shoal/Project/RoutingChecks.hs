@@ -61,7 +61,7 @@ twoLaneHandoff = do
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "handoff-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (coding rightLabel projectHead task))"
+  void $ turn owner "(right, rightProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (coding projectHead (assignment rightLabel task)))"
   right <- activation
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
@@ -299,7 +299,7 @@ independentSources = do
   owner <- root
   script owner "attention-sources-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @WorkProgress @Text (coding rightLabel projectHead (\"right\" :: Text)))"
+  void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @WorkProgress @Text (coding projectHead (assignment rightLabel (\"right\" :: Text))))"
   right <- activation
   script owner "attention-sources-route"
   script (checkActor left) "attention-sources-question"

@@ -10,13 +10,13 @@
 -- 'Tidepool.Command'; this module changes only the text prepared for display.
 module Project.Shell
   ( tools,
-    Snapshot,
-    snapshot,
+    OutputSnapshot,
+    outputSnapshot,
     snapshotJob,
     stdoutEndpoint,
     stderrEndpoint,
     SectionId (..),
-    SnapshotIssue (..),
+    OutputSnapshotIssue (..),
     section,
     sectionPage,
     estimatedTokens,
@@ -69,20 +69,20 @@ maximumScoredTokens = 262144
 questionsPerRequest :: Int
 questionsPerRequest = 128
 
-data Snapshot = Snapshot
+data OutputSnapshot = OutputSnapshot
   { snapshotJob :: Cmd.Job,
     stdoutEndpoint :: Int,
     stderrEndpoint :: Int
   }
   deriving (Eq, Show)
 
-snapshot :: Cmd.Job -> Int -> Int -> Snapshot
-snapshot = Snapshot
+outputSnapshot :: Cmd.Job -> Int -> Int -> OutputSnapshot
+outputSnapshot = OutputSnapshot
 
 newtype SectionId = SectionId Int
   deriving (Eq, Ord, Show)
 
-data SnapshotIssue
+data OutputSnapshotIssue
   = SnapshotExpired Cmd.CommandStream Int
   | SnapshotDecodingLoss Cmd.CommandStream Int
   | SnapshotUnavailable Cmd.CommandStream CommandError
@@ -151,7 +151,7 @@ prepare command purpose recent observed = case Cmd.presentedOutput observed of
   Left issue -> pure (statusHeading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed)
   Right output -> do
     let frozen =
-          Snapshot
+          OutputSnapshot
             (Cmd.presentedJob observed)
             (Cmd.outputAvailableEnd (Cmd.commandStdout output))
             (Cmd.outputAvailableEnd (Cmd.commandStderr output))
@@ -183,18 +183,18 @@ statusHeading observed =
 jobText :: Cmd.Job -> Text
 jobText (Job key) = key
 
-snapshotFromObservation :: Cmd.PresentedObservation -> Maybe Snapshot
+snapshotFromObservation :: Cmd.PresentedObservation -> Maybe OutputSnapshot
 snapshotFromObservation observed = case Cmd.presentedOutput observed of
   Left _ -> Nothing
   Right output ->
     Just
-      ( Snapshot
+      ( OutputSnapshot
           (Cmd.presentedJob observed)
           (Cmd.outputAvailableEnd (Cmd.commandStdout output))
           (Cmd.outputAvailableEnd (Cmd.commandStderr output))
       )
 
-loadSections :: Member Commands effects => Snapshot -> Maybe CommandOutput -> Eff effects (Either SnapshotIssue [Section])
+loadSections :: Member Commands effects => OutputSnapshot -> Maybe CommandOutput -> Eff effects (Either OutputSnapshotIssue [Section])
 loadSections frozen initial = do
   out <- readFrozen frozen Cmd.Stdout (stdoutEndpoint frozen) (Cmd.commandStdout <$> initial)
   err <- readFrozen frozen Cmd.Stderr (stderrEndpoint frozen) (Cmd.commandStderr <$> initial)
@@ -240,7 +240,7 @@ assignSections streams = snd (foldl addStream (1, []) streams)
        in (offset + bytes, parts <> [(offset, offset + bytes, part)])
     number stream ident (start, end, text) = Section (SectionId ident) stream start end text True
 
-readFrozen :: Member Commands effects => Snapshot -> Cmd.CommandStream -> Int -> Maybe CommandPage -> Eff effects (Either SnapshotIssue Text)
+readFrozen :: Member Commands effects => OutputSnapshot -> Cmd.CommandStream -> Int -> Maybe CommandPage -> Eff effects (Either OutputSnapshotIssue Text)
 readFrozen frozen stream endpoint initial = case initial of
   Nothing -> collect 0 []
   Just page
@@ -327,14 +327,14 @@ scoreBatch command purpose recent rows = do
           | (row, judged) <- response.sections
         ]
 
-renderRaw :: Cmd.PresentedObservation -> Snapshot -> [Section] -> Text
+renderRaw :: Cmd.PresentedObservation -> OutputSnapshot -> [Section] -> Text
 renderRaw observed frozen sections =
   let raw = statusHeading observed <> "\n" <> T.concat (map sectionText sections)
    in if utf8Bytes raw <= Cmd.presentedByteBudget observed
         then raw
         else renderFallback observed frozen "short output exceeds the configured byte display budget" sections
 
-renderFallback :: Cmd.PresentedObservation -> Snapshot -> Text -> [Section] -> Text
+renderFallback :: Cmd.PresentedObservation -> OutputSnapshot -> Text -> [Section] -> Text
 renderFallback observed frozen failure sections =
   let prefix =
         statusHeading observed
@@ -345,7 +345,7 @@ renderFallback observed frozen failure sections =
       chosen = takeWithin (selectedOutputTokens * 4) (Cmd.presentedByteBudget observed) render sections
    in render chosen
 
-renderSelected :: Cmd.PresentedObservation -> Snapshot -> [Ranked] -> Text
+renderSelected :: Cmd.PresentedObservation -> OutputSnapshot -> [Ranked] -> Text
 renderSelected observed frozen ranked =
   let allSections = map (\(Ranked section' _) -> section') ranked
       orderedByRank = sortBy (flip (comparing rankKey)) ranked
@@ -396,7 +396,7 @@ renderMarked = T.concat . map render
       let key = sectionKey (sectionId section')
        in streamName (sectionStream section') <> " <" <> key <> ">\n" <> sectionText section' <> "\n</" <> key <> ">\n"
 
-recoveryIfOmitted :: Snapshot -> [Section] -> [Section] -> Text
+recoveryIfOmitted :: OutputSnapshot -> [Section] -> [Section] -> Text
 recoveryIfOmitted frozen allSections selected =
   let kept = map sectionId selected
       omitted = [sectionId section' | section' <- allSections, sectionId section' `notElem` kept]
@@ -407,9 +407,9 @@ recoveryIfOmitted frozen allSections selected =
 recovery :: Cmd.PresentedObservation -> Text
 recovery observed = maybe "" recoveryFor (snapshotFromObservation observed)
 
-recoveryFor :: Snapshot -> Text
+recoveryFor :: OutputSnapshot -> Text
 recoveryFor frozen =
-  "Recover without rerunning (use the Cmd.Job binding shown above): let snap = Project.Shell.snapshot jobN"
+  "Recover without rerunning (use the Cmd.Job binding shown above): let snap = Project.Shell.outputSnapshot jobN"
     <> " "
     <> number (stdoutEndpoint frozen)
     <> " "
@@ -442,21 +442,21 @@ streamName :: Cmd.CommandStream -> Text
 streamName Cmd.Stdout = "stdout"
 streamName Cmd.Stderr = "stderr"
 
-renderIssue :: SnapshotIssue -> Text
+renderIssue :: OutputSnapshotIssue -> Text
 renderIssue issue = case issue of
   SnapshotExpired stream offset -> streamName stream <> " retained output expired or has a gap at byte " <> number offset <> "."
   SnapshotDecodingLoss stream offset -> streamName stream <> " has decoding loss at byte " <> number offset <> "."
   SnapshotUnavailable stream failure -> streamName stream <> " unavailable: " <> Cmd.renderCommandError failure
   UnknownSection ident -> "No section " <> sectionKey ident <> " belongs to this snapshot."
 
-section :: Member Commands effects => Snapshot -> SectionId -> Eff effects (Either SnapshotIssue Text)
+section :: Member Commands effects => OutputSnapshot -> SectionId -> Eff effects (Either OutputSnapshotIssue Text)
 section frozen ident = do
   loaded <- loadSections frozen Nothing
   pure $ do
     sections <- loaded
     maybe (Left (UnknownSection ident)) (Right . sectionText) (findSection ident sections)
 
-sectionPage :: Member Commands effects => Snapshot -> SectionId -> Eff effects (Either SnapshotIssue Cmd.OutputPage)
+sectionPage :: Member Commands effects => OutputSnapshot -> SectionId -> Eff effects (Either OutputSnapshotIssue Cmd.OutputPage)
 sectionPage frozen ident = do
   loaded <- loadSections frozen Nothing
   case loaded >>= maybe (Left (UnknownSection ident)) Right . findSection ident of

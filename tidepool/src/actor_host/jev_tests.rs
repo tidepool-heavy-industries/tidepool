@@ -485,7 +485,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         "omission summary missing: {output}"
     );
     assert!(
-        output.contains("Project.Shell.snapshot jobN"),
+        output.contains("Project.Shell.outputSnapshot jobN"),
         "recovery missing: {output}"
     );
     assert!(
@@ -529,7 +529,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     let short_page = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         &format!(
-            "Project.Shell.sectionPage (Project.Shell.snapshot {binding} {} {}) (Project.Shell.SectionId 1)",
+            "Project.Shell.sectionPage (Project.Shell.outputSnapshot {binding} {} {}) (Project.Shell.SectionId 1)",
             command_output.len(),
             "ESSENTIAL-diagnostic\n".len()
         ),
