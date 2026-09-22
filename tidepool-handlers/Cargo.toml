@@ -28,7 +28,6 @@ tidepool-agent.workspace = true
 # Jev/System One handler: resolves TYPESAFE_API_KEY via the shared config/secrets
 # path resolver (see `tidepool-toolchain::paths::secrets_dir`).
 tidepool-toolchain.workspace = true
-inventory.workspace = true
 frunk.workspace = true
 # Native deps moved from tidepool/Cargo.toml
 glob.workspace = true
@@ -43,7 +42,6 @@ url.workspace = true
 # Process-group SIGKILL on Exec timeout (Unix only — see `handlers/exec.rs`).
 libc.workspace = true
 # Direct deps for handler implementations
-serde.workspace = true
 serde_json.workspace = true
 # Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
 # matches the cache layer's blake3 choice (tidepool-runtime).

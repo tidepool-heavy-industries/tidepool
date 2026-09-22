@@ -75,32 +75,52 @@ impl JsonConIds {
     /// `Data.Map.Tip` and `Data.Set.Tip` are present (cross-module closure) the
     /// `Tip` that is actually a sibling of the resolved `Bin` is chosen.
     pub fn from_table(table: &DataConTable) -> Option<Self> {
-        let bin = table
-            .get_by_qualified_name("Data.Map.Bin")
-            .or_else(|| table.get_by_name_arity("Bin", 5))?;
+        fn named(
+            table: &DataConTable,
+            qualified: &[&str],
+            name: &str,
+            arity: u32,
+        ) -> Option<DataConId> {
+            qualified
+                .iter()
+                .find_map(|qualified| {
+                    table
+                        .get_by_qualified_name(qualified)
+                        .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == arity))
+                })
+                .or_else(|| table.get_by_name_arity_checked(name, arity).ok().flatten())
+        }
+
+        let bin = named(table, &["Data.Map.Bin"], "Bin", 5)?;
         let tip = table
             .get_by_qualified_name("Data.Map.Tip")
+            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 0))
             .or_else(|| table.get_companion(bin, "Tip", 0))
-            .or_else(|| table.get_by_name_arity("Tip", 0))?;
+            .or_else(|| named(table, &[], "Tip", 0))?;
         Some(JsonConIds {
-            object: table.get_by_name_arity("Object", 1)?,
-            array: table.get_by_name_arity("Array", 1)?,
-            string: table.get_by_name_arity("String", 1)?,
-            number: table.get_by_name_arity("Number", 1)?,
-            scientific: table.get_by_name_arity("Scientific", 2)?,
-            is: table.get_by_name_arity("IS", 1)?,
-            ip: table.get_by_name_arity("IP", 1)?,
-            in_: table.get_by_name_arity("IN", 1)?,
-            bool_con: table.get_by_name_arity("Bool", 1)?,
-            null: table.get_by_name_arity("Null", 0)?,
-            true_con: table.get_by_name_arity("True", 0)?,
-            false_con: table.get_by_name_arity("False", 0)?,
+            object: named(table, &["Tidepool.Aeson.Value.Object"], "Object", 1)?,
+            array: named(table, &["Tidepool.Aeson.Value.Array"], "Array", 1)?,
+            string: named(table, &["Tidepool.Aeson.Value.String"], "String", 1)?,
+            number: named(table, &["Tidepool.Aeson.Value.Number"], "Number", 1)?,
+            scientific: named(
+                table,
+                &["Tidepool.Aeson.Scientific.Scientific"],
+                "Scientific",
+                2,
+            )?,
+            is: named(table, &["GHC.Num.Integer.IS"], "IS", 1)?,
+            ip: named(table, &["GHC.Num.Integer.IP"], "IP", 1)?,
+            in_: named(table, &["GHC.Num.Integer.IN"], "IN", 1)?,
+            bool_con: named(table, &["Tidepool.Aeson.Value.Bool"], "Bool", 1)?,
+            null: named(table, &["Tidepool.Aeson.Value.Null"], "Null", 0)?,
+            true_con: named(table, &["GHC.Internal.Types.True"], "True", 0)?,
+            false_con: named(table, &["GHC.Internal.Types.False"], "False", 0)?,
             bin,
             tip,
-            i_hash: table.get_by_name_arity("I#", 1)?,
-            text: table.get_by_name_arity("Text", 3)?,
-            cons: table.get_by_name_arity(":", 2)?,
-            nil: table.get_by_name_arity("[]", 0)?,
+            i_hash: named(table, &["GHC.Internal.Types.I#"], "I#", 1)?,
+            text: named(table, &["Data.Text.Internal.Text"], "Text", 3)?,
+            cons: named(table, &["GHC.Internal.Types.:"], ":", 2)?,
+            nil: named(table, &["GHC.Internal.Types.[]"], "[]", 0)?,
         })
     }
 }
@@ -380,6 +400,26 @@ mod tests {
             HaskellValue::Con(id, _) => assert_eq!(*id, ids.object),
             other => panic!("expected Con(Object), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn json_con_ids_rejects_same_shape_user_constructor_without_a_qualified_anchor() {
+        let mut table = json_test_table();
+        table
+            .insert_checked(DataCon {
+                id: DataConId(501),
+                name: "Object".into(),
+                tag: 1,
+                rep_arity: 1,
+                field_bangs: vec![],
+                qualified_name: Some("User.Object".into()),
+                type_name: "UserValue".into(),
+            })
+            .expect("distinct user constructor");
+        assert!(
+            JsonConIds::from_table(&table).is_none(),
+            "an unqualified JSON family must not select a same-name, same-arity user constructor"
+        );
     }
 
     /// When `Bin`/`Tip` from `Data.Map` AND `Data.Set` are both present with

@@ -12,7 +12,6 @@ rust-version.workspace = true
 [dependencies]
 clap.workspace = true
 tidepool-harness.workspace = true
-tidepool-runtime.workspace = true
 tidepool-repr.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
@@ -22,8 +21,6 @@ axum.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-core = "0.3"
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[bin]]
 name = "tidepool-selfharness-web"

@@ -111,6 +111,35 @@ pub struct SessionRunContext {
     pub principal: PrincipalId,
 }
 
+/// One payload-independent host binding interface retained across mounts.
+///
+/// The compiler mints its [`BoundBinder`] and `Val.G` generation once.  This
+/// record keeps that exact typed identity and constructor table together, so
+/// later JSON or Text payloads do not require a payload-shaped source module
+/// or another compile merely to recover a binder.
+#[derive(Clone, Debug)]
+pub struct HostMountBinding {
+    scope: ScopeId,
+    binder: BoundBinder,
+    generation: Generation,
+    table: DataConTable,
+}
+
+impl HostMountBinding {
+    /// The lexical scope whose compile view may import this binding.
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+
+    /// The compiler-produced binding identity.  Callers normally pass the
+    /// whole record to one of the mount methods instead of reconstructing it.
+    #[must_use]
+    pub fn binder(&self) -> &BoundBinder {
+        &self.binder
+    }
+}
+
 impl SessionRunContext {
     pub const ROOT: Self = Self {
         resource_scope: RealmId::ROOT,
@@ -1666,6 +1695,42 @@ where
         self.mount_host_handle_prepared(scope, binder, gen, handle)
     }
 
+    /// Retain a compiler-produced, payload-independent host interface for
+    /// subsequent replacement mounts.  The caller obtains the binder and
+    /// table from exactly one `run_turn` result; this method rejects a stale
+    /// scope or value-module generation before retaining anything.
+    pub fn retain_host_mount_binding(
+        &self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        generation: Generation,
+        table: &DataConTable,
+    ) -> Result<HostMountBinding, ResidentError> {
+        self.validate_compiled_mount_target(scope, binder, generation)?;
+        Ok(HostMountBinding {
+            scope,
+            binder: binder.clone(),
+            generation,
+            table: table.clone(),
+        })
+    }
+
+    /// Replace this retained interface's value with host JSON.  It is the
+    /// stable-interface form of [`Self::mount_json_binding_in`].
+    pub fn mount_host_json(
+        &mut self,
+        binding: &HostMountBinding,
+        value: &serde_json::Value,
+    ) -> Result<(), ResidentError> {
+        self.mount_json_binding_in(
+            binding.scope,
+            &binding.binder,
+            binding.generation,
+            &binding.table,
+            value,
+        )
+    }
+
     /// The `Text` sibling of [`Self::mount_json_binding_in`]. It is for host
     /// strings whose compiler-produced binder has type `Text`; the UTF-8
     /// bytes stream directly into the same managed builder and never become a
@@ -1689,6 +1754,49 @@ where
             .require_prepared()?
             .build_host_text(realm, text, table)?;
         self.mount_host_handle_prepared(scope, binder, gen, handle)
+    }
+
+    /// Replace this retained interface's value with host UTF-8 text.  It is
+    /// the stable-interface form of [`Self::mount_text_binding_in`].
+    pub fn mount_host_text(
+        &mut self,
+        binding: &HostMountBinding,
+        text: &str,
+    ) -> Result<(), ResidentError> {
+        self.mount_text_binding_in(
+            binding.scope,
+            &binding.binder,
+            binding.generation,
+            &binding.table,
+            text,
+        )
+    }
+
+    /// Remove a host binding from future compile views when a request has no
+    /// input.  Its root intentionally remains live: already compiled
+    /// closures still import the older `Val.G` identity and must keep their
+    /// heap reachability until normal scope retirement reclaims it.
+    ///
+    /// Returns `false` if this exact interface is not the current local
+    /// binding, so a newer user binding with the same name is never hidden.
+    pub fn hide_host_mount(&mut self, binding: &HostMountBinding) -> Result<bool, ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(binding.scope, &binding.binder, binding.generation)?;
+        let expected_id = SessionVarId::from_extract(binding.binder.var_id);
+        let expected_module = SessionModule::val(binding.generation);
+        let Some(current) = self.state.resolve_in(binding.scope, &binding.binder.name) else {
+            return Ok(false);
+        };
+        if current.scope != binding.scope
+            || current.id != expected_id
+            || current.module != expected_module
+        {
+            return Ok(false);
+        }
+        self.state
+            .bindings_mut()
+            .remove_current_in(binding.scope, &binding.binder.name);
+        Ok(true)
     }
 
     fn validate_compiled_mount_target(
