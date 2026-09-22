@@ -463,7 +463,7 @@ struct ProcessRecoveryRecord {
     retired: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessRecoveryCheckpoint {
     version: u32,
@@ -602,6 +602,13 @@ pub(crate) fn stop_predecessor_processes(
         .map_err(std::io::Error::from)?;
         std::fs::remove_dir_all(&record.socket_root)?;
         report.stopped += 1;
+        // Process evidence is enough to prove that replacing the root is safe,
+        // but it does not reconstruct a child actor's lost Haskell state,
+        // lineage, or mailbox. Keep that child visible as unavailable until an
+        // actor-owned durable record can restore those identities.
+        if !actor_name.starts_with("1-") {
+            report.unavailable.push(actor_name);
+        }
     }
     Ok(report)
 }
@@ -6583,6 +6590,61 @@ mod tests {
         let report = stop_predecessor_processes(run.path()).unwrap();
         assert!(!report.root_available());
         assert_eq!(report.unavailable, vec!["1-1"]);
+    }
+
+    #[test]
+    fn recovery_reports_a_stopped_child_until_its_actor_state_can_be_rebuilt() {
+        let run = tempfile::tempdir().unwrap();
+        let root = run.path().join("1-1");
+        let child = run.path().join("2-1");
+        let socket_root = child.join("sockets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&socket_root).unwrap();
+        tidepool_atomic_write::write_durable(
+            &root.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "root-launch".into(),
+                recovery_secret: "retired".into(),
+                supervisor_socket: root.join("supervisor.sock"),
+                socket_root: root.join("sockets"),
+                retired: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let supervisor_socket = socket_root.join("supervisor.sock");
+        tidepool_atomic_write::write_durable(
+            &child.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "child-launch".into(),
+                recovery_secret: "secret".into(),
+                supervisor_socket: supervisor_socket.clone(),
+                socket_root: socket_root.clone(),
+                retired: false,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        tidepool_atomic_write::write_durable(
+            &socket_root.join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT),
+            &serde_json::to_vec(&ProcessRecoveryCheckpoint {
+                version: tidepool_node::PROCESS_SUPERVISOR_VERSION,
+                launch_id: "child-launch".into(),
+                observation: tidepool_node::ProcessSupervisorObservation::ProcessStopped,
+                operation_pending: false,
+                error: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(report.root_available());
+        assert_eq!(report.stopped, 1);
+        assert_eq!(report.unavailable, vec!["2-1"]);
+        assert!(!socket_root.exists());
     }
 
     fn test_delivery_dependencies(
