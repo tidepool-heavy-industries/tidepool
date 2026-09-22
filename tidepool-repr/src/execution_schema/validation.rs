@@ -2065,7 +2065,16 @@ impl<'a> Validator<'a> {
             || constructor.unit != family.unit
         {
             return Err(ParseError::Malformed(format!(
-                "JSON {role} constructor does not match its admitted nominal identity"
+                "JSON {role} constructor does not match its admitted nominal identity: \
+                 constructor={}:{}:{} family={}:{}:{} tag={}/{}",
+                constructor.unit,
+                constructor.module,
+                constructor.occurrence,
+                family.unit,
+                family.module,
+                family.occurrence,
+                declaration.tag,
+                declaration.family_size,
             )));
         }
         if declaration.tag != tag || declaration.family_size != family_size {
@@ -2197,41 +2206,41 @@ impl<'a> Validator<'a> {
             (
                 true_,
                 "True",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "True",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "Bool",
-                1,
+                2,
                 2,
             ),
             (
                 false_,
                 "False",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "False",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "Bool",
-                2,
+                1,
                 2,
             ),
             (
                 cons,
                 "list cons",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 ":",
-                "GHC.Internal.Types",
-                "[]",
-                1,
+                "GHC.Types",
+                "List",
+                2,
                 2,
             ),
             (
                 nil,
                 "list nil",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "[]",
-                "GHC.Internal.Types",
-                "[]",
-                2,
+                "GHC.Types",
+                "List",
+                1,
                 2,
             ),
             (
@@ -2287,9 +2296,9 @@ impl<'a> Validator<'a> {
             (
                 int,
                 "boxed Int",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "I#",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "Int",
                 1,
                 1,
@@ -2786,46 +2795,19 @@ mod tests {
                 2,
                 vec![],
             ),
-            json_constructor(
-                9,
-                "GHC.Internal.Types",
-                "True",
-                "GHC.Internal.Types",
-                "Bool",
-                1,
-                2,
-                vec![],
-            ),
-            json_constructor(
-                10,
-                "GHC.Internal.Types",
-                "False",
-                "GHC.Internal.Types",
-                "Bool",
-                2,
-                2,
-                vec![],
-            ),
+            json_constructor(9, "GHC.Types", "True", "GHC.Types", "Bool", 2, 2, vec![]),
+            json_constructor(10, "GHC.Types", "False", "GHC.Types", "Bool", 1, 2, vec![]),
             json_constructor(
                 11,
-                "GHC.Internal.Types",
+                "GHC.Types",
                 ":",
-                "GHC.Internal.Types",
-                "[]",
-                1,
+                "GHC.Types",
+                "List",
+                2,
                 2,
                 vec![RuntimeRep::LiftedRef; 2],
             ),
-            json_constructor(
-                12,
-                "GHC.Internal.Types",
-                "[]",
-                "GHC.Internal.Types",
-                "[]",
-                2,
-                2,
-                vec![],
-            ),
+            json_constructor(12, "GHC.Types", "[]", "GHC.Types", "List", 1, 2, vec![]),
             json_constructor(
                 13,
                 "Tidepool.Aeson.Scientific",
@@ -2882,9 +2864,9 @@ mod tests {
             ),
             json_constructor(
                 18,
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "I#",
-                "GHC.Internal.Types",
+                "GHC.Types",
                 "Int",
                 1,
                 1,
@@ -2929,6 +2911,20 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::Malformed(detail))
                 if detail.contains("admitted nominal identity")
+        ));
+    }
+
+    #[test]
+    fn json_layout_rejects_reexported_standard_constructor_identity() {
+        let mut program = admitted_json_program();
+        let true_ = &mut program.constructors[8];
+        true_.identity.module = "GHC.Internal.Types".into();
+        true_.family.module = "GHC.Internal.Types".into();
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::Malformed(detail))
+                if detail.contains("JSON True constructor")
+                    && detail.contains("GHC.Internal.Types")
         ));
     }
 
