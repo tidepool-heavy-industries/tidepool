@@ -47,12 +47,6 @@ The final 13-program machine snapshot contained 12,113 native functions,
 throughput claims. Raw diagnostics live under ignored `target/` measurement
 directories.
 
-The matched compiler/runtime/GC acceptance passed, including all seven
-registered schema-14 embedded artifacts. `just quick` passed 726 tests with
-one ignored, and supported Cargo all-target compilation passed. The hours-long
-`just verify` was not run. Earlier intermediate failures and historical parcel
-completion notes are omitted; use Git history for that record.
-
 ## Open questions and cost axis
 
 | Question | Runtime and native cost | Build, memory, and dependency cost | Correctness and maintenance gate |
