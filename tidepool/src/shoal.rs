@@ -2646,6 +2646,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn run_storage_observation_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        for ordinal in 0..8_000 {
+            std::fs::write(root.path().join(format!("entry-{ordinal}")), b"12345678").unwrap();
+        }
+        let iterations = 100_u128;
+        let started = std::time::Instant::now();
+        let mut observation = BoundedStorageObservation::default();
+        for _ in 0..iterations {
+            observation = observe_storage(root.path(), 8_192);
+        }
+        eprintln!(
+            "run_storage entries={} bytes={} sample_micros={}",
+            observation.entries,
+            observation.bytes,
+            started.elapsed().as_micros() / iterations,
+        );
+        assert!(!observation.truncated);
+    }
+
+    #[test]
     fn compiler_daemon_is_tmux_owned_and_only_the_host_receives_its_socket() {
         let workspace = Path::new("/tmp/workspace");
         let socket = Path::new("/tmp/run/compiler.sock");

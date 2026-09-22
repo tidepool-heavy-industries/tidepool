@@ -496,4 +496,24 @@ mod tests {
             "echoed\n"
         );
     }
+
+    #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn retained_output_throughput_measurement() {
+        let mut capture = StreamBuffer::default();
+        let chunk = vec![b'x'; 64 * 1024];
+        let total = 256 * 1024 * 1024_u64;
+        let started = std::time::Instant::now();
+        for _ in 0..total / chunk.len() as u64 {
+            capture.push(&chunk);
+        }
+        let elapsed = started.elapsed();
+        let mib_per_second = total as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
+        eprintln!(
+            "output_capture mib_per_second={mib_per_second:.1} retained_bytes={} dropped_bytes={}",
+            capture.bytes.len(),
+            capture.dropped,
+        );
+        assert_eq!(capture.bytes.len(), RETAINED_STREAM_BYTES);
+    }
 }

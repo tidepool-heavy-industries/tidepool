@@ -177,4 +177,27 @@ mod tests {
         let error = invoke(None, Duration::from_millis(50)).await;
         assert!(error.to_string().contains("unconfirmed"));
     }
+
+    #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn command_protocol_roundtrip_measurement() {
+        let value = Response::State(State::Finished {
+            exit_code: 0,
+            cancelled: false,
+        });
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let iterations = 100_000_u128;
+        let started = std::time::Instant::now();
+        for _ in 0..iterations {
+            let bytes = serde_json::to_vec(std::hint::black_box(&value)).unwrap();
+            let decoded: Response = serde_json::from_slice(std::hint::black_box(&bytes)).unwrap();
+            std::hint::black_box(decoded);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "command_protocol bytes={} roundtrip_ns={}",
+            encoded.len(),
+            elapsed.as_nanos() / iterations,
+        );
+    }
 }

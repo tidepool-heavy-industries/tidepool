@@ -177,9 +177,41 @@ impl Entry {
 struct State {
     entries: HashMap<Key, Entry>,
     active: HashSet<Key>,
+    cleanup_failures: HashSet<Key>,
+    retained_allocations: HashSet<Key>,
     queue: Queue,
     sealed_producers: HashSet<String>,
     acknowledged: HashSet<Key>,
+}
+
+fn refresh_observation_indexes(state: &mut State, key: &Key) {
+    let Some(entry) = state.entries.get(key) else {
+        state.cleanup_failures.remove(key);
+        state.retained_allocations.remove(key);
+        return;
+    };
+    if matches!(
+        entry.current(),
+        CommandResourceStatus::CleanupUnconfirmed { .. }
+    ) {
+        state.cleanup_failures.insert(key.clone());
+    } else {
+        state.cleanup_failures.remove(key);
+    }
+    if entry.directory.is_some() {
+        state.retained_allocations.insert(key.clone());
+    } else {
+        state.retained_allocations.remove(key);
+    }
+}
+
+fn rebuild_observation_indexes(state: &mut State) {
+    state.cleanup_failures.clear();
+    state.retained_allocations.clear();
+    let keys = state.entries.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        refresh_observation_indexes(state, &key);
+    }
 }
 
 pub struct CommandResources {
@@ -322,6 +354,8 @@ impl CommandResources {
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 active: HashSet::new(),
+                cleanup_failures: HashSet::new(),
+                retained_allocations: HashSet::new(),
                 queue: Queue::new(
                     policy.general_bytes,
                     policy.protected_bytes,
@@ -608,6 +642,7 @@ impl CommandResources {
                 }
             }
         }
+        rebuild_observation_indexes(&mut state);
         self.admit_waiters(&mut state);
         Ok(())
     }
@@ -620,22 +655,13 @@ impl CommandResources {
         self.observe();
         let state = self.state.lock();
         let mut observation = CommandResourceObservation {
+            active: state.active.len(),
+            historical: state.entries.len().saturating_sub(state.active.len()),
+            retained_allocations: state.retained_allocations.len(),
+            cleanup_failures: state.cleanup_failures.len(),
             sealed_producers: state.sealed_producers.len(),
             ..CommandResourceObservation::default()
         };
-        for entry in state.entries.values() {
-            match entry.current() {
-                CommandResourceStatus::Queued
-                | CommandResourceStatus::Admitted { .. }
-                | CommandResourceStatus::Running => observation.active += 1,
-                CommandResourceStatus::CleanupUnconfirmed { .. } => {
-                    observation.cleanup_failures += 1;
-                    observation.historical += 1;
-                }
-                _ => observation.historical += 1,
-            }
-            observation.retained_allocations += usize::from(entry.directory.is_some());
-        }
         observation.process_count = bounded_process_count(&self.root, 4096).ok();
         observation.memory_bytes = read_scalar(&self.root.join("memory.current")).ok();
         observation.memory_pressure_avg10_micros =
@@ -745,6 +771,7 @@ impl CommandResources {
             state.entries[&key]
                 .status
                 .send_replace(CommandResourceStatus::Retired);
+            refresh_observation_indexes(&mut state, &key);
             state.acknowledged.insert(key);
         }
         Ok(())
@@ -772,6 +799,7 @@ impl CommandResources {
         state.entries[&key]
             .status
             .send_replace(CommandResourceStatus::Retired);
+        refresh_observation_indexes(&mut state, &key);
         state.acknowledged.insert(key);
         Ok(())
     }
@@ -807,6 +835,7 @@ impl CommandResources {
     }
 
     fn admit_waiters(&self, state: &mut State) {
+        let mut changed = Vec::new();
         while let Some((key, bytes)) = state.queue.next() {
             let configured = self.configure_command(&key, bytes);
             #[expect(
@@ -831,12 +860,20 @@ impl CommandResources {
                         if cleanup.is_ok() {
                             state.queue.release(&key);
                             state.active.remove(&key);
+                        } else {
+                            entry.directory = Some(directory);
                         }
                         entry
                             .status
                             .send_replace(CommandResourceStatus::CleanupUnconfirmed {
-                                detail: format!("allocation publication failed: {error}"),
+                                detail: match cleanup {
+                                    Ok(()) => format!("allocation publication failed: {error}"),
+                                    Err(cleanup) => format!(
+                                        "allocation publication failed: {error}; cleanup failed: {cleanup}"
+                                    ),
+                                },
                             });
+                        changed.push(key);
                         continue;
                     }
                     entry.directory = Some(directory.clone());
@@ -854,6 +891,10 @@ impl CommandResources {
                         });
                 }
             }
+            changed.push(key);
+        }
+        for key in changed {
+            refresh_observation_indexes(state, &key);
         }
     }
 
@@ -957,6 +998,7 @@ impl CommandResources {
                 .send_replace(CommandResourceStatus::CancelledBeforeStart);
             state.queue.release(&key);
             state.active.remove(&key);
+            refresh_observation_indexes(&mut state, &key);
             self.admit_waiters(&mut state);
         }
         Ok(state.entries[&key].current())
@@ -966,7 +1008,7 @@ impl CommandResources {
         let mut state = self.state.lock();
         let mut released = Vec::new();
         let active = state.active.iter().cloned().collect::<Vec<_>>();
-        for key in active {
+        for key in active.iter().cloned() {
             let Some(entry) = state.entries.get_mut(&key) else {
                 tracing::error!(actor = %key.0, command = %key.1,
                     "active command has no retained ownership entry");
@@ -1025,6 +1067,9 @@ impl CommandResources {
         for key in released {
             state.queue.release(&key);
             state.active.remove(&key);
+        }
+        for key in active {
+            refresh_observation_indexes(&mut state, &key);
         }
         self.admit_waiters(&mut state);
     }
@@ -1096,6 +1141,8 @@ mod tests {
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 active: HashSet::new(),
+                cleanup_failures: HashSet::new(),
+                retained_allocations: HashSet::new(),
                 queue: Queue::new(
                     policy.general_bytes,
                     policy.protected_bytes,
@@ -1213,5 +1260,50 @@ mod tests {
             owner.submit("actor-1", "command-1", MIB).unwrap(),
             CommandResourceStatus::CancelledBeforeStart
         );
+    }
+
+    #[test]
+    #[ignore = "measurement harness; run explicitly at integration boundaries"]
+    fn retained_history_does_not_scale_resource_polling() {
+        fn rss_kib() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0)
+        }
+        fn poll(owner: &CommandResources, count: usize) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..count {
+                std::hint::black_box(owner.observation());
+            }
+            started.elapsed().as_nanos() / count as u128
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        let empty_ns = poll(&owner, 2_000);
+        let rss_before = rss_kib();
+        {
+            let mut state = owner.state.lock();
+            for ordinal in 0..100_000 {
+                state.entries.insert(
+                    ("retired".into(), format!("command-{ordinal}")),
+                    Entry::new(CommandResourceStatus::Completed, Some(MIB)),
+                );
+            }
+            rebuild_observation_indexes(&mut state);
+        }
+        let retained_ns = poll(&owner, 2_000);
+        let observation = owner.observation();
+        eprintln!(
+            "resource_poll empty_ns={empty_ns} retained_ns={retained_ns} historical={} rss_delta_kib={}",
+            observation.historical,
+            rss_kib().saturating_sub(rss_before),
+        );
+        assert_eq!(observation.historical, 100_000);
+        assert_eq!(observation.active, 0);
     }
 }
