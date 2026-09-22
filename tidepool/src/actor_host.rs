@@ -731,6 +731,37 @@ fn durable_root_identity(
         .transpose()
 }
 
+fn latest_recoverable_actor_records(
+    records: &[tidepool_actor::DurableActorRecord],
+    root: ActorRef,
+) -> Vec<tidepool_actor::DurableActorRecord> {
+    let mut latest = BTreeMap::new();
+    for record in records
+        .iter()
+        .filter(|record| record.admission.actor.id != root.id)
+    {
+        latest
+            .entry(record.admission.actor.id)
+            .and_modify(|current: &mut &tidepool_actor::DurableActorRecord| {
+                if record.admission.actor.incarnation > current.admission.actor.incarnation {
+                    *current = record;
+                }
+            })
+            .or_insert(record);
+    }
+    latest
+        .into_values()
+        .filter(|record| {
+            record.terminal.is_none()
+                && record
+                    .application
+                    .as_ref()
+                    .is_some_and(|application| application.conversation.is_some())
+        })
+        .cloned()
+        .collect()
+}
+
 async fn recover_prior_actors(
     forest: &Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
     run_root: &Path,
@@ -745,20 +776,7 @@ async fn recover_prior_actors(
     if incarnation == tidepool_actor::Incarnation::FIRST {
         return BTreeMap::new();
     }
-    let mut pending = records
-        .iter()
-        .filter(|record| {
-            record.terminal.is_none()
-                && record.admission.actor.incarnation != incarnation
-                && record.admission.actor.id != root.id
-                && record
-                    .application
-                    .as_ref()
-                    .is_some_and(|application| application.conversation.is_some())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    pending.sort_by_key(|record| record.admission.actor.id);
+    let mut pending = latest_recoverable_actor_records(records, root);
     let mut recovered = BTreeMap::new();
     let mut recovered_ids = std::collections::BTreeSet::from([root.id]);
     loop {
@@ -7008,6 +7026,25 @@ mod tests {
         }
     }
 
+    fn durable_child(
+        actor: ActorRef,
+        conversation: Option<&str>,
+    ) -> tidepool_actor::DurableActorRecord {
+        let mut record = durable_root(actor);
+        record.admission.role = "coding".into();
+        record.admission.creator = Some(ActorRef::first(tidepool_actor::ActorId(1)));
+        record.application =
+            conversation.map(|conversation| tidepool_actor::DurableActorApplication {
+                binding_path: std::path::PathBuf::from(format!(
+                    "binding-{}-{}.json",
+                    actor.id.0, actor.incarnation.0
+                )),
+                conversation: Some(conversation.into()),
+                accepted_source: Some("source-revision".into()),
+            });
+        record
+    }
+
     #[test]
     fn actor_recovery_records_the_published_source_revision() {
         let project = tempfile::tempdir().unwrap();
@@ -7069,6 +7106,56 @@ mod tests {
                 incarnation: tidepool_actor::Incarnation(3),
             })
         );
+    }
+
+    #[test]
+    fn repeated_recovery_uses_only_the_latest_logical_actor_incarnation() {
+        let root = ActorRef {
+            id: tidepool_actor::ActorId(1),
+            incarnation: tidepool_actor::Incarnation(4),
+        };
+        let child = tidepool_actor::ActorId(2);
+        let first = durable_child(
+            ActorRef {
+                id: child,
+                incarnation: tidepool_actor::Incarnation(1),
+            },
+            Some("old-conversation"),
+        );
+        let second = durable_child(
+            ActorRef {
+                id: child,
+                // Actor incarnations can advance independently of the host
+                // generation and may happen to have the same number.
+                incarnation: tidepool_actor::Incarnation(4),
+            },
+            Some("latest-conversation"),
+        );
+        let selected = latest_recoverable_actor_records(&[first.clone(), second.clone()], root);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].admission.actor, second.admission.actor);
+
+        // A crash after the successor admission must fence the older
+        // conversation instead of launching it yet again.
+        let unpublished = durable_child(
+            ActorRef {
+                id: child,
+                incarnation: tidepool_actor::Incarnation(5),
+            },
+            None,
+        );
+        assert!(latest_recoverable_actor_records(
+            &[first.clone(), second.clone(), unpublished],
+            root,
+        )
+        .is_empty());
+
+        let mut retired = second;
+        retired.terminal = Some(tidepool_actor::DurableActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        });
+        assert!(latest_recoverable_actor_records(&[first, retired], root).is_empty());
     }
 
     #[test]

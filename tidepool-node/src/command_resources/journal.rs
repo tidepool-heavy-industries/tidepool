@@ -58,6 +58,7 @@ struct Row {
 pub(super) struct Journal {
     path: Option<PathBuf>,
     next_sequence: u64,
+    uncertain: bool,
 }
 
 impl Journal {
@@ -65,6 +66,7 @@ impl Journal {
         Self {
             path: None,
             next_sequence: 1,
+            uncertain: false,
         }
     }
 
@@ -98,12 +100,18 @@ impl Journal {
             Self {
                 path: Some(path),
                 next_sequence: expected,
+                uncertain: false,
             },
             events,
         ))
     }
 
     pub(super) fn append(&mut self, event: EventKind) -> std::io::Result<()> {
+        if self.uncertain {
+            return Err(std::io::Error::other(
+                "command ownership journal has an uncertain append; reopen it exclusively",
+            ));
+        }
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -115,7 +123,10 @@ impl Journal {
         let encoded = serde_json::to_string(&row).map_err(std::io::Error::other)?;
         // An append error is uncertain. Do not advance or retry it inside this
         // owner; callers retain the allocation and surface cleanup uncertainty.
-        tidepool_repr::jsonl::append_new_line(path, &encoded, SyncPolicy::All)?;
+        if let Err(error) = tidepool_repr::jsonl::append_new_line(path, &encoded, SyncPolicy::All) {
+            self.uncertain = true;
+            return Err(error);
+        }
         self.next_sequence += 1;
         Ok(())
     }
@@ -199,5 +210,31 @@ mod tests {
         assert!(allocation_path(root, "../outside").is_err());
         assert!(allocation_path(root, "/outside/command").is_err());
         assert!(allocation_path(root, "too/many/components").is_err());
+    }
+
+    #[test]
+    fn an_uncertain_append_fences_the_writer_until_exclusive_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ownership.jsonl");
+        let (mut journal, _) = Journal::open(path.clone()).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let event = || EventKind::Admission {
+            producer: "run-a-actor-1".into(),
+            actor: "run-a-actor-1".into(),
+            command: "command-2".into(),
+            requested_bytes: 4096,
+        };
+        assert!(journal.append(event()).is_err());
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        let error = journal.append(event()).unwrap_err();
+        assert!(error.to_string().contains("uncertain append"));
+        assert!(std::fs::read(&path).unwrap().is_empty());
+
+        let (mut reopened, events) = Journal::open(path.clone()).unwrap();
+        assert!(events.is_empty());
+        reopened.append(event()).unwrap();
+        assert_eq!(Journal::open(path).unwrap().1.len(), 1);
     }
 }
