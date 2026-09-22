@@ -47,6 +47,13 @@ shippedValueSource = BS.pack $(do
   addDependentFile source
   lift . BS.unpack =<< runIO (BS.readFile source))
 
+shippedScientificSource :: ByteString
+shippedScientificSource = BS.pack $(do
+  here <- loc_filename <$> location
+  let source = takeDirectory here </> ".." </> ".." </> "lib" </> "Tidepool" </> "Aeson" </> "Scientific.hs"
+  addDependentFile source
+  lift . BS.unpack =<< runIO (BS.readFile source))
+
 data JsonAuthority = JsonAuthority Module Unit (JsonLayout DataCon) deriving stock (Eq)
 instance Show JsonAuthority where
   show (JsonAuthority owner _ _) = showSDocUnsafe (ppr owner)
@@ -55,27 +62,48 @@ jsonAuthorityLayout :: JsonAuthority -> JsonLayout DataCon
 jsonAuthorityLayout (JsonAuthority _ _ layout) = layout
 
 resolveJsonAuthority :: HscEnv -> IO (Maybe JsonAuthority)
-resolveJsonAuthority env = case lookupPackageName
-    (ue_units (hsc_unit_env env)) (PackageName (fsLit "text")) of
-  Nothing -> pure Nothing
-  Just textUnit -> do
-    textFound <- findImportedModule env (mkModuleName "Data.Text.Internal") (OtherPkg textUnit)
-    found <- findImportedModule env (mkModuleName "Tidepool.Aeson.Value") NoPkgQual
-    case (textFound, found) of
-      (Found _ textOwner, Found moduleLocation owner)
+-- Source authentication covers the numeric interpretation as well as the
+-- outer Value carrier. Package dependencies must come from the selected
+-- installed owners; a same-shaped home shadow does not grant intrinsic authority.
+resolveJsonAuthority env = do
+  valueOwner <- shippedHome "Tidepool.Aeson.Value" shippedValueSource
+  scientificOwner <- shippedHome "Tidepool.Aeson.Scientific" shippedScientificSource
+  textOwner <- installed "text" "Data.Text.Internal"
+  mapOwner <- installed "containers" "Data.Map.Internal"
+  primitiveOwner <- installed "ghc-prim" "GHC.Types"
+  integerOwner <- installed "ghc-bignum" "GHC.Num.Integer"
+  pure $ do
+    owner <- valueOwner
+    scientific <- scientificOwner
+    text <- textOwner
+    map_ <- mapOwner
+    primitive <- primitiveOwner
+    integer <- integerOwner
+    hmi <- lookupHpt (hsc_HPT env) (moduleName owner)
+    tyCon <- find (exact (Just (moduleUnit owner)) "Tidepool.Aeson.Value" "Value")
+      (typeEnvTyCons (md_types (hm_details hmi)))
+    layout <- jsonValueLayoutForTyCon scientific text map_ primitive integer tyCon
+    Just (JsonAuthority owner (moduleUnit text) layout)
+ where
+  shippedHome name expected = do
+    found <- findImportedModule env (mkModuleName name) NoPkgQual
+    case found of
+      Found moduleLocation owner
         | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
         , Just source <- ml_hs_file moduleLocation -> do
-        actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
-        pure $ case actual of
-          Right bytes | bytes == shippedValueSource -> do
-            let valueTyCon = lookupHpt (hsc_HPT env) (moduleName owner) >>= \hmi ->
-                  find (exact (Just (moduleUnit owner)) "Tidepool.Aeson.Value" "Value")
-                    (typeEnvTyCons (md_types (hm_details hmi)))
-            do tyCon <- valueTyCon
-               layout <- jsonValueLayoutForTyCon owner (moduleUnit textOwner) tyCon
-               Just (JsonAuthority owner (moduleUnit textOwner) layout)
-          _ -> Nothing
+            actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
+            pure $ case actual of
+              Right bytes | bytes == expected -> Just owner
+              _ -> Nothing
       _ -> pure Nothing
+  installed package name = case lookupPackageName
+      (ue_units (hsc_unit_env env)) (PackageName (fsLit package)) of
+    Nothing -> pure Nothing
+    Just unit -> do
+      found <- findImportedModule env (mkModuleName name) (OtherPkg unit)
+      pure $ case found of
+        Found _ owner -> Just owner
+        _ -> Nothing
 
 data JsonSpec = DecodeJson DataCon DataCon DataCon
   | EncodeJson DataCon
@@ -133,9 +161,10 @@ jsonValueLayoutForType (JsonAuthority owner _ layout) valueType = do
     then Nothing
     else Just layout
 
-jsonValueLayoutForTyCon :: Module -> Unit -> GHC.Core.TyCon.TyCon
+jsonValueLayoutForTyCon :: Module -> Module -> Module -> Module -> Module
+  -> GHC.Core.TyCon.TyCon
   -> Maybe (JsonLayout DataCon)
-jsonValueLayoutForTyCon _owner textUnit valueTyCon = do
+jsonValueLayoutForTyCon scientificOwner textOwner mapOwner primitiveOwner integerOwner valueTyCon = do
   let valueCons = tyConDataCons valueTyCon
   objectCon <- named "Object" valueCons
   arrayCon <- named "Array" valueCons
@@ -145,14 +174,20 @@ jsonValueLayoutForTyCon _owner textUnit valueTyCon = do
   mapTyCon <- soleFieldTyCon objectCon
   listTyCon <- soleFieldTyCon arrayCon
   textTyCon <- soleFieldTyCon stringCon
-  if exact (Just textUnit) "Data.Text.Internal" "Text" textTyCon then pure () else Nothing
+  ownedBy textOwner textTyCon
+  ownedBy mapOwner mapTyCon
+  ownedBy primitiveOwner listTyCon
   scientificTyCon <- soleFieldTyCon numberCon
   boolTyCon <- soleFieldTyCon boolCon
+  ownedBy scientificOwner scientificTyCon
+  ownedBy primitiveOwner boolTyCon
   let scientificCons = tyConDataCons scientificTyCon
   scientificCon <- named "Scientific" scientificCons
   [coefficientType, exponentType] <- pure (map scaledThing (dataConOrigArgTys scientificCon))
   (integerTyCon, []) <- splitTyConApp_maybe coefficientType
   (intTyCon, []) <- splitTyConApp_maybe exponentType
+  ownedBy integerOwner integerTyCon
+  ownedBy primitiveOwner intTyCon
   object <- named "Object" valueCons
   array <- named "Array" valueCons
   string <- named "String" valueCons
@@ -177,6 +212,9 @@ jsonValueLayoutForTyCon _owner textUnit valueTyCon = do
     , jsonScientific = scientificCon, jsonIntegerSmall = is, jsonIntegerPositive = ip
     , jsonIntegerNegative = in_, jsonText = text, jsonInt = int }
  where
+  ownedBy owner tyCon
+    | nameModule_maybe (GHC.Core.TyCon.tyConName tyCon) == Just owner = Just ()
+    | otherwise = Nothing
   named wanted = find ((== wanted) . occNameString . nameOccName . dataConName)
   soleFieldTyCon constructor = case dataConOrigArgTys constructor of
     [Scaled _ field] -> fst <$> splitTyConApp_maybe field

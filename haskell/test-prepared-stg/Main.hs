@@ -4,6 +4,7 @@ import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
+import Data.Text qualified as Text
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, flattenBinds)
@@ -39,6 +40,7 @@ import Tidepool.ExecutionIR
 import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
 import RetainedPluginTest (verifyCompilerReuse)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
+import Tidepool.PreparedJson (resolveJsonAuthority)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -126,6 +128,26 @@ assertProjects :: String -> Either Projection.ProjectionError Schema.WireProgram
 assertProjects label outcome = case outcome of
   Right _ -> pure ()
   Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
+
+verifyJsonDependencyAuthority :: FilePath -> IO ()
+verifyJsonDependencyAuthority dir = do
+  let fixture = "test-prepared-stg/JsonAuthorityContract.hs"
+      shadowRoot = dir </> "json-shadow"
+      shadowDirectory = shadowRoot </> "Tidepool" </> "Aeson"
+  trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib"]
+  trustedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult trusted))
+  assert (trustedAuthority /= Nothing) "shipped JSON dependency graph lacks authority"
+  source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
+  let shadow = Text.replace "coefficient (Scientific c _) = c"
+        "coefficient (Scientific c _) = c + 1" (Text.pack source)
+  assert (shadow /= Text.pack source) "Scientific shadow fixture did not change semantics"
+  createDirectoryIfMissing True shadowDirectory
+  writeFile (shadowDirectory </> "Scientific.hs") (Text.unpack shadow)
+  substituted <- runPipelineSelected PreparedStg fixture
+    [shadowRoot, "test-prepared-stg", "lib"]
+  substitutedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult substituted))
+  assert (substitutedAuthority == Nothing)
+    "JSON authority admitted a same-shaped Scientific dependency with changed semantics"
 
 -- | TH's bytecode provisioning must not change a constructor declared by an
 -- unchanged home module.  The graph checks run after metadata preparation and
@@ -387,6 +409,7 @@ main = do
         (\result entry auxEntries ->
           projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
       verifyConstructorRepresentations dir
+      verifyJsonDependencyAuthority dir
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
