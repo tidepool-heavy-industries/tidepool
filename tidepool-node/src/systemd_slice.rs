@@ -95,6 +95,35 @@ impl SystemdSlice {
         )
     }
 
+    /// Run a host as a restart-bounded per-run service. `--wait` keeps the
+    /// tmux diagnostics window attached to the unit through automatic restarts;
+    /// an intentional `systemctl stop` is successful and does not restart.
+    pub fn supervised_service(&self, unit: &str, command: ProcessInvocation) -> ProcessInvocation {
+        let mut args = vec![
+            "--user".into(),
+            "--quiet".into(),
+            "--wait".into(),
+            "--collect".into(),
+            "--service-type=exec".into(),
+            "--expand-environment=no".into(),
+            format!("--slice={}", self.as_str()),
+            "--property=Delegate=yes".into(),
+            "--property=KillMode=process".into(),
+            "--property=Restart=on-failure".into(),
+            "--property=RestartSec=2s".into(),
+            "--property=StartLimitIntervalSec=60s".into(),
+            "--property=StartLimitBurst=5".into(),
+            format!("--unit={unit}"),
+            "--".into(),
+            command.program,
+        ];
+        args.extend(command.args);
+        ProcessInvocation {
+            program: "systemd-run".into(),
+            args,
+        }
+    }
+
     fn wrap(&self, command: ProcessInvocation, properties: Vec<String>) -> ProcessInvocation {
         let mut args = vec![
             "--user".into(),
@@ -210,5 +239,25 @@ mod tests {
         });
         assert_eq!(wrapped.args.last().unwrap(), "$HOME;literal");
         assert_eq!(wrapped.args[6], "/a path/tool");
+    }
+
+    #[test]
+    fn supervised_service_has_bounded_failure_restart_and_literal_arguments() {
+        let wrapped = SystemdSlice::default().supervised_service(
+            "shoal-host-run-1",
+            ProcessInvocation {
+                program: "/a path/shoal".into(),
+                args: vec!["host".into(), "$HOME;literal".into()],
+            },
+        );
+        assert_eq!(wrapped.program, "systemd-run");
+        assert!(wrapped
+            .args
+            .contains(&"--property=Restart=on-failure".into()));
+        assert!(wrapped
+            .args
+            .contains(&"--property=StartLimitBurst=5".into()));
+        assert!(wrapped.args.contains(&"--wait".into()));
+        assert_eq!(wrapped.args.last().unwrap(), "$HOME;literal");
     }
 }

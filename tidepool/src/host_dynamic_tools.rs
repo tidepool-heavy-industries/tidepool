@@ -227,7 +227,7 @@ impl HostDynamicToolService {
         let registration = Registration {
             protocol_version: PROTOCOL_VERSION,
             dynamic_tools: wire_tools,
-            scope: RegistrationScope::PrimaryThread,
+            scope: codex_shoal_protocol::HostedRegistrationScope::PrimaryThread,
             input_control_socket: None,
             launch_id: uuid::Uuid::new_v4().to_string(),
             input_control_nonce: uuid::Uuid::new_v4().to_string(),
@@ -314,23 +314,7 @@ fn validate_description(kind: &str, name: &str, description: &str) -> Result<(),
     ))
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Registration {
-    protocol_version: u32,
-    dynamic_tools: Vec<DynamicTool>,
-    scope: RegistrationScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input_control_socket: Option<PathBuf>,
-    launch_id: String,
-    input_control_nonce: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-enum RegistrationScope {
-    PrimaryThread,
-}
+type Registration = codex_shoal_protocol::HostedRegistration<DynamicTool, PathBuf>;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
@@ -348,32 +332,13 @@ enum DynamicTool {
     Function(DynamicToolFunctionSpec),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompletionRequest {
-    protocol_version: u32,
-    thread_id: String,
-    context_call_id: String,
-}
+type CompletionRequest = codex_shoal_protocol::HostedCompletionRequest<String>;
 
 /// Exact native/application custody supplied by the challenged session plus
 /// the complete hosted invocation coordinate. The resident owner derives its
 /// opaque execution identity from this coordinate; the HTTP host never issues
 /// or substitutes one.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WorkbenchCancellationRequest {
-    protocol_version: u32,
-    thread_id: String,
-    turn_id: String,
-    call_id: String,
-    context_call_id: Option<String>,
-    namespace: Option<String>,
-    launch_id: String,
-    application_instance_id: String,
-    session_generation: u64,
-    input_control_nonce: String,
-}
+type WorkbenchCancellationRequest = codex_shoal_protocol::HostedCancellationRequest<String>;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
@@ -692,22 +657,7 @@ async fn registration(State(state): State<HostState>) -> Result<Json<Registratio
     Ok(Json((*state.registration).clone()))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionRequest {
-    protocol_version: u32,
-    thread_id: String,
-    #[serde(default)]
-    input_control_socket: Option<PathBuf>,
-    #[serde(default)]
-    launch_id: Option<String>,
-    #[serde(default)]
-    application_instance_id: Option<String>,
-    #[serde(default)]
-    session_generation: Option<u64>,
-    #[serde(default)]
-    input_control_nonce: Option<String>,
-}
+type SessionRequest = codex_shoal_protocol::HostedSessionRequest<String, PathBuf>;
 
 async fn attach_session(
     State(state): State<HostState>,
@@ -806,18 +756,7 @@ fn parse_thread(raw: String) -> Result<BackendThreadId, uuid::Error> {
     Ok(BackendThreadId(raw))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CallRequest {
-    context_call_id: Option<String>,
-    protocol_version: u32,
-    thread_id: String,
-    turn_id: String,
-    call_id: String,
-    namespace: Option<String>,
-    tool: String,
-    arguments: serde_json::Value,
-}
+type CallRequest = codex_shoal_protocol::HostedCallRequest<String, serde_json::Value>;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

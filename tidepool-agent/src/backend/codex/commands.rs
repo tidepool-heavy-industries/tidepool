@@ -56,7 +56,7 @@ pub(super) async fn request(
     // JSON escaping can expand a bounded byte read by up to six times.
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(unconfirmed)? {
-        if body.len() + chunk.len() > 800 * 1024 {
+        if body.len() + chunk.len() > codex_shoal_protocol::MAX_COMMAND_REPLY_BYTES {
             return Err(unconfirmed("native command reply exceeds limit"));
         }
         body.extend_from_slice(&chunk);

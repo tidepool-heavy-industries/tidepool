@@ -14,8 +14,8 @@
 //! - **What it may consume**: the cgroup [`crate::command_resources`] admitted
 //!   for this job, joined before `exec`, so memory is capped and accounted like
 //!   every other command's.
-//! - **When it stops**: its own process group, so termination reaches the whole
-//!   tree a script starts and not only the shell that started it.
+//! - **When it stops**: the resource owner kills the admitted cgroup, including
+//!   descendants. This object retains output and I/O handles, not signal authority.
 //!
 //! Captured output is bounded by [`RETAINED_STREAM_BYTES`], since it lives in
 //! the host's memory rather than the child's cgroup. Positions stay byte
@@ -24,6 +24,7 @@
 //! renumbering or moving it.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -99,11 +100,13 @@ pub struct HostCommandSpec<'a> {
     pub stdin: HostStdin,
     pub cgroup: Option<&'a Path>,
     pub boundary: Option<&'a crate::ProcessMountBoundary>,
+    /// Absolute executable selected by the launch owner for a bounded command.
+    pub bubblewrap: Option<&'a Path>,
 }
 
 #[derive(Default)]
 struct StreamBuffer {
-    bytes: Vec<u8>,
+    bytes: VecDeque<u8>,
     /// Bytes dropped off the front to stay inside [`RETAINED_STREAM_BYTES`].
     /// Positions stay original-stream offsets, so this is also where the
     /// retained window begins.
@@ -113,12 +116,16 @@ struct StreamBuffer {
 
 impl StreamBuffer {
     fn push(&mut self, chunk: &[u8]) {
-        self.bytes.extend_from_slice(chunk);
-        if self.bytes.len() > RETAINED_STREAM_BYTES {
-            let excess = self.bytes.len() - RETAINED_STREAM_BYTES;
-            self.bytes.drain(..excess);
-            self.dropped += excess as u64;
-        }
+        let excess = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(RETAINED_STREAM_BYTES);
+        let from_buffer = excess.min(self.bytes.len());
+        self.bytes.drain(..from_buffer);
+        let from_chunk = excess - from_buffer;
+        self.bytes.extend(&chunk[from_chunk..]);
+        self.dropped = self.dropped.saturating_add(excess as u64);
     }
 
     /// Render `[start, end)` of the captured bytes. Boundaries that fall
@@ -129,7 +136,12 @@ impl StreamBuffer {
         let available = self.dropped + self.bytes.len() as u64;
         let start = start.clamp(self.dropped, available);
         let end = end.clamp(start, available);
-        let slice = &self.bytes[(start - self.dropped) as usize..(end - self.dropped) as usize];
+        let slice: Vec<u8> = self
+            .bytes
+            .range((start - self.dropped) as usize..(end - self.dropped) as usize)
+            .copied()
+            .collect();
+        let slice = slice.as_slice();
 
         let leading = slice
             .iter()
@@ -178,9 +190,6 @@ impl StreamBuffer {
 /// caller holds exactly one of these per job, alongside the resource grant.
 pub struct HostCommand {
     child: tokio::sync::Mutex<Child>,
-    /// Retained separately from `child` so termination never has to wait for
-    /// whoever is currently awaiting exit.
-    group: Option<i32>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     stdout: Arc<Mutex<StreamBuffer>>,
     stderr: Arc<Mutex<StreamBuffer>>,
@@ -197,7 +206,14 @@ impl HostCommand {
         };
         let invocation = match spec.boundary {
             Some(boundary) => boundary.wrap(
-                crate::BUBBLEWRAP_PROGRAM,
+                spec.bubblewrap
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "a bounded command requires resolved bubblewrap",
+                        )
+                    })?
+                    .to_string_lossy(),
                 crate::ProcessInvocation {
                     program: program.clone(),
                     args: arguments.to_vec(),
@@ -218,9 +234,6 @@ impl HostCommand {
                 HostStdin::Closed => Stdio::null(),
                 HostStdin::Piped => Stdio::piped(),
             })
-            // Its own group, so termination reaches the whole tree a script
-            // starts, not only the shell that started it.
-            .process_group(0)
             .kill_on_drop(true);
         for (name, value) in spec.environment {
             command.env(name, value);
@@ -241,7 +254,6 @@ impl HostCommand {
             }
         }
         let mut child = command.spawn()?;
-        let group = child.id().map(|id| id as i32);
         let stdout = Arc::new(Mutex::new(StreamBuffer::default()));
         let stderr = Arc::new(Mutex::new(StreamBuffer::default()));
         let mut readers = Vec::new();
@@ -254,7 +266,6 @@ impl HostCommand {
         let stdin = child.stdin.take();
         Ok(Self {
             child: tokio::sync::Mutex::new(child),
-            group,
             stdin: tokio::sync::Mutex::new(stdin),
             stdout,
             stderr,
@@ -277,16 +288,6 @@ impl HostCommand {
         })
     }
 
-    /// Ask the child's whole process group to stop. Safe to call more than
-    /// once and after exit; a vanished group is not an error.
-    pub fn terminate(&self) {
-        let Some(group) = self.group else { return };
-        let Some(group) = rustix::process::Pid::from_raw(group) else {
-            return;
-        };
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
-    }
-
     /// Write to the child's standard input. Fails when input was not piped.
     pub async fn write_stdin(&self, text: &str) -> std::io::Result<()> {
         let mut stdin = self.stdin.lock().await;
@@ -307,7 +308,8 @@ impl HostCommand {
 
     /// Bytes captured from `stream` so far.
     pub fn available(&self, stream: HostStream) -> u64 {
-        self.buffer(stream).lock().bytes.len() as u64
+        let buffer = self.buffer(stream).lock();
+        buffer.dropped + buffer.bytes.len() as u64
     }
 
     pub fn page(&self, stream: HostStream, start: u64, end: u64) -> HostPage {
@@ -364,7 +366,7 @@ mod tests {
 
     fn buffer(bytes: &[u8], finished: bool) -> StreamBuffer {
         StreamBuffer {
-            bytes: bytes.to_vec(),
+            bytes: bytes.iter().copied().collect(),
             dropped: 0,
             finished,
         }
@@ -414,6 +416,27 @@ mod tests {
         assert_eq!((page.start, page.end), (0, 3));
     }
 
+    #[test]
+    fn rotation_keeps_absolute_offsets_and_the_latest_tail() {
+        let mut capture = StreamBuffer::default();
+        capture.push(&vec![b'a'; RETAINED_STREAM_BYTES]);
+        capture.push(b"latest");
+
+        assert_eq!(capture.dropped, 6);
+        assert_eq!(capture.bytes.len(), RETAINED_STREAM_BYTES);
+        let available = RETAINED_STREAM_BYTES as u64 + 6;
+        let page = capture.page(available - 6, available);
+        assert_eq!(page.text, "latest");
+        assert_eq!(page.available_end, RETAINED_STREAM_BYTES as u64 + 6);
+        assert_eq!(page.retained_start, 6);
+
+        let oversized = vec![b'z'; RETAINED_STREAM_BYTES + 17];
+        capture.push(&oversized);
+        assert_eq!(capture.bytes.len(), RETAINED_STREAM_BYTES);
+        assert_eq!(capture.bytes.back(), Some(&b'z'));
+        assert_eq!(capture.dropped, RETAINED_STREAM_BYTES as u64 + 23);
+    }
+
     #[tokio::test]
     async fn a_command_runs_in_the_directory_it_was_given_and_captures_both_streams() {
         let directory = tempfile::tempdir().unwrap();
@@ -428,6 +451,7 @@ mod tests {
             stdin: HostStdin::Closed,
             cgroup: None,
             boundary: None,
+            bubblewrap: None,
         })
         .unwrap();
         assert_eq!(command.wait().await.unwrap(), HostExit::Exited(3));
@@ -461,6 +485,7 @@ mod tests {
             stdin: HostStdin::Piped,
             cgroup: None,
             boundary: None,
+            bubblewrap: None,
         })
         .unwrap();
         command.write_stdin("echoed\n").await.unwrap();
@@ -469,25 +494,6 @@ mod tests {
         assert_eq!(
             command.page(HostStream::Stdout, 0, u64::MAX).text,
             "echoed\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn termination_reaches_a_child_that_would_otherwise_wait() {
-        let directory = tempfile::tempdir().unwrap();
-        let command = HostCommand::spawn(HostCommandSpec {
-            argv: &["sleep".into(), "600".into()],
-            directory: directory.path(),
-            environment: &[],
-            stdin: HostStdin::Closed,
-            cgroup: None,
-            boundary: None,
-        })
-        .unwrap();
-        command.terminate();
-        assert_eq!(
-            command.wait().await.unwrap(),
-            HostExit::Signalled(libc::SIGTERM)
         );
     }
 }

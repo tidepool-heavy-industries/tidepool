@@ -82,11 +82,14 @@ pub(super) async fn request(
             )));
         }
         use http_body_util::BodyExt;
-        let body = http_body_util::Limited::new(response.into_body(), 16 * 1024)
-            .collect()
-            .await
-            .map_err(unconfirmed)?
-            .to_bytes();
+        let body = http_body_util::Limited::new(
+            response.into_body(),
+            codex_shoal_protocol::MAX_WORKSPACE_REPLY_BYTES,
+        )
+        .collect()
+        .await
+        .map_err(unconfirmed)?
+        .to_bytes();
         Ok(
             match serde_json::from_slice::<Reply<PathBuf>>(&body).map_err(unconfirmed)? {
                 Reply::Ready {

@@ -6,7 +6,7 @@ on this page is what happens around those two.
 
 ## What you need
 
-Linux, with Nix, systemd user services on cgroup v2, Bubblewrap and tmux. Shoal
+Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and tmux. Shoal
 drives a pinned Tidepool fork of the Codex client as each agent's interface, so
 authenticate that client before starting model work. For Jev, put a TypeSafe
 key in `TYPESAFE_API_KEY` before launching.
@@ -27,7 +27,7 @@ workspace config names a different slice.
 ## Build
 
 ```bash
-git clone https://github.com/tidepool-heavy-industries/tidepool.git
+git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
 nix build .#shoal
 ./result/bin/shoal --help
@@ -116,10 +116,11 @@ after the project, and prints where things are:
 log:     …/.shoal/logs/<run>.jsonl
 status:  ~/.cache/tidepool/shoal/runs/<run>/status.json
 attach:  tmux attach -t shoal-<project>
-stop:    tmux kill-session -t shoal-<project>
+stop:    shoal stop --run-id <run> --session shoal-<project>
 ```
 
-The session has a `Host` window running the actor host, a `Compiler` window
+The host is a restart-bounded per-run systemd user service. The session has a
+`Host` window following that service, a `Compiler` window
 running the Haskell compile service, and a `shoal-root` window with the root
 agent's client. Give the root a task there. Each child agent gets a window of its own
 when it starts.
@@ -159,8 +160,20 @@ full. `SHOAL_TRACE=info` leaves content out. The directory is ignored by Git.
 
 ## Stopping and cleaning up
 
-`tmux kill-session -t <session>` stops a run. A stopped run's live heap, jobs
-and handles are gone; what survives is what was committed or written to files.
+Use `shoal stop --run-id <run> --session <session>` for intentional shutdown;
+stopping only tmux leaves the supervised host running. A host failure restarts
+with backoff and a finite retry limit. Recovery reopens the same run under its
+exclusive incarnation lock, stops every predecessor application whose exact
+supervisor identity can be proven, resumes the recorded conversation, reloads
+the last accepted source, and sends a recovery notice before new work. Actors
+whose process or ownership evidence cannot be verified remain unavailable.
+Live Haskell values, requests, watches, and bindings are reported lost rather
+than reconstructed. Unresolved tool calls are not replayed automatically.
+
+A stopped run's live heap and handles are gone. Durable command ownership,
+cleanup failures, accepted source, and process evidence remain until retirement
+is confirmed. The resource service reconciles its journal with delegated
+cgroups before granting new work.
 `shoal cleanup` inspects a stopped run's build storage and never touches source
 or Git state. `shoal run-map` reads a run's recorded artifacts without starting
 or attaching to anything.

@@ -164,6 +164,24 @@
           ]
         );
         interactiveCodex = codex.packages.${system}.default;
+        # Tidepool consumes only the standalone private wire crate from the
+        # matched Codex checkout. Keep the rest of Codex in its independent
+        # flake/toolchain graph so implementation-only client edits do not
+        # invalidate the Shoal host derivation.
+        shoalSource = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            let
+              relative = pkgs.lib.removePrefix (toString ./.) (toString path);
+              protocol = "/vendor/codex/codex-rs/shoal-protocol";
+              inProtocol = pkgs.lib.hasPrefix protocol relative;
+              protocolAncestor = pkgs.lib.hasPrefix relative protocol;
+              inCodex = pkgs.lib.hasPrefix "/vendor/codex" relative;
+            in
+            if inProtocol || protocolAncestor then true
+            else if inCodex then false
+            else pkgs.lib.cleanSourceFilter path type;
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -276,7 +294,7 @@
         packages.shoal-unwrapped = tidepoolRustPlatform.buildRustPackage {
           pname = "shoal-unwrapped";
           version = "0.1.0";
-          src = ./.;
+          src = shoalSource;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [
             "-p"
@@ -418,7 +436,7 @@
             ${interactiveCodex}/bin/codex-code-mode-host --help
             ${interactiveCodex}/bin/codex --shoal-protocol-manifest \
               | ${pkgs.jq}/bin/jq --exit-status \
-                  '.hostProtocolVersion == 4 and .inputControlProtocolVersion == 4 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
+                  '.hostProtocolVersion == 5 and .inputControlProtocolVersion == 4 and .maxCommandReplyBytes == 819200 and .maxWorkspaceReplyBytes == 16384 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
             touch "$out"
           '';
 

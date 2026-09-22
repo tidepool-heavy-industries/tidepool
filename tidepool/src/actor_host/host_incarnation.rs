@@ -23,7 +23,7 @@ struct IncarnationState {
 
 /// Exclusive claim on one Shoal host incarnation.
 #[derive(Debug)]
-pub(super) struct HostIncarnationLease {
+pub(crate) struct HostIncarnationLease {
     incarnation: Incarnation,
     _owner_lock: HostRunLock,
 }
@@ -63,7 +63,7 @@ impl Drop for HostRunLock {
 }
 
 impl HostIncarnationLease {
-    pub(super) fn claim(run_root: &Path) -> io::Result<Self> {
+    pub(crate) fn claim(run_root: &Path) -> io::Result<Self> {
         fs::create_dir_all(run_root)?;
         let owner_lock = HostRunLock::claim(run_root, true)?;
 
@@ -89,7 +89,7 @@ impl HostIncarnationLease {
         })
     }
 
-    pub(super) const fn incarnation(&self) -> Incarnation {
+    pub(crate) const fn incarnation(&self) -> Incarnation {
         self.incarnation
     }
 }

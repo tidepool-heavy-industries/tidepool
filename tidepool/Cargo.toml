@@ -38,6 +38,7 @@ tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
 tidepool-worktree.workspace = true
 tidepool-agent.workspace = true
+codex-shoal-protocol.workspace = true
 tidepool-actor.workspace = true
 tidepool-tool.workspace = true
 tidepool-node.workspace = true

@@ -37,6 +37,26 @@ impl Queue {
         self.waiting.push_back((key, bytes));
     }
 
+    /// Restore capacity already owned by an allocation found on disk.
+    pub(super) fn recover_active(&mut self, key: Key, bytes: u64) -> Result<(), String> {
+        if self.active.contains_key(&key) {
+            return Ok(());
+        }
+        self.waiting.retain(|(waiting, _)| waiting != &key);
+        let pool =
+            if bytes <= self.small && bytes <= self.protected.saturating_sub(self.protected_used) {
+                self.protected_used += bytes;
+                Pool::Protected
+            } else if bytes <= self.general.saturating_sub(self.general_used) {
+                self.general_used += bytes;
+                Pool::General
+            } else {
+                return Err("recovered command allocations exceed configured capacity".into());
+            };
+        self.active.insert(key, (pool, bytes));
+        Ok(())
+    }
+
     pub(super) fn next(&mut self) -> Option<(Key, u64)> {
         let protected = self.waiting.iter().position(|(_, bytes)| {
             *bytes <= self.small && *bytes <= self.protected - self.protected_used

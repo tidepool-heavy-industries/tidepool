@@ -121,7 +121,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
-use self::host_incarnation::HostIncarnationLease;
+pub(crate) use self::host_incarnation::HostIncarnationLease;
 use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot, SharedOverlayResource};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
@@ -450,6 +450,162 @@ pub struct ActorHostConfig {
     pub jev: Option<tidepool_actor::JevBackendHandle>,
 }
 
+const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessRecoveryRecord {
+    version: u32,
+    launch_id: String,
+    recovery_secret: String,
+    supervisor_socket: PathBuf,
+    socket_root: PathBuf,
+    retired: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessRecoveryCheckpoint {
+    version: u32,
+    launch_id: String,
+    observation: tidepool_node::ProcessSupervisorObservation,
+    operation_pending: bool,
+    error: Option<String>,
+}
+
+pub(crate) struct PredecessorRecovery {
+    pub(crate) stopped: usize,
+    pub(crate) unavailable: Vec<String>,
+}
+
+impl PredecessorRecovery {
+    pub(crate) fn root_available(&self) -> bool {
+        !self.unavailable.iter().any(|actor| actor.starts_with("1-"))
+    }
+}
+
+/// Stop each predecessor whose exact supervisor identity remains provable.
+/// Unverifiable children remain unavailable without preventing independent
+/// actors from recovering. Composition separately rejects an unverifiable root.
+pub(crate) fn stop_predecessor_processes(
+    run_root: &Path,
+) -> Result<PredecessorRecovery, std::io::Error> {
+    let mut report = PredecessorRecovery {
+        stopped: 0,
+        unavailable: Vec::new(),
+    };
+    for actor in std::fs::read_dir(run_root)? {
+        let actor = actor?;
+        if !actor.file_type()?.is_dir() {
+            continue;
+        }
+        let actor_name = actor.file_name().to_string_lossy().into_owned();
+        let mut components = actor_name.split('-');
+        let actor_directory = components
+            .next()
+            .is_some_and(|part| part.parse::<u64>().is_ok())
+            && components
+                .next()
+                .is_some_and(|part| part.parse::<u64>().is_ok())
+            && components.next().is_none();
+        if !actor_directory {
+            continue;
+        }
+        let record_path = actor.path().join(PROCESS_RECOVERY_RECORD);
+        let bytes = match std::fs::read(&record_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                report.unavailable.push(actor_name);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let mut record: ProcessRecoveryRecord = match serde_json::from_slice(&bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(actor = %actor_name, %error, "corrupt predecessor evidence");
+                report.unavailable.push(actor_name);
+                continue;
+            }
+        };
+        if record.version != 1 {
+            report.unavailable.push(actor_name);
+            continue;
+        }
+        if record.retired {
+            continue;
+        }
+        let terminal = (|| -> Result<_, std::io::Error> {
+            if record.supervisor_socket.exists() {
+                let (mut recovery, _) = tidepool_node::ProcessSupervisorRecovery::recover(
+                    record.supervisor_socket.clone(),
+                    record.launch_id.clone(),
+                    record.recovery_secret.clone(),
+                    PROCESS_OPERATION_TIMEOUT,
+                )
+                .map_err(std::io::Error::other)?;
+                let observation = recovery
+                    .stop(PROCESS_OPERATION_TIMEOUT)
+                    .map_err(std::io::Error::other)?;
+                recovery
+                    .finalize(PROCESS_OPERATION_TIMEOUT)
+                    .map_err(std::io::Error::other)?;
+                Ok(observation)
+            } else {
+                let checkpoint_path = record
+                    .supervisor_socket
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("supervisor socket has no parent"))?
+                    .join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT);
+                let checkpoint: ProcessRecoveryCheckpoint =
+                    serde_json::from_slice(&std::fs::read(&checkpoint_path).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "predecessor process evidence unavailable at {}: {error}",
+                            checkpoint_path.display()
+                        ))
+                    })?)
+                    .map_err(std::io::Error::other)?;
+                if checkpoint.version != tidepool_node::PROCESS_SUPERVISOR_VERSION
+                    || checkpoint.launch_id != record.launch_id
+                    || checkpoint.operation_pending
+                    || checkpoint.error.is_some()
+                {
+                    return Err(std::io::Error::other(format!(
+                        "predecessor process evidence is unresolved at {}",
+                        checkpoint_path.display()
+                    )));
+                }
+                Ok(checkpoint.observation)
+            }
+        })();
+        let terminal = match terminal {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                tracing::warn!(actor = %actor_name, %error, "predecessor actor remains unavailable");
+                report.unavailable.push(actor_name);
+                continue;
+            }
+        };
+        if !matches!(
+            terminal,
+            tidepool_node::ProcessSupervisorObservation::ProcessStopped
+                | tidepool_node::ProcessSupervisorObservation::NotSpawned
+        ) {
+            report.unavailable.push(actor_name);
+            continue;
+        }
+        record.retired = true;
+        tidepool_atomic_write::write_durable(
+            &record_path,
+            &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
+        )
+        .map_err(std::io::Error::from)?;
+        std::fs::remove_dir_all(&record.socket_root)?;
+        report.stopped += 1;
+    }
+    Ok(report)
+}
+
 impl ActorHostConfig {
     /// Whether this run's captured workspace supplies the Jev authoring
     /// surface. Jev is pinned source a project opts into through
@@ -629,6 +785,7 @@ struct InteractiveDeployment {
     connection: InteractiveConnection,
     service: hosted_retirement::HostedOwner,
     socket_directory: SocketDirectory,
+    process_recovery_record: PathBuf,
     worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
@@ -1425,14 +1582,13 @@ struct InteractiveLaunchContext {
     bindings: Arc<Mutex<BindingTable>>,
 }
 
-pub async fn run(
+pub(crate) async fn run(
     mut config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    host_incarnation: HostIncarnationLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
-    let host_incarnation = HostIncarnationLease::claim(&run_root)?;
-
     let workspace = config.workspace.clone();
     let (worktrees, bindings) =
         tokio::task::spawn_blocking(move || actor_worktree_resources(&workspace)).await??;
@@ -2720,6 +2876,12 @@ async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
+                        if let Some(resources) = &launch_context.config.command_resources {
+                            let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
+                            if let Err(error) = resources.seal_producer(&producer).await {
+                                tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
+                            }
+                        }
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.retired(terminal);
                         }
@@ -2767,6 +2929,14 @@ async fn run_interactive_applications(
                                         launch_context.backend.clone(), thread, resources, request.owner,
                                     )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>),
                                     None => {
+                                        let bubblewrap = resolve_scope_bubblewrap(
+                                            &launch_context.config.pane_environment,
+                                        )
+                                        .map_err(|error| {
+                                            tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                                format!("cannot resolve bubblewrap for resident commands: {error}"),
+                                            )
+                                        })?;
                                         Ok(Arc::new(commands::HostCommandBackend::new(
                                             resources,
                                             request.owner,
@@ -2776,6 +2946,7 @@ async fn run_interactive_applications(
                                                 &launch_context.config.workspace,
                                                 request.owner,
                                             ),
+                                            bubblewrap,
                                         ))
                                             as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
                                     }
@@ -3798,6 +3969,10 @@ async fn launch_prepared_interactive_application(
             launch_effort(&launch_mode, config.effort, installation.fork_effort),
         )
     };
+    let recovery_notice = (actor_identity == root
+        && matches!(launch_mode, InteractiveLaunchMode::Resume(_)))
+    .then(|| std::fs::read_to_string(config.run_root.join("host-recovery-notice.txt")).ok())
+    .flatten();
     let spec = InteractiveAgentSpec {
         shell_tools: tidepool_agent::InteractiveShellTools::Hosted,
         mode: launch_mode,
@@ -3808,7 +3983,7 @@ async fn launch_prepared_interactive_application(
         effort: Some(effort),
         developer_instructions,
         base_instructions_file: base_prompt.file().to_path_buf(),
-        initial_prompt: installation.initial_user_message.clone(),
+        initial_prompt: recovery_notice.or_else(|| installation.initial_user_message.clone()),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         host_tools_socket: endpoint.clone(),
     };
@@ -3964,6 +4139,31 @@ async fn launch_prepared_interactive_application(
     });
     let manifest_path = manifest.write_new().map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    tidepool_atomic_write::write_durable(
+        &actor_root.join(PROCESS_RECOVERY_RECORD),
+        &serde_json::to_vec_pretty(&ProcessRecoveryRecord {
+            version: 1,
+            launch_id: launch_id.clone(),
+            recovery_secret: recovery_secret.clone(),
+            supervisor_socket: supervisor_socket.clone(),
+            socket_root: socket_directory.path().to_path_buf(),
+            retired: false,
+        })
+        .map_err(|error| {
+            application_error(
+                actor_identity,
+                InteractiveOperation::PrepareRuntime,
+                error,
+            )
+        })?,
+    )
+    .map_err(|error| {
+        application_error(
+            actor_identity,
+            InteractiveOperation::PrepareRuntime,
+            error,
+        )
     })?;
     scoped_custody::stage_supervisor(
         &scope_slot,
@@ -4197,6 +4397,7 @@ async fn launch_prepared_interactive_application(
             connection: InteractiveConnection::AwaitingBinding,
             service,
             socket_directory,
+            process_recovery_record: actor_root.join(PROCESS_RECOVERY_RECORD),
             worktree_custody: installation.worktree_custody.clone(),
             failure_reported: false,
             last_activation_sequence: 0,
@@ -5141,7 +5342,11 @@ async fn retire_interactive_application(
         component: CleanupComponent::Delivery,
         outcome: delivery_outcome,
     });
-    let quiescent = exact_process_stopped
+    let retirement_record_error = exact_process_stopped
+        .then(|| mark_process_recovery_retired(&deployment.process_recovery_record).err())
+        .flatten();
+    let retirement_recorded = exact_process_stopped && retirement_record_error.is_none();
+    let quiescent = retirement_recorded
         && components
             .iter()
             .filter(|component| {
@@ -5155,9 +5360,15 @@ async fn retire_interactive_application(
     if quiescent {
         socket_directory.work_settled();
     }
+    let socket_outcome = retirement_record_error.map_or_else(
+        || socket_cleanup_outcome(socket_directory),
+        |error| CleanupComponentOutcome::Failed {
+            detail: format!("process retirement evidence remains retained: {error}"),
+        },
+    );
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Socket,
-        outcome: socket_cleanup_outcome(socket_directory),
+        outcome: socket_outcome,
     });
     let build_outcome = if quiescent {
         match deployment
@@ -5228,6 +5439,22 @@ async fn retire_interactive_application(
         outcome: binding_outcome,
     });
     InteractiveCleanupReceipt { actor, components }
+}
+
+fn mark_process_recovery_retired(path: &Path) -> std::io::Result<()> {
+    let mut record: ProcessRecoveryRecord =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?;
+    if record.version != 1 {
+        return Err(std::io::Error::other(
+            "unsupported process recovery record version",
+        ));
+    }
+    record.retired = true;
+    tidepool_atomic_write::write_durable(
+        path,
+        &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
+    )
+    .map_err(std::io::Error::from)
 }
 
 /// Account for exact resident cleanup before draining the original HTTP task.
@@ -6055,12 +6282,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_update_keeps_original_request_and_fences_terminal_delivery() {
+    async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
         let setup = dispatch_haskell_script(
             root.as_ref(),
-            include_str!("actor_host/active_update_setup.hs"),
+            include_str!("actor_host/request_update_setup.hs"),
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -6108,7 +6335,8 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             presentation.not_presented(
-                "native input was not submitted: connecting update proxy: controlled transport failure",
+                "native input was not submitted: connecting update proxy: controlled transport failure"
+                    .into(),
             )
         });
         let logged = std::fs::read_to_string(log.path()).unwrap();
@@ -6320,6 +6548,42 @@ mod tests {
     };
     use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use tidepool_worktree::WorktreeSpec;
+
+    #[test]
+    fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {
+        let run = tempfile::tempdir().unwrap();
+        let root = run.path().join("1-1");
+        let child = run.path().join("2-1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        tidepool_atomic_write::write_durable(
+            &root.join(PROCESS_RECOVERY_RECORD),
+            &serde_json::to_vec(&ProcessRecoveryRecord {
+                version: 1,
+                launch_id: "root-launch".into(),
+                recovery_secret: "retired".into(),
+                supervisor_socket: root.join("supervisor.sock"),
+                socket_root: root.join("sockets"),
+                retired: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(child.join(PROCESS_RECOVERY_RECORD), b"not-json").unwrap();
+
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(report.root_available());
+        assert_eq!(report.unavailable, vec!["2-1"]);
+    }
+
+    #[test]
+    fn recovery_fails_closed_when_root_process_evidence_is_missing() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(run.path().join("1-1")).unwrap();
+        let report = stop_predecessor_processes(run.path()).unwrap();
+        assert!(!report.root_available());
+        assert_eq!(report.unavailable, vec!["1-1"]);
+    }
 
     fn test_delivery_dependencies(
         root: &Path,

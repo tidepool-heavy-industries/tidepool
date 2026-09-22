@@ -3233,6 +3233,7 @@ dependencies = [
  "axum",
  "blake3",
  "clap",
+ "codex-shoal-protocol",
  "frunk",
  "futures-util",
  "glob",

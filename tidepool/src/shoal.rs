@@ -404,6 +404,10 @@ fn resolve_agent_defaults(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub version: u32,
+    #[serde(default)]
+    pub host_generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_actors: Vec<String>,
     pub run_id: String,
     pub workspace: PathBuf,
     pub session: String,
@@ -537,7 +541,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join("shoal")
         .join("runs")
         .join(&run_id);
-    std::fs::create_dir_all(&run_root)?;
+    ensure_private_run_root(&run_root)?;
     let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     crate::actor_host::validate_workspace_program(&selected, &run_root)?;
     if options.recreate {
@@ -545,10 +549,16 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         // The host repeats this check at launch so a later disappearance also
         // fails closed.
         resolve_root_launch_mode(true, &root_binding_path).await?;
-        tmux.kill().await?;
+        let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
+            runtime_error(format!(
+                "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
+            ))
+        })?;
+        stop(previous_run.trim(), &session_name).await?;
     } else {
         clear_fresh_root_binding(&root_binding_path)?;
     }
+    tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
 
     let status_path = run_root.join("status.json");
     write_status(
@@ -691,7 +701,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
-    let host_launch = slice.delegated_scope(
+    let host_launch = slice.supervised_service(
         &format!("shoal-host-{run_id}"),
         slice.verified_command(
             &executable,
@@ -775,13 +785,38 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     println!("config: {}", workspace.join(SHOAL_CONFIG).display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
-        println!("stop:   tmux kill-session -t {session_name}");
+        println!("stop:   shoal stop --run-id {run_id} --session {session_name}");
         Ok(())
     } else {
         tmux.attach_or_switch()
             .await
             .map_err(|failure| Box::new(failure) as Box<dyn std::error::Error>)
     }
+}
+
+pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if run_id.is_empty()
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(runtime_error("invalid Shoal run identity"));
+    }
+    let unit = format!("shoal-host-{run_id}.service");
+    let status = tokio::process::Command::new("systemctl")
+        .args(["--user", "stop", &unit])
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(runtime_error(format!(
+            "could not stop supervised host unit {unit}"
+        )));
+    }
+    let tmux = TmuxSession::new(session)?;
+    if tmux.exists().await? {
+        tmux.kill().await?;
+    }
+    Ok(())
 }
 
 fn compiler_daemon_launch(
@@ -981,6 +1016,9 @@ async fn read_bounded_diagnostics(
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_private_run_root(&options.run_root)?;
+    let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&options.run_root)?;
+    let generation = host_incarnation.incarnation().0;
     let log_path = shoal_log_path(&options.workspace, &options.run_id);
     tracing::info!(
         run_id = %options.run_id,
@@ -993,10 +1031,11 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         model = %options.agent.model,
         effort = %options.agent.effort,
         detailed_log = %log_path.display(),
+        host_generation = generation,
         "starting Shoal actor host"
     );
-    let result = run_host(&options).await;
-    let settled = settle_host_result(result, &options);
+    let result = run_host(&options, generation, host_incarnation).await;
+    let settled = settle_host_result(result, &options, generation);
     if let Err(error) = &settled {
         tracing::error!(run_id = %options.run_id, error = %error, "Shoal actor host failed");
     } else {
@@ -1005,16 +1044,68 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
     settled
 }
 
-async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&options.run_root)?;
+async fn run_host(
+    options: &HostOptions,
+    host_generation: u64,
+    host_incarnation: crate::actor_host::HostIncarnationLease,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_private_run_root(&options.run_root)?;
     if let Some(parent) = options.root_binding_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let root_launch_mode =
-        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
+    let recovered_binding = options.run_root.join("root-binding.json");
+    let root_launch_mode = if host_generation > 1 {
+        resolve_root_launch_mode(true, &recovered_binding)
+            .await
+            .map_err(|error| {
+                runtime_error(format!(
+                    "host generation {host_generation} cannot prove a resumable root; actor remains unavailable: {error}"
+                ))
+            })?
+    } else {
+        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?
+    };
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    let mut unavailable_actors = Vec::new();
+    if host_generation > 1 {
+        let predecessors = crate::actor_host::stop_predecessor_processes(&options.run_root).map_err(
+            |error| {
+                runtime_error(format!(
+                    "host recovery cannot prove predecessor native applications stopped; actors remain unavailable: {error}"
+                ))
+            },
+        )?;
+        if !predecessors.root_available() {
+            return Err(runtime_error(format!(
+                "host recovery cannot prove the predecessor root stopped; actor remains unavailable: {}",
+                predecessors.unavailable.join(", ")
+            )));
+        }
+        let unavailable = if predecessors.unavailable.is_empty() {
+            "none".into()
+        } else {
+            predecessors.unavailable.join(", ")
+        };
+        unavailable_actors = predecessors.unavailable.clone();
+        let notice = format!(
+            "Recovery notice [{}:{}]. Restored accepted source {}. Live Haskell computations, requests, watches, and bindings from the prior host were lost. Native work was interrupted. The recorded conversation is being resumed without replaying unresolved tool calls. Unavailable predecessor actors: {unavailable}. Inspect Shoal status and retained command jobs before starting new work.",
+            options.run_id,
+            host_generation,
+            workspace_inputs.identity(),
+        );
+        tidepool_atomic_write::write_durable(
+            &options.run_root.join("host-recovery-notice.txt"),
+            notice.as_bytes(),
+        )?;
+        tracing::info!(
+            host_generation,
+            stopped = predecessors.stopped,
+            unavailable = ?predecessors.unavailable,
+            "predecessor native applications reconciled"
+        );
+    }
     let configuration = workspace_inputs.config()?;
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
@@ -1049,6 +1140,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             jev: None,
         },
         readiness_tx,
+        host_incarnation,
     )
     .instrument(tracing::info_span!(
         "shoal_host",
@@ -1079,7 +1171,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         &options.session,
                         options.agent.clone(),
                         RunPhase::AwaitingBinding { root_actor: root },
-                    );
+                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone());
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish pending root status; host remains active");
                     }
@@ -1103,7 +1195,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                             root_actor: root,
                             root_thread: thread.id().clone(),
                         },
-                    );
+                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone());
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish ready root status; host remains active");
                     }
@@ -1119,6 +1211,13 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             result = &mut run => return result,
         }
     }
+}
+
+fn ensure_private_run_root(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
 async fn resolve_root_launch_mode(
@@ -1153,6 +1252,7 @@ fn clear_fresh_root_binding(path: &Path) -> Result<(), Box<dyn std::error::Error
 fn settle_host_result(
     result: Result<(), Box<dyn std::error::Error>>,
     options: &HostOptions,
+    host_generation: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let phase = match &result {
         Ok(()) => RunPhase::Exited,
@@ -1160,13 +1260,14 @@ fn settle_host_result(
             error: failure.to_string(),
         },
     };
-    let status = RunStatus::new(
+    let mut status = RunStatus::new(
         &options.run_id,
         &options.workspace,
         &options.session,
         options.agent.clone(),
         phase,
     );
+    status.host_generation = host_generation;
     match (result, write_status(&options.status_path, &status)) {
         (result, Ok(())) => result,
         (Ok(()), Err(status_error)) => Err(status_error),
@@ -1313,12 +1414,24 @@ impl RunStatus {
     ) -> Self {
         Self {
             version: STATUS_VERSION,
+            host_generation: 0,
+            unavailable_actors: Vec::new(),
             run_id: run_id.into(),
             workspace: workspace.into(),
             session: session.into(),
             agent,
             phase,
         }
+    }
+
+    fn at_generation(mut self, generation: u64) -> Self {
+        self.host_generation = generation;
+        self
+    }
+
+    fn with_unavailable_actors(mut self, actors: Vec<String>) -> Self {
+        self.unavailable_actors = actors;
+        self
     }
 }
 
@@ -2483,7 +2596,7 @@ mod tests {
             resume_root: false,
             agent: test_agent_defaults(),
         };
-        let result = settle_host_result(Err(runtime_error("compile exploded")), &options);
+        let result = settle_host_result(Err(runtime_error("compile exploded")), &options, 7);
         assert!(result.is_err());
         let status: RunStatus =
             serde_json::from_slice(&std::fs::read(status_path).unwrap()).unwrap();
@@ -2493,6 +2606,7 @@ mod tests {
                 error: "compile exploded".into()
             }
         );
+        assert_eq!(status.host_generation, 7);
     }
 
     #[tokio::test]
