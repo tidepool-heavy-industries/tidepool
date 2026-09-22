@@ -804,11 +804,15 @@ fn visit_named(
     visitor: &mut dyn HaskellVisitor,
     module: &str,
     name: &str,
-    arity: usize,
     fields: impl FnOnce(&mut dyn HaskellVisitor) -> Result<(), BridgeError>,
 ) -> Result<(), BridgeError> {
     let qualified = format!("{module}.{name}");
-    let constructor = tidepool_bridge::get_qualified(table, &qualified, arity as u32)
+    let constructor = table
+        .get_by_qualified_name(&qualified)
+        .ok_or_else(|| BridgeError::UnknownDataConName(qualified.clone()))?;
+    let arity = table
+        .get(constructor)
+        .map(|data_con| data_con.rep_arity as usize)
         .ok_or(BridgeError::UnknownDataConName(qualified))?;
     visitor.begin_constructor(constructor, arity)?;
     fields(visitor)?;
@@ -824,10 +828,9 @@ fn visit_core(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     name: &str,
-    arity: usize,
     fields: impl FnOnce(&mut dyn HaskellVisitor) -> Result<(), BridgeError>,
 ) -> Result<(), BridgeError> {
-    visit_named(table, visitor, "Tidepool.Effects.Core", name, arity, fields)
+    visit_named(table, visitor, "Tidepool.Effects.Core", name, fields)
 }
 
 struct RouteStateAnswer(Result<crate::request::routes::RouteState, crate::ReplyError>);
@@ -846,7 +849,6 @@ impl ToHaskell for RouteStateAnswer {
                 visitor,
                 "Tidepool.Agent.Watch.Internal",
                 "RouteWaiting",
-                0,
                 |_| Ok(()),
             ),
             Ok(RouteState::Running) => visit_named(
@@ -854,7 +856,6 @@ impl ToHaskell for RouteStateAnswer {
                 visitor,
                 "Tidepool.Agent.Watch.Internal",
                 "RouteRunning",
-                0,
                 |_| Ok(()),
             ),
             Ok(RouteState::Completed) => visit_named(
@@ -862,7 +863,6 @@ impl ToHaskell for RouteStateAnswer {
                 visitor,
                 "Tidepool.Agent.Watch.Internal",
                 "RouteCompleted",
-                0,
                 |_| Ok(()),
             ),
             Ok(RouteState::Failed(error)) => visit_named(
@@ -870,7 +870,6 @@ impl ToHaskell for RouteStateAnswer {
                 visitor,
                 "Tidepool.Agent.Watch.Internal",
                 "RouteFailed",
-                1,
                 |visitor| error.visit(table, visitor),
             ),
             Err(error) => visit_named(
@@ -878,7 +877,6 @@ impl ToHaskell for RouteStateAnswer {
                 visitor,
                 "Tidepool.Agent.Watch.Internal",
                 "RouteRejected",
-                1,
                 |visitor| error.visit(table, visitor),
             ),
         }
@@ -895,10 +893,10 @@ impl ToHaskell for CallStatus {
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
         match &self.0 {
-            Some(summary) => visit_core(table, visitor, "ActorCallFailed", 1, |visitor| {
+            Some(summary) => visit_core(table, visitor, "ActorCallFailed", |visitor| {
                 summary.visit(table, visitor)
             }),
-            None => visit_core(table, visitor, "ActorCallSucceeded", 0, |_| Ok(())),
+            None => visit_core(table, visitor, "ActorCallSucceeded", |_| Ok(())),
         }
     }
 }
@@ -926,10 +924,10 @@ impl ToHaskell for ForkCleanupAnswer {
     ) -> Result<(), BridgeError> {
         match &self.0 {
             Ok(crate::ForkGroupCleanupOutcome::Cleaned) => {
-                visit_core(table, visitor, "ForkGroupCleaned", 0, |_| Ok(()))
+                visit_core(table, visitor, "ForkGroupCleaned", |_| Ok(()))
             }
             Ok(crate::ForkGroupCleanupOutcome::Active(actors)) => {
-                visit_core(table, visitor, "ForkGroupStillActive", 1, |visitor| {
+                visit_core(table, visitor, "ForkGroupStillActive", |visitor| {
                     actors
                         .iter()
                         .map(|actor| {
@@ -942,7 +940,7 @@ impl ToHaskell for ForkCleanupAnswer {
                         .visit(table, visitor)
                 })
             }
-            Err(error) => visit_core(table, visitor, "ForkGroupCleanupRejected", 1, |visitor| {
+            Err(error) => visit_core(table, visitor, "ForkGroupCleanupRejected", |visitor| {
                 error.to_string().visit(table, visitor)
             }),
         }
@@ -957,8 +955,8 @@ impl ToHaskell for LifecycleAnswer {
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
         match self {
-            Self::Live => visit_core(table, visitor, "ActorLive", 0, |_| Ok(())),
-            Self::Paused(detail) => visit_core(table, visitor, "ActorPaused", 1, |visitor| {
+            Self::Live => visit_core(table, visitor, "ActorLive", |_| Ok(())),
+            Self::Paused(detail) => visit_core(table, visitor, "ActorPaused", |visitor| {
                 detail.visit(table, visitor)
             }),
             Self::Exited(terminal) => visit_core(
@@ -969,7 +967,6 @@ impl ToHaskell for LifecycleAnswer {
                     crate::ActorExitKind::Failed => "ActorFailed",
                     crate::ActorExitKind::Cancelled => "ActorCancelled",
                 },
-                1,
                 |visitor| terminal.summary.visit(table, visitor),
             ),
         }
@@ -989,7 +986,6 @@ impl ToHaskell for ProgressAnswer {
                 visitor,
                 "Tidepool.Agent.Reply.Internal",
                 "ProgressPending",
-                0,
                 |_| Ok(()),
             ),
             Self::Closed => visit_named(
@@ -997,7 +993,6 @@ impl ToHaskell for ProgressAnswer {
                 visitor,
                 "Tidepool.Agent.Reply.Internal",
                 "ProgressClosed",
-                0,
                 |_| Ok(()),
             ),
             Self::Rejected(error) => visit_named(
@@ -1005,7 +1000,6 @@ impl ToHaskell for ProgressAnswer {
                 visitor,
                 "Tidepool.Agent.Reply.Internal",
                 "ProgressRejected",
-                1,
                 |visitor| error.visit(table, visitor),
             ),
         }
@@ -1020,13 +1014,11 @@ impl ToHaskell for AgentForgetProjection {
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
         match self {
-            Self::Forgotten => visit_core(table, visitor, "AgentForgotten", 0, |_| Ok(())),
-            Self::Running => visit_core(table, visitor, "AgentForgetRunning", 0, |_| Ok(())),
-            Self::Unavailable => {
-                visit_core(table, visitor, "AgentForgetUnavailable", 0, |_| Ok(()))
-            }
+            Self::Forgotten => visit_core(table, visitor, "AgentForgotten", |_| Ok(())),
+            Self::Running => visit_core(table, visitor, "AgentForgetRunning", |_| Ok(())),
+            Self::Unavailable => visit_core(table, visitor, "AgentForgetUnavailable", |_| Ok(())),
             Self::Retained { requests, watches } => {
-                visit_core(table, visitor, "AgentForgetRetained", 2, |visitor| {
+                visit_core(table, visitor, "AgentForgetRetained", |visitor| {
                     requests
                         .iter()
                         .map(|request| actor_haskell_int(request.0, "request id"))
@@ -1051,23 +1043,21 @@ impl ToHaskell for AgentStopProjection {
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
         match self {
-            Self::StoppedNow => visit_core(table, visitor, "AgentStoppedNow", 0, |_| Ok(())),
+            Self::StoppedNow => visit_core(table, visitor, "AgentStoppedNow", |_| Ok(())),
             Self::StoppedRetaining(detail) => {
-                visit_core(table, visitor, "AgentStoppedRetaining", 1, |visitor| {
+                visit_core(table, visitor, "AgentStoppedRetaining", |visitor| {
                     detail.visit(table, visitor)
                 })
             }
             Self::StoppedReleasing => {
-                visit_core(table, visitor, "AgentStoppedReleasing", 0, |_| Ok(()))
+                visit_core(table, visitor, "AgentStoppedReleasing", |_| Ok(()))
             }
             Self::AlreadyStopped => {
-                visit_core(table, visitor, "AgentStopAlreadyStopped", 0, |_| Ok(()))
+                visit_core(table, visitor, "AgentStopAlreadyStopped", |_| Ok(()))
             }
-            Self::Unavailable => visit_core(table, visitor, "AgentStopUnavailable", 0, |_| Ok(())),
-            Self::Unauthorized => {
-                visit_core(table, visitor, "AgentStopUnauthorized", 0, |_| Ok(()))
-            }
-            Self::Failed(detail) => visit_core(table, visitor, "AgentStopFailed", 1, |visitor| {
+            Self::Unavailable => visit_core(table, visitor, "AgentStopUnavailable", |_| Ok(())),
+            Self::Unauthorized => visit_core(table, visitor, "AgentStopUnauthorized", |_| Ok(())),
+            Self::Failed(detail) => visit_core(table, visitor, "AgentStopFailed", |visitor| {
                 detail.visit(table, visitor)
             }),
         }
@@ -1081,7 +1071,7 @@ impl ToHaskell for CleanupActorProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupActorPlan", 5, |visitor| {
+        visit_core(table, visitor, "CleanupActorPlan", |visitor| {
             actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
             actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
                 .visit(table, visitor)?;
@@ -1094,7 +1084,6 @@ impl ToHaskell for CleanupActorProjection {
                 } else {
                     "CleanupActorRunning"
                 },
-                0,
                 |_| Ok(()),
             )?;
             actor_haskell_int(self.revision, "cleanup revision")?.visit(table, visitor)
@@ -1109,7 +1098,7 @@ impl ToHaskell for CleanupPlanProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupPlan", 5, |visitor| {
+        visit_core(table, visitor, "CleanupPlan", |visitor| {
             actor_haskell_int(self.group.0, "fork group id")?.visit(table, visitor)?;
             self.actors.visit(table, visitor)?;
             self.pending_responses
@@ -1144,7 +1133,7 @@ impl ToHaskell for CleanupStepProjection {
         };
         match self {
             Self::ForgotResponses(requests) => {
-                visit_core(table, visitor, "CleanupForgotResponses", 1, |visitor| {
+                visit_core(table, visitor, "CleanupForgotResponses", |visitor| {
                     ids(
                         visitor,
                         &requests.iter().map(|request| request.0).collect::<Vec<_>>(),
@@ -1153,7 +1142,7 @@ impl ToHaskell for CleanupStepProjection {
                 })
             }
             Self::ForgotWatches(watches) => {
-                visit_core(table, visitor, "CleanupForgotWatches", 1, |visitor| {
+                visit_core(table, visitor, "CleanupForgotWatches", |visitor| {
                     ids(
                         visitor,
                         &watches.iter().map(|watch| watch.0).collect::<Vec<_>>(),
@@ -1162,7 +1151,7 @@ impl ToHaskell for CleanupStepProjection {
                 })
             }
             Self::StoppedActor(actor, outcome) => {
-                visit_core(table, visitor, "CleanupStoppedActor", 3, |visitor| {
+                visit_core(table, visitor, "CleanupStoppedActor", |visitor| {
                     actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
                     actor_haskell_int(actor.incarnation.0, "actor incarnation")?
                         .visit(table, visitor)?;
@@ -1170,7 +1159,7 @@ impl ToHaskell for CleanupStepProjection {
                 })
             }
             Self::ForgotActor(actor) => {
-                visit_core(table, visitor, "CleanupForgotActor", 2, |visitor| {
+                visit_core(table, visitor, "CleanupForgotActor", |visitor| {
                     actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
                     actor_haskell_int(actor.incarnation.0, "actor incarnation")?
                         .visit(table, visitor)
@@ -1180,7 +1169,7 @@ impl ToHaskell for CleanupStepProjection {
                 actor,
                 requests,
                 watches,
-            } => visit_core(table, visitor, "CleanupActorRetained", 4, |visitor| {
+            } => visit_core(table, visitor, "CleanupActorRetained", |visitor| {
                 actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
                 actor_haskell_int(actor.incarnation.0, "actor incarnation")?
                     .visit(table, visitor)?;
@@ -1196,14 +1185,14 @@ impl ToHaskell for CleanupStepProjection {
                     .visit(table, visitor)
             }),
             Self::GroupRetired(group) => {
-                visit_core(table, visitor, "CleanupGroupRetired", 1, |visitor| {
+                visit_core(table, visitor, "CleanupGroupRetired", |visitor| {
                     actor_haskell_int(group.0, "fork group id")?.visit(table, visitor)
                 })
             }
-            Self::Blocked(detail) => visit_core(table, visitor, "CleanupBlocked", 1, |visitor| {
+            Self::Blocked(detail) => visit_core(table, visitor, "CleanupBlocked", |visitor| {
                 detail.visit(table, visitor)
             }),
-            Self::StalePlan => visit_core(table, visitor, "CleanupStalePlan", 0, |_| Ok(())),
+            Self::StalePlan => visit_core(table, visitor, "CleanupStalePlan", |_| Ok(())),
         }
     }
 }
@@ -1215,7 +1204,7 @@ impl ToHaskell for CleanupReceiptProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupReceipt", 3, |visitor| {
+        visit_core(table, visitor, "CleanupReceipt", |visitor| {
             self.plan.visit(table, visitor)?;
             self.steps.visit(table, visitor)?;
             self.complete.visit(table, visitor)
@@ -1230,8 +1219,8 @@ fn visit_usage_observation(
 ) -> Result<(), BridgeError> {
     match sample {
         None => Option::<i64>::None.visit(table, visitor),
-        Some(sample) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
-            visit_core(table, visitor, "ProviderUsageObservation", 4, |visitor| {
+        Some(sample) => visit_named(table, visitor, "GHC.Maybe", "Just", |visitor| {
+            visit_core(table, visitor, "ProviderUsageObservation", |visitor| {
                 sample.observation_id.visit(table, visitor)?;
                 sample.source_timestamp.visit(table, visitor)?;
                 sample.cached_input_tokens.visit(table, visitor)?;
@@ -1262,16 +1251,16 @@ fn visit_usage_summary(
                 .ok_or_else(|| {
                     BridgeError::UnsupportedType("cached input tokens exceed input tokens".into())
                 })?;
-            visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
-                visit_core(table, visitor, "ProviderUsageSummary", 7, |visitor| {
+            visit_named(table, visitor, "GHC.Maybe", "Just", |visitor| {
+                visit_core(table, visitor, "ProviderUsageSummary", |visitor| {
                     match &summary.scope {
                         ProviderUsageScope::Thread(thread) => {
-                            visit_core(table, visitor, "UsageThread", 1, |visitor| {
+                            visit_core(table, visitor, "UsageThread", |visitor| {
                                 thread.visit(table, visitor)
                             })?
                         }
                         ProviderUsageScope::Turn { thread, turn } => {
-                            visit_core(table, visitor, "UsageTurn", 2, |visitor| {
+                            visit_core(table, visitor, "UsageTurn", |visitor| {
                                 thread.visit(table, visitor)?;
                                 turn.visit(table, visitor)
                             })?
@@ -1284,7 +1273,6 @@ fn visit_usage_summary(
                             ProviderUsageCompleteness::Partial => "UsagePartial",
                             ProviderUsageCompleteness::Complete => "UsageComplete",
                         },
-                        0,
                         |_| Ok(()),
                     )?;
                     summary.observations.visit(table, visitor)?;
@@ -1317,7 +1305,7 @@ impl ToHaskell for AgentRosterProjection {
             crate::ActorRole::Integration => "ContextIntegration",
             crate::ActorRole::Inherited => "ContextInherited",
         };
-        visit_core(table, visitor, "AgentRosterEntry", 35, |visitor| {
+        visit_core(table, visitor, "AgentRosterEntry", |visitor| {
             actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
             actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
                 .visit(table, visitor)?;
@@ -1367,44 +1355,44 @@ impl ToHaskell for AgentRosterProjection {
                 .transpose()?
                 .visit(table, visitor)?;
             match &self.terminal {
-                None => visit_core(table, visitor, "RosterRunning", 0, |_| Ok(()))?,
+                None => visit_core(table, visitor, "RosterRunning", |_| Ok(()))?,
                 Some(t) => match t.kind {
                     crate::ActorExitKind::Completed => {
-                        visit_core(table, visitor, "RosterStopped", 0, |_| Ok(()))?
+                        visit_core(table, visitor, "RosterStopped", |_| Ok(()))?
                     }
                     crate::ActorExitKind::Failed => {
-                        visit_core(table, visitor, "RosterFailed", 1, |v| {
+                        visit_core(table, visitor, "RosterFailed", |v| {
                             t.summary.visit(table, v)
                         })?
                     }
                     crate::ActorExitKind::Cancelled => {
-                        visit_core(table, visitor, "RosterCancelled", 1, |v| {
+                        visit_core(table, visitor, "RosterCancelled", |v| {
                             t.summary.visit(table, v)
                         })?
                     }
                 },
             }
             match self.runtime.provider_turn.as_ref().map(|t| &t.state) {
-                None => visit_core(table, visitor, "ProviderUnknown", 0, |_| Ok(()))?,
+                None => visit_core(table, visitor, "ProviderUnknown", |_| Ok(()))?,
                 Some(tidepool_model::ProviderTurnState::Active) => {
-                    visit_core(table, visitor, "ProviderActive", 0, |_| Ok(()))?
+                    visit_core(table, visitor, "ProviderActive", |_| Ok(()))?
                 }
                 Some(tidepool_model::ProviderTurnState::Succeeded) => {
-                    visit_core(table, visitor, "ProviderSucceeded", 0, |_| Ok(()))?
+                    visit_core(table, visitor, "ProviderSucceeded", |_| Ok(()))?
                 }
                 Some(tidepool_model::ProviderTurnState::Interrupted) => {
-                    visit_core(table, visitor, "ProviderInterrupted", 0, |_| Ok(()))?
+                    visit_core(table, visitor, "ProviderInterrupted", |_| Ok(()))?
                 }
                 Some(tidepool_model::ProviderTurnState::Failed(f)) => {
-                    visit_core(table, visitor, "ProviderFailed", 1, |v| match f {
+                    visit_core(table, visitor, "ProviderFailed", |v| match f {
                         tidepool_model::ProviderFailure::RequestRejected => {
-                            visit_core(table, v, "RequestRejected", 0, |_| Ok(()))
+                            visit_core(table, v, "RequestRejected", |_| Ok(()))
                         }
                         tidepool_model::ProviderFailure::TransportFailed => {
-                            visit_core(table, v, "TransportFailed", 0, |_| Ok(()))
+                            visit_core(table, v, "TransportFailed", |_| Ok(()))
                         }
                         tidepool_model::ProviderFailure::Other(d) => {
-                            visit_core(table, v, "OtherProviderFailure", 1, |v| d.visit(table, v))
+                            visit_core(table, v, "OtherProviderFailure", |v| d.visit(table, v))
                         }
                     })?
                 }
@@ -1418,14 +1406,13 @@ impl ToHaskell for AgentRosterProjection {
                 .provider_observation_stale
                 .visit(table, visitor)?;
             match self.terminal {
-                None => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |v| {
+                None => visit_named(table, visitor, "GHC.Maybe", "Just", |v| {
                     visit_core(
                         table,
                         v,
                         self.runtime
                             .disposition(!self.requests.0.is_empty() || !self.requests.1.is_empty())
                             .constructor_name(),
-                        0,
                         |_| Ok(()),
                     )
                 })?,
@@ -1443,7 +1430,7 @@ impl ToHaskell for AgentRosterProjection {
                 .map(|x| actor_haskell_int(x.0, "request id"))
                 .collect::<Result<Vec<_>, _>>()?
                 .visit(table, visitor)?;
-            visit_core(table, visitor, role, 0, |_| Ok(()))?;
+            visit_core(table, visitor, role, |_| Ok(()))?;
             self.bound_worktree.visit(table, visitor)?;
             self.descriptor
                 .fork_group()
@@ -1464,7 +1451,7 @@ impl ToHaskell for AgentRosterProjection {
             )?;
             match self.runtime.latest_provider_usage() {
                 None => Option::<i64>::None.visit(table, visitor)?,
-                Some(s) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |v| {
+                Some(s) => visit_named(table, visitor, "GHC.Maybe", "Just", |v| {
                     visit_core(
                         table,
                         v,
@@ -1474,7 +1461,6 @@ impl ToHaskell for AgentRosterProjection {
                             crate::CacheBoundaryReason::ReattachedThread => "CacheReattachedThread",
                             crate::CacheBoundaryReason::ProviderUnknown => "CacheProviderUnknown",
                         },
-                        0,
                         |_| Ok(()),
                     )
                 })?,
@@ -1494,12 +1480,12 @@ fn visit_workbench_posture(
 ) -> Result<(), BridgeError> {
     match posture {
         crate::ActorWorkbenchPosture::Idle => {
-            visit_core(table, visitor, "WorkbenchIdle", 0, |_| Ok(()))
+            visit_core(table, visitor, "WorkbenchIdle", |_| Ok(()))
         }
         crate::ActorWorkbenchPosture::RunningUnit {
             input_unit_index,
             total,
-        } => visit_core(table, visitor, "WorkbenchRunningUnit", 2, |v| {
+        } => visit_core(table, visitor, "WorkbenchRunningUnit", |v| {
             i64::try_from(*input_unit_index)
                 .map_err(|_| {
                     BridgeError::UnsupportedType(
@@ -1519,7 +1505,7 @@ fn visit_workbench_posture(
             input_unit_index,
             total,
             effect,
-        } => visit_core(table, visitor, "WorkbenchAwaitingEffect", 3, |v| {
+        } => visit_core(table, visitor, "WorkbenchAwaitingEffect", |v| {
             i64::try_from(*input_unit_index)
                 .map_err(|_| {
                     BridgeError::UnsupportedType(
@@ -1537,7 +1523,7 @@ fn visit_workbench_posture(
             effect.visit(table, v)
         }),
         crate::ActorWorkbenchPosture::TerminalTransfer { transfer } => {
-            visit_core(table, visitor, "WorkbenchTerminalTransfer", 1, |v| {
+            visit_core(table, visitor, "WorkbenchTerminalTransfer", |v| {
                 visit_core(
                     table,
                     v,
@@ -1547,13 +1533,12 @@ fn visit_workbench_posture(
                             "WorkbenchCancellationTransfer"
                         }
                     },
-                    0,
                     |_| Ok(()),
                 )
             })
         }
         crate::ActorWorkbenchPosture::Failed => {
-            visit_core(table, visitor, "WorkbenchFailed", 0, |_| Ok(()))
+            visit_core(table, visitor, "WorkbenchFailed", |_| Ok(()))
         }
     }
 }
@@ -1591,7 +1576,7 @@ impl ToHaskell for ActorContextProjection {
             crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
             crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
         };
-        visit_core(table, visitor, "ActorContextInfo", 24, |v| {
+        visit_core(table, visitor, "ActorContextInfo", |v| {
             actor_haskell_int(self.context.actor.id.0, "actor id")?.visit(table, v)?;
             actor_haskell_int(self.context.actor.incarnation.0, "actor incarnation")?
                 .visit(table, v)?;
@@ -1606,13 +1591,13 @@ impl ToHaskell for ActorContextProjection {
                 .transpose()?
                 .visit(table, v)?;
             self.descriptor.label().to_owned().visit(table, v)?;
-            visit_core(table, v, role, 0, |_| Ok(()))?;
+            visit_core(table, v, role, |_| Ok(()))?;
             self.descriptor
                 .effective_role()
                 .haskell_effects_type()
                 .visit(table, v)?;
-            visit_core(table, v, tools, 0, |_| Ok(()))?;
-            visit_core(table, v, workspace, 0, |_| Ok(()))?;
+            visit_core(table, v, tools, |_| Ok(()))?;
+            visit_core(table, v, workspace, |_| Ok(()))?;
             self.bound_worktree.visit(table, v)?;
             self.descriptor
                 .fork_group()
@@ -1623,17 +1608,17 @@ impl ToHaskell for ActorContextProjection {
                 .visit(table, v)?;
             match &self.runtime.activation_kind {
                 crate::ActorActivationKind::RootStarted => {
-                    visit_core(table, v, "ActivationRootStarted", 0, |_| Ok(()))?
+                    visit_core(table, v, "ActivationRootStarted", |_| Ok(()))?
                 }
                 crate::ActorActivationKind::RequestActivated {
                     request,
                     activation_sequence,
-                } => visit_core(table, v, "ActivationRequest", 2, |v| {
+                } => visit_core(table, v, "ActivationRequest", |v| {
                     actor_haskell_int(request.0, "request id")?.visit(table, v)?;
                     actor_haskell_int(*activation_sequence, "activation sequence")?.visit(table, v)
                 })?,
                 crate::ActorActivationKind::EventsActivated { inbox_sequences } => {
-                    visit_core(table, v, "ActivationEvents", 1, |v| {
+                    visit_core(table, v, "ActivationEvents", |v| {
                         inbox_sequences
                             .iter()
                             .copied()
@@ -6102,12 +6087,10 @@ fn visit_introspection_scope(
 ) -> Result<(), BridgeError> {
     use tidepool_runtime::session::NameScope;
     match scope {
-        NameScope::Current => visit_core(table, visitor, "CurrentScope", 0, |_| Ok(())),
-        NameScope::PublicModule(module) => {
-            visit_core(table, visitor, "PublicModule", 1, |visitor| {
-                module.visit(table, visitor)
-            })
-        }
+        NameScope::Current => visit_core(table, visitor, "CurrentScope", |_| Ok(())),
+        NameScope::PublicModule(module) => visit_core(table, visitor, "PublicModule", |visitor| {
+            module.visit(table, visitor)
+        }),
     }
 }
 
@@ -6117,7 +6100,7 @@ fn visit_introspection_query(
     query: &tidepool_runtime::session::NameQuery,
 ) -> Result<(), BridgeError> {
     use tidepool_runtime::session::NameNamespace;
-    visit_core(table, visitor, "NameQuery", 3, |visitor| {
+    visit_core(table, visitor, "NameQuery", |visitor| {
         visit_introspection_scope(table, visitor, &query.scope)?;
         visit_core(
             table,
@@ -6128,7 +6111,6 @@ fn visit_introspection_query(
                 NameNamespace::Type => "TypeName",
                 NameNamespace::Constructor => "ConstructorName",
             },
-            0,
             |_| Ok(()),
         )?;
         query.name.visit(table, visitor)
@@ -6141,7 +6123,7 @@ fn visit_introspection_identifier(
     identifier: &tidepool_runtime::session::IdentifierRef,
 ) -> Result<(), BridgeError> {
     use tidepool_runtime::session::IdentifierNamespace;
-    visit_core(table, visitor, "IdentifierRef", 3, |visitor| {
+    visit_core(table, visitor, "IdentifierRef", |visitor| {
         identifier.module.visit(table, visitor)?;
         identifier.name.visit(table, visitor)?;
         visit_core(
@@ -6153,7 +6135,6 @@ fn visit_introspection_identifier(
                 IdentifierNamespace::Constructor => "ConstructorIdentifier",
                 IdentifierNamespace::Field => "FieldIdentifier",
             },
-            0,
             |_| Ok(()),
         )
     })
@@ -6164,7 +6145,7 @@ fn visit_introspection_type_expression(
     visitor: &mut dyn HaskellVisitor,
     ty: &tidepool_runtime::session::TypeExpression,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "TypeExpression", 3, |visitor| {
+    visit_core(table, visitor, "TypeExpression", |visitor| {
         ty.canonical.visit(table, visitor)?;
         ty.variables.visit(table, visitor)?;
         ty.constraints.visit(table, visitor)
@@ -6176,7 +6157,7 @@ fn visit_introspection_provenance(
     visitor: &mut dyn HaskellVisitor,
     provenance: &tidepool_runtime::session::ScopeProvenance,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "ScopeProvenance", 3, |visitor| {
+    visit_core(table, visitor, "ScopeProvenance", |visitor| {
         visit_introspection_scope(table, visitor, &provenance.scope)?;
         actor_haskell_int(provenance.generation, "scope generation")?.visit(table, visitor)?;
         provenance.fingerprint.visit(table, visitor)
@@ -6188,7 +6169,7 @@ fn visit_introspection_field(
     visitor: &mut dyn HaskellVisitor,
     field: &tidepool_runtime::session::FieldInfo,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "FieldInfo", 2, |visitor| {
+    visit_core(table, visitor, "FieldInfo", |visitor| {
         field.name.visit(table, visitor)?;
         visit_introspection_type_expression(table, visitor, &field.ty)
     })
@@ -6221,7 +6202,7 @@ fn visit_introspection_constructor(
     visitor: &mut dyn HaskellVisitor,
     constructor: &tidepool_runtime::session::ConstructorInfo,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "ConstructorInfo", 4, |visitor| {
+    visit_core(table, visitor, "ConstructorInfo", |visitor| {
         visit_introspection_identifier(table, visitor, &constructor.identifier)?;
         visit_introspection_type_expression(table, visitor, &constructor.ty)?;
         visit_structural_list(table, visitor, &constructor.arguments, |ty, visitor| {
@@ -6240,15 +6221,13 @@ fn visit_introspection_declaration(
 ) -> Result<(), BridgeError> {
     use tidepool_runtime::session::DeclarationInfo;
     match declaration {
-        DeclarationInfo::Value(ty) => {
-            visit_core(table, visitor, "ValueDeclaration", 1, |visitor| {
-                visit_introspection_type_expression(table, visitor, ty)
-            })
-        }
+        DeclarationInfo::Value(ty) => visit_core(table, visitor, "ValueDeclaration", |visitor| {
+            visit_introspection_type_expression(table, visitor, ty)
+        }),
         DeclarationInfo::Data {
             parameters,
             constructors,
-        } => visit_core(table, visitor, "DataDeclaration", 2, |visitor| {
+        } => visit_core(table, visitor, "DataDeclaration", |visitor| {
             parameters.visit(table, visitor)?;
             visit_structural_list(table, visitor, constructors, |constructor, visitor| {
                 visit_introspection_constructor(table, visitor, constructor)
@@ -6257,12 +6236,12 @@ fn visit_introspection_declaration(
         DeclarationInfo::Newtype {
             parameters,
             constructor,
-        } => visit_core(table, visitor, "NewtypeDeclaration", 2, |visitor| {
+        } => visit_core(table, visitor, "NewtypeDeclaration", |visitor| {
             parameters.visit(table, visitor)?;
             visit_introspection_constructor(table, visitor, constructor)
         }),
         DeclarationInfo::TypeSynonym { parameters, body } => {
-            visit_core(table, visitor, "TypeSynonymDeclaration", 2, |visitor| {
+            visit_core(table, visitor, "TypeSynonymDeclaration", |visitor| {
                 parameters.visit(table, visitor)?;
                 visit_introspection_type_expression(table, visitor, body)
             })
@@ -6271,13 +6250,13 @@ fn visit_introspection_declaration(
             parameters,
             superclasses,
             methods,
-        } => visit_core(table, visitor, "ClassDeclaration", 3, |visitor| {
+        } => visit_core(table, visitor, "ClassDeclaration", |visitor| {
             parameters.visit(table, visitor)?;
             visit_structural_list(table, visitor, superclasses, |ty, visitor| {
                 visit_introspection_type_expression(table, visitor, ty)
             })?;
             visit_structural_list(table, visitor, methods, |method, visitor| {
-                visit_core(table, visitor, "ClassMethodInfo", 2, |visitor| {
+                visit_core(table, visitor, "ClassMethodInfo", |visitor| {
                     visit_introspection_identifier(table, visitor, &method.identifier)?;
                     visit_introspection_type_expression(table, visitor, &method.ty)
                 })
@@ -6286,12 +6265,12 @@ fn visit_introspection_declaration(
         DeclarationInfo::Constructor {
             parent,
             constructor,
-        } => visit_core(table, visitor, "ConstructorDeclaration", 2, |visitor| {
+        } => visit_core(table, visitor, "ConstructorDeclaration", |visitor| {
             visit_introspection_identifier(table, visitor, parent)?;
             visit_introspection_constructor(table, visitor, constructor)
         }),
         DeclarationInfo::RecordSelector { parent, ty } => {
-            visit_core(table, visitor, "RecordSelectorDeclaration", 2, |visitor| {
+            visit_core(table, visitor, "RecordSelectorDeclaration", |visitor| {
                 visit_introspection_identifier(table, visitor, parent)?;
                 visit_introspection_type_expression(table, visitor, ty)
             })
@@ -6305,10 +6284,10 @@ fn visit_optional_identifier(
     identifier: Option<&tidepool_runtime::session::IdentifierRef>,
 ) -> Result<(), BridgeError> {
     match identifier {
-        Some(identifier) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
+        Some(identifier) => visit_named(table, visitor, "GHC.Maybe", "Just", |visitor| {
             visit_introspection_identifier(table, visitor, identifier)
         }),
-        None => visit_named(table, visitor, "GHC.Maybe", "Nothing", 0, |_| Ok(())),
+        None => visit_named(table, visitor, "GHC.Maybe", "Nothing", |_| Ok(())),
     }
 }
 
@@ -6317,7 +6296,7 @@ fn visit_introspection_info(
     visitor: &mut dyn HaskellVisitor,
     info: &tidepool_runtime::session::IdentifierInfo,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "IdentifierInfo", 4, |visitor| {
+    visit_core(table, visitor, "IdentifierInfo", |visitor| {
         visit_introspection_identifier(table, visitor, &info.identifier)?;
         visit_introspection_declaration(table, visitor, &info.declaration)?;
         visit_optional_identifier(table, visitor, info.parent.as_ref())?;
@@ -6330,7 +6309,7 @@ fn visit_introspection_type(
     visitor: &mut dyn HaskellVisitor,
     info: &tidepool_runtime::session::TypeInfo,
 ) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "TypeInfo", 3, |visitor| {
+    visit_core(table, visitor, "TypeInfo", |visitor| {
         visit_introspection_identifier(table, visitor, &info.identifier)?;
         visit_introspection_type_expression(table, visitor, &info.expression)?;
         visit_introspection_provenance(table, visitor, &info.provenance)
@@ -6344,13 +6323,11 @@ fn visit_introspection_query_error(
 ) -> Result<(), BridgeError> {
     use tidepool_runtime::session::QueryError;
     match error {
-        QueryError::Unknown(query) => {
-            visit_core(table, visitor, "UnknownIdentifier", 1, |visitor| {
-                visit_introspection_query(table, visitor, query)
-            })
-        }
+        QueryError::Unknown(query) => visit_core(table, visitor, "UnknownIdentifier", |visitor| {
+            visit_introspection_query(table, visitor, query)
+        }),
         QueryError::Ambiguous(query, candidates) => {
-            visit_core(table, visitor, "AmbiguousIdentifier", 2, |visitor| {
+            visit_core(table, visitor, "AmbiguousIdentifier", |visitor| {
                 visit_introspection_query(table, visitor, query)?;
                 visit_structural_list(table, visitor, candidates, |candidate, visitor| {
                     visit_introspection_identifier(table, visitor, candidate)
@@ -6358,12 +6335,12 @@ fn visit_introspection_query_error(
             })
         }
         QueryError::UnknownModule(module) => {
-            visit_core(table, visitor, "UnknownModule", 1, |visitor| {
+            visit_core(table, visitor, "UnknownModule", |visitor| {
                 module.visit(table, visitor)
             })
         }
         QueryError::Unsupported(detail) => {
-            visit_core(table, visitor, "UnsupportedDeclaration", 1, |visitor| {
+            visit_core(table, visitor, "UnsupportedDeclaration", |visitor| {
                 detail.visit(table, visitor)
             })
         }
@@ -6394,10 +6371,9 @@ impl ToHaskell for StructuredIntrospectionAnswer {
             visitor,
             "Data.Either",
             if right { "Right" } else { "Left" },
-            1,
             |visitor| match self {
                 Self::ScopeChanged { before, after } => {
-                    visit_core(table, visitor, "ScopeChanged", 2, |visitor| {
+                    visit_core(table, visitor, "ScopeChanged", |visitor| {
                         visit_introspection_provenance(table, visitor, before)?;
                         visit_introspection_provenance(table, visitor, after)
                     })
@@ -6406,7 +6382,7 @@ impl ToHaskell for StructuredIntrospectionAnswer {
                 Self::Type(info) => visit_introspection_type(table, visitor, info),
                 Self::QueryError(error) => visit_introspection_query_error(table, visitor, error),
                 Self::CompilerUnavailable(detail) => {
-                    visit_core(table, visitor, "CompilerUnavailable", 1, |visitor| {
+                    visit_core(table, visitor, "CompilerUnavailable", |visitor| {
                         detail.visit(table, visitor)
                     })
                 }
@@ -7817,6 +7793,109 @@ mod request_tests {
             error,
             BridgeError::UnsupportedType(ref detail)
                 if detail == "cached input tokens exceed input tokens"
+        ));
+    }
+
+    #[test]
+    fn usage_projection_emits_every_summary_field() {
+        use tidepool_repr::{DataCon, DataConId};
+
+        struct UsageSummary(Option<tidepool_model::ProviderUsageSummary>);
+        impl tidepool_bridge::sealed::ToHaskellSealed for UsageSummary {}
+        impl ToHaskell for UsageSummary {
+            fn visit(
+                &self,
+                table: &DataConTable,
+                visitor: &mut dyn HaskellVisitor,
+            ) -> Result<(), BridgeError> {
+                visit_usage_summary(table, visitor, self.0.as_ref())
+            }
+        }
+
+        let mut table = tidepool_test_data::standard_datacon_table();
+        for (id, name, arity) in [
+            (130, "UsageThread", 1),
+            (131, "UsageComplete", 0),
+            (132, "ProviderUsageSummary", 8),
+        ] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                type_name: String::new(),
+            });
+        }
+        let summary = tidepool_model::ProviderUsageSummary {
+            scope: tidepool_model::ProviderUsageScope::Thread("thread".into()),
+            completeness: tidepool_model::ProviderUsageCompleteness::Complete,
+            observations: 2,
+            usage: tidepool_model::TokenUsage {
+                input_tokens: 13,
+                cached_input_tokens: 5,
+                output_tokens: 3,
+                reasoning_output_tokens: 2,
+                total_tokens: 18,
+            },
+        };
+        let value = UsageSummary(Some(summary)).to_value(&table).unwrap();
+        assert!(matches!(
+            value,
+            HaskellValue::Con(_, ref maybe_fields)
+                if matches!(maybe_fields.as_slice(), [HaskellValue::Con(DataConId(132), summary_fields)] if summary_fields.len() == 8)
+        ));
+    }
+
+    #[test]
+    fn actor_context_projection_emits_the_schema_field_count() {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_repr::{DataCon, DataConId, SessionId};
+
+        let mut table = tidepool_test_data::standard_datacon_table();
+        for (id, name, arity) in [
+            (140, "ActorContextInfo", 23),
+            (141, "ContextCoding", 0),
+            (142, "NativeCoding", 0),
+            (143, "WorkspaceWritableBound", 0),
+            (144, "ActivationRootStarted", 0),
+        ] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                type_name: String::new(),
+            });
+        }
+        let placement = crate::ActorPlacement {
+            session: SessionId(1),
+            resource_scope: RealmId::ROOT,
+            lexical_scope: ScopeId(1),
+        };
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement,
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: "'[]".into(),
+            source_layer: std::sync::Arc::from([]),
+        };
+        let projection = ActorContextProjection {
+            context,
+            descriptor: crate::ActorDescriptor::new("root", placement),
+            bound_worktree: None,
+            runtime: crate::ActorRuntimeObservation::default(),
+        };
+        let value = projection.to_value(&table).unwrap();
+        assert!(matches!(
+            value,
+            HaskellValue::Con(DataConId(140), ref fields) if fields.len() == 23
         ));
     }
 

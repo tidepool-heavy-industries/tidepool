@@ -2359,20 +2359,6 @@ impl PreparedEngine {
                 return Err(PreparedRuntimeError::Run(error));
             }
         };
-        // A live-payload policy names one field of THIS request Con (the
-        // convention's field 1) as the value crossing the runtime boundary
-        // by reference; mirror it into a persistent root BEFORE releasing
-        // `payload`; see `Self::tenure_live_payload`.
-        let live_payload_root =
-            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
-                Ok(root) => root,
-                Err(error) => {
-                    self.machine.release(payload);
-                    self.machine.release(continuation);
-                    return Err(PreparedRuntimeError::Run(error));
-                }
-            };
-        self.machine.release(payload);
         // A request carrying a dynamic site names it; an ordinary effect
         // request is classified by its outer constructor through the verb
         // index, which names the synthetic row answering it.
@@ -2410,10 +2396,27 @@ impl PreparedEngine {
         let (site, owner) = match classified {
             Ok(classified) => classified,
             Err(error) => {
+                self.machine.release(payload);
                 self.machine.release(continuation);
                 return Err(error);
             }
         };
+        // A live-payload policy names one field of THIS request Con (the
+        // convention's field 1) as the value crossing the runtime boundary
+        // by reference. Classify first so a rejected request cannot strand a
+        // newly tenured root without a frame to own it; then mirror the field
+        // before releasing `payload`. `PreparedMachine::park` consumes the
+        // root on both success and refusal.
+        let live_payload_root =
+            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
+                Ok(root) => root,
+                Err(error) => {
+                    self.machine.release(payload);
+                    self.machine.release(continuation);
+                    return Err(PreparedRuntimeError::Run(error));
+                }
+            };
+        self.machine.release(payload);
         let evidence = PreparedFrameEvidence {
             owner,
             site,

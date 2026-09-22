@@ -1757,7 +1757,8 @@ impl<'code> PreparedMachine<'code> {
     /// any -- callers compute it (`PreparedEngine::tenure_live_payload`
     /// mirrors `PreparedMachine`'s own pre-park tenure) since minting it
     /// needs a handle inspection this method has no reason to also know how
-    /// to do; `park` only stows what it is given.
+    /// to do. This call consumes that root on every outcome: a successful
+    /// frame stows it, while refusal deregisters it before returning.
     pub fn park(
         &mut self,
         continuation: PreparedHandle,
@@ -1766,18 +1767,28 @@ impl<'code> PreparedMachine<'code> {
         request: ParkRequest,
     ) -> Result<ContinuationId, ExecutionError> {
         let ParkRequest { evidence, .. } = request;
-        self.ensure_handle_access()?;
+        if let Err(error) = self.ensure_handle_access() {
+            if let Some(root) = live_payload_root {
+                self.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(error);
+        }
         let owned_here = self
             .handles
             .handle(continuation.raw)
             .is_some_and(|entry| entry.realm == realm);
         if !owned_here {
+            if let Some(root) = live_payload_root {
+                self.machine.deregister_persistent_root(root.addr());
+            }
             return Err(ExecutionError::UnknownPreparedHandle);
         }
-        let entry = self
-            .handles
-            .take_handle(continuation.raw)
-            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let Some(entry) = self.handles.take_handle(continuation.raw) else {
+            if let Some(root) = live_payload_root {
+                self.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(ExecutionError::UnknownPreparedHandle);
+        };
         let slot = entry.slot;
         // Nothing allocates between these two registrations, so the value is
         // rooted throughout: it leaves one list and enters the other before
@@ -6983,13 +6994,26 @@ mod tests {
         let handles_before = machine.handle_count();
         let roots_before = machine.total_persistent_roots();
 
-        // A handle from another realm is refused with nothing changed.
+        // A handle from another realm is refused. Any already-tenured live
+        // payload passed with the request is consumed and deregistered because
+        // no parked frame took custody of it.
+        let payload_batch = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect("a second retained value can become the live payload");
+        let [PreparedResult::Managed(payload)] = payload_batch.values.as_slice() else {
+            panic!("the CAF entry returns one managed payload");
+        };
+        let payload = *payload;
+        let payload_root = machine
+            .take_handle_root(payload)
+            .expect("the payload handle is accessible")
+            .expect("the payload handle owns a root");
         let other = RealmId::fresh();
         assert!(matches!(
             machine.park(
                 continuation,
                 other,
-                None,
+                Some(payload_root),
                 ParkRequest {
                     principal: PrincipalId::SYSTEM,
                     effect_policy: EffectRunPolicy::SuspendAll,
@@ -7001,6 +7025,11 @@ mod tests {
         ));
         assert_eq!(machine.parked_count(), 0);
         assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(
+            machine.total_persistent_roots(),
+            roots_before,
+            "refused parking releases the unclaimed live-payload root"
+        );
 
         let id = machine
             .park(
