@@ -106,7 +106,6 @@ pub fn visit_json(
 }
 
 /// Count the bridged shape without building it or copying string/limb payloads.
-#[must_use]
 pub fn bridged_node_count(
     value: &serde_json::Value,
 ) -> Result<usize, crate::decimal::DecimalError> {

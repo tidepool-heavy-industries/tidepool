@@ -397,7 +397,8 @@ pub(crate) fn artifacts_store(
     let mut bundle = Vec::new();
     append_frame(&mut bundle, &manifest.encode());
     for (_, bytes) in artifacts {
-        append_frame(&mut bundle, bytes.unwrap());
+        let Some(bytes) = bytes else { return };
+        append_frame(&mut bundle, bytes);
     }
     let dir = crate::paths::compile_cache_dir();
     if fs::create_dir_all(&dir).is_err() || !evidence.valid(source) {

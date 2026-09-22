@@ -258,6 +258,10 @@ impl StaticRegionCatalog {
         self.regions.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
     pub fn insert(&mut self, region: Arc<StaticRegion>) -> Result<bool, DescriptorTraceError> {
         if region.is_empty() {
             return Ok(false);

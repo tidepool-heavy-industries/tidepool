@@ -649,9 +649,8 @@ impl CommandResources {
         let unfinished = state
             .entries
             .iter()
-            .filter_map(|(key, entry)| {
-                (entry.directory.is_none() && entry.current().is_queued()).then(|| key.clone())
-            })
+            .filter(|(_, entry)| entry.directory.is_none() && entry.current().is_queued())
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in unfinished {
             let disposition = CommandResourceStatus::CancelledBeforeStart;
