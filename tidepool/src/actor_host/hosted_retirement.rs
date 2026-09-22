@@ -129,6 +129,7 @@ pub(super) fn start(
         listener,
         EndpointSource::Canonical(Vec::new()),
         None,
+        None,
     )
 }
 
@@ -150,6 +151,7 @@ fn start_untrusted(
         listener,
         EndpointSource::Untrusted(endpoint),
         None,
+        None,
     )
 }
 
@@ -166,6 +168,7 @@ fn start_endpoint(
         Arc<tidepool_node::command_resources::CommandResourceClient>,
         String,
     )>,
+    operation_journal: Option<PathBuf>,
 ) -> Result<HostedOwner, String> {
     let endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint> = match &endpoint_source {
         EndpointSource::Canonical(tools) => {
@@ -177,8 +180,11 @@ fn start_endpoint(
         #[cfg(test)]
         EndpointSource::Untrusted(endpoint) => endpoint.clone(),
     };
-    let server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?
+    let mut server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?
         .with_command_resources(resources);
+    if let Some(path) = operation_journal {
+        server = server.with_operation_journal(path)?;
+    }
     let mut entry = slot.lock();
     if entry.is_some() {
         return Err("host service already installed".into());
@@ -487,6 +493,7 @@ pub(super) fn start_with_resources(
         Arc<tidepool_node::command_resources::CommandResourceClient>,
         String,
     )>,
+    operation_journal: PathBuf,
 ) -> Result<HostedOwner, String> {
     start_endpoint(
         slot,
@@ -496,5 +503,6 @@ pub(super) fn start_with_resources(
         listener,
         EndpointSource::Canonical(tools),
         resources,
+        Some(operation_journal),
     )
 }

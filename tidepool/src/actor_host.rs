@@ -4480,6 +4480,9 @@ async fn launch_prepared_interactive_application(
                 format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0),
             )
         }),
+        run_root
+            .join("hosted-operations")
+            .join(format!("{}.v1.jsonl", actor_identity.id.0)),
     )
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::ServeToolHost, error)

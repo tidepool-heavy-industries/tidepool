@@ -143,7 +143,11 @@ async fn http_quiesce_preserves_completion_and_drain_retains_blocked_call() {
         assert!(settling.text().await.unwrap().contains("still settling"));
     }
     assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(endpoint.completions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        endpoint.completions.load(Ordering::SeqCst),
+        1,
+        "repeated completion acknowledgments are served from the durable tombstone"
+    );
     control.drain();
     control.quiesce(); // Cannot reopen.
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut server)
@@ -319,7 +323,11 @@ async fn http_seal_unsupported_quiesces_before_poll_without_draining() {
     ));
     assert_quiesced_but_completion_available(&client(&socket)).await;
     assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(endpoint.completions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        endpoint.completions.load(Ordering::SeqCst),
+        1,
+        "repeated completion acknowledgments are idempotent"
+    );
     assert!(tokio::time::timeout(Duration::from_millis(30), &mut server)
         .await
         .is_err());
@@ -368,7 +376,11 @@ async fn http_seal_timeout_retains_single_future_and_failure_keeps_completion() 
     assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
     assert_quiesced_but_completion_available(&client(&socket)).await;
     assert_eq!(endpoint.inner.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(endpoint.inner.completions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        endpoint.inner.completions.load(Ordering::SeqCst),
+        1,
+        "repeated completion acknowledgments are idempotent"
+    );
     assert!(tokio::time::timeout(Duration::from_millis(30), &mut server)
         .await
         .is_err());
