@@ -510,20 +510,9 @@ pub const PREPARED_SCAFFOLD_TARGET: &str = "__prepared";
 /// that lacks it.
 pub const PREPARED_RESUME_TARGET: &str = "__resume";
 
-/// The decode entry every prepared turn admits beside
-/// [`PREPARED_SCAFFOLD_TARGET`] and [`PREPARED_RESUME_TARGET`]
-/// (`Tidepool.Session.preparedDecodeTargetName` on the worker side):
-/// `__decodeValue :: Text -> Either Text Value`, the leaf adapter the
-/// session enters to turn a JSON-rendered bridge answer into a retained
-/// `Tidepool.Aeson.Value.Value` before splicing it into an outer answer
-/// ([`crate::session::prepared`]'s `Value`-carrying-reply lowering). The
-/// extractor projects it as an auxiliary root beside
-/// [`PREPARED_RESUME_TARGET`].
-pub const PREPARED_DECODE_TARGET: &str = "__decodeValue";
-
 /// The generic apply entry every prepared turn admits beside
-/// [`PREPARED_SCAFFOLD_TARGET`], [`PREPARED_RESUME_TARGET`], and
-/// [`PREPARED_DECODE_TARGET`] (`Tidepool.Session.preparedApplyEntryTargetName`
+/// [`PREPARED_SCAFFOLD_TARGET`] and [`PREPARED_RESUME_TARGET`]
+/// (`Tidepool.Session.preparedApplyEntryTargetName`
 /// on the worker side): `__applyEntry f n = settle (f (I# n))`, the entry
 /// `ResidentSession::run_rooted_entry`/`run_rooted_entry_borrowed`
 /// (`tidepool-runtime/src/session/resident.rs`) enters to apply a rooted
@@ -552,28 +541,22 @@ pub const PREPARED_APPLY_VALUE_TARGET: &str = "__applyValue";
 /// The qualified alias every template imports `Tidepool.Internal.Resume` under.
 const RESUME_ALIAS: &str = "TidepoolResume";
 
-/// The qualified aliases the decode entry's signature is written under.
-/// The scaffold cannot assume a template's own preamble brings `Text` or
-/// `Value` into scope (the harness-ctx template imports almost nothing), so
-/// it imports both modules itself under aliases no authored code uses.
+/// Qualified text alias used by the activation-preview scaffold.
 const TEXT_ALIAS: &str = "TidepoolScaffoldText";
-const AESON_VALUE_ALIAS: &str = "TidepoolScaffoldAeson";
 
 /// The qualified alias every template imports `GHC.Exts` under, so
 /// [`PREPARED_APPLY_ENTRY_TARGET`] can box its unboxed `Int#` argument
 /// through `I#` without depending on a template's own imports.
 const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 
-/// The three lines every executable template ends with: the settled
-/// scaffold the prepared route projects, the resume entry it re-enters
-/// parked continuations through, and the decode entry it lowers
-/// `Value`-carrying answers through. All three are unreachable from
+/// Every executable template ends with its settled scaffold, resume entry,
+/// and generic apply entries. These auxiliary bindings are unreachable from
 /// `__result`, so they do not enlarge its prepared dependency closure. Built from
 /// [`prepared_scaffold_binding_named`] (the settled line) and
-/// [`prepared_resume_decode_binding`] (the shared resume/decode/apply group)
+/// [`prepared_resume_apply_binding`] (the shared resume/apply group)
 /// at the fixed [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/
-/// [`PREPARED_DECODE_TARGET`]/[`PREPARED_APPLY_ENTRY_TARGET`]/
-/// [`PREPARED_APPLY_VALUE_TARGET`] names every resident-turn template uses.
+/// [`PREPARED_APPLY_ENTRY_TARGET`]/[`PREPARED_APPLY_VALUE_TARGET`] names every
+/// resident-turn template uses.
 ///
 /// Public so a caller assembling its OWN template outside
 /// [`assemble_bind_module`]/[`assemble_expression_module`] (a hand-rolled
@@ -581,7 +564,7 @@ const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 /// compile requires, rather than hand-duplicating these binder names.
 pub fn prepared_scaffold_binding(target: &str) -> String {
     let mut out = prepared_scaffold_binding_named(PREPARED_SCAFFOLD_TARGET, target);
-    out.push_str(&prepared_resume_decode_binding());
+    out.push_str(&prepared_resume_apply_binding());
     out
 }
 
@@ -597,54 +580,47 @@ pub fn prepared_scaffold_binding(target: &str) -> String {
 /// [`prepared_scaffold_binding`] is a thin specialization, not a second
 /// copy.
 ///
-/// Does NOT emit `__resume`/`__decodeValue` — see
-/// [`prepared_resume_decode_binding`]'s doc for why those stay
+/// Does NOT emit the fixed auxiliary entries — see
+/// [`prepared_resume_apply_binding`]'s doc for why those stay
 /// fixed-named and module-shared rather than following `scaffold_target`.
 #[must_use]
 pub fn prepared_scaffold_binding_named(scaffold_target: &str, target: &str) -> String {
     format!("{scaffold_target} = {RESUME_ALIAS}.settle {target}\n")
 }
 
-/// The resume, decode, and generic-apply entries a module needs beside its
+/// The resume and generic-apply entries a module needs beside its
 /// settled scaffold line(s) — see [`prepared_scaffold_binding`]'s doc for
 /// what each does. UNLIKE the settled line itself, these are fixed at
-/// [`PREPARED_RESUME_TARGET`]/[`PREPARED_DECODE_TARGET`]/
-/// [`PREPARED_APPLY_ENTRY_TARGET`]/[`PREPARED_APPLY_VALUE_TARGET`] no matter
+/// [`PREPARED_RESUME_TARGET`]/[`PREPARED_APPLY_ENTRY_TARGET`]/
+/// [`PREPARED_APPLY_VALUE_TARGET`] no matter
 /// how many targets a module settles: the runtime resolves a program's
-/// resume/decode/apply roots by looking these exact names up in the
+/// resume/apply roots by looking these exact names up in the
 /// program's own top-level bindings (`ProgramFacts::of` in
 /// `tidepool-runtime/src/session/prepared.rs` scans for
-/// `identity.occurrence == PREPARED_RESUME_TARGET`/`PREPARED_DECODE_TARGET`/
+/// `identity.occurrence == PREPARED_RESUME_TARGET`/
 /// `PREPARED_APPLY_ENTRY_TARGET`/`PREPARED_APPLY_VALUE_TARGET`), and none of
-/// these four bodies take a target-specific argument (`resumeLifted`/
-/// `eitherDecodeValue`/the apply roots' own `settle` are the same computation
+/// these bodies take a target-specific argument (`resumeLifted` and the apply
+/// roots' own `settle` are the same computation
 /// regardless of which settled entry suspended) — so a module settling
 /// several targets ([`with_settled_scaffolds`] in `tidepool-harness::engine`)
 /// emits this ONCE for the whole module, not once per target the way
 /// [`prepared_scaffold_binding_named`]'s settled line must be.
 ///
-/// Every binding names its parameters on purpose: a point-free
-/// `__decodeValue = eitherDecodeValue` compiles to an arity-0 value, and the
-/// runtime enters the root with one managed argument, which the entry then
-/// refuses ("expected 0 physical scalar slots"). Eta-expanded, the root is a
-/// one-argument function with the signature the runtime enters (see `git show
-/// bd69b719d`). `__applyEntry`/`__applyValue` take no explicit signature:
+/// `__applyEntry`/`__applyValue` take no explicit signature:
 /// each has explicit parameters, so the monomorphism restriction never
 /// applies and GHC infers `n`'s type as `Int#` directly from its use as
 /// `I#`'s argument.
 #[must_use]
-pub fn prepared_resume_decode_binding() -> String {
+pub fn prepared_resume_apply_binding() -> String {
     format!(
         "{PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
-         {PREPARED_DECODE_TARGET} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
-         {PREPARED_DECODE_TARGET} t = {AESON_VALUE_ALIAS}.eitherDecodeValue t\n\
          {PREPARED_APPLY_ENTRY_TARGET} f n = {RESUME_ALIAS}.settle (f ({SCAFFOLD_EXTS_ALIAS}.I# n))\n\
          {PREPARED_APPLY_VALUE_TARGET} f x = {RESUME_ALIAS}.settle (f x)\n"
     )
 }
 
 /// The bare import targets (no leading `import `, one per line)
-/// [`prepared_scaffold_binding`]/[`prepared_resume_decode_binding`]'s aliases
+/// [`prepared_scaffold_binding`]/[`prepared_resume_apply_binding`]'s aliases
 /// need in scope. [`with_resume_import`] splices these in through
 /// [`insert_preamble_imports`]'s own marker
 /// ([`PREAMBLE_DEFAULT_MARKER`], the production preamble's shape); a caller
@@ -656,7 +632,6 @@ pub fn resume_import_targets() -> String {
     format!(
         "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
          qualified Data.Text as {TEXT_ALIAS}\n\
-         qualified Tidepool.Aeson.Value as {AESON_VALUE_ALIAS}\n\
          qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
     )
 }
@@ -2155,7 +2130,7 @@ pub fn assemble_activation_module(
          __activationBudget = {budget}\n\
          {PREPARED_SCAFFOLD_TARGET} input = {RESUME_ALIAS}.settle (__activationPreview input)\n"
     ));
-    source.push_str(&prepared_resume_decode_binding());
+    source.push_str(&prepared_resume_apply_binding());
     source
 }
 

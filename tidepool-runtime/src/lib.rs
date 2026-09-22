@@ -21,7 +21,6 @@ use thiserror::Error;
 pub use tidepool_bridge::HaskellValue;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::machine::CancelHandle;
-pub use tidepool_codegen::suspension::ResumeInput;
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_effect::EffectError;
 pub use tidepool_extract_cmd::{
@@ -155,7 +154,7 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// * `preamble` - Module header, pragmas, and imports (e.g. from
 ///   `tidepool_mcp::build_preamble`) — everything before the compiled
 ///   binding. Must NOT itself import `Tidepool.Internal.Resume` or define
-///   anything named `__resume`/`__decodeValue`/`__applyEntry`/
+///   anything named `__resume`/`__applyEntry`/
 ///   `__applyValue`/`__prepared`/`__tidepoolInEffectRow`/`__workbenchValue`:
 ///   [`session::assemble_expression_module`] owns those names.
 /// * `target` - Name for the assembled top-level binding (only used inside

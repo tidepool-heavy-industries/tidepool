@@ -248,29 +248,6 @@ test-suite swarm-spec-test
     DeriveTraversable
   ghc-options:      -Wall
 
--- Unit coverage for 'Tidepool.Aeson.Value.eitherDecodeValue''s hand-written
--- RFC 8259 parser used by prepared-STG answer decoding. Plain-GHC business
--- logic, so — like swarm-spec-test — this reaches `lib` directly
--- and costs no extract compile.
--- Run: cabal test aeson-value-spec-test  (needs the nix with-packages GHC on PATH).
-test-suite aeson-value-spec-test
-  type:             exitcode-stdio-1.0
-  main-is:          AesonValueSpecTest.hs
-  hs-source-dirs:   lib, test-aeson
-  other-modules:
-    Tidepool.Aeson.Value
-    Tidepool.Aeson.Scientific
-    Tidepool.Data.Text
-    Tidepool.Double
-  build-depends:
-    base       >= 4.20 && < 5,
-    containers,
-    text
-  default-language: GHC2024
-  default-extensions:
-    OverloadedStrings
-  ghc-options:      -Wall
-
 test-suite fat-iface-exact-test
   type:             exitcode-stdio-1.0
   main-is:          FatIfaceExactTest.hs

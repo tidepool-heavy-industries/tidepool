@@ -39,14 +39,6 @@ pub enum AnswerPlan {
     Scalar { rep: RuntimeRep, bits: [u8; 16] },
     /// An unlifted `ByteArray#` field holding exactly these bytes.
     Bytes(Vec<u8>),
-    /// A `Value`-carrying leaf rendered as JSON text, not yet decoded: the
-    /// session's `lower_answer` produces this in place of walking an
-    /// unconstructible `Tidepool.Aeson.Value.Value` node. `session::prepared`
-    /// resolves every `Json` leaf of a plan to a [`Self::Handle`] (by
-    /// entering the program's decode root) before the plan reaches
-    /// [`FlattenedAnswer::resolve`] — a `Json` leaf reaching the builder is
-    /// an invariant violation, not an ordinary refusal.
-    Json(String),
     /// A value already retained elsewhere in this program's heap, borrowed as
     /// this field's reference: the decoded outer constructor of a resolved
     /// `Json` leaf, or a caller-supplied framed-handle delivery. The build
@@ -94,12 +86,6 @@ pub enum AnswerBuildError {
     /// for more cannot be laid out in the span the builder reserves.
     #[error("constructor {host_id:?} requires {required}-byte alignment, above the nursery's word alignment")]
     Alignment { host_id: DataConId, required: u32 },
-    /// A plan still carried an unresolved [`AnswerPlan::Json`] leaf. The
-    /// session's decode pre-pass resolves every one to a [`AnswerPlan::Handle`]
-    /// before a plan reaches the builder; reaching this is an invariant
-    /// violation in the caller, not a normal refusal.
-    #[error("an answer plan reached the builder with an unresolved Value-carrying leaf")]
-    UnresolvedJson,
     /// A [`AnswerPlan::Handle`] leaf named a handle no longer live in this
     /// engine's ledger (already released, or minted under another engine).
     #[error("an answer plan's borrowed handle is not live")]
@@ -200,7 +186,6 @@ impl FlattenedAnswer {
                 self.byte_arrays.push(PlannedBytes { data: data.clone() });
                 Ok(PlannedField::Bytes(self.byte_arrays.len() - 1))
             }
-            AnswerPlan::Json(_) => Err(AnswerBuildError::UnresolvedJson),
             AnswerPlan::Handle(handle) => {
                 self.handles.push(*handle);
                 Ok(PlannedField::Handle(self.handles.len() - 1))

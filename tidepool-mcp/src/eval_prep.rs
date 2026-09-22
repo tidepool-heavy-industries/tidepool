@@ -1712,7 +1712,7 @@ mod template_haskell_pin {
     /// to actually exercise the splice instead of silently falling back to
     /// `preamble.len()` and appending imports after every declaration,
     /// which is not valid Haskell), and `__prepared`/`__resume`/
-    /// `__decodeValue`/`__applyEntry`/`__applyValue` after `result`.
+    /// `__applyEntry`/`__applyValue` after `result`.
     #[test]
     fn settled_true_splices_the_real_resume_scaffold() {
         const REALISTIC_PRE: &str =
@@ -1742,12 +1742,11 @@ mod template_haskell_pin {
              declaration) — got:\n{src}"
         );
 
-        // The four fixed-named scaffold bindings are present, and the
+        // The three fixed-named scaffold bindings are present, and the
         // settled line names the PRIMARY entry (`result`).
         for needle in [
             "__prepared = TidepoolResume.settle result\n",
             "__resume q x = TidepoolResume.settle",
-            "__decodeValue t = ",
             "__applyEntry f n = TidepoolResume.settle",
             "__applyValue f x = TidepoolResume.settle",
         ] {

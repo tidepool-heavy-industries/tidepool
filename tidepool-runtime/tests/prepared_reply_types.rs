@@ -3,8 +3,8 @@
 //!
 //! `PreparedEngine::lower_answer` (`tidepool-runtime/src/session/prepared.rs`)
 //! refuses `TypeNode::Unconstructible` anywhere in a suspended effect's answer
-//! path, except inside the `Tidepool.Aeson.Value.Value` family (lowered whole
-//! through the decode root). A refusal on a verb whose
+//! path, except inside the `Tidepool.Aeson.Value.Value` family (constructed by
+//! the authenticated structural visitor). A refusal on a verb whose
 //! reply the host cannot build means a suspended frame on that verb parks
 //! forever: it can never resume. This test finds every such verb up front by
 //! compiling ONE turn module that mentions every effect verb of a generated
@@ -335,8 +335,8 @@ fn verb_signatures(decls: &[EffectDecl]) -> (Vec<(String, String)>, Vec<String>)
 
 /// Walk `wire`'s type graph and collect every `Unconstructible` node's reason,
 /// EXCLUDING nodes reached only through the `Tidepool.Aeson.Value.Value`
-/// family: `lower_answer` lowers that family whole through the decode root
-/// (`__decodeValue`), so a `Value`-carrying reply is constructible even though
+/// family: the structural visitor owns that representation, so a
+/// `Value`-carrying reply is constructible even though
 /// `Value`'s `Object` row nests `Data.Map.Internal.Map` underneath.
 fn unconstructible_reasons(program: &PreparedProgram, wire: TypeNodeId) -> Vec<String> {
     let mut reasons = Vec::new();

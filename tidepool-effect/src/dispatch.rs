@@ -8,7 +8,7 @@ use tidepool_bridge::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
 pub struct Response {
-    source: Box<dyn ToHaskell>,
+    source: Box<dyn ToHaskell + Send>,
 }
 
 impl std::fmt::Debug for Response {
@@ -18,6 +18,13 @@ impl std::fmt::Debug for Response {
 }
 
 impl Response {
+    /// Own and erase one structural response source until the runtime visits it.
+    pub fn new<T: ToHaskell + Send + 'static>(source: T) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+
     pub fn visit(
         &self,
         table: &DataConTable,
@@ -47,9 +54,7 @@ impl ToHaskell for Response {
 
 impl From<HaskellValue> for Response {
     fn from(v: HaskellValue) -> Self {
-        Response {
-            source: Box::new(v),
-        }
+        Self::new(v)
     }
 }
 
@@ -83,10 +88,8 @@ impl<'a, U> EffectContext<'a, U> {
     }
 
     /// Convert a Rust value into a complete response for the JIT.
-    pub fn respond<T: ToHaskell + 'static>(&self, val: T) -> Result<Response, EffectError> {
-        Ok(Response {
-            source: Box::new(val),
-        })
+    pub fn respond<T: ToHaskell + Send + 'static>(&self, val: T) -> Result<Response, EffectError> {
+        Ok(Response::new(val))
     }
 
     /// Access the data constructor table (for manual `FromHaskell`/`ToHaskell` calls).

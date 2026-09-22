@@ -101,9 +101,8 @@ runTypeEvidenceChecks directory project projectWithAux = do
   assert (null (programSites empty) && null (programTypes empty))
     "unreachable typed sites leaked into the selected artifact"
 
-  -- An admitted auxiliary root is not a declared site (mirrors
-  -- 'preparedDecodeTargetName'/'__decodeValue' beside a turn's resume
-  -- entry): its own result type must still be interned, even though
+  -- An admitted auxiliary root is not a declared site: its own result type
+  -- must still be interned, even though
   -- 'unrelated' -- the selected entry here -- never otherwise constructs or
   -- observes an 'Either'.
   auxWire <- either

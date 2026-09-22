@@ -70,7 +70,6 @@ module Tidepool.Session
   , scaffoldTargetName
   , preparedScaffoldTargetName
   , preparedResumeTargetName
-  , preparedDecodeTargetName
   , preparedApplyEntryTargetName
   , preparedApplyValueTargetName
   , scaffoldOutputBase
@@ -358,20 +357,8 @@ preparedScaffoldTargetName = "__prepared"
 preparedResumeTargetName :: String
 preparedResumeTargetName = "__resume"
 
--- | The scaffold-reserved decode entry a prepared turn admits beside
--- 'preparedScaffoldTargetName' and 'preparedResumeTargetName':
--- @__decodeValue :: Text -> Either Text Value@, the leaf adapter the host
--- enters to turn a JSON-rendered bridge answer into a retained
--- @Tidepool.Aeson.Value.Value@ before it is spliced into an outer answer's
--- constructor tree ('Tidepool.Aeson.Value.Value' itself, and any type built
--- from it, is otherwise unconstructible host-side: aeson's 'Object' row
--- needs 'Data.Map.Internal.Map', which the host cannot build directly).
--- Projected as an auxiliary root beside 'preparedResumeTargetName'.
-preparedDecodeTargetName :: String
-preparedDecodeTargetName = "__decodeValue"
-
 -- | The scaffold-reserved generic apply entry a prepared turn admits beside
--- 'preparedResumeTargetName' and 'preparedDecodeTargetName':
+-- 'preparedResumeTargetName':
 -- @__applyEntry f n = settle (f (I# n))@, the entry the host enters to apply
 -- a rooted @Int -> M a@ closure to a bare unboxed argument (actor program
 -- start, shutdown hooks, actor source, and green-thread bodies) without a
@@ -379,7 +366,7 @@ preparedDecodeTargetName = "__decodeValue"
 -- is not admitted as auxiliary-root evidence
 -- ('Tidepool.ExecutionProjection.lowerAuxiliaryRootEvidence' excludes any
 -- root whose result type has free type variables). Projected as an auxiliary
--- root beside 'preparedDecodeTargetName'.
+-- root beside 'preparedResumeTargetName'.
 preparedApplyEntryTargetName :: String
 preparedApplyEntryTargetName = "__applyEntry"
 

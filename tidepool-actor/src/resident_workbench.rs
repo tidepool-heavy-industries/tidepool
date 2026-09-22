@@ -2184,9 +2184,8 @@ where
                         return Err(error);
                     }
                 };
-                let answer = ().to_value(session.data_con_table())?;
                 let settled = session
-                    .resume(hole, answer)
+                    .resume(hole, ())
                     .map_err(ResidentActorWorkbenchError::Delivered)?;
                 if !matches!(
                     settled,
@@ -2249,7 +2248,7 @@ where
                             "tool dispatcher crossed an unexpected input boundary".into(),
                         ));
                     }
-                    Ok((name, arguments).to_value(session.data_con_table())?)
+                    Ok((name, arguments))
                 })();
                 let answer = match input {
                     Ok(answer) => answer,
@@ -2315,7 +2314,7 @@ where
                             "after-tool slot crossed an unexpected input boundary".into(),
                         ));
                     }
-                    Ok((tool, payload).to_value(session.data_con_table())?)
+                    Ok((tool, payload))
                 })();
                 let answer = match input {
                     Ok(answer) => answer,
@@ -4571,9 +4570,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = ().to_value(session.data_con_table())?;
                 session
-                    .resume(readiness.hole, answer)
+                    .resume(readiness.hole, ())
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -4874,9 +4872,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = ().to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, ())
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -4918,9 +4915,8 @@ where
                         "runtime identity exceeds Haskell Int".into(),
                     )
                 })?;
-                let answer = value.to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, value)
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5053,9 +5049,8 @@ where
                 for entry in roster {
                     entries.push(agent_roster_value(table, entry)?);
                 }
-                let answer = core_list(table, entries)?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, entries)
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5072,14 +5067,12 @@ where
                 let table = session.data_con_table();
                 let answer = roster
                     .map(|roster| {
-                        let entries = roster
+                        roster
                             .into_iter()
                             .map(|entry| agent_roster_value(table, entry))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok::<_, ResidentActorWorkbenchError>(core_list(table, entries)?)
+                            .collect::<Result<Vec<_>, _>>()
                     })
-                    .transpose()?
-                    .to_value(table)?;
+                    .transpose()?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5098,8 +5091,7 @@ where
                 let table = session.data_con_table();
                 let answer = observation
                     .map(|entry| agent_roster_value(table, entry))
-                    .transpose()?
-                    .to_value(table)?;
+                    .transpose()?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5189,9 +5181,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = outcome.to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, outcome)
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5273,10 +5264,8 @@ where
                         "fork group identity exceeds Haskell Int".into(),
                     )
                 })?;
-                let answer = Ok::<_, String>((group, group_path, paths))
-                    .to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, Ok::<_, String>((group, group_path, paths)))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5326,19 +5315,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let answer = match outcome {
-                    Ok(value) => {
-                        let right =
-                            tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
-                                tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
-                            })?;
-                        HaskellValue::Con(right, vec![value.to_value(table)?])
-                    }
-                    Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
-                };
                 session
-                    .resume(hole, answer)
+                    .resume(hole, crate::request_effect::ReplyResult(outcome))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5352,19 +5330,11 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let answer = match outcome {
-                    Ok(_) => {
-                        let right =
-                            tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
-                                tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
-                            })?;
-                        HaskellValue::Con(right, vec![().to_value(table)?])
-                    }
-                    Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
-                };
                 session
-                    .resume(hole, answer)
+                    .resume(
+                        hole,
+                        crate::request_effect::ReplyResult(outcome.map(|_| ())),
+                    )
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5502,9 +5472,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let keep_receiving = true.to_value(session.data_con_table())?;
                 let outcome = session
-                    .resume(receiver_continuation, keep_receiving)
+                    .resume(receiver_continuation, true)
                     .map_err(ResidentActorWorkbenchError::Delivered)?;
                 let _ = session.close_realm(handler_realm);
                 Ok(outcome)
@@ -5616,9 +5585,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = (name, arguments).to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, (name, arguments))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5848,14 +5816,15 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = (
-                    actor.id.0 as i64,
-                    actor.incarnation.0 as i64,
-                    allocated_label,
-                )
-                    .to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(
+                        hole,
+                        (
+                            actor.id.0 as i64,
+                            actor.incarnation.0 as i64,
+                            allocated_label,
+                        ),
+                    )
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5871,17 +5840,18 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = Ok::<_, String>((
-                    (
-                        actor.id.0 as i64,
-                        actor.incarnation.0 as i64,
-                        allocated_label,
-                    ),
-                    worktree,
-                ))
-                .to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(
+                        hole,
+                        Ok::<_, String>((
+                            (
+                                actor.id.0 as i64,
+                                actor.incarnation.0 as i64,
+                                allocated_label,
+                            ),
+                            worktree,
+                        )),
+                    )
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5895,9 +5865,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = Err::<(), _>(detail).to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, Err::<(), _>(detail))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5910,9 +5879,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = Ok::<(), String>(()).to_value(session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, Ok::<(), String>(()))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await

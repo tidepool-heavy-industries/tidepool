@@ -14,11 +14,10 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, ManagedBuilder,
-    ManagedField, ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
-    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, MAX_ANSWER_DEPTH,
+    CompileError, CompiledProgram, ExecutionError, ImportBindings, ManagedBuilder, ManagedField,
+    ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle,
+    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
+    PreparedResult, PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's realm-scoped cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -37,8 +36,7 @@ use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId}
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use super::turn::{
-    PREPARED_APPLY_ENTRY_TARGET, PREPARED_APPLY_VALUE_TARGET, PREPARED_DECODE_TARGET,
-    PREPARED_RESUME_TARGET,
+    PREPARED_APPLY_ENTRY_TARGET, PREPARED_APPLY_VALUE_TARGET, PREPARED_RESUME_TARGET,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,21 +146,9 @@ pub enum PreparedRuntimeError {
     /// parked.
     #[error("typed site {site} has an unconstructible answer type: {reason}")]
     AnswerUnconstructible { site: u64, reason: String },
-    /// The program that produced a suspension admits no decode entry
-    /// (`__decodeValue`), so a `HaskellValue`-carrying leaf of its answer could
-    /// never be lowered. Every turn template defines the entry; this is a
-    /// stale or foreign artifact, never a user error.
-    #[error("program {program:?} admits no `{entry}` entry, so a HaskellValue-carrying answer cannot be decoded")]
-    NoDecodeEntry {
-        program: ProgramId,
-        entry: &'static str,
-    },
-    /// A `HaskellValue`-carrying leaf's JSON rendering did not decode back to a
-    /// `Tidepool.Aeson.Value.Value` (aeson's decoder disagrees with the
-    /// bridge renderer that produced the text, or the leaf reached a
-    /// malformed shape the renderer could not fully express). The frame
-    /// stays parked; every handle built before the failure is released.
-    #[error("typed site {site} rejects a HaskellValue-carrying answer: {detail}")]
+    /// Structural conversion failed at the dispatch/resume boundary. The
+    /// frame stays parked and no answer root is published.
+    #[error("typed site {site} rejects its structural answer: {detail}")]
     AnswerRejected { site: u64, detail: String },
     /// A resumed handle (bare or framed) is not live in this engine's
     /// ledger: unknown, released, or minted under a different engine. The
@@ -215,7 +201,6 @@ impl PreparedRuntimeError {
             | Self::UnsitedAnswer
             | Self::UnhandledRequest
             | Self::NoResumeEntry { .. }
-            | Self::NoDecodeEntry { .. }
             | Self::AnswerDelivery { .. }
             | Self::AnswerConstructor { .. }
             | Self::AnswerShape { .. }
@@ -284,11 +269,6 @@ struct ProgramFacts {
     /// q x)`, beside the entry in its module), when the artifact retained it.
     /// A suspension of a program without one is refused before parking.
     resume: Option<ValueId>,
-    /// The turn's admitted decode entry (`__decodeValue :: Text -> Either
-    /// Text HaskellValue`, beside the entry in its module), when the artifact
-    /// retained it. A `HaskellValue`-carrying leaf of an answer to a program
-    /// without one is refused before anything is built.
-    decode: Option<ValueId>,
     /// The turn's admitted generic apply entries (`__applyEntry f n = settle
     /// (f (I# n))`, `__applyValue f x = settle (f x)`, beside the entry in
     /// its module), when the artifact retained them. Looked up by
@@ -380,12 +360,6 @@ impl ProgramFacts {
                     .then_some(*id)
             })
         });
-        let decode = entry_module.clone().and_then(|module| {
-            tops.iter().find_map(|(id, (identity, _))| {
-                (identity.module == module && identity.occurrence == PREPARED_DECODE_TARGET)
-                    .then_some(*id)
-            })
-        });
         let apply_entry = entry_module.clone().and_then(|module| {
             tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_APPLY_ENTRY_TARGET)
@@ -429,7 +403,6 @@ impl ProgramFacts {
             tops,
             settled: SettledIds::of(&by_identity),
             resume,
-            decode,
             apply_entry,
             apply_value,
             sites,
@@ -453,91 +426,6 @@ impl ProgramFacts {
             .map(|(identity, _)| identity)
     }
 
-    /// Lower a bridge `HaskellValue` offered as the answer at `site` against the type
-    /// node `node` of this (evidence-owning) program: every constructor must
-    /// be one of the node's rows, every field count must match, every scalar
-    /// must fit its declared representation. Text, Integer and Natural leaves
-    /// are a later slice; an unconstructible node refuses, EXCEPT the family
-    /// this checks first: `Tidepool.Aeson.Value.Value` itself is
-    /// unconstructible field-by-field (its `Object` row needs
-    /// `Data.Map.Internal.Map`, its `Number` row needs `Scientific`'s
-    /// unpacked fields), so any node of that family is lowered whole as a
-    /// [`AnswerPlan::Json`] leaf instead of walking its rows — the leaf
-    /// adapter `session::prepared`'s resume path resolves through the
-    /// program's decode root before building. `table` names constructors for
-    /// that rendering only; nothing here touches the machine, so a refusal
-    /// leaves the frame exactly as parked.
-    fn lower_answer(
-        &self,
-        site: u64,
-        node: TypeNodeId,
-        value: &HaskellValue,
-        depth: usize,
-        table: &DataConTable,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        if depth > MAX_ANSWER_DEPTH {
-            return Err(PreparedRuntimeError::AnswerShape {
-                site,
-                detail: "the answer nests deeper than the builder admits",
-            });
-        }
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        match self.type_node(node) {
-            None => Err(shape("the site's type evidence names an undeclared node")),
-            Some(TypeNode::Data { family, .. }) if is_aeson_value(family) => {
-                let rendered = crate::value_to_json(value, table, 0);
-                Ok(AnswerPlan::Json(rendered.to_string()))
-            }
-            Some(TypeNode::Data { rows, .. }) => {
-                let HaskellValue::Con(host_id, fields) = value else {
-                    return Err(shape("a constructor of the site's answer type is required"));
-                };
-                let row = rows
-                    .iter()
-                    .find(|row| {
-                        self.constructors
-                            .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared)| declared == host_id)
-                    })
-                    .ok_or(PreparedRuntimeError::AnswerConstructor {
-                        site,
-                        host_id: *host_id,
-                    })?;
-                if row.fields.len() != fields.len() {
-                    return Err(shape(
-                        "the constructor's field count does not match its declaration",
-                    ));
-                }
-                let mut planned = Vec::with_capacity(fields.len());
-                for (field_node, field) in row.fields.iter().zip(fields) {
-                    planned.push(self.lower_answer(site, *field_node, field, depth + 1, table)?);
-                }
-                Ok(AnswerPlan::Constructor {
-                    host_id: *host_id,
-                    fields: planned,
-                })
-            }
-            Some(TypeNode::Scalar(rep)) => {
-                let HaskellValue::Lit(literal) = value else {
-                    return Err(shape("a scalar field requires a literal"));
-                };
-                let bits = scalar_bits(*rep, literal).ok_or_else(|| {
-                    shape("the literal does not fit the field's scalar representation")
-                })?;
-                Ok(AnswerPlan::Scalar { rep: *rep, bits })
-            }
-            Some(TypeNode::Text) => self.lower_text(site, value),
-            Some(TypeNode::Integer) => self.lower_integer(site, value),
-            Some(TypeNode::Natural) => self.lower_natural(site, value),
-            Some(TypeNode::Unconstructible { reason, .. }) => {
-                Err(PreparedRuntimeError::AnswerUnconstructible {
-                    site,
-                    reason: reason.clone(),
-                })
-            }
-        }
-    }
-
     /// The bridge id of a declared constructor, by qualified identity.
     fn constructor_named(&self, module: &str, occurrence: &str) -> Option<DataConId> {
         self.by_identity
@@ -558,173 +446,6 @@ impl ProgramFacts {
             _ => None,
         }
     }
-
-    /// One byte-backed leaf: the constructor `module.occurrence` over a
-    /// `ByteArray#` field followed by `scalars`.
-    fn bytes_plan(
-        &self,
-        site: u64,
-        module: &str,
-        occurrence: &str,
-        bytes: Vec<u8>,
-        scalars: impl IntoIterator<Item = AnswerPlan>,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let host_id = self.constructor_named(module, occurrence).ok_or(
-            PreparedRuntimeError::AnswerShape {
-                site,
-                detail:
-                    "the site's program declares no constructor for its byte-backed answer type",
-            },
-        )?;
-        let mut fields = vec![AnswerPlan::Bytes(bytes)];
-        fields.extend(scalars);
-        Ok(AnswerPlan::Constructor { host_id, fields })
-    }
-
-    /// `Text`: the bridge's `Text backing off len` (as `String::to_value`
-    /// builds it) or a bare string literal; the slice must be in bounds and
-    /// valid UTF-8. Built as `Text bytes 0 len` over a fresh byte array.
-    fn lower_text(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let text = self.constructor_named(TEXT_MODULE, "Text");
-        let bytes = match value {
-            HaskellValue::Lit(Literal::LitString(bytes)) => bytes.clone(),
-            HaskellValue::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
-                let backing = byte_backing(&fields[0])
-                    .ok_or(shape("a Text answer's backing must be a byte array"))?;
-                let (
-                    HaskellValue::Lit(Literal::LitInt(off)),
-                    HaskellValue::Lit(Literal::LitInt(len)),
-                ) = (&fields[1], &fields[2])
-                else {
-                    return Err(shape(
-                        "a Text answer's offset and length must be Int literals",
-                    ));
-                };
-                usize::try_from(*off)
-                    .ok()
-                    .zip(usize::try_from(*len).ok())
-                    .and_then(|(off, len)| backing.get(off..off.checked_add(len)?))
-                    .ok_or(shape("a Text answer's slice is out of bounds"))?
-                    .to_vec()
-            }
-            _ => return Err(shape("a Text answer requires Text or a string literal")),
-        };
-        if std::str::from_utf8(&bytes).is_err() {
-            return Err(shape("a Text answer must be valid UTF-8"));
-        }
-        let len = bytes.len() as i64;
-        self.bytes_plan(
-            site,
-            TEXT_MODULE,
-            "Text",
-            bytes,
-            [
-                scalar_plan(RuntimeRep::Int(64), 0),
-                scalar_plan(RuntimeRep::Int(64), len as u128),
-            ],
-        )
-    }
-
-    /// `Integer`: `IS Int#`, or `IP`/`IN` over canonical little-endian
-    /// 64-bit limbs whose magnitude does not fit `IS` (GHC's invariant, which
-    /// generated comparisons and conversions rely on). A bare `Int` literal
-    /// is an `IS`.
-    fn lower_integer(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let named = |occurrence: &str| self.constructor_named(INTEGER_MODULE, occurrence);
-        let small = |host_id: DataConId, value: i64| AnswerPlan::Constructor {
-            host_id,
-            fields: vec![scalar_plan(RuntimeRep::Int(64), value as u128)],
-        };
-        match value {
-            HaskellValue::Lit(Literal::LitInt(value)) => {
-                let is =
-                    named("IS").ok_or(shape("the site's program declares no IS constructor"))?;
-                Ok(small(is, *value))
-            }
-            HaskellValue::Con(id, fields) if Some(*id) == named("IS") => match fields.as_slice() {
-                [HaskellValue::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
-                _ => Err(shape("IS takes one Int literal")),
-            },
-            HaskellValue::Con(id, fields)
-                if Some(*id) == named("IP") || Some(*id) == named("IN") =>
-            {
-                let positive = Some(*id) == named("IP");
-                let limbs = bignat_limbs(fields).ok_or(shape(
-                    "IP and IN take one canonical BigNat# payload of whole limbs",
-                ))?;
-                // Beyond the `IS` range: `IP` above i64::MAX, `IN` below i64::MIN.
-                let fits_small = <[u8; 8]>::try_from(limbs.as_slice()).is_ok_and(|limb| {
-                    let limb = u64::from_le_bytes(limb);
-                    if positive {
-                        limb <= i64::MAX as u64
-                    } else {
-                        limb <= 1_u64 << 63
-                    }
-                });
-                if fits_small {
-                    return Err(shape("a BigNat# payload must lie beyond the IS range"));
-                }
-                self.bytes_plan(
-                    site,
-                    INTEGER_MODULE,
-                    if positive { "IP" } else { "IN" },
-                    limbs,
-                    [],
-                )
-            }
-            _ => Err(shape(
-                "an Integer answer requires IS, IP, IN or an Int literal",
-            )),
-        }
-    }
-
-    /// `Natural`: `NS Word#`, or `NB` over canonical limbs above `u64::MAX`.
-    /// A bare word literal, or a non-negative `Int` literal, is an `NS`.
-    fn lower_natural(
-        &self,
-        site: u64,
-        value: &HaskellValue,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
-        let named = |occurrence: &str| self.constructor_named(NATURAL_MODULE, occurrence);
-        let small = |host_id: DataConId, value: u64| AnswerPlan::Constructor {
-            host_id,
-            fields: vec![scalar_plan(RuntimeRep::Word(64), u128::from(value))],
-        };
-        let ns = || named("NS").ok_or(shape("the site's program declares no NS constructor"));
-        match value {
-            HaskellValue::Lit(Literal::LitWord(value)) => Ok(small(ns()?, *value)),
-            HaskellValue::Lit(Literal::LitInt(value)) => {
-                let value = u64::try_from(*value)
-                    .map_err(|_| shape("a Natural answer cannot be negative"))?;
-                Ok(small(ns()?, value))
-            }
-            HaskellValue::Con(id, fields) if Some(*id) == named("NS") => match fields.as_slice() {
-                [HaskellValue::Lit(Literal::LitWord(value))] => Ok(small(*id, *value)),
-                _ => Err(shape("NS takes one Word literal")),
-            },
-            HaskellValue::Con(id, fields) if Some(*id) == named("NB") => {
-                let limbs = bignat_limbs(fields).ok_or(shape(
-                    "NB takes one canonical BigNat# payload of whole limbs",
-                ))?;
-                if limbs.len() < 16 {
-                    return Err(shape("a BigNat# payload must lie beyond the NS range"));
-                }
-                self.bytes_plan(site, NATURAL_MODULE, "NB", limbs, [])
-            }
-            _ => Err(shape("a Natural answer requires NS, NB or a word literal")),
-        }
-    }
 }
 
 const TEXT_MODULE: &str = "Data.Text.Internal";
@@ -735,49 +456,9 @@ const AESON_SCIENTIFIC_MODULE: &str = "Tidepool.Aeson.Scientific";
 const GHC_TYPES_MODULE: &str = "GHC.Internal.Types";
 const AESON_VALUE_OCCURRENCE: &str = "Value";
 
-/// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
-/// (module+name, never the numeric `TypeNodeId`, which is per-artifact) —
-/// the one family [`ProgramFacts::lower_answer`] lowers whole as JSON rather
-/// than walking rows.
+/// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type.
 fn is_aeson_value(family: &SymbolIdentity) -> bool {
     family.module == AESON_VALUE_MODULE && family.occurrence == AESON_VALUE_OCCURRENCE
-}
-
-/// The raw bytes behind a bridge byte-array value, in any of the forms the
-/// bridge emits for a `ByteArray#` backing.
-fn byte_backing(value: &HaskellValue) -> Option<Vec<u8>> {
-    match value {
-        HaskellValue::ByteArray(bytes) => Some(
-            bytes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-        ),
-        HaskellValue::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => {
-            Some(bytes.clone())
-        }
-        _ => None,
-    }
-}
-
-/// The one `BigNat#` payload of an `IP`/`IN`/`NB` constructor as canonical
-/// little-endian limbs: whole 64-bit words, at least one, top limb nonzero.
-fn bignat_limbs(fields: &[HaskellValue]) -> Option<Vec<u8>> {
-    let [payload] = fields else {
-        return None;
-    };
-    let limbs = byte_backing(payload)?;
-    let canonical = !limbs.is_empty()
-        && limbs.len() % 8 == 0
-        && limbs[limbs.len() - 8..].iter().any(|byte| *byte != 0);
-    canonical.then_some(limbs)
-}
-
-fn scalar_plan(rep: RuntimeRep, word: u128) -> AnswerPlan {
-    AnswerPlan::Scalar {
-        rep,
-        bits: word.to_ne_bytes(),
-    }
 }
 
 /// Target-encode `literal` for a field of representation `rep`: the value's
@@ -1181,6 +862,44 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
     }
 }
 
+fn build_structural_node(
+    response: &dyn tidepool_bridge::ToHaskell,
+    table: &DataConTable,
+    site: u64,
+    root: TypeNodeId,
+    facts: &ProgramFacts,
+    builder: &mut ManagedBuilder<'_, '_>,
+) -> Result<ManagedNode, PreparedRuntimeError> {
+    let mut visitor = StructuralAnswerVisitor {
+        site,
+        root,
+        facts,
+        builder,
+        frames: Vec::new(),
+        result: None,
+        failure: None,
+        depth: 0,
+    };
+    let visited = response.visit(table, &mut visitor);
+    if let Some(error) = visitor.failure.take() {
+        return Err(error);
+    }
+    visited.map_err(|error| PreparedRuntimeError::AnswerRejected {
+        site,
+        detail: error.to_string(),
+    })?;
+    if !visitor.frames.is_empty() {
+        return Err(PreparedRuntimeError::AnswerShape {
+            site,
+            detail: "the response left a constructor unfinished",
+        });
+    }
+    visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
+        site,
+        detail: "the response emitted no managed answer root",
+    })
+}
+
 /// Whether two site rows from two programs carry the same evidence: the same
 /// delivery mode and structurally equal wire and input type graphs, compared
 /// by family and constructor identity with ordered arguments, never by local
@@ -1297,7 +1016,7 @@ fn typed_site_of(request: &HaskellValue, table: &DataConTable) -> Option<u64> {
     }
     /// The numeric content of a `typedSite` leaf: an unboxed or boxed
     /// integral literal, or an aeson `Number` wrapping one. This is the one
-    /// leaf this walk ever renders through the generic JSON decoder — never
+    /// leaf this walk ever renders through the snapshot JSON renderer — never
     /// the whole request.
     fn value_u64(value: &HaskellValue, table: &DataConTable) -> Option<u64> {
         match value {
@@ -2015,21 +1734,6 @@ impl PreparedEngine {
             })
     }
 
-    /// The admitted decode entry of `program`, read without holding a
-    /// borrow past this call.
-    fn decode_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
-        self.programs
-            .get(&program)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                program,
-            )))?
-            .decode
-            .ok_or(PreparedRuntimeError::NoDecodeEntry {
-                program,
-                entry: PREPARED_DECODE_TARGET,
-            })
-    }
-
     /// The admitted generic apply-entry entry (`__applyEntry`) of `program`.
     fn apply_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
         self.programs
@@ -2171,7 +1875,7 @@ impl PreparedEngine {
     /// all populated by [`Self::bootstrap`]/[`Self::install`]) and mutates
     /// (the machine's own park registry) belongs to the engine itself, with
     /// no session, actor, or lexical-scope bookkeeping folded in. The rest of
-    /// the parked-continuation cycle this feeds — [`Self::resume_with_answer`],
+    /// the parked-continuation cycle this feeds — [`Self::resume_with_structural_answer`],
     /// [`Self::parked_count`], [`Self::stowed_roots_count`],
     /// [`Self::parked_ids`], [`Self::parked_realm`], [`Self::close_realm`],
     /// [`Self::abort_parked`] — was already `pub`; this was the one private
@@ -2423,7 +2127,7 @@ impl PreparedEngine {
     /// caller has already validated against the frame's site evidence and
     /// retained under the frame's realm: take the frame, enter the runner's
     /// resume entry with the continuation and the answer, and read the
-    /// settled layer through the shared decoder. `answer` is consumed on
+    /// settled layer through the shared settlement reader. `answer` is consumed on
     /// every path. Every failure before the take (unknown id, an answer from
     /// another realm, cancellation) leaves the frame parked and rooted; a
     /// failure after the take is a run failure.
@@ -2463,7 +2167,7 @@ impl PreparedEngine {
 
     /// [`Self::resume_parked`], but `answer` is BORROWED rather than
     /// consumed: it is delivered to the resume entry and left exactly as
-    /// live afterward, custody unchanged — `ResumeInput::Handle` delivery
+    /// live afterward, custody unchanged — borrowed-handle delivery
     /// (`docs/continuation-parking-contract.md`), which reads a handle's
     /// current heap pointer without releasing its root. No realm check: a
     /// handle is meant to move between parked continuations across resource
@@ -2507,7 +2211,7 @@ impl PreparedEngine {
 
     /// Re-enter the frame parked under `id` by delivering an
     /// already-retained value verbatim — no materialization, closures
-    /// included, the same shape `ResumeInput::Handle` delivers. `raw`
+    /// included, the same shape borrowed-handle delivery accepts. `raw`
     /// must be live in this engine's ledger; the only check possible on this
     /// route is its `RuntimeRep` (every handle this engine mints is
     /// `LiftedRef`), so no deeper type check is available on this path. The
@@ -2525,11 +2229,9 @@ impl PreparedEngine {
     }
 
     /// Re-enter the frame parked under `id` with a constructor whose final
-    /// field borrows `raw` verbatim: `prefix` is lowered against the site's
-    /// declared row for `constructor` exactly as an ordinary answer's fields
-    /// are (`HaskellValue`-carrying prefix fields resolve through the decode entry
-    /// the same way), and the borrowed field is spliced in unvalidated
-    /// beyond its `RuntimeRep`, under the framed-delivery contract
+    /// field borrows `raw` verbatim. Prefix fields stream through the same
+    /// typed structural visitor as ordinary host answers; the borrowed field
+    /// is spliced in unvalidated beyond its `RuntimeRep`, under the framed-delivery contract
     /// (`docs/continuation-parking-contract.md`). The built constructor is
     /// released as usual once the resume entry has read it; `raw`'s root is
     /// untouched throughout.
@@ -2553,12 +2255,8 @@ impl PreparedEngine {
         if site == UNSITED {
             return Err(PreparedRuntimeError::UnsitedAnswer);
         }
-        // Copied out before the cancellation check below takes `self.machine`
-        // mutably: `evidence` itself stays borrowed from it, so a field read
-        // after that point would conflict.
-        let runner = evidence.runner;
-        let owner = self
-            .programs
+        let (programs, machine) = (&self.programs, &mut self.machine);
+        let owner = programs
             .get(&evidence.owner)
             .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
                 evidence.owner,
@@ -2588,31 +2286,25 @@ impl PreparedEngine {
             });
         }
         let field_nodes = ctor_row.fields[..prefix.len()].to_vec();
-        let mut fields = Vec::with_capacity(prefix.len() + 1);
-        for (field_node, field) in field_nodes.iter().zip(&prefix) {
-            fields.push(owner.lower_answer(site, *field_node, field, 0, table)?);
-        }
-        fields.push(AnswerPlan::Handle(handle));
-        let plan = AnswerPlan::Constructor {
-            host_id: constructor,
-            fields,
-        };
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let mut produced = Vec::new();
-        let built = self
-            .resolve_json_leaves(site, runner, realm, plan, table, &mut produced)
-            .and_then(|plan| {
-                self.machine
-                    .build_answer(realm, &plan)
-                    .map_err(PreparedRuntimeError::Run)
-            });
-        // Decoded prefix leaves are rooted by the built constructor from here
-        // on (or by nothing, on failure); the borrowed final field is not in
-        // `produced` and is untouched either way.
-        self.release_all(produced);
-        self.resume_parked(id, built?)
+        let mut builder = machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut fields = Vec::with_capacity(prefix.len() + 1);
+        for (field_node, field) in field_nodes.into_iter().zip(&prefix) {
+            let node = build_structural_node(field, table, site, field_node, owner, &mut builder)?;
+            fields.push(ManagedField::Node(node));
+        }
+        fields.push(ManagedField::Handle(handle));
+        let root = builder
+            .constructor(constructor, &fields)
+            .map_err(PreparedRuntimeError::Run)?;
+        let built = builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, built)
     }
 
     /// The pre-take checks of a resume, then the take: the frame exists,
@@ -2638,61 +2330,9 @@ impl PreparedEngine {
         Ok((continuation, evidence, realm))
     }
 
-    /// Validate `value` as the host-built answer for the frame parked under
-    /// `id` and lower it to a build plan: the frame's site row must be
-    /// delivered by a host answer, and the value must fit the site's wire
-    /// type evidence in the evidence owner's tables. Nothing here touches the
-    /// machine; every refusal leaves the frame exactly as parked.
-    fn answer_plan(
-        &self,
-        id: ContinuationId,
-        value: &HaskellValue,
-        table: &DataConTable,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownContinuation(id),
-        ))?;
-        if evidence.site == UNSITED {
-            // A field-less constructor is the one host-built answer an
-            // open-reply frame accepts: it has no payload for wire evidence
-            // to shape, so building it needs only the constructor's own
-            // interned descriptor (`Nothing` closing a stateful actor's
-            // receive on drain). Anything with a field re-enters by handle.
-            return match value {
-                HaskellValue::Con(host_id, fields) if fields.is_empty() => {
-                    Ok(AnswerPlan::Constructor {
-                        host_id: *host_id,
-                        fields: Vec::new(),
-                    })
-                }
-                _ => Err(PreparedRuntimeError::UnsitedAnswer),
-            };
-        }
-        let owner = self
-            .programs
-            .get(&evidence.owner)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                evidence.owner,
-            )))?;
-        let row = owner
-            .sites
-            .iter()
-            .find(|row| row.site == evidence.site)
-            .ok_or(PreparedRuntimeError::UnknownSite {
-                site: evidence.site,
-            })?;
-        if row.delivery != SiteDelivery::HostAnswer {
-            return Err(PreparedRuntimeError::AnswerDelivery {
-                site: row.site,
-                delivery: row.delivery,
-            });
-        }
-        owner.lower_answer(row.site, row.wire, value, 0, table)
-    }
-
     /// Validate and construct an owned response directly from structural
     /// visitor events. Completed children enter the shared incremental
-    /// builder immediately, so no `HaskellValue` or `AnswerPlan` tree exists.
+    /// builder immediately, so no intermediate `HaskellValue` tree exists.
     pub fn resume_with_structural_answer(
         &mut self,
         id: ContinuationId,
@@ -2730,223 +2370,11 @@ impl PreparedEngine {
         let mut builder = machine
             .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let mut visitor = StructuralAnswerVisitor {
-            site,
-            root: row.wire,
-            facts: owner,
-            builder: &mut builder,
-            frames: Vec::new(),
-            result: None,
-            failure: None,
-            depth: 0,
-        };
-        let visited = response.visit(table, &mut visitor);
-        if let Some(error) = visitor.failure.take() {
-            return Err(error);
-        }
-        visited.map_err(|error| PreparedRuntimeError::AnswerRejected {
-            site,
-            detail: error.to_string(),
-        })?;
-        if !visitor.frames.is_empty() {
-            return Err(PreparedRuntimeError::AnswerShape {
-                site,
-                detail: "the response left a constructor unfinished",
-            });
-        }
-        let root = visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
-            site,
-            detail: "the response emitted no managed answer root",
-        })?;
-        drop(visitor);
+        let root = build_structural_node(response, table, site, row.wire, owner, &mut builder)?;
         let answer = builder
             .finish(realm, root)
             .map_err(PreparedRuntimeError::Run)?;
         self.resume_parked(id, answer)
-    }
-
-    /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `HaskellValue`-carrying
-    /// field [`ProgramFacts::lower_answer`] could not walk into rows) to an
-    /// [`AnswerPlan::Handle`]: render the leaf as a retained `Text`, enter
-    /// `runner`'s admitted decode entry, and project `Right v` to `v`'s
-    /// handle. `Left _` is a typed [`PreparedRuntimeError::AnswerRejected`]
-    /// refusal. Every handle this pass decodes is pushed onto `produced`,
-    /// and ONLY those: a caller-supplied [`AnswerPlan::Handle`] (a borrowed
-    /// framed-delivery field) is never listed there. The caller releases
-    /// `produced` on any failure, so a refusal leaves nothing extra rooted,
-    /// and again once `build_answer` has copied the decoded words into the
-    /// built answer, which roots them from then on. The frame stays parked
-    /// throughout (this runs before the take, like [`Self::answer_plan`] and
-    /// `build_answer`).
-    fn resolve_json_leaves(
-        &mut self,
-        site: u64,
-        runner: ProgramId,
-        realm: RealmId,
-        plan: AnswerPlan,
-        table: &DataConTable,
-        produced: &mut Vec<PreparedHandle>,
-    ) -> Result<AnswerPlan, PreparedRuntimeError> {
-        match plan {
-            AnswerPlan::Json(text) => {
-                let handle = self.decode_json_leaf(site, runner, realm, &text, table)?;
-                produced.push(handle);
-                Ok(AnswerPlan::Handle(handle))
-            }
-            AnswerPlan::Constructor { host_id, fields } => {
-                let mut resolved = Vec::with_capacity(fields.len());
-                for field in fields {
-                    resolved.push(
-                        self.resolve_json_leaves(site, runner, realm, field, table, produced)?,
-                    );
-                }
-                Ok(AnswerPlan::Constructor {
-                    host_id,
-                    fields: resolved,
-                })
-            }
-            other @ (AnswerPlan::Scalar { .. } | AnswerPlan::Bytes(_) | AnswerPlan::Handle(_)) => {
-                Ok(other)
-            }
-        }
-    }
-
-    /// Decode one `HaskellValue`-carrying leaf's JSON text through `runner`'s
-    /// admitted decode entry, returning the decoded value's retained handle.
-    fn decode_json_leaf(
-        &mut self,
-        site: u64,
-        runner: ProgramId,
-        realm: RealmId,
-        text: &str,
-        table: &DataConTable,
-    ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let decode_entry = self.decode_entry_of(runner)?;
-        let owner = self.programs.get(&runner).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownProgram(runner),
-        ))?;
-        let reject = |detail: &str| PreparedRuntimeError::AnswerRejected {
-            site,
-            detail: detail.to_string(),
-        };
-        // `Either`'s constructors are never walked by `TypePolicy` (it only
-        // interns a SITE's own answer type; `__decodeValue`'s signature is
-        // not a site), so `owner`'s own declared-constructor table never
-        // carries them. The session-wide `DataConTable` does: every
-        // compile's `prTyCons` registers every constructor GHC's own type
-        // checker sees, `Either`'s included, regardless of which types a
-        // site happens to answer with. `DataConId` is the same bridge-wide
-        // space `inspect_outer`'s `identity` reads from, so the two compare
-        // directly.
-        let left = table.get_by_qualified_name("Data.Either.Left");
-        let right = table.get_by_qualified_name("Data.Either.Right");
-        let (left, right) = match (left, right) {
-            (Some(left), Some(right)) => (left, right),
-            _ => {
-                return Err(reject(
-                    "the runner declares no Either constructors to read the decode result",
-                ))
-            }
-        };
-        let text_plan = owner.lower_text(
-            site,
-            &HaskellValue::Lit(Literal::LitString(text.as_bytes().to_vec())),
-        )?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let text_handle = self
-            .machine
-            .build_answer(realm, &text_plan)
-            .map_err(PreparedRuntimeError::Run)?;
-        let batch = self.machine.run_entry_retained(
-            runner,
-            decode_entry,
-            &[PreparedInput::Managed(text_handle)],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(text_handle);
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
-        let outer = self
-            .take_first_managed(batch.values)
-            .ok_or_else(|| reject("the decode entry returned no managed Either value"))?;
-        let layer = self.machine.inspect_outer(outer, realm);
-        self.machine.release(outer);
-        let CodegenPreparedOuter::Constructor { identity, fields } =
-            layer.map_err(PreparedRuntimeError::Run)?;
-        let managed: Vec<PreparedHandle> = fields
-            .into_iter()
-            .filter_map(|field| match field {
-                PreparedResult::Managed(handle) => Some(handle),
-                PreparedResult::Void | PreparedResult::Scalar(_) => None,
-            })
-            .collect();
-        if identity == right {
-            match managed.as_slice() {
-                [value] => Ok(*value),
-                _ => {
-                    self.release_all(managed);
-                    Err(reject("Right carried other than one managed field"))
-                }
-            }
-        } else {
-            self.release_all(managed);
-            if identity == left {
-                Err(reject("the HaskellValue-carrying answer failed to decode"))
-            } else {
-                Err(reject("the decode entry returned neither Left nor Right"))
-            }
-        }
-    }
-
-    /// Re-enter the frame parked under `id` with a host-built answer: peek,
-    /// validate and lower `value` against the site evidence, resolve any
-    /// `HaskellValue`-carrying leaves through the decode entry
-    /// ([`Self::resolve_json_leaves`]), build the result into a realm-owned
-    /// handle, then take the frame and enter the resume entry
-    /// ([`Self::resume_parked`]). A plan that is itself one resolved `HaskellValue`
-    /// leaf (the site's whole answer type is `HaskellValue`) delivers that leaf's
-    /// handle directly — a decoded `HaskellValue` is already a retained heap object,
-    /// so wrapping it in another constructor is unnecessary. Every failure
-    /// before the take leaves the frame parked with the handle and root
-    /// counts unchanged.
-    pub fn resume_with_answer(
-        &mut self,
-        id: ContinuationId,
-        value: &HaskellValue,
-        table: &DataConTable,
-    ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let plan = self.answer_plan(id, value, table)?;
-        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownContinuation(id),
-        ))?;
-        let site = evidence.site;
-        let runner = evidence.runner;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let mut produced = Vec::new();
-        let plan = match self.resolve_json_leaves(site, runner, realm, plan, table, &mut produced) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.release_all(produced);
-                return Err(error);
-            }
-        };
-        if let AnswerPlan::Handle(handle) = plan {
-            // The whole answer is one decoded leaf: it is `produced`'s only
-            // entry, and `resume_parked` releases it after the entry reads it.
-            return self.resume_parked(id, handle);
-        }
-        let built = self
-            .machine
-            .build_answer(realm, &plan)
-            .map_err(PreparedRuntimeError::Run);
-        // The built answer now roots every decoded leaf it copied in; the
-        // leaves' own handles are released whether or not the build succeeded.
-        self.release_all(produced);
-        self.resume_parked(id, built?)
     }
 
     /// Consume the frame parked under `id` without entering it: the

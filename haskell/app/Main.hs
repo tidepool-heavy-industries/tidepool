@@ -69,7 +69,7 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
-  , preparedDecodeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName
+  , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , parseSessionModule )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
@@ -510,17 +510,17 @@ requireProjection = \case
   Right projected -> evaluate projected
 
 -- | Filter the standard prepared-turn auxiliary root names
--- ('preparedResumeTargetName', 'preparedDecodeTargetName') down to those the
+-- ('preparedResumeTargetName' and the generic apply roots) down to those the
 -- module actually defines as top-level binders. Shared by 'processFile' and
--- 'runTurnMode' so both admit @__resume@\/@__decodeValue@ as auxiliary roots
+-- 'runTurnMode' so both admit the executable scaffold's auxiliary roots
 -- exactly when a compiled module (e.g. the harness's fused turn module)
 -- defines them, and admit nothing extra for an ordinary module with no
 -- scaffold.
 standardAuxiliaryRoots :: [CoreBind] -> [String]
 standardAuxiliaryRoots binds =
   [ name
-  | name <- [ preparedResumeTargetName, preparedDecodeTargetName
-            , preparedApplyEntryTargetName, preparedApplyValueTargetName
+  | name <- [ preparedResumeTargetName, preparedApplyEntryTargetName
+            , preparedApplyValueTargetName
             ]
   , name `Set.member` topLevelNames
   ]

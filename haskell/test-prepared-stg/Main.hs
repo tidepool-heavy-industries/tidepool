@@ -85,8 +85,8 @@ projectEntry result modul entry retained =
   projectEntryWithAux result modul entry [] retained
 
 -- | 'projectEntry' plus a set of auxiliary root occurrences in the same
--- module (mirroring 'preparedDecodeTargetName' beside a turn's resume
--- entry): admitted the same way a turn's own auxiliary roots are, so a
+-- module (mirroring the fixed entries beside a turn's resume entry): admitted
+-- the same way as a turn's own auxiliary roots, so a
 -- fixture can assert that an auxiliary root's own result type is interned
 -- even when the selected entry never otherwise reaches it.
 projectEntryWithAux :: PreparedPipelineResult -> String -> String -> [String]

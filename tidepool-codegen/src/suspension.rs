@@ -2,8 +2,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tidepool_bridge::HaskellValue;
-
 /// Identity of a continuation parked in one machine. Ids are never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContinuationId(pub u64);
@@ -52,22 +50,6 @@ impl ValueHandle {
             .unwrap_or_else(|_| panic!("rooted-value handle ids exhausted"));
         Self(id)
     }
-}
-
-/// Input supplied when resuming a parked continuation.
-pub enum ResumeInput {
-    /// A validated value to materialize into the retained heap.
-    Answer(HaskellValue),
-    /// A value already rooted in this machine's retained heap.
-    Handle(ValueHandle),
-    /// A constructor whose final field borrows an existing live value.
-    FramedHandle {
-        handle: ValueHandle,
-        constructor: tidepool_repr::DataConId,
-        prefix: Vec<HaskellValue>,
-    },
-    /// Consume the continuation without running it.
-    Abort(String),
 }
 
 #[cfg(test)]

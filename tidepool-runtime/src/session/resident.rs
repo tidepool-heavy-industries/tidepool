@@ -18,8 +18,8 @@ use tidepool_repr::execution_schema::SymbolIdentity;
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
-use tidepool_codegen::suspension::{ContinuationId, RealmId, ResumeInput, ValueHandle};
-use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext};
+use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
+use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
@@ -29,6 +29,17 @@ use tidepool_repr::{
 use crate::render::EvalResult;
 use crate::timing;
 use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+
+enum ResidentResumeInput {
+    Response(Response),
+    Handle(ValueHandle),
+    FramedHandle {
+        handle: ValueHandle,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<HaskellValue>,
+    },
+    Abort(String),
+}
 
 /// Immutable compiler provenance that travels with live Haskell programs.
 /// Sites are globally stable, while the map makes accidental hash collisions
@@ -758,11 +769,6 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
     Ok((program, run))
 }
 
-/// The bridge value a handler's [`Response`] delivers as a host-built
-/// answer. A list response arrives as a flat item vector so that no deep
-/// spine exists on the handler side; the answer plan walks the rebuilt spine
-/// iteratively per row, and the spine's own `Drop` is the bridge `HaskellValue`'s
-/// (frame-based, not recursive).
 /// The one completion routine for a settled layer, whichever entry produced
 /// it (the initial scaffold or a resume): a completed value is prepared per
 /// binder tier; a suspension is parked with the run's policy, then offered to
@@ -1567,7 +1573,7 @@ where
         let provenance = Arc::clone(&transfer.provenance);
         let result = self.reenter(
             &cont_id,
-            ResumeInput::Handle(transfer.handle),
+            ResidentResumeInput::Handle(transfer.handle),
             seed,
             Some(&provenance),
         );
@@ -1686,7 +1692,7 @@ where
         };
         self.reenter(
             &cont_id,
-            ResumeInput::FramedHandle {
+            ResidentResumeInput::FramedHandle {
                 handle,
                 constructor,
                 prefix,
@@ -2534,10 +2540,24 @@ where
     /// nothing extra. There is no external "is this pending a bind" flag left
     /// for a caller to get out of sync with which method it calls — there is
     /// only this one method, and the hole itself says what it owes.
-    pub fn resume(
+    pub fn resume<T>(
         &mut self,
         hole: ResidentHole,
-        answer: HaskellValue,
+        answer: T,
+    ) -> Result<ResidentOutcome, ResidentError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        self.resume_response(hole, Response::new(answer))
+    }
+
+    /// Resume a suspended turn from one owned structural source. Conversion
+    /// errors are classified at the validate-before-consume boundary, while
+    /// the parked continuation is still available to retry or abort.
+    pub fn resume_response(
+        &mut self,
+        hole: ResidentHole,
+        answer: Response,
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole.seed();
         let id = match hole {
@@ -2545,7 +2565,7 @@ where
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
-        self.reenter(&id, ResumeInput::Answer(answer), seed, None)
+        self.reenter(&id, ResidentResumeInput::Response(answer), seed, None)
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -2559,13 +2579,18 @@ where
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Abort(reason), HoleSeed::Plain, None)
+        self.reenter(
+            cont_id,
+            ResidentResumeInput::Abort(reason),
+            HoleSeed::Plain,
+            None,
+        )
     }
 
     fn reenter(
         &mut self,
         cont_id: &str,
-        input: ResumeInput,
+        input: ResidentResumeInput,
         seed: HoleSeed,
         additional_provenance: Option<&ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
@@ -2784,12 +2809,12 @@ where
         &mut self,
         cont_id: &str,
         frame_id: ContinuationId,
-        input: ResumeInput,
+        input: ResidentResumeInput,
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let input = match input {
-            ResumeInput::Abort(reason) => {
+            ResidentResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
                     Ok(engine.abort_parked(frame_id))
                 });
@@ -2838,16 +2863,16 @@ where
         };
         let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
             let outcome = match input {
-                ResumeInput::Answer(value) => {
-                    engine.resume_with_structural_answer(frame_id, &value, table)
+                ResidentResumeInput::Response(response) => {
+                    engine.resume_with_structural_answer(frame_id, &response, table)
                 }
-                ResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
-                ResumeInput::FramedHandle {
+                ResidentResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
+                ResidentResumeInput::FramedHandle {
                     handle,
                     constructor,
                     prefix,
                 } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
-                ResumeInput::Abort(_) => {
+                ResidentResumeInput::Abort(_) => {
                     unreachable!("Abort is handled before the frame is touched")
                 }
             };

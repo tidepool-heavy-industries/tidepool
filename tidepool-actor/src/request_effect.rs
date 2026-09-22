@@ -1,5 +1,5 @@
 use tidepool_bridge::HaskellValue;
-use tidepool_bridge::{BridgeError, ToHaskell};
+use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
@@ -198,15 +198,60 @@ pub(crate) fn reply_error_value(
     error: ReplyError,
     table: &DataConTable,
 ) -> Result<HaskellValue, BridgeError> {
-    let name = match error {
+    constructor(
+        table,
+        "Tidepool.Agent.Reply.Internal",
+        reply_error_name(error),
+        Vec::new(),
+    )
+}
+
+fn reply_error_name(error: ReplyError) -> &'static str {
+    match error {
         ReplyError::UpdatePending => "ReplyUpdatePending",
         ReplyError::Stale => "ReplyStale",
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
-    };
-    constructor(table, "Tidepool.Agent.Reply.Internal", name, Vec::new())
+    }
+}
+
+/// An actor reply whose successful payload is emitted directly into the
+/// resident managed builder.
+pub(crate) struct ReplyResult<T>(pub Result<T, ReplyError>);
+
+impl<T> tidepool_bridge::sealed::ToHaskellSealed for ReplyResult<T> {}
+
+impl<T: ToHaskell> ToHaskell for ReplyResult<T> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match &self.0 {
+            Ok(value) => {
+                let right = tidepool_bridge::get_resilient(table, "Right", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Right".into()))?;
+                visitor.begin_constructor(right, 1)?;
+                value.visit(table, visitor)?;
+                visitor.end_constructor()
+            }
+            Err(error) => {
+                let left = tidepool_bridge::get_resilient(table, "Left", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Left".into()))?;
+                let qualified =
+                    format!("Tidepool.Agent.Reply.Internal.{}", reply_error_name(*error));
+                let rejection = table
+                    .get_by_qualified_name(&qualified)
+                    .ok_or_else(|| BridgeError::UnknownDataConName(qualified))?;
+                visitor.begin_constructor(left, 1)?;
+                visitor.begin_constructor(rejection, 0)?;
+                visitor.end_constructor()?;
+                visitor.end_constructor()
+            }
+        }
+    }
 }
 
 pub(crate) fn rejected_reply_value(
