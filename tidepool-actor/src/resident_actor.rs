@@ -4231,12 +4231,21 @@ where
         }
 
         let install = self.spec_installs + 1;
+        let prepare_started = std::time::Instant::now();
         let candidate = self
             .environment
             .runner
             .application_workbench()
             .prepare_tools(context.clone(), install)
             .await;
+        tracing::info!(
+            actor = %context.actor,
+            phase = "reload",
+            install,
+            elapsed_ms = prepare_started.elapsed().as_millis(),
+            success = candidate.is_ok(),
+            "agent spec preparation"
+        );
         let candidate = match candidate {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
@@ -4303,12 +4312,22 @@ where
             )
         })?;
         self.spec_installs = 1;
-        self.compiled_tools = self
+        let prepare_started = std::time::Instant::now();
+        let compiled_tools = self
             .environment
             .runner
             .application_workbench()
             .prepare_tools(context.clone(), self.spec_installs)
-            .await?;
+            .await;
+        tracing::info!(
+            actor = %context.actor,
+            phase = "startup",
+            install = self.spec_installs,
+            elapsed_ms = prepare_started.elapsed().as_millis(),
+            success = compiled_tools.is_ok(),
+            "agent spec preparation"
+        );
+        self.compiled_tools = compiled_tools?;
         let declarations = self
             .compiled_tools
             .as_ref()
