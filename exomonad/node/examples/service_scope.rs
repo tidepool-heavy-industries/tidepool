@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [&workspace].map(Clone::clone),
         [&workspace].map(Clone::clone),
     )?;
-    let prepared = boundary.prepare_service_scope(
+    let prepared = boundary.reserve_service_scope(
         bubblewrap.into(),
         ProcessInvocation {
             program: "/bin/sh".into(),

@@ -27,7 +27,7 @@ impl Fixture {
                 )
             });
         let mut prepared = boundary
-            .prepare_service_scope(
+            .reserve_service_scope(
                 bwrap,
                 ProcessInvocation {
                     program: "/bin/sh".into(),
@@ -307,11 +307,11 @@ fn scope_invalid_executable_is_pre_spawn_failure() {
         args: vec![],
     };
     assert!(matches!(
-        boundary.prepare_service_scope("bwrap".into(), invocation.clone()),
+        boundary.reserve_service_scope("bwrap".into(), invocation.clone()),
         Err(ServiceScopeError::ExecutableNotAbsolute)
     ));
     let prepared = boundary
-        .prepare_service_scope("/no/such/bwrap".into(), invocation)
+        .reserve_service_scope("/no/such/bwrap".into(), invocation)
         .unwrap();
     assert!(matches!(
         prepared.spawn(Default::default(), tempfile::tempfile().unwrap()),

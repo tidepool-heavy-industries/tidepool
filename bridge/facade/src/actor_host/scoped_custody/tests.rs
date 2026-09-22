@@ -129,7 +129,7 @@ impl Fixture {
             [self.tree.cwd().to_owned()],
         )
         .unwrap()
-        .prepare_service_scope(
+        .reserve_service_scope(
             executable.into(),
             ProcessInvocation {
                 program: "/bin/sh".into(),

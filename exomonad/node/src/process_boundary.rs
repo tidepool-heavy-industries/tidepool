@@ -89,16 +89,6 @@ impl ProcessMountBoundary {
         service_scope::LaunchReservation::new(self.clone(), bubblewrap, command)
     }
 
-    /// Compatibility spelling for existing host composition while it moves to
-    /// the explicit reservation vocabulary.
-    pub fn prepare_service_scope(
-        &self,
-        bubblewrap: PathBuf,
-        command: ProcessInvocation,
-    ) -> Result<service_scope::LaunchReservation, service_scope::ServiceScopeError> {
-        self.reserve_service_scope(bubblewrap, command)
-    }
-
     pub fn new(
         cwd: impl AsRef<Path>,
         read_only_roots: impl IntoIterator<Item = PathBuf>,
