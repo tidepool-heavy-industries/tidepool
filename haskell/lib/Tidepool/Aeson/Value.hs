@@ -125,15 +125,20 @@ emptyArray = Array []
 
 -- | Parse JSON through Tidepool's authenticated native intrinsic. Ordinary GHC
 -- can typecheck this anchor; execution requires the Tidepool prepared runtime.
+-- The fallback enters the outer carrier because GHC exports its demand facts
+-- before prepared projection replaces the body, and the native parser also
+-- enters the 'Text' constructor.
 {-# OPAQUE eitherDecodeValue #-}
 eitherDecodeValue :: Text -> Either Text Value
-eitherDecodeValue _ = Left (T.pack "requires Tidepool")
+eitherDecodeValue input = input `seq` Left (T.pack "requires Tidepool")
 
 -- | Render compact, deterministic JSON through Tidepool's authenticated native
 -- intrinsic. Object keys are emitted in their 'Map' order.
+-- Keep the fallback's outer demand aligned with the native encoder so optimized
+-- importers retain the value that prepared projection will pass to it.
 {-# OPAQUE encodeValue #-}
 encodeValue :: Value -> Text
-encodeValue _ = T.pack ""
+encodeValue value = value `seq` T.pack ""
 
 -- | A class for types that can be converted to JSON Value.
 --

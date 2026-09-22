@@ -225,6 +225,46 @@ fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
 }
 
 #[test]
+fn native_json_intrinsics_preserve_arguments_from_optimized_importers() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/JsonIntrinsicDemand.hs");
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin().expect("resolve extractor").path,
+    ));
+    command
+        .input(&source)
+        .targets(["result"])
+        .include(root.join("haskell/lib"))
+        .include(root.join("haskell/test-prepared-stg"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract cross-module JSON intrinsic fixture");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+    let bytes = std::fs::read(output.path().join("result.prepared.cbor"))
+        .expect("extractor wrote cross-module JSON fixture");
+    let result = run_prepared_once(
+        &bytes,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .expect("optimized importer preserves both JSON intrinsic arguments");
+    assert_eq!(observed_int(&result.values[0]), 1);
+}
+
+#[test]
 fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
     use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 
