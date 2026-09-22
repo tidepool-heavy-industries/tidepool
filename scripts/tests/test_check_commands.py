@@ -22,8 +22,9 @@ class CheckCommands(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "bin").mkdir()
         self.env = os.environ | {"PATH": f"{self.root / 'bin'}:{os.environ['PATH']}"}
-        for name in ("check.sh", "test-suite.sh", "lib-steps.sh"):
+        for name in ("check.sh", "test-suite.sh", "battery.sh", "lib-steps.sh"):
             shutil.copyfile(SCRIPTS / name, self.root / "scripts" / name)
+            (self.root / "scripts" / name).chmod(0o755)
         self.script("scripts/lib-extract.sh", '''
 resolve_tidepool_extract() { :; }
 prepare_battery_artifacts() { BATTERY_NEXTEST_LOG="$PWD/check.log"; }
@@ -37,15 +38,19 @@ _terminate_and_wait() { kill "$1"; wait "$1" || :; }
 ''')
         self.script("scripts/lint.sh", 'echo lint >> events\nexit "${LINT_STATUS:-0}"')
         self.script("scripts/test-suite-check.sh", "echo registration >> events")
-        self.script("scripts/battery-shard.sh", 'echo "shard:$*" >> events')
-        self.script("bin/jq", "printf 'alpha\\nbeta\\n'")
+        self.script("bin/cargo-nextest", "exit 0")
         self.script("bin/cargo", '''
 import json, os, signal, sys, time
 from pathlib import Path
 with open("cargo.jsonl", "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1] == "metadata":
-    print("{}")
+    if os.environ.get("FAIL_METADATA"):
+        sys.exit(7)
+    targets = [] if os.environ.get("NO_TARGETS") else [
+        {"kind": ["test"], "name": name} for name in ("alpha", "beta")]
+    print(json.dumps({"workspace_members": ["example"], "packages": [
+        {"id": "example", "name": "example", "targets": targets}]}))
     sys.exit(0)
 assert os.environ.get("TIDEPOOL_EXTRACT_DAEMON_SOCKET"), "missing resident compiler"
 if os.environ.get("WAIT_FOR_SIGNAL"):
@@ -53,6 +58,8 @@ if os.environ.get("WAIT_FOR_SIGNAL"):
     Path("cargo.pid").write_text(str(os.getpid()))
     while True:
         time.sleep(0.01)
+if os.environ.get("ZERO_TESTS"):
+    print("Summary 0 tests run:", file=sys.stderr)
 sys.exit(int(os.environ.get("TEST_STATUS", "0")))
 ''', python=True)
 
@@ -65,19 +72,46 @@ sys.exit(int(os.environ.get("TEST_STATUS", "0")))
         return subprocess.run(["bash", "scripts/check.sh"], cwd=self.root,
                               env=self.env | env, capture_output=True, text=True, timeout=10)
 
-    def test_suite_prebuild_selects_only_its_registered_integration_targets(self):
+    def test_suite_selects_all_and_only_registered_targets_in_one_run(self):
         result = subprocess.run(["bash", "scripts/test-suite.sh", "example"],
                                 cwd=self.root, env=self.env, capture_output=True,
                                 text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
-        self.assertEqual(calls[-1], ["nextest", "run", "--no-run", "-p", "example",
+        self.assertEqual(calls[-1], ["nextest", "run", "--profile", "battery", "--no-fail-fast",
+                                    "--status-level", "fail", "--final-status-level", "fail", "-p", "example",
                                     "--test", "alpha", "--test", "beta"])
         events = (self.root / "events").read_text().splitlines()
         self.assertEqual(events.count("start"), 1)
         self.assertEqual(events[-1], "teardown")
-        self.assertIn("shard:example --test alpha", events)
-        self.assertIn("shard:example --test beta", events)
+        self.assertEqual(len(calls), 2)
+
+    def test_suite_rejects_missing_package_and_metadata_failure(self):
+        for crate, env in (("missing", {}), ("example", {"FAIL_METADATA": "1"})):
+            with self.subTest(crate=crate, env=env):
+                result = subprocess.run(["bash", "scripts/test-suite.sh", crate],
+                                        cwd=self.root, env=self.env | env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("start", (self.root / "events").read_text().splitlines())
+
+    def test_suite_propagates_failure_and_rejects_zero_tests(self):
+        for env in ({"TEST_STATUS": "9"}, {"ZERO_TESTS": "1"}):
+            with self.subTest(env=env):
+                result = subprocess.run(["bash", "scripts/test-suite.sh", "example"],
+                                        cwd=self.root, env=self.env | env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((self.root / "events").read_text().splitlines()[-1], "teardown")
+
+    def test_suite_without_integration_targets_selects_whole_package(self):
+        result = subprocess.run(["bash", "scripts/test-suite.sh", "example"],
+                                cwd=self.root, env=self.env | {"NO_TARGETS": "1"},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
+        self.assertEqual(calls[-1][-2:], ["-p", "example"])
+        self.assertNotIn("--test", calls[-1])
 
     def test_lint_failure_still_runs_tests_and_retires_compiler(self):
         result = self.run_check(LINT_STATUS="7")
@@ -94,8 +128,14 @@ sys.exit(int(os.environ.get("TEST_STATUS", "0")))
                 self.assertEqual((self.root / "events").read_text().splitlines()[-1], "teardown")
 
     def test_direct_signal_stops_test_process_before_cleanup(self):
+        self.assert_signal_cleanup(["bash", "scripts/check.sh"])
+
+    def test_suite_signal_stops_test_process_before_cleanup(self):
+        self.assert_signal_cleanup(["bash", "scripts/test-suite.sh", "example"])
+
+    def assert_signal_cleanup(self, command):
         with open(self.root / "output", "w") as output:
-            process = subprocess.Popen(["bash", "scripts/check.sh"], cwd=self.root,
+            process = subprocess.Popen(command, cwd=self.root,
                                        env=self.env | {"WAIT_FOR_SIGNAL": "1"},
                                        stdout=output, stderr=output)
             try:

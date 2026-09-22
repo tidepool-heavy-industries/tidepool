@@ -16,8 +16,8 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 #
 default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))))'
 
-# The battery scripts (`just verify`, `just test-target`, `just suite`) run
-# every registered tier.
+# Explicit battery commands (`just test-target`, `just suite`) run all selected
+# tests. `just verify` uses the default tier above plus fixture checks.
 [profile.battery]
 default-filter = 'all()'
 

@@ -72,9 +72,7 @@ start_battery_daemon
 # the default profile skips for quick inner-loop `cargo nextest run`. It
 # inherits slow-timeout and the ghc-heavy thread cap.
 #
-# `exec` here would replace this shell before any check could run — same
-# zero-tests-as-a-pass trap scripts/battery-shard.sh closes; see that script's
-# comment for the reasoning. Capture the run instead of masking it behind exec.
+# Retain the wrapper to reject zero-test selections and own process cleanup.
 set +e
 # No hardcoded --workspace: the root manifest is VIRTUAL, so a bare
 # invocation already defaults to every member (script cd's to repo root

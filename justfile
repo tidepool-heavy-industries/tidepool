@@ -48,12 +48,12 @@ test-lib crate filter="":
 test-toolchain-scripts:
     {{ nix }} python3 scripts/tests/test_lib_extract.py -v
 
-# Run a crate's Cargo integration suites sequentially.
+# Run a crate's Cargo integration suites in one bounded nextest invocation.
 [positional-arguments]
 suite crate:
     {{ nix }} scripts/test-suite.sh "$1"
 
-# Show a crate's checked shard plan without running tests.
+# Show a crate's registered integration targets without running tests.
 [positional-arguments]
 suite-plan crate:
     {{ nix }} scripts/test-suite.sh "$1" --list

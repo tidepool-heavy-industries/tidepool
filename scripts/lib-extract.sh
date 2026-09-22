@@ -6,8 +6,8 @@
 # the build step below runs `cd haskell`.
 #
 # Also owns the resident-compile-daemon lifecycle helpers
-# (start_battery_daemon / teardown_battery_daemon) used by battery.sh and
-# battery-shard.sh. Kept here, not duplicated per script, for the same reason as
+# (start_battery_daemon / teardown_battery_daemon) used by test wrappers.
+# Kept here, not duplicated per script, for the same reason as
 # resolve_tidepool_extract above.
 
 # A no-argument frontend invocation is a usage error and therefore exits
@@ -305,7 +305,7 @@ _battery_daemon_stamp_path() {
 #
 # Outer-wrapper respect: if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set
 # and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
-# invocation (e.g. battery-shard.sh runs launched back-to-back by another
+# invocation (e.g. battery.sh runs launched back-to-back by another
 # script that already started a daemon) must not start, or later tear down,
 # a second one. The explicit disable switch still takes precedence.
 #
