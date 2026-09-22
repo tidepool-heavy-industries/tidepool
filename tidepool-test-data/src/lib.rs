@@ -120,5 +120,24 @@ pub fn standard_datacon_table() -> DataConTable {
         qualified_name: Some("Data.Text.Text".into()),
         type_name: String::new(),
     });
+    // Either
+    table.insert(DataCon {
+        id: DataConId(12),
+        name: "Left".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+        qualified_name: Some("Data.Either.Left".into()),
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: DataConId(13),
+        name: "Right".to_string(),
+        tag: 2,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+        qualified_name: Some("Data.Either.Right".into()),
+        type_name: String::new(),
+    });
     table
 }

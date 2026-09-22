@@ -156,8 +156,13 @@ pub fn session_decl_module_env_with_companions(
             .map(String::from)
             .collect();
     if companion_imports == CompanionImports::Include {
+        let has_source_effect = effects.iter().any(|effect| effect.type_name == "Source");
         for decl in effects {
-            imports.extend(decl.extra_imports.iter().map(|s| (*s).to_string()));
+            imports.extend(
+                decl.extra_imports
+                    .iter()
+                    .map(|import| companion_import(import, has_source_effect).to_string()),
+            );
         }
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
@@ -267,9 +272,10 @@ fn pragmas_and_imports(
     // order, shared with `session_decl_module_env` — see that fn's doc
     // comment for why this used to be two hand-mirrored gates (friction #23).
     if companion_imports == CompanionImports::Include {
+        let has_source_effect = effects.iter().any(|effect| effect.type_name == "Source");
         for decl in effects {
             for imp in decl.extra_imports {
-                out.push_str(imp);
+                out.push_str(companion_import(imp, has_source_effect));
                 out.push('\n');
             }
         }
@@ -707,6 +713,16 @@ pub enum PaginateMode {
     Passthrough,
 }
 
+fn companion_import(import: &'static str, has_source_effect: bool) -> &'static str {
+    if has_source_effect && import == "import Tidepool.Actor" {
+        // The actor facade's authored `Source` record and the effect GADT's
+        // `Source` type otherwise collide in every all-effects module.
+        "import Tidepool.Actor hiding (Source)"
+    } else {
+        import
+    }
+}
+
 /// Emit the mode-selected `paginateResult` alias into the eval expr module.
 /// `Tidepool.Orchestrate` exports `paginateInteractive` and/or `paginateTrunc`;
 /// the result wrapper in `eval_prep.rs` calls `paginateResult`, so the expr
@@ -1084,6 +1100,20 @@ mod vocab_tests {
             .imports
             .iter()
             .any(|import| import == "import Tidepool.Actor"));
+    }
+
+    #[test]
+    fn actor_companion_does_not_shadow_the_source_effect_type() {
+        let effects = [crate::actor_decl(), crate::source_decl()];
+        let preamble = build_preamble_with_companions(&effects, false, CompanionImports::Include);
+        assert!(preamble.contains("import Tidepool.Actor hiding (Source)\n"));
+
+        let declarations =
+            session_decl_module_env_with_companions(&effects, false, CompanionImports::Include);
+        assert!(declarations
+            .imports
+            .iter()
+            .any(|import| import == "import Tidepool.Actor hiding (Source)"));
     }
 
     #[test]

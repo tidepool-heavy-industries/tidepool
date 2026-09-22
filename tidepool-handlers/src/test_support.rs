@@ -1,6 +1,7 @@
 use crate::*;
 use tidepool_bridge::HaskellValue;
 use tidepool_mcp::CapturedOutput;
+use tidepool_repr::execution_schema::JsonLayout;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
 pub(crate) fn expect_handled(
@@ -198,7 +199,31 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         });
         next_id += 1;
     }
-    t
+    let role = |name: &str| {
+        t.get_by_name(name)
+            .unwrap_or_else(|| panic!("missing JSON test constructor {name}"))
+    };
+    let layout = JsonLayout {
+        object: role("Object"),
+        array: role("Array"),
+        string: role("String"),
+        number: role("Number"),
+        bool_: role("Bool"),
+        null: role("Null"),
+        map_bin: role("Bin"),
+        map_tip: role("Tip"),
+        true_: role("True"),
+        false_: role("False"),
+        cons: role(":"),
+        nil: role("[]"),
+        scientific: role("Scientific"),
+        integer_small: role("IS"),
+        integer_positive: role("IP"),
+        integer_negative: role("IN"),
+        text: role("Text"),
+        int: role("I#"),
+    };
+    t.with_json_layout(Some(layout))
 }
 
 pub(crate) fn assert_is_haskell_list(val: &HaskellValue, table: &DataConTable) {
