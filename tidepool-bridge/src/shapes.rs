@@ -494,9 +494,33 @@ pub fn integer_from_decimal(
     ip_id: DataConId,
     in_id: DataConId,
 ) -> HaskellValue {
+    let (constructor, payload) = integer_payload(s, is_id, ip_id, in_id);
+    HaskellValue::Con(constructor, vec![HaskellValue::Lit(payload)])
+}
+
+/// Emit an exact Integer without allocating a temporary HaskellValue tree.
+pub(crate) fn visit_integer_from_decimal(
+    s: &str,
+    is_id: DataConId,
+    ip_id: DataConId,
+    in_id: DataConId,
+    visitor: &mut dyn crate::HaskellVisitor,
+) -> Result<(), crate::BridgeError> {
+    let (constructor, payload) = integer_payload(s, is_id, ip_id, in_id);
+    visitor.begin_constructor(constructor, 1)?;
+    visitor.literal(payload)?;
+    visitor.end_constructor()
+}
+
+fn integer_payload(
+    s: &str,
+    is_id: DataConId,
+    ip_id: DataConId,
+    in_id: DataConId,
+) -> (DataConId, Literal) {
     // Machine-Int fast path (the overwhelmingly common case).
     if let Ok(i) = s.parse::<i64>() {
-        return HaskellValue::Con(is_id, vec![HaskellValue::Lit(Literal::LitInt(i))]);
+        return (is_id, Literal::LitInt(i));
     }
     let (neg, mag) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -521,7 +545,7 @@ pub fn integer_from_decimal(
     }
     let bytes: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     let con = if neg { in_id } else { ip_id };
-    HaskellValue::Con(con, vec![HaskellValue::Lit(Literal::LitByteArray(bytes))])
+    (con, Literal::LitByteArray(bytes))
 }
 
 /// Unwrap the `BigNat#` payload of an `IP`/`IN` con to its raw limb bytes.

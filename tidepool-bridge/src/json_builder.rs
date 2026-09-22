@@ -21,7 +21,7 @@
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
 //! (key sorting and resolving [`JsonConIds`]) on top of them.
 
-use crate::{BridgeError, HaskellValue, HaskellVisitor, ToHaskell};
+use crate::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// `DataConId`s of every constructor needed to build a `HaskellValue`.
@@ -162,8 +162,13 @@ pub fn visit_json(
                 crate::decimal::Decimal::parse_token(number.as_str())?.into_parts();
             visitor.begin_constructor(ids.number, 1)?;
             visitor.begin_constructor(ids.scientific, 2)?;
-            crate::shapes::integer_from_decimal(&coefficient, ids.is, ids.ip, ids.in_)
-                .visit(&DataConTable::new(), visitor)?;
+            crate::shapes::visit_integer_from_decimal(
+                &coefficient,
+                ids.is,
+                ids.ip,
+                ids.in_,
+                visitor,
+            )?;
             visitor.literal(Literal::LitInt(exponent))?;
             visitor.end_constructor()?;
             visitor.end_constructor()
@@ -269,45 +274,36 @@ pub fn json_to_value(
     })
 }
 
-/// The exact node count of the `HaskellValue` [`json_to_value`] would build for `j` —
-/// equal to `json_to_value(j, ids).node_count()` for ANY `ids`, since
-/// [`HaskellValue::node_count`] walks tree SHAPE and ignores constructor ids. Lets a
-/// caller reject a response that would overflow the effect-response
-/// materialization cap with a TYPED error, before it reaches the generic
-/// mid-effect abort in `tidepool-codegen`.
-///
-/// Counting the serde tree directly under-counts badly: bridging a JSON object
-/// to a `Data.Map` spine adds a `Bin` node, a boxed `I#` size, and a boxed
-/// `Text` key PER ENTRY (an object bridges several-fold larger than its serde
-/// node count), which is why an approximate serde-side guard let object-heavy
-/// responses slip past and abort. This builds the real `HaskellValue` and counts it —
-/// the same work the machine does on the abort path (`resp_val.node_count()`),
-/// so the numbers agree by construction; cheap relative to the network fetch.
+/// Count the bridged shape without building it or copying string/limb payloads.
+/// Every constructor and literal counts as one node. Counts saturate at
+/// `usize::MAX`, so an unrepresentable result still exceeds any response cap.
+/// Numbers use the same checked decimal policy as materialization.
 #[must_use]
 pub fn bridged_node_count(j: &serde_json::Value) -> Result<usize, crate::decimal::DecimalError> {
-    // node_count is shape-only, so every id can be the same placeholder.
-    let z = DataConId(0);
-    let ids = JsonConIds {
-        object: z,
-        array: z,
-        string: z,
-        number: z,
-        scientific: z,
-        is: z,
-        ip: z,
-        in_: z,
-        bool_con: z,
-        null: z,
-        true_con: z,
-        false_con: z,
-        bin: z,
-        tip: z,
-        i_hash: z,
-        text: z,
-        cons: z,
-        nil: z,
-    };
-    Ok(json_to_value(j, &ids)?.node_count())
+    let mut pending = vec![j];
+    let mut count = 0usize;
+    while let Some(value) = pending.pop() {
+        let local = match value {
+            serde_json::Value::Null => 1,
+            serde_json::Value::Bool(_) => 2,
+            serde_json::Value::String(_) => 5, // String (Text bytes offset length)
+            serde_json::Value::Number(number) => {
+                crate::decimal::Decimal::parse_token(number.as_str())?;
+                5 // Number (Scientific (IS/IP/IN payload) exponent)
+            }
+            serde_json::Value::Array(items) => {
+                pending.extend(items);
+                items.len().saturating_add(2) // Array, cons cells and nil
+            }
+            serde_json::Value::Object(entries) => {
+                pending.extend(entries.values());
+                // Object; each Bin has a boxed size and Text key, plus n+1 Tips.
+                entries.len().saturating_mul(8).saturating_add(2)
+            }
+        };
+        count = count.saturating_add(local);
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -504,7 +500,7 @@ mod tests {
     }
 
     /// `bridged_node_count` is independent of which ids are used (shape-only),
-    /// so the placeholder-ids count equals a real-ids build's `node_count`.
+    /// including exact large coefficients and exponent boundaries.
     #[test]
     fn bridged_count_is_id_independent() {
         let j = serde_json::json!({"xs": [1, 2, 3], "s": "hi", "nested": {"k": true}});
@@ -529,9 +525,27 @@ mod tests {
             cons: z,
             nil: z,
         };
+        let mut values = vec![j, serde_json::json!([null, false, [], {}, "λ😀"])];
+        for token in [
+            "9223372036854775808",
+            "-9223372036854775809",
+            "123456789012345678901234567890.123456789",
+            "10e9223372036854775807",
+            "1e-9223372036854775808",
+            "0e9999999999999999999999999",
+        ] {
+            values.push(serde_json::from_str(token).unwrap());
+        }
+        for value in values {
+            assert_eq!(
+                bridged_node_count(&value).unwrap(),
+                json_to_value(&value, &ids).unwrap().node_count()
+            );
+        }
+        let invalid: serde_json::Value = serde_json::from_str("1e9223372036854775808").unwrap();
         assert_eq!(
-            bridged_node_count(&j).unwrap(),
-            json_to_value(&j, &ids).unwrap().node_count()
+            bridged_node_count(&invalid).unwrap_err(),
+            crate::decimal::DecimalError::ExponentOutOfRange
         );
     }
 }
