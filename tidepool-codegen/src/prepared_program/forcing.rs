@@ -99,12 +99,20 @@ impl<'a> ObservationRoots<'a> {
         Ok(ObservationSlot { index, rep })
     }
 
-    pub fn read(&self, slot: ObservationSlot) -> usize {
+    fn slot_address(&self, slot: ObservationSlot) -> Result<*mut u64, ExecutionError> {
         let chunk = slot.index / super::construction::ROOT_CHUNK_WORDS;
         let offset = slot.index % super::construction::ROOT_CHUNK_WORDS;
-        self.chunks[chunk]
-            .read(offset)
-            .expect("observation slot remains allocated") as usize
+        self.chunks
+            .get(chunk)
+            .and_then(|words| words.slot_address(offset))
+            .map(|slot| slot.cast::<u64>())
+            .ok_or_else(|| super::run::runtime_error(self.machine, RuntimeError::BadPointer))
+    }
+
+    pub fn read(&self, slot: ObservationSlot) -> Result<usize, ExecutionError> {
+        let address = self.slot_address(slot)?;
+        // Observation roots own this initialized word until the traversal ends.
+        Ok(unsafe { address.read() } as usize)
     }
 
     /// Only the program-generated platform adapter crosses from Rust to Tail.
@@ -132,13 +140,8 @@ impl<'a> ObservationRoots<'a> {
         self.stack
             .ensure_current_frame_reserve(reserve)
             .map_err(|cause| super::run::runtime_error(self.machine, cause))?;
-        let input = self.read(slot);
-        let chunk = slot.index / super::construction::ROOT_CHUNK_WORDS;
-        let offset = slot.index % super::construction::ROOT_CHUNK_WORDS;
-        let output = self.chunks[chunk]
-            .slot_address(offset)
-            .expect("observation slot remains allocated")
-            .cast::<u64>();
+        let input = self.read(slot)?;
+        let output = self.slot_address(slot)?;
         let pointer = program
             .pipeline
             .get_function_ptr(program.prepared_force_adapter());
@@ -263,11 +266,11 @@ pub(super) fn observe_results(
                     )?;
                     // Admission must happen before generated code can move or
                     // inspect the pointer. The heap borrow ends before force.
-                    heap.validate_reference(roots.read(slot))?;
+                    heap.validate_reference(roots.read(slot)?)?;
                 }
                 roots.force(slot, program, vmctx, statics, registry)?;
                 let seed = super::observe::ObservationSeed {
-                    word: roots.read(slot),
+                    word: roots.read(slot)?,
                     rep: slot.rep,
                 };
                 // The reader borrows the active prefix only for this call.

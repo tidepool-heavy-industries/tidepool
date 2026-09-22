@@ -1167,8 +1167,7 @@ pub(super) fn emit_operation(
                 vmctx,
                 bytes_array,
                 *layout,
-                left,
-                right,
+                (left, right),
                 arguments,
             )
             .map(Some)

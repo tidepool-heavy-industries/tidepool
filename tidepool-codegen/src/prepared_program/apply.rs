@@ -747,7 +747,7 @@ pub(super) fn emit_dispatchers(
             .collect::<std::collections::BTreeSet<_>>();
         for signature in offers {
             let application = classify(function.signature, 0, &signature)
-                .expect("owner offers are produced by the canonical classifier contract");
+                .ok_or_else(|| super::CompileError::MissingDemand(signature.clone()))?;
             let Some(callee_function) = callee_instance(functions, id, function, &signature) else {
                 continue;
             };
@@ -786,7 +786,7 @@ pub(super) fn emit_dispatchers(
             .collect::<std::collections::BTreeSet<_>>();
         for signature in offers {
             let application = classify(function.signature, pending, &signature)
-                .expect("PAP offers are produced by the canonical classifier contract");
+                .ok_or_else(|| super::CompileError::MissingDemand(signature.clone()))?;
             let Some(callee_function) = callee_instance(functions, id, function, &signature) else {
                 continue;
             };

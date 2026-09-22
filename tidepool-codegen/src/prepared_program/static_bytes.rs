@@ -173,14 +173,13 @@ impl PinnedBytes {
                 added.storage_bytes += storage.len();
             } else {
                 let address = storage.as_ptr() as usize;
-                if !base.by_address.contains_key(&address) {
-                    base.by_address.insert(
-                        address,
-                        PinnedLiteral {
-                            storage: Arc::clone(storage),
-                            logical_len: value.len(),
-                        },
-                    );
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    base.by_address.entry(address)
+                {
+                    entry.insert(PinnedLiteral {
+                        storage: Arc::clone(storage),
+                        logical_len: value.len(),
+                    });
                     added.storage_entries += 1;
                     added.storage_bytes += storage.len();
                 }

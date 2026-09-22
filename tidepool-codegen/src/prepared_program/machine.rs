@@ -1749,9 +1749,10 @@ impl<'code> PreparedMachine<'code> {
     /// the stowed-root list: the frame now owns the value's liveness, and
     /// only [`Self::take_parked`] or [`Self::close_realm`] ends it. The
     /// handle must be live under `realm`; a foreign, released or other-realm
-    /// handle is [`ExecutionError::UnknownPreparedHandle`] with nothing
-    /// changed. The minted [`ContinuationId`] is the only token that names
-    /// the frame afterwards; no [`PreparedHandle`] ever is.
+    /// handle is [`ExecutionError::UnknownPreparedHandle`]. This call consumes
+    /// the supplied continuation handle on every outcome. The minted
+    /// [`ContinuationId`] is the only token that names a successful frame
+    /// afterwards; no [`PreparedHandle`] ever is.
     ///
     /// `live_payload_root` is the frame's already-tenured live payload, if
     /// any -- callers compute it (`PreparedEngine::tenure_live_payload`
@@ -1768,6 +1769,7 @@ impl<'code> PreparedMachine<'code> {
     ) -> Result<ContinuationId, ExecutionError> {
         let ParkRequest { evidence, .. } = request;
         if let Err(error) = self.ensure_handle_access() {
+            self.release(continuation);
             if let Some(root) = live_payload_root {
                 self.machine.deregister_persistent_root(root.addr());
             }
@@ -1778,12 +1780,14 @@ impl<'code> PreparedMachine<'code> {
             .handle(continuation.raw)
             .is_some_and(|entry| entry.realm == realm);
         if !owned_here {
+            self.release(continuation);
             if let Some(root) = live_payload_root {
                 self.machine.deregister_persistent_root(root.addr());
             }
             return Err(ExecutionError::UnknownPreparedHandle);
         }
         let Some(entry) = self.handles.take_handle(continuation.raw) else {
+            self.release(continuation);
             if let Some(root) = live_payload_root {
                 self.machine.deregister_persistent_root(root.addr());
             }
@@ -6994,9 +6998,16 @@ mod tests {
         let handles_before = machine.handle_count();
         let roots_before = machine.total_persistent_roots();
 
-        // A handle from another realm is refused. Any already-tenured live
-        // payload passed with the request is consumed and deregistered because
-        // no parked frame took custody of it.
+        // A handle from another realm is refused. Both inputs are consumed:
+        // the continuation and any already-tenured live payload are released
+        // because no parked frame took custody of them.
+        let rejected_batch = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect("a second retained value can become the rejected continuation");
+        let [PreparedResult::Managed(rejected)] = rejected_batch.values.as_slice() else {
+            panic!("the CAF entry returns one rejected continuation");
+        };
+        let rejected = *rejected;
         let payload_batch = machine
             .run_entry_retained(program, ValueId(0), &[], call, realm)
             .expect("a second retained value can become the live payload");
@@ -7011,7 +7022,7 @@ mod tests {
         let other = RealmId::fresh();
         assert!(matches!(
             machine.park(
-                continuation,
+                rejected,
                 other,
                 Some(payload_root),
                 ParkRequest {

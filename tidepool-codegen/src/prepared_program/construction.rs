@@ -352,6 +352,10 @@ impl ConstructionCore {
 
     /// Build one constructor. `resolve` runs after the last possible
     /// collection and writes into storage allocated before that collection.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the transactional construction boundary keeps allocation, collection, and resolution ownership explicit"
+    )]
     pub(super) fn constructor<E>(
         &mut self,
         machine: &MachineState,

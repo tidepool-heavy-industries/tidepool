@@ -152,10 +152,13 @@ pub(super) fn emit_parse_json(
     vmctx: Value,
     descriptor: &ObjectDescriptor,
     layout: JsonLayout,
-    left: tidepool_repr::execution_schema::ConstructorId,
-    right: tidepool_repr::execution_schema::ConstructorId,
+    result_constructors: (
+        tidepool_repr::execution_schema::ConstructorId,
+        tidepool_repr::execution_schema::ConstructorId,
+    ),
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
+    let (left, right) = result_constructors;
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params = vec![AbiParam::new(types::I64); 9];
     signature.returns = vec![AbiParam::new(types::I32)];
@@ -1074,7 +1077,7 @@ impl MovingIdentities {
 impl JsonEncoder<'_, '_> {
     fn step(&mut self) -> Result<(), EncodeFailure> {
         self.steps = self.steps.saturating_add(1);
-        if self.steps % 1024 == 0 {
+        if self.steps.is_multiple_of(1024) {
             self.poll_now()?;
         }
         Ok(())
@@ -1267,7 +1270,7 @@ impl JsonEncoder<'_, '_> {
                 match action {
                     MapAction::Enter(node, owned) => {
                         let expanded = self.constructor(node.0, node.1);
-                        let (id, mut fields) = match expanded {
+                        let (id, fields) = match expanded {
                             Ok(expanded) => expanded,
                             Err(error) => {
                                 if owned {
@@ -1302,11 +1305,13 @@ impl JsonEncoder<'_, '_> {
                             }
                             return result;
                         }
-                        let right = fields.pop().expect("validated map fields");
-                        let left = fields.pop().expect("validated map fields");
-                        let value = fields.pop().expect("validated map fields");
-                        let key = fields.pop().expect("validated map fields");
-                        let size = fields.pop().expect("validated map fields");
+                        // The exact length was admitted above; fields are Copy,
+                        // so fixed indexing preserves the cleanup owner in `fields`.
+                        let size = fields[0];
+                        let key = fields[1];
+                        let value = fields[2];
+                        let left = fields[3];
+                        let right = fields[4];
                         self.builder.release_node(size.0)?;
                         actions.push(MapAction::Leave(node.0, owned));
                         actions.push(MapAction::Enter(right, true));

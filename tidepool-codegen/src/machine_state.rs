@@ -260,8 +260,9 @@ impl TemporaryRoots {
             return;
         };
         self.slots.swap_remove(index);
-        if let Some((moved, _)) = self.slots.get(index) {
-            *self.indices.get_mut(moved).expect("registered root index") = index;
+        if let Some(moved) = self.slots.get(index).map(|(registration, _)| *registration) {
+            let previous = self.indices.insert(moved, index);
+            debug_assert!(previous.is_some(), "moved root must remain indexed");
         }
     }
 
@@ -1197,6 +1198,10 @@ impl MachineState {
 
     // --- rust roots (run-scoped GC roots, leaf 3) --------------------------
 
+    #[expect(
+        clippy::expect_used,
+        reason = "exhausting the machine-wide usize registration space cannot be recovered"
+    )]
     pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) -> usize {
         let registration = self.next_rust_root.get();
         self.next_rust_root.set(
