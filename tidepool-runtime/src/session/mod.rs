@@ -1546,6 +1546,76 @@ mod tests {
     }
 
     #[test]
+    fn later_data_declaration_shadows_a_type_referenced_by_a_live_value() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = staged_test_lib(&root);
+        let first =
+            validated_staged_declaration(&lib, "data Version = OldVersion Int deriving Show");
+        lib.adopt_staged_batch_with_receipt_and_vals_in(first, &[])
+            .expect("commit the original Version declaration");
+
+        let bind_template = TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: assemble_bind_module(
+                concat!(
+                    "{-# LANGUAGE DataKinds, TypeOperators #-}\n",
+                    "module SessionBind where\n",
+                    "import Tidepool.Prelude\n",
+                    "import Tidepool.Effects\n",
+                    "import Control.Monad.Freer (Eff)\n",
+                    "import Tidepool.Session.Lib.G1\n",
+                ),
+                "",
+                "__result",
+                "'[]",
+                "{{TURN_STMT}}",
+                "{{BINDERS}}",
+                false,
+            ),
+        };
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let includes = [
+            root.path(),
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let bound = run_turn(TurnRequest {
+            turn_text: "old <- pure (OldVersion 1)",
+            templates: std::slice::from_ref(&bind_template),
+            include: &includes,
+            session_root: root.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec!["old".to_owned()],
+                items: Vec::new(),
+            }),
+            target: None,
+            retained_imports: &[],
+        })
+        .expect("compile the value against the original type");
+        let TurnResult::Bind { bound, .. } = bound else {
+            panic!("the original value must compile as a bind")
+        };
+        let injected = vec![bound[0].module.clone()];
+        let receipt = lib
+            .declaration_receipt(&["data Version = NewVersion Bool deriving Show"])
+            .expect("extract replacement declaration")
+            .expect("non-empty replacement declaration");
+        lib.stage_batch_with_receipt_and_vals_in(
+            ScopeId::ROOT,
+            &SourceImports::new(),
+            &receipt,
+            &injected,
+            &injected,
+        )
+        .expect("a replacement type may shadow the type of a live value");
+    }
+
+    #[test]
     fn stale_candidate_cannot_remove_a_sibling_committed_artifact() {
         let root = tempfile::tempdir().unwrap();
         let mut lib = staged_test_lib(&root);
