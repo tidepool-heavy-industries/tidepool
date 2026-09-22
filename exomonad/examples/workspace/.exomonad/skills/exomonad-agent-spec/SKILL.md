@@ -16,12 +16,11 @@ record when there is no agent spec. Use `status` with `view: "detailed"` to see
 the selected rule, source file, and installed revision. Run
 `exomonad check --workspace <path>` to typecheck a workspace before launch.
 
-## Put behavior in the tool
+## Put behavior at the right boundary
 
-A tool body receives its declared Haskell input and can use typed effects. Put
-judgment or result handling in that body, not in a separate observer of a
-completed tool call. When the boundary needs a different presentation, use the
-tool's typed seam:
+A tool body receives its declared Haskell input and can use typed effects.
+When the tool needs to select or present its own result, use that tool's typed
+seam:
 
 - [`Project.Shell`](../../Project/Shell.hs) selects and presents typed command
   observations and retained output.
@@ -31,6 +30,15 @@ tool's typed seam:
 These modules are workspace-specific examples, not functions exported by the
 shared agent-spec API. Read their source before adapting them; a tool's effect
 constraints and record type must match the effects its body uses.
+
+The parent may also install an after-tool monitor for its children. The
+monitor sees a completed child tool call and can advise the child or escalate
+to the parent; it does not present or rewrite the tool's result. The shipped
+workspace example is [`Project.Watchdog`](../../Project/Watchdog.hs). A parent
+can use `watchBy` to select heuristics from a child's actor path, which
+includes the label chosen when that child was created. The after-tool hook
+remains generic; use a tool's typed seam when the result needs presentation
+tailored to that tool.
 
 ## Reload
 
