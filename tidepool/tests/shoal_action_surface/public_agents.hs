@@ -7,9 +7,11 @@ module ShoalPublicAgents where
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import Prelude
+import Tidepool.Agent.Contract (AsServerT)
 import Tidepool.Actors.Shoal
 import Tidepool.Actors.Observe (actorContext)
 import qualified Tidepool.Actors.Shoal as Shoal
+import qualified Tidepool.Tools as Tools
 
 -- Pinned cell signatures must resolve through the authored facade.
 type ReplyPin = Shoal.Reply Int
@@ -21,6 +23,27 @@ type LifecyclePin = Shoal.ActorLifecycle
 type CancellationPin = Shoal.Void
 type DurationInputPin = Shoal.Natural
 type GitFailurePin = Shoal.GitFailureReceipt
+
+-- Every interactive role installs the workspace's tool record. Keep these
+-- specializations beside the public role aliases so a new tool effect cannot
+-- drift out of one role unnoticed.
+coreTools :: Tools.Tools (AsServerT (Eff CoreEffects))
+coreTools = Tools.tools
+
+researchTools :: Tools.Tools (AsServerT (Eff ResearchEffects))
+researchTools = Tools.tools
+
+researchLeafTools :: Tools.Tools (AsServerT (Eff ResearchLeafEffects))
+researchLeafTools = Tools.tools
+
+codingTools :: Tools.Tools (AsServerT (Eff CodingEffects))
+codingTools = Tools.tools
+
+integrationTools :: Tools.Tools (AsServerT (Eff IntegrationEffects))
+integrationTools = Tools.tools
+
+rootTools :: Tools.Tools (AsServerT (Eff ActorEffects))
+rootTools = Tools.tools
 
 startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
 startCoding = startAgent . codingAgent
