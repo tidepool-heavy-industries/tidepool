@@ -4598,6 +4598,40 @@ mod tests {
             crate::classify_compile(&err.error).class,
             crate::FailureClass::Infra
         );
+        assert_eq!(
+            err.attempted_source.as_deref(),
+            Some(templates[0].source.replace("{{TURN}}", "1 :: Int").as_str())
+        );
+    }
+
+    #[test]
+    fn failed_turn_preserves_the_last_attempted_template() {
+        tidepool_testing::eval_harness::require_extract();
+        let session_root = TempDir::new().unwrap();
+        let templates = ["missingFirst", "missingLast"].map(|name| TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: format!("module Expr where\n__result = {name}\n"),
+        });
+        let failure = run_turn(TurnRequest {
+            turn_text: "()",
+            templates: &templates,
+            include: &[],
+            session_root: session_root.path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: vec![],
+                items: vec![],
+            }),
+            target: None,
+            retained_imports: &[],
+        })
+        .expect_err("both typed alternatives are rejected");
+        assert_eq!(
+            failure.attempted_source.as_deref(),
+            Some(templates[1].source.as_str())
+        );
     }
 
     // ---- TurnOut CBOR decoding ----
