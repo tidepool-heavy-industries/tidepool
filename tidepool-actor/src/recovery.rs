@@ -527,4 +527,49 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("reused"));
     }
+
+    #[test]
+    fn every_application_publication_boundary_reopens_without_inventing_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let binding = directory.path().join("binding.json");
+        let actor = ActorRef::first(ActorId(9));
+
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        drop(journal);
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        assert!(journal.records()[0].application.is_none());
+
+        journal
+            .prepare_application(actor, binding.clone(), Some("source-revision".into()))
+            .unwrap();
+        drop(journal);
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let prepared = journal
+            .records()
+            .into_iter()
+            .next()
+            .unwrap()
+            .application
+            .unwrap();
+        assert_eq!(prepared.binding_path, binding);
+        assert_eq!(prepared.accepted_source.as_deref(), Some("source-revision"));
+        assert!(prepared.conversation.is_none());
+
+        journal
+            .bind_application(actor, "conversation-9".into())
+            .unwrap();
+        drop(journal);
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        assert_eq!(
+            journal.records()[0]
+                .application
+                .as_ref()
+                .unwrap()
+                .conversation
+                .as_deref(),
+            Some("conversation-9")
+        );
+    }
 }

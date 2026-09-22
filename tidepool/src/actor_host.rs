@@ -1884,6 +1884,21 @@ struct InteractiveLaunchContext {
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
+fn active_source_identity(
+    run_root: &Path,
+    has_workspace_source: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !has_workspace_source {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::shoal::source::SourceLayer::new(run_root)
+            .read_active()?
+            .ok_or("root compilation did not publish its accepted source revision")?
+            .identity,
+    ))
+}
+
 pub(crate) async fn run(
     mut config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
@@ -1917,6 +1932,7 @@ pub(crate) async fn run(
         worktree_authority.clone(),
         source_layers.as_ref(),
     )?;
+    let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
     let worktree_admission = fork_workspace_admission(
         worktrees.clone(),
@@ -1994,10 +2010,7 @@ pub(crate) async fn run(
             program.clone(),
             config.research_policy,
             &worktree_admission,
-            config
-                .workspace_inputs
-                .as_ref()
-                .map(|inputs| inputs.identity()),
+            accepted_source.as_deref(),
         )
         .await,
     );
@@ -4264,15 +4277,12 @@ async fn launch_prepared_interactive_application(
     } else {
         actor_root.join("binding.json")
     };
+    let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
     actor_recovery
-        .prepare_application(
-            actor_identity,
-            binding_path.clone(),
-            config
-                .workspace_inputs
-                .as_ref()
-                .map(|inputs| inputs.identity().to_string()),
-        )
+        .prepare_application(actor_identity, binding_path.clone(), accepted_source)
         .map_err(|error| {
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
@@ -6996,6 +7006,52 @@ mod tests {
             application: None,
             terminal: None,
         }
+    }
+
+    #[test]
+    fn actor_recovery_records_the_published_source_revision() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal/Project");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(
+            project.path().join(".shoal/config.toml"),
+            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 1\n",
+        )
+        .unwrap();
+        let frozen =
+            crate::shoal::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = crate::shoal::source::SourceLayer::new(run.path());
+        let first = layer.ensure_active(&frozen).unwrap();
+
+        assert_eq!(
+            active_source_identity(run.path(), true).unwrap(),
+            Some(first.identity.clone())
+        );
+        assert_ne!(first.identity, frozen.identity());
+
+        std::fs::write(
+            project.path().join(".shoal/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        let second = layer
+            .publish(
+                layer
+                    .capture_from_workspace(&frozen, project.path())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            active_source_identity(run.path(), true).unwrap(),
+            Some(second.identity)
+        );
+        assert_eq!(active_source_identity(run.path(), false).unwrap(), None);
     }
 
     #[test]

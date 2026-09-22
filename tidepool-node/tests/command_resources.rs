@@ -132,6 +132,11 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     );
     owner.cancel("test", "descendant-wait").unwrap();
     occupied_child.kill().await.unwrap();
+    assert_eq!(
+        owner.cancel("test", "background").unwrap(),
+        CommandResourceStatus::Running,
+        "the resource owner retains custody until the descendant is gone"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         while !matches!(
             owner.status("test", "background").unwrap(),
@@ -142,6 +147,7 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     })
     .await
     .unwrap();
+    assert!(!background_group.exists());
     let final_group = admitted(&owner, "after").await;
     let mut final_command = spawn_in(&final_group, "print('control survived')");
     owner.started("test", "after").unwrap();

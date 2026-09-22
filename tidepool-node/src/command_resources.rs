@@ -642,6 +642,29 @@ impl CommandResources {
                 }
             }
         }
+        // An admission row without an allocation row is the crash window
+        // before a launch grant became externally visible. Requeueing it
+        // would turn recovery into a second submission, so retain the
+        // identity and settle it before accepting new work.
+        let unfinished = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (entry.directory.is_none() && entry.current().is_queued()).then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in unfinished {
+            let disposition = CommandResourceStatus::CancelledBeforeStart;
+            self.journal.lock().append(JournalEvent::Terminal {
+                producer: key.0.clone(),
+                actor: key.0.clone(),
+                command: key.1.clone(),
+                disposition: disposition.clone(),
+            })?;
+            state.entries[&key].status.send_replace(disposition);
+            state.queue.release(&key);
+            state.active.remove(&key);
+        }
         rebuild_observation_indexes(&mut state);
         self.admit_waiters(&mut state);
         Ok(())
@@ -1256,6 +1279,31 @@ mod tests {
                 command: "command-1".into(),
             }])
             .unwrap();
+        assert_eq!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CancelledBeforeStart
+        );
+    }
+
+    #[test]
+    fn recovery_fences_an_admission_without_relaunching_it() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        owner
+            .reconcile(vec![JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+            }])
+            .unwrap();
+
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CancelledBeforeStart
+        );
+        assert_eq!(owner.observation().active, 0);
+        assert!(!root.path().join("actor-1/command-1").exists());
         assert_eq!(
             owner.submit("actor-1", "command-1", MIB).unwrap(),
             CommandResourceStatus::CancelledBeforeStart

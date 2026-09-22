@@ -24,12 +24,13 @@ The run storage observation intentionally stops after 8,192 entries and reports
 truncation. The measurement used 8,000 files and therefore remained below that
 bound. The resource status also bounds its process census at 4,096 entries.
 
-Focused verification on this machine took 0.017 seconds for 13 command-resource
+Focused verification on this machine took 0.017 seconds for 14 command-resource
 and output tests, 0.058 seconds for two command-protocol failure tests, and
 0.006 seconds for the bounded storage test, excluding compilation and Nix shell
 startup. The three isolated delegated-cgroup integration tests completed in
-4.18 seconds and exercised OOM accounting, queued cancellation, surviving
-descendants, observer loss, and actor-admission timeout. A full host startup was
+2.26 seconds after the final cancellation coverage change and exercised OOM
+accounting, queued cancellation, resource-owner cancellation of a surviving
+descendant, observer loss, and actor-admission timeout. A full host startup was
 not timed because the acceptance boundary
 forbids disruptive runs against active sessions and credentialed model runs.
 The model-free `actor_spec_cost_measurement` was attempted, but failed before

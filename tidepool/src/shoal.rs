@@ -1078,6 +1078,9 @@ async fn run_host(
     };
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    let accepted_source = source::SourceLayer::new(&options.run_root)
+        .ensure_active(&workspace_inputs)?
+        .identity;
     let mut unavailable_actors = Vec::new();
     if host_generation > 1 {
         let predecessors = crate::actor_host::stop_predecessor_processes(&options.run_root).map_err(
@@ -1103,7 +1106,7 @@ async fn run_host(
             "Recovery notice [{}:{}]. Restored accepted source {}. Live Haskell computations, requests, watches, and bindings from the prior host were lost. Native work was interrupted. The recorded conversation is being resumed without replaying unresolved tool calls. Unavailable predecessor actors: {unavailable}. Inspect Shoal status and retained command jobs before starting new work.",
             options.run_id,
             host_generation,
-            workspace_inputs.identity(),
+            accepted_source,
         );
         tidepool_atomic_write::write_durable(
             &options.run_root.join("host-recovery-notice.txt"),
