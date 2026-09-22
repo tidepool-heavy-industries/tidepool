@@ -13,6 +13,8 @@ import Tidepool.GhcPipeline
   ( PipelineResult(..), isClosureType, renderType, stripMonadHead
   , splitTupleType )
 import Tidepool.Identity (stableVarId)
+import Tidepool.HostBindingAuthority
+  ( classifyHostBindingAuthority, resolveHostBindingAuthorities )
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIface, parseSessionModule, sessionBinderName
@@ -38,23 +40,26 @@ mkBoundBinders bindNames generation root result = do
         | length types == length bindNames -> pure types
         | otherwise -> error $ "multi-bind has " ++ show (length bindNames)
             ++ " names but its result has " ++ show (length types) ++ " fields"
-  let build name ty =
-        let persistedType = stabilizeEffectRows ty
+  let persistedTypes = map stabilizeEffectRows componentTypes
+  authorities <- resolveHostBindingAuthorities persistedTypes hsc
+  let build name ty persistedType =
+        let
             occurrence = mkVarOcc name
             varId = stableVarId (sessionBinderName hsc sessionModule occurrence)
             moduleName = sessionModuleString sessionModule
             tier = if isClosureType persistedType then RetainOpaque else ForceData
             displayType = renderType ty
             rootHead = rootNominalHeadOfType persistedType
-        in (BoundBinder name varId moduleName tier displayType rootHead, occurrence, persistedType)
-      built = zipWith build bindNames componentTypes
+            hostAuthority = classifyHostBindingAuthority authorities persistedType
+        in (BoundBinder name varId moduleName tier displayType rootHead hostAuthority, occurrence, persistedType)
+      built = zipWith3 build bindNames componentTypes persistedTypes
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIface hsc sessionModule [(occ, ty) | (_, occ, ty) <- built]
   writeSessionIface hsc root sessionModule iface
-  forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead) ->
+  forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead hostAuthority) ->
     hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
       ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", root " ++ show rootHead
-      ++ ", varId " ++ show varId ++ ")"
+      ++ ", authority " ++ show hostAuthority ++ ", varId " ++ show varId ++ ")"
   pure binders
 
 parseValModule :: String -> Maybe SessionModule

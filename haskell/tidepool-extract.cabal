@@ -28,6 +28,7 @@ library tidepool-extract-internal
     Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.HostBindingAuthority
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata

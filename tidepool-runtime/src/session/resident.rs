@@ -93,7 +93,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::PrincipalId;
 
 use super::persistent::{PersistentSession, ScopeRetirement};
-use super::turn::{BoundBinder, ValueTier};
+use super::turn::{BoundBinder, HostBindingAuthority, ValueTier};
 use super::OutputSink;
 use super::{SessionError, SessionLib, SourceImports};
 
@@ -113,10 +113,12 @@ pub struct SessionRunContext {
 }
 
 /// A compiler-issued host mount must have this exact outer nominal type. The
-/// unit is carried by [`BoundBinder::root_head`]; module and type constructor
-/// identify the shipped surface the host builder knows how to construct.
+/// unit is authenticated by [`BoundBinder::host_authority`]; module and type
+/// constructor identify the shipped surface the host builder knows how to
+/// construct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostBindingType {
+    authority: HostBindingAuthority,
     module: &'static str,
     name: &'static str,
     constructors: &'static [&'static str],
@@ -124,6 +126,7 @@ pub struct HostBindingType {
 
 impl HostBindingType {
     pub const JSON_VALUE: Self = Self {
+        authority: HostBindingAuthority::JsonValue,
         module: "Tidepool.Aeson.Value",
         name: "Value",
         constructors: &[
@@ -136,15 +139,36 @@ impl HostBindingType {
         ],
     };
     pub const TEXT: Self = Self {
+        authority: HostBindingAuthority::Text,
         module: "Data.Text.Internal",
         name: "Text",
         constructors: &["Data.Text.Text"],
     };
     pub const COMMAND_JOB: Self = Self {
+        authority: HostBindingAuthority::CommandJob,
         module: "Tidepool.Command.Types",
         name: "Job",
         constructors: &["Tidepool.Command.Types.Job"],
     };
+}
+
+/// Require the compiler-issued sidecar before any host mount can merge a
+/// constructor table or install its carrier program. A same-spelling type from
+/// another unit has no sidecar, because the extractor compares its exact GHC
+/// module identity while minting this tag.
+fn require_host_binding_authority(
+    binder: &BoundBinder,
+    expected: HostBindingType,
+) -> Result<(), ResidentError> {
+    if binder.host_authority == Some(expected.authority) {
+        return Ok(());
+    }
+    Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+        format!(
+            "compiled binder `{}` has host authority {:?}; host mount requires {:?}",
+            binder.name, binder.host_authority, expected.authority,
+        ),
+    ))))
 }
 
 impl SessionRunContext {
@@ -1964,6 +1988,7 @@ where
                 ),
             ))));
         }
+        require_host_binding_authority(binder, expected)?;
         let Some(root) = &binder.root_head else {
             return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
                 format!(
@@ -3628,6 +3653,31 @@ where
             self.parked_provenance.remove(id);
         }
         self.parked.retain(|(name, _)| name != hole);
+    }
+}
+
+#[cfg(test)]
+mod host_binding_authority_tests {
+    use super::*;
+    use crate::NominalHead;
+
+    #[test]
+    fn same_name_from_an_untrusted_unit_cannot_mount_as_json() {
+        let binder = BoundBinder {
+            name: "input".into(),
+            var_id: 1,
+            module: "Tidepool.Session.Val.G1".into(),
+            tier: ValueTier::ForceData,
+            type_display: "Tidepool.Aeson.Value.Value".into(),
+            root_head: Some(NominalHead {
+                unit: "shadowed-value-0.1".into(),
+                module: "Tidepool.Aeson.Value".into(),
+                name: "Value".into(),
+            }),
+            // The extractor refuses to mint JsonValue for the wrong unit.
+            host_authority: None,
+        };
+        assert!(require_host_binding_authority(&binder, HostBindingType::JSON_VALUE).is_err());
     }
 }
 

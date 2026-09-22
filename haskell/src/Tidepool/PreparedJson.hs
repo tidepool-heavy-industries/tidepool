@@ -2,7 +2,7 @@
 
 module Tidepool.PreparedJson
   ( JsonAuthority, JsonSpec(..), JsonError(..)
-  , classifyJson, resolveJsonAuthority
+  , classifyJson, resolveJsonAuthority, jsonAuthorityModule
   ) where
 
 import Control.Exception (IOException, try)
@@ -46,6 +46,12 @@ shippedValueSource = BS.pack $(do
 data JsonAuthority = JsonAuthority Module Unit deriving stock (Eq)
 instance Show JsonAuthority where
   show (JsonAuthority owner _) = showSDocUnsafe (ppr owner)
+
+-- | The compiler-resolved, byte-authenticated module that owns the shipped
+-- JSON surface. Other compiler products can carry this identity as authority
+-- without reconstructing it from a rendered module name.
+jsonAuthorityModule :: JsonAuthority -> Module
+jsonAuthorityModule (JsonAuthority owner _) = owner
 
 resolveJsonAuthority :: HscEnv -> IO (Maybe JsonAuthority)
 resolveJsonAuthority env = case lookupPackageName

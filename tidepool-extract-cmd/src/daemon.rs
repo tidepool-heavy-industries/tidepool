@@ -1721,7 +1721,7 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn compiler_request_correlation_is_stable_and_content_addressed() {
         let argv = [
-            OsString::from("--worker-request-v11"),
+            OsString::from("--worker-request-v12"),
             OsString::from("payload"),
         ];
         assert_eq!(

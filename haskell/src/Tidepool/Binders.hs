@@ -54,6 +54,7 @@ module Tidepool.Binders
   , TurnOut(..)
   , BoundBinder(..)
   , ValueTier(..)
+  , HostBindingAuthority(..)
   , renderAskJson
   ) where
 
@@ -90,6 +91,7 @@ import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
+import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource (spliceTemplate)
@@ -1098,6 +1100,7 @@ data BoundBinder = BoundBinder
   , bbTier        :: ValueTier
   , bbTypeDisplay :: String
   , bbRootHead    :: Maybe NominalHead
+  , bbHostAuthority :: Maybe HostBindingAuthority
   } deriving (Eq, Show)
 
 -- | The rich result of a @--turn@ run. 'TDecl' never compiles — its

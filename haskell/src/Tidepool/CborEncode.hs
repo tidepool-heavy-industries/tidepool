@@ -12,7 +12,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders
-  ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..)
+  ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..), HostBindingAuthority(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
   , CellSourceSpan(..), CheckedBinderPin(..), SourcePrologue(..)
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
@@ -259,8 +259,8 @@ encodeBoundBinders :: [BoundBinder] -> Encoding
 encodeBoundBinders bs = encodeListLen (fromIntegral (length bs)) <> foldMap encodeBoundBinder bs
 
 encodeBoundBinder :: BoundBinder -> Encoding
-encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead) =
-  encodeListLen 6
+encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead hostAuthority) =
+  encodeListLen 7
   <> encodeString (T.pack name)
   <> encodeWord64 varid
   <> encodeString (T.pack modul)
@@ -269,9 +269,13 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead) =
       RetainOpaque -> "RetainOpaque")
   <> encodeString (T.pack tdisp)
   <> maybe encodeNull encodeHead rootHead
+  <> maybe encodeNull encodeAuthority hostAuthority
   where
     encodeHead (NominalHead unit headModule headName) =
       encodeListLen 3 <> encodeString unit <> encodeString headModule <> encodeString headName
+    encodeAuthority JsonValueAuthority = encodeString "JsonValue"
+    encodeAuthority TextAuthority = encodeString "Text"
+    encodeAuthority CommandJobAuthority = encodeString "CommandJob"
 
 -- | @modules@ (the third element, added alongside @site@/@type@ — see
 -- @modules@ is the defining-module set a shim

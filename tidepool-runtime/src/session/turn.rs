@@ -45,6 +45,16 @@ pub enum ValueTier {
     RetainOpaque,
 }
 
+/// Closed compiler-issued authority for a host-built resident value. The
+/// extractor classifies this from the exact root TyCon and its resolved unit;
+/// it is never inferred from rendered type text or a constructor name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostBindingAuthority {
+    JsonValue,
+    Text,
+    CommandJob,
+}
+
 /// One binder a BIND turn introduces — the extract's `BoundBinder` record.
 #[derive(Clone, Debug)]
 pub struct BoundBinder {
@@ -62,6 +72,9 @@ pub struct BoundBinder {
     /// is a type constructor. This is compiler-issued structural evidence,
     /// never parsed from `type_display` or inferred from nested type heads.
     pub root_head: Option<NominalHead>,
+    /// The authenticated shipped type surface this binder belongs to, when it
+    /// is one of the closed set the resident host can construct.
+    pub host_authority: Option<HostBindingAuthority>,
 }
 
 /// The three mutually-exclusive shapes a turn can take (GHC-sourced).
@@ -2532,7 +2545,7 @@ fn decode_export_items(v: &CborValue) -> Result<Vec<ExportItem>, CompileError> {
 }
 
 fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
-    let arr = cbor_expect_array_len(v, 6, "BoundBinder")?;
+    let arr = cbor_expect_array_len(v, 7, "BoundBinder")?;
     let name = cbor_expect_text(&arr[0], "BoundBinder name")?.to_string();
     let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
     let module = cbor_expect_text(&arr[2], "BoundBinder module")?.to_string();
@@ -2557,6 +2570,24 @@ fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
             })
         }
     };
+    let host_authority = match &arr[6] {
+        CborValue::Null => None,
+        CborValue::Text(authority) => Some(match authority.as_str() {
+            "JsonValue" => HostBindingAuthority::JsonValue,
+            "Text" => HostBindingAuthority::Text,
+            "CommandJob" => HostBindingAuthority::CommandJob,
+            other => {
+                return Err(CompileError::ExtractFailed(format!(
+                    "TurnOut CBOR: unknown BoundBinder host authority {other:?}"
+                )))
+            }
+        }),
+        _ => {
+            return Err(CompileError::ExtractFailed(
+                "TurnOut CBOR: BoundBinder host authority must be text or null".into(),
+            ))
+        }
+    };
     Ok(BoundBinder {
         name,
         var_id,
@@ -2564,6 +2595,7 @@ fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
         tier,
         type_display,
         root_head,
+        host_authority,
     })
 }
 
@@ -4719,6 +4751,7 @@ mod tests {
                         CborValue::Text("GHC.Types".into()),
                         CborValue::Text("Int".into()),
                     ]),
+                    CborValue::Null,
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Integer(7.into()),
@@ -4746,6 +4779,7 @@ mod tests {
                 assert_eq!(bound[0].name, "x");
                 assert_eq!(bound[0].var_id, 42);
                 assert_eq!(bound[0].tier, ValueTier::ForceData);
+                assert_eq!(bound[0].host_authority, None);
                 assert_eq!(
                     bound[0].root_head.as_ref().map(|head| (
                         head.unit.as_str(),
@@ -4771,6 +4805,32 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bound_binder_authority_is_closed_and_required_on_the_new_wire_shape() {
+        let fields = vec![
+            CborValue::Text("host".into()),
+            CborValue::Integer(1.into()),
+            CborValue::Text("Tidepool.Session.Val.G1".into()),
+            CborValue::Text("ForceData".into()),
+            CborValue::Text("Tidepool.Aeson.Value.Value".into()),
+            CborValue::Array(vec![
+                CborValue::Text("main".into()),
+                CborValue::Text("Tidepool.Aeson.Value".into()),
+                CborValue::Text("Value".into()),
+            ]),
+            CborValue::Text("JsonValue".into()),
+        ];
+        let binder = decode_bound_binder(&CborValue::Array(fields.clone())).unwrap();
+        assert_eq!(binder.host_authority, Some(HostBindingAuthority::JsonValue));
+
+        let old_shape = CborValue::Array(fields[..6].to_vec());
+        assert!(decode_bound_binder(&old_shape).is_err());
+
+        let mut unknown = fields;
+        unknown[6] = CborValue::Text("SameSpellingWrongUnit".into());
+        assert!(decode_bound_binder(&CborValue::Array(unknown)).is_err());
     }
 
     #[test]
