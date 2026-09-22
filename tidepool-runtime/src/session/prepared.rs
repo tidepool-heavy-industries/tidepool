@@ -656,8 +656,23 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     if host_id == layout.map_tip {
                         Ok(Vec::new())
                     } else if host_id == layout.map_bin {
+                        let representation = self
+                            .builder
+                            .constructor_field_rep(host_id, 0)
+                            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+                        let size = match representation {
+                            Some(RuntimeRep::Int(64)) => {
+                                StructuralExpected::Scalar(RuntimeRep::Int(64))
+                            }
+                            Some(RuntimeRep::LiftedRef) => StructuralExpected::JsonBoxedInt,
+                            _ => {
+                                return Err(
+                                    self.shape("a JSON map size has an invalid representation")
+                                )
+                            }
+                        };
                         Ok(vec![
-                            StructuralExpected::JsonBoxedInt,
+                            size,
                             StructuralExpected::JsonText,
                             StructuralExpected::JsonValue,
                             StructuralExpected::JsonMap,
@@ -843,6 +858,14 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
 }
 
 impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn expected_field_rep(&self) -> Option<RuntimeRep> {
+        let frame = self.frames.last()?;
+        self.builder
+            .constructor_field_rep(frame.host_id, frame.fields.len())
+            .ok()
+            .flatten()
+    }
+
     fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
         let expected = self.expected()?;
         // Representation spines do not add semantic nesting: a flat 100k
@@ -3693,26 +3716,8 @@ mod tests {
                 3,
                 vec![RuntimeRep::UnliftedRef],
             ),
-            mount_constructor(
-                "GHC.Types",
-                "True",
-                "GHC.Types",
-                "Bool",
-                130,
-                2,
-                2,
-                vec![],
-            ),
-            mount_constructor(
-                "GHC.Types",
-                "False",
-                "GHC.Types",
-                "Bool",
-                131,
-                1,
-                2,
-                vec![],
-            ),
+            mount_constructor("GHC.Types", "True", "GHC.Types", "Bool", 130, 2, 2, vec![]),
+            mount_constructor("GHC.Types", "False", "GHC.Types", "Bool", 131, 1, 2, vec![]),
             mount_constructor(
                 "Data.Map.Internal",
                 "Bin",
@@ -3767,16 +3772,7 @@ mod tests {
                 2,
                 vec![RuntimeRep::LiftedRef; 2],
             ),
-            mount_constructor(
-                "GHC.Types",
-                "[]",
-                "GHC.Types",
-                "List",
-                171,
-                1,
-                2,
-                vec![],
-            ),
+            mount_constructor("GHC.Types", "[]", "GHC.Types", "List", 171, 1, 2, vec![]),
             mount_constructor(
                 "Fixture.Mount",
                 "BadText",

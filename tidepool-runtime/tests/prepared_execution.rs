@@ -93,6 +93,64 @@ const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
 
 #[test]
+fn compiler_json_reply_streams_using_the_parked_program_layout() {
+    use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_runtime::prepared_execution::{ParkPolicy, PreparedEngine, PreparedSettlement};
+
+    tidepool_testing::eval_harness::require_extract();
+    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+        tidepool_mcp::runllmturn_decl(),
+    ])
+    .expect("JSON reply effect surface");
+    let compiled = tidepool_runtime::compile_haskell(
+        include_str!("fixtures/JsonReply.hs"),
+        "__prepared",
+        &surface.include_path_refs(),
+    )
+    .expect("compile JSON reply without JSON intrinsic calls");
+    let prepared = compiled.prepared.into_prepared();
+    assert!(prepared.json_layout().is_some());
+    let table = compiled.table.with_json_layout(None);
+    let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
+        .expect("bootstrap compiler-produced JSON reply");
+    let PreparedSettlement::Suspended {
+        request,
+        continuation,
+    } = engine
+        .run_settled(program, RealmId::ROOT)
+        .expect("run JSON request")
+    else {
+        panic!("JSON request must suspend")
+    };
+    let parked = engine
+        .park_suspension(
+            program,
+            RealmId::ROOT,
+            ParkPolicy {
+                principal: tidepool_repr::PrincipalId::SYSTEM,
+                effect_policy: EffectRunPolicy::SuspendAll,
+                live_payload: LivePayloadPolicy::None,
+            },
+            request,
+            continuation,
+            &table,
+        )
+        .expect("park compiler-produced JSON site");
+    let payload = serde_json::json!({"mixed": [true, false, null, 42, "text", {"nested": []}]});
+    let resumed = engine
+        .resume_with_structural_answer(parked.id, &payload, &table)
+        .expect("stream JSON with the owner's physical map layout");
+    let PreparedSettlement::Done { value } = resumed.settlement else {
+        panic!("JSON reply must complete")
+    };
+    let observed = engine.observe(program, value).expect("observe JSON reply");
+    let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
+    assert_eq!(decoded, payload);
+    assert!(engine.release(value));
+    assert_eq!(engine.parked_count(), 0);
+}
+
+#[test]
 fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
     use tidepool_repr::execution_schema::RuntimeRep;
 
