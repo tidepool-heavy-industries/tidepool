@@ -308,7 +308,7 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             .next_builder
             .checked_add(1)
             .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
-        let core = super::construction::ConstructionCore::new(&machine.machine, owner);
+        let core = super::construction::ConstructionCore::new(owner);
         Ok(Self { machine, core })
     }
 
@@ -1960,7 +1960,7 @@ impl<'code> PreparedMachine<'code> {
         for &(field_index, _) in &managed {
             selected.push(unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() });
         }
-        let mark = self.machine.rust_roots_len();
+        let mark = self.machine.rust_roots_mark();
         for &(field_index, _) in &managed {
             let slot = unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() };
             self.machine.register_rust_root(slot);
@@ -2204,7 +2204,7 @@ impl<'code> PreparedMachine<'code> {
         let words = RootWords::new(1)?;
         words.write(0, word)?;
         let source = words.as_mut_ptr().cast::<*mut u8>();
-        let mark = self.machine.rust_roots_len();
+        let mark = self.machine.rust_roots_mark();
         self.machine.register_rust_root(source);
         let _roots = TemporaryRoots {
             machine: &self.machine,
@@ -2712,7 +2712,7 @@ impl<'code> InstalledProgram<'code> {
             };
             argument_area.write(argument_index, word)?;
         }
-        let argument_mark = machine.rust_roots_len();
+        let argument_mark = machine.rust_roots_mark();
         for argument_index in managed_arguments {
             let slot = unsafe {
                 argument_area
@@ -2777,7 +2777,7 @@ impl<'code> InstalledProgram<'code> {
         let result_reps = result_contract
             .returned_reps()
             .ok_or_else(|| runtime_error(machine, RuntimeError::NoSuccessReturned))?;
-        let mark = machine.rust_roots_len();
+        let mark = machine.rust_roots_mark();
         register_result_roots(machine, &results, &result_layout);
         let _results = TemporaryRoots { machine, mark };
         if options.collect_before_observation {
@@ -2962,7 +2962,7 @@ impl<'code> InstalledProgram<'code> {
             return Err(runtime_error(machine, RuntimeError::NoSuccessReturned));
         }
 
-        let root_mark = machine.rust_roots_len();
+        let root_mark = machine.rust_roots_mark();
         register_result_roots(machine, &results, &result_layout);
         let _roots = TemporaryRoots {
             machine,
@@ -7845,6 +7845,31 @@ mod tests {
                 root_mask: vec![true],
             },
         });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineCompaction", "Pair"),
+            family: testing::identity("MachineCompaction", "Pair"),
+            host_id: DataConId(932),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            strict_fields: vec![false, false],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, true],
+            },
+        });
         wire.expressions.nodes[0] = ExprFrame::Construct {
             constructor: ConstructorId(0),
             fields: vec![],
@@ -7912,7 +7937,7 @@ mod tests {
         let roots_before = builder.temporary_root_metrics();
         assert!(builder
             .constructor(
-                DataConId(931),
+                DataConId(932),
                 &[ManagedField::Consume(child), ManagedField::Consume(child)],
             )
             .is_err());
@@ -7921,6 +7946,27 @@ mod tests {
             builder.core.word(child.node).is_ok(),
             "failed parent preserves child"
         );
+    }
+
+    #[test]
+    fn consumed_node_does_not_alias_a_reused_root_slot() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let child = builder.constructor(DataConId(930), &[]).expect("child");
+        let _parent = builder
+            .constructor(DataConId(931), &[ManagedField::Consume(child)])
+            .expect("parent consumes child");
+        let replacement = builder
+            .constructor(DataConId(930), &[])
+            .expect("the consumed root slot is reusable");
+        assert!(builder
+            .constructor(DataConId(931), &[ManagedField::Node(child)])
+            .is_err());
+        assert!(builder.core.word(replacement.node).is_ok());
     }
 
     /// The nesting depth of an observed `boxed` value, `None` for any other
@@ -7980,6 +8026,11 @@ mod tests {
             builder.constructor(DataConId(931), &[ManagedField::Handle(stale)]),
             Err(ExecutionError::Answer(AnswerBuildError::UnknownHandle))
         ));
+        assert_eq!(
+            builder.temporary_root_metrics().1,
+            0,
+            "failed publication releases its temporary root"
+        );
         drop(builder);
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);

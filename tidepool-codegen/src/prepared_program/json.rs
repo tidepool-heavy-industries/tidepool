@@ -1349,7 +1349,7 @@ impl<'a> IntrinsicBuilder<'a> {
         Ok(Self {
             machine,
             vmctx,
-            core: ConstructionCore::new(machine, program as *const _ as u64),
+            core: ConstructionCore::new(program as *const _ as u64),
             program,
             starts: Vec::new(),
             scanned_words: 0,

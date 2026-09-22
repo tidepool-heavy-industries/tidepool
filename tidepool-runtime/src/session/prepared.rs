@@ -826,14 +826,13 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
         if frame.fields.len() != frame.expected.len() {
             return Err(self.shape("a constructor ended before all fields were emitted"));
         }
-        let fields = frame
-            .fields
-            .into_iter()
-            .map(|field| match field {
+        let mut fields = frame.fields;
+        for field in &mut fields {
+            *field = match *field {
                 ManagedField::Node(node) => ManagedField::Consume(node),
                 field => field,
-            })
-            .collect::<Vec<_>>();
+            };
+        }
         let node = self
             .builder
             .constructor(frame.host_id, &fields)

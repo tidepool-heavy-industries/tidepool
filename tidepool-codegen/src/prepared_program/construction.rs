@@ -21,6 +21,7 @@ use tidepool_repr::execution_schema::RuntimeRep;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ConstructionNode {
     index: usize,
+    generation: u64,
     owner: u64,
 }
 
@@ -39,9 +40,9 @@ pub(super) enum ConstructionError<E> {
     Storage(ExternalStorageValidationError),
 }
 
+#[derive(Clone, Copy)]
 struct PreparedRoot {
-    chunk: usize,
-    slot: usize,
+    node: ConstructionNode,
 }
 
 pub(super) const ROOT_CHUNK_WORDS: usize = 64;
@@ -49,7 +50,8 @@ pub(super) const ROOT_CHUNK_WORDS: usize = 64;
 struct RootChunk {
     words: RootWords,
     active: Box<[bool]>,
-    registered: Box<[bool]>,
+    registrations: Box<[Option<usize>]>,
+    generations: Box<[u64]>,
 }
 
 impl RootChunk {
@@ -57,7 +59,8 @@ impl RootChunk {
         Ok(Self {
             words: RootWords::new(ROOT_CHUNK_WORDS).map_err(|_| RuntimeError::HeapOverflow)?,
             active: vec![false; ROOT_CHUNK_WORDS].into_boxed_slice(),
-            registered: vec![false; ROOT_CHUNK_WORDS].into_boxed_slice(),
+            registrations: vec![None; ROOT_CHUNK_WORDS].into_boxed_slice(),
+            generations: vec![0; ROOT_CHUNK_WORDS].into_boxed_slice(),
         })
     }
 }
@@ -65,20 +68,33 @@ impl RootChunk {
 pub(super) struct ConstructionCore {
     owner: u64,
     roots: Vec<RootChunk>,
-    roots_mark: usize,
+    free: Vec<usize>,
+    next_index: usize,
 }
 
 impl ConstructionCore {
-    pub(super) fn new(machine: &MachineState, owner: u64) -> Self {
+    pub(super) fn new(owner: u64) -> Self {
         Self {
             owner,
             roots: Vec::new(),
-            roots_mark: machine.rust_roots_len(),
+            free: Vec::new(),
+            next_index: 0,
         }
     }
 
     pub(super) fn release(&mut self, machine: &MachineState) {
-        machine.truncate_rust_roots(self.roots_mark);
+        // The free list reserves one word per admitted slot, so teardown can
+        // reuse it without allocating while unwinding a failed operation.
+        self.free.clear();
+        for chunk in &mut self.roots {
+            for slot in 0..ROOT_CHUNK_WORDS {
+                if let Some(registration) = chunk.registrations[slot].take() {
+                    self.free.push(registration);
+                }
+            }
+        }
+        self.free.sort_unstable();
+        machine.deregister_rust_roots(&self.free);
     }
 
     fn prepare_root(
@@ -86,40 +102,59 @@ impl ConstructionCore {
         machine: &MachineState,
         rep: RuntimeRep,
     ) -> Result<PreparedRoot, RuntimeError> {
-        let chunk = match self
-            .roots
-            .iter()
-            .position(|chunk| chunk.active.iter().any(|active| !active))
-        {
-            Some(chunk) => chunk,
+        let index = match self.free.pop() {
+            Some(index) => index,
             None => {
-                self.roots
-                    .try_reserve(1)
-                    .map_err(|_| RuntimeError::HeapOverflow)?;
-                self.roots.push(RootChunk::new()?);
-                self.roots.len() - 1
+                let index = self.next_index;
+                let chunk = index / ROOT_CHUNK_WORDS;
+                if chunk == self.roots.len() {
+                    debug_assert_eq!(index % ROOT_CHUNK_WORDS, 0);
+                    self.roots
+                        .try_reserve(1)
+                        .map_err(|_| RuntimeError::HeapOverflow)?;
+                    let required_free_capacity = index
+                        .checked_add(ROOT_CHUNK_WORDS)
+                        .ok_or(RuntimeError::HeapOverflow)?;
+                    self.free
+                        .try_reserve_exact(required_free_capacity - self.free.len())
+                        .map_err(|_| RuntimeError::HeapOverflow)?;
+                    self.roots.push(RootChunk::new()?);
+                }
+                self.next_index = self
+                    .next_index
+                    .checked_add(1)
+                    .ok_or(RuntimeError::HeapOverflow)?;
+                index
             }
         };
-        let slot_index = self.roots[chunk]
-            .active
-            .iter()
-            .position(|active| !active)
-            .ok_or(RuntimeError::BadPointer)?;
-        self.roots[chunk].active[slot_index] = true;
-        let slot = self.roots[chunk]
+        let chunk = index / ROOT_CHUNK_WORDS;
+        let slot_index = index % ROOT_CHUNK_WORDS;
+        let root = self.roots.get_mut(chunk).ok_or(RuntimeError::BadPointer)?;
+        if root.active[slot_index] || root.registrations[slot_index].is_some() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let generation = root.generations[slot_index]
+            .checked_add(1)
+            .ok_or(RuntimeError::HeapOverflow)?;
+        root.generations[slot_index] = generation;
+        let slot = root
             .words
             .slot_address(slot_index)
             .ok_or(RuntimeError::BadPointer)?;
+        // A consumed managed node leaves its old pointer in the backing word.
+        // Clear it before registration so a collection between preparation and
+        // publication never treats the previous occupant as this new root.
+        unsafe { slot.write(std::ptr::null_mut()) };
+        root.active[slot_index] = true;
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-            // Register the zero-filled slot before any collection or object
-            // publication. It is already at its final address, and a failed
-            // operation may safely leave it registered until the owner drops.
-            machine.register_rust_root(slot);
-            self.roots[chunk].registered[slot_index] = true;
+            root.registrations[slot_index] = Some(machine.register_rust_root(slot));
         }
         Ok(PreparedRoot {
-            chunk,
-            slot: slot_index,
+            node: ConstructionNode {
+                index,
+                generation,
+                owner: self.owner,
+            },
         })
     }
 
@@ -127,16 +162,22 @@ impl ConstructionCore {
         // `prepare_root` proved the index and allocated its one word. No
         // fallible root work remains after the nursery object is committed.
         unsafe {
-            self.roots[root.chunk]
+            self.roots[root.node.index / ROOT_CHUNK_WORDS]
                 .words
                 .as_mut_ptr()
-                .add(root.slot)
+                .add(root.node.index % ROOT_CHUNK_WORDS)
                 .write(word as u64)
         };
-        ConstructionNode {
-            index: root.chunk * ROOT_CHUNK_WORDS + root.slot,
-            owner: self.owner,
-        }
+        root.node
+    }
+
+    fn abandon_root(
+        &mut self,
+        machine: &MachineState,
+        root: PreparedRoot,
+    ) -> Result<(), RuntimeError> {
+        self.consume(machine, root.node)
+            .map_err(|_| RuntimeError::BadPointer)
     }
 
     fn root(&self, node: ConstructionNode) -> Result<(&RootChunk, usize), NodeAccessError> {
@@ -146,6 +187,9 @@ impl ConstructionCore {
         let chunk = node.index / ROOT_CHUNK_WORDS;
         let slot = node.index % ROOT_CHUNK_WORDS;
         let root = self.roots.get(chunk).ok_or(NodeAccessError::Invalid)?;
+        if root.generations.get(slot).copied() != Some(node.generation) {
+            return Err(NodeAccessError::Invalid);
+        }
         root.active
             .get(slot)
             .filter(|active| **active)
@@ -162,15 +206,16 @@ impl ConstructionCore {
         let slot = node.index % ROOT_CHUNK_WORDS;
         self.root(node)?;
         let root = &mut self.roots[chunk_index];
-        if root.registered[slot] {
+        if let Some(registration) = root.registrations[slot].take() {
             let address = root
                 .words
                 .slot_address(slot)
                 .ok_or(NodeAccessError::Invalid)?;
-            machine.deregister_rust_root(address);
-            root.registered[slot] = false;
+            machine.deregister_rust_root(registration, address);
         }
+        unsafe { root.words.as_mut_ptr().add(slot).write(0) };
         root.active[slot] = false;
+        self.free.push(node.index);
         Ok(())
     }
 
@@ -246,20 +291,40 @@ impl ConstructionCore {
         collect: impl FnOnce(&MachineState, &mut VMContext, usize) -> Result<(), E>,
         resolve: impl FnOnce(&Self, &mut [DescriptorValue]) -> Result<(), E>,
     ) -> Result<ConstructionNode, ConstructionError<E>> {
-        let root = self
-            .prepare_root(machine, RuntimeRep::LiftedRef)
-            .map_err(ConstructionError::Runtime)?;
+        for (index, child) in consumed.iter().enumerate() {
+            self.root(*child)
+                .map_err(|_| ConstructionError::Runtime(RuntimeError::BadPointer))?;
+            if consumed[..index].contains(child) {
+                return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
+            }
+        }
         let mut values = Vec::new();
         values
             .try_reserve_exact(field_count)
             .map_err(|_| ConstructionError::Runtime(RuntimeError::HeapOverflow))?;
         values.resize(field_count, DescriptorValue::Bits([0; 16]));
+        let root = self
+            .prepare_root(machine, RuntimeRep::LiftedRef)
+            .map_err(ConstructionError::Runtime)?;
         let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        Self::ensure_capacity(machine, vmctx, extent, collect)?;
-        resolve(self, &mut values).map_err(ConstructionError::Operation)?;
+        if let Err(error) = Self::ensure_capacity(machine, vmctx, extent, collect) {
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            return Err(error);
+        }
+        if let Err(error) = resolve(self, &mut values) {
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            return Err(ConstructionError::Operation(error));
+        }
         let pointer = vmctx.alloc_ptr;
-        unsafe { marshal_descriptor_object(pointer, extent, descriptor, &values) }
-            .map_err(ConstructionError::Marshal)?;
+        if let Err(error) =
+            unsafe { marshal_descriptor_object(pointer, extent, descriptor, &values) }
+        {
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            return Err(ConstructionError::Marshal(error));
+        }
         vmctx.alloc_ptr = unsafe { pointer.add(extent) };
         let node = self.publish_root(root, pointer as usize | usize::from(descriptor.tag()));
         for child in consumed {
@@ -284,12 +349,25 @@ impl ConstructionCore {
             .prepare_root(machine, RuntimeRep::LiftedRef)
             .map_err(ConstructionError::Runtime)?;
         let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        Self::ensure_capacity(machine, vmctx, extent, collect)?;
-        let payload = machine
-            .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
-            .map_err(ConstructionError::Storage)?;
+        if let Err(error) = Self::ensure_capacity(machine, vmctx, extent, collect) {
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            return Err(error);
+        }
+        let payload =
+            match machine.allocate_external_storage(ExternalStorageKind::Bytes, bytes.len()) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.abandon_root(machine, root)
+                        .map_err(ConstructionError::Runtime)?;
+                    return Err(ConstructionError::Storage(error));
+                }
+            };
         if let Err(error) = machine.store_external_bytes(payload, 0, bytes) {
-            if !machine.release_external_storage(payload) {
+            let released = machine.release_external_storage(payload);
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            if !released {
                 return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
             }
             return Err(ConstructionError::Storage(error));
@@ -303,7 +381,10 @@ impl ConstructionCore {
                 &[DescriptorValue::Address(payload.cast_const())],
             )
         } {
-            if !machine.release_external_storage(payload) {
+            let released = machine.release_external_storage(payload);
+            self.abandon_root(machine, root)
+                .map_err(ConstructionError::Runtime)?;
+            if !released {
                 return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
             }
             return Err(ConstructionError::Marshal(error));

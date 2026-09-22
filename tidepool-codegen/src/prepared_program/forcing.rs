@@ -58,7 +58,7 @@ impl<'a> ObservationRoots<'a> {
             chunks: Vec::new(),
             limit: budget,
             used: 0,
-            mark: machine.rust_roots_len(),
+            mark: machine.rust_roots_mark(),
             stack,
         })
     }
@@ -72,7 +72,6 @@ impl<'a> ObservationRoots<'a> {
             return Err(ObservationFailure::BudgetExceeded { limit: self.limit }.into());
         }
         let index = self.used;
-        self.used += 1;
         let chunk = index / super::construction::ROOT_CHUNK_WORDS;
         let offset = index % super::construction::ROOT_CHUNK_WORDS;
         if chunk == self.chunks.len() {
@@ -85,6 +84,7 @@ impl<'a> ObservationRoots<'a> {
                 )?,
             );
         }
+        self.used += 1;
         let slot = self.chunks[chunk]
             .slot_address(offset)
             .ok_or_else(|| super::run::runtime_error(self.machine, RuntimeError::BadPointer))?;

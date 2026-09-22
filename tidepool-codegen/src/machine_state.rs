@@ -270,7 +270,8 @@ pub struct MachineState {
     /// Run-scoped GC roots (`RUST_ROOTS`): heap-pointer slots registered by
     /// Rust host-fn frames the JIT frame walker cannot see. Cleared every
     /// `clear_run_scratch`/`clear_gc_state`.
-    rust_roots: RefCell<Vec<*mut *mut u8>>,
+    rust_roots: RefCell<Vec<(usize, *mut *mut u8)>>,
+    next_rust_root: Cell<usize>,
     /// Session-scoped GC roots (`PERSISTENT_ROOTS`): tenured bindings'
     /// stable slots. Survive across runs; cleared only at machine teardown
     /// (`free_session_heap`).
@@ -402,6 +403,7 @@ impl MachineState {
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
+            next_rust_root: Cell::new(0),
             prepared_exception: Cell::new(std::ptr::null_mut()),
             describing_exception: Cell::new(false),
             persistent_roots: RefCell::new(Vec::new()),
@@ -1119,28 +1121,51 @@ impl MachineState {
 
     // --- rust roots (run-scoped GC roots, leaf 3) --------------------------
 
-    pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) {
-        self.rust_roots.borrow_mut().push(slot);
+    pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) -> usize {
+        let registration = self.next_rust_root.get();
+        self.next_rust_root.set(
+            registration
+                .checked_add(1)
+                .expect("temporary root registration space exhausted"),
+        );
+        let mut roots = self.rust_roots.borrow_mut();
+        roots.push((registration, slot));
+        registration
     }
 
-    /// Stop tracing one temporary Rust root while retaining its fixed backing
-    /// slot for reuse. Construction uses this when a tree parent has adopted
-    /// a completed child; unlike a zeroed slot, it no longer costs a collector
-    /// root scan. Temporary roots are unique registrations.
-    pub(crate) fn deregister_rust_root(&self, slot: *mut *mut u8) {
+    /// Stop tracing one temporary Rust root without moving registrations owned
+    /// by nested operations across their stack marks.
+    pub(crate) fn deregister_rust_root(&self, registration: usize, slot: *mut *mut u8) {
         let mut roots = self.rust_roots.borrow_mut();
-        if let Some(index) = roots.iter().position(|registered| *registered == slot) {
-            roots.swap_remove(index);
+        if let Some(index) = roots
+            .iter()
+            .position(|candidate| *candidate == (registration, slot))
+        {
+            roots.remove(index);
         }
     }
 
-    /// Temporary root-vector mark; excludes the independently owned exception.
+    /// Remove a sorted set of exact registrations in one linear pass. This is
+    /// used when a construction owner drops with many reusable DAG roots.
+    pub(crate) fn deregister_rust_roots(&self, registrations: &[usize]) {
+        self.rust_roots
+            .borrow_mut()
+            .retain(|(registration, _)| registrations.binary_search(registration).is_err());
+    }
+
+    /// Number of active temporary roots; excludes the independent exception.
     pub(crate) fn rust_roots_len(&self) -> usize {
         self.rust_roots.borrow().len()
     }
 
+    pub(crate) fn rust_roots_mark(&self) -> usize {
+        self.next_rust_root.get()
+    }
+
     pub(crate) fn truncate_rust_roots(&self, mark: usize) {
-        self.rust_roots.borrow_mut().truncate(mark);
+        self.rust_roots
+            .borrow_mut()
+            .retain(|(registration, _)| *registration < mark);
     }
 
     /// Clear temporary registrations, not the exception settlement slot.
@@ -1151,7 +1176,7 @@ impl MachineState {
     /// Append this machine's run-scoped rust roots to `out` — used by
     /// `perform_gc` to build its root slot list.
     pub(crate) fn extend_rust_roots(&self, out: &mut Vec<*mut *mut u8>) {
-        out.extend(self.rust_roots.borrow().iter().copied());
+        out.extend(self.rust_roots.borrow().iter().map(|(_, slot)| *slot));
         if !self.prepared_exception.get().is_null() {
             out.push(self.prepared_exception.as_ptr());
         }
@@ -3249,7 +3274,7 @@ mod tests {
             )
             .unwrap();
         let reference = machine.gc_active_range().unwrap().0;
-        let mark = machine.rust_roots_len();
+        let mark = machine.rust_roots_mark();
         let mut temporary = reference;
         machine.register_rust_root(&mut temporary);
         // The descriptor-backed object and stable Rc machine remain owned.
@@ -3265,6 +3290,23 @@ mod tests {
             Some(RuntimeError::RaisedException)
         );
         assert!(machine.prepared_exception.get().is_null());
+    }
+
+    #[test]
+    fn removing_an_outer_temporary_root_preserves_nested_mark_cleanup() {
+        let machine = MachineState::new();
+        let mut outer = std::ptr::null_mut();
+        let outer_registration = machine.register_rust_root(&mut outer);
+        let nested_mark = machine.rust_roots_mark();
+        let mut nested = std::ptr::null_mut();
+        machine.register_rust_root(&mut nested);
+
+        machine.deregister_rust_root(outer_registration, &mut outer);
+        machine.truncate_rust_roots(nested_mark);
+
+        let mut roots = Vec::new();
+        machine.extend_rust_roots(&mut roots);
+        assert!(roots.is_empty());
     }
 
     fn prepared_tag_fixture(

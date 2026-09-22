@@ -38,7 +38,8 @@ pub unsafe fn register_rust_root(vmctx: *mut VMContext, slot: *mut *mut u8) {
     }
 }
 
-/// Current depth of the Rust-root stack. Pair with `truncate_rust_roots` to
+/// Current generation mark of the Rust-root stack. Pair with
+/// `truncate_rust_roots` to
 /// scope registrations: host fns that call back into JIT code can nest (e.g.
 /// `heap_force` → thunk code → `heap_force`), so unscoped clearing would drop
 /// an outer frame's registrations. Returns 0 when there is no machine to read.
@@ -47,7 +48,7 @@ pub unsafe fn register_rust_root(vmctx: *mut VMContext, slot: *mut *mut u8) {
 /// If `vmctx` is non-null, it must point to a live `VMContext`.
 pub unsafe fn rust_roots_mark(vmctx: *mut VMContext) -> usize {
     machine_state_opt(vmctx)
-        .map(|ms| ms.rust_roots_len())
+        .map(|ms| ms.rust_roots_mark())
         .unwrap_or(0)
 }
 
