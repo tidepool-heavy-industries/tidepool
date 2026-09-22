@@ -62,6 +62,7 @@ import Tidepool.Aeson.Scientific
   , fromFloatDigits, toRealFloat, isFiniteDouble )
 import Data.Kind (Type)
 import Data.Proxy (Proxy(..))
+import qualified GHC.Exts as Exts
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
@@ -125,20 +126,22 @@ emptyArray = Array []
 
 -- | Parse JSON through Tidepool's authenticated native intrinsic. Ordinary GHC
 -- can typecheck this anchor; execution requires the Tidepool prepared runtime.
--- The fallback enters the outer carrier because GHC exports its demand facts
--- before prepared projection replaces the body, and the native parser also
--- enters the 'Text' constructor.
+-- The fallback records a conservative lazy use because GHC exports demand
+-- facts before prepared projection replaces the body. A shallow 'seq' would
+-- still let optimized importers discard the 'Text' fields the native parser
+-- reads.
 {-# OPAQUE eitherDecodeValue #-}
 eitherDecodeValue :: Text -> Either Text Value
-eitherDecodeValue input = input `seq` Left (T.pack "requires Tidepool")
+eitherDecodeValue input = Exts.lazy input `seq` Left (T.pack "requires Tidepool")
 
 -- | Render compact, deterministic JSON through Tidepool's authenticated native
 -- intrinsic. Object keys are emitted in their 'Map' order.
--- Keep the fallback's outer demand aligned with the native encoder so optimized
--- importers retain the value that prepared projection will pass to it.
+-- Keep a conservative lazy use here as well: the native encoder reads fields
+-- throughout the recursive 'Value', while evaluating them early would change
+-- bottom and cycle behavior.
 {-# OPAQUE encodeValue #-}
 encodeValue :: Value -> Text
-encodeValue value = value `seq` T.pack ""
+encodeValue value = Exts.lazy value `seq` T.pack ""
 
 -- | A class for types that can be converted to JSON Value.
 --
