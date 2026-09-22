@@ -6,7 +6,7 @@
   "artifacts": [
     {
       "path": "haskell/test-prepared-stg/fixtures/m3-vertical.cbor",
-      "producer": "cabal test execution-schema-projection --test-options=<output.cbor>",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-repr/tests/execution_schema_contract.rs",
         "tidepool-toolchain/src/prepared_artifact.rs",
@@ -15,7 +15,7 @@
     },
     {
       "path": "haskell/test-prepared-stg/fixtures/freer-resume.cbor",
-      "producer": "tidepool-extract --targets program,resumeInt,freerResumeEntries,askArgument,valResult FreerResume.hs; copy freerResumeEntries.prepared.cbor",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-codegen/src/prepared_program/foreign_apply_tests.rs",
         "tidepool-runtime/tests/prepared_execution.rs",
@@ -24,7 +24,7 @@
     },
     {
       "path": "haskell/test-prepared-stg/fixtures/freer-retention.cbor",
-      "producer": "tidepool-extract --targets freerRequest FreerRetention.hs",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-codegen/src/prepared_program/machine.rs",
         "tidepool-runtime/tests/prepared_execution.rs"
@@ -32,7 +32,7 @@
     },
     {
       "path": "haskell/test-prepared-stg/fixtures/import-producer.cbor",
-      "producer": "cargo test -p tidepool-extract-cmd --test import_fixtures -- --ignored",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-runtime/tests/prepared_execution.rs",
         "tidepool-runtime/tests/prepared_resident_composite.rs"
@@ -40,7 +40,7 @@
     },
     {
       "path": "haskell/test-prepared-stg/fixtures/import-consumer.cbor",
-      "producer": "cargo test -p tidepool-extract-cmd --test import_fixtures -- --ignored",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-runtime/tests/prepared_execution.rs",
         "tidepool-runtime/tests/prepared_resident_composite.rs"
@@ -48,14 +48,14 @@
     },
     {
       "path": "haskell/test-prepared-stg/fixtures/import-consumer-result.cbor",
-      "producer": "cargo test -p tidepool-extract-cmd --test import_fixtures -- --ignored",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-runtime/tests/prepared_execution.rs"
       ]
     },
     {
       "path": "haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor",
-      "producer": "cabal test execution-schema-encode --test-options=--write-schema6-fixture=<output.cbor>",
+      "producer": "scripts/embedded-fixtures-update.sh",
       "consumers": [
         "tidepool-repr/tests/execution_schema_contract.rs"
       ]

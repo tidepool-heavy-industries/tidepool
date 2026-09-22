@@ -11,6 +11,8 @@ fi
 # operation, then repeat after an update so a stale blob cannot be published.
 if [[ "$1" == "check" ]]; then
   python3 scripts/embedded-fixtures-check.py
+else
+  scripts/embedded-fixtures-update.sh
 fi
 scripts/prepared-corpus.sh "$@"
 python3 scripts/embedded-fixtures-check.py
