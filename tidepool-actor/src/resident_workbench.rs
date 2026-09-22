@@ -5555,9 +5555,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::actor_terminal_value(&terminal, session.data_con_table())?;
                 session
-                    .resume(hole, answer)
+                    .resume(hole, terminal)
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5597,28 +5596,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let answer = match terminal {
-                    Some(terminal) => {
-                        let just = tidepool_bridge::get_qualified(table, "GHC.Maybe.Just", 1)
-                            .ok_or_else(|| {
-                                tidepool_bridge::BridgeError::UnknownDataConName("Just".into())
-                            })?;
-                        HaskellValue::Con(
-                            just,
-                            vec![crate::actor_terminal_value(&terminal, table)?],
-                        )
-                    }
-                    None => {
-                        let nothing = tidepool_bridge::get_qualified(table, "GHC.Maybe.Nothing", 0)
-                            .ok_or_else(|| {
-                                tidepool_bridge::BridgeError::UnknownDataConName("Nothing".into())
-                            })?;
-                        HaskellValue::Con(nothing, Vec::new())
-                    }
-                };
                 session
-                    .resume(hole, answer)
+                    .resume(hole, terminal)
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
