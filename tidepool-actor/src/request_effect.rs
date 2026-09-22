@@ -194,13 +194,6 @@ pub(crate) fn watch_id(raw: i64) -> Result<WatchId, BridgeError> {
         .map_err(|_| BridgeError::UnsupportedType(format!("invalid watch id {raw}")))
 }
 
-pub(crate) fn reply_error_value(
-    error: ReplyError,
-    table: &DataConTable,
-) -> Result<HaskellValue, BridgeError> {
-    error.to_value(table)
-}
-
 fn reply_error_name(error: ReplyError) -> &'static str {
     match error {
         ReplyError::UpdatePending => "ReplyUpdatePending",
@@ -441,19 +434,6 @@ impl ToHaskell for WatchId {
             .map_err(|_| BridgeError::UnsupportedType("watch id exceeds Int".into()))?
             .visit(table, visitor)
     }
-}
-
-pub(crate) fn constructor(
-    table: &DataConTable,
-    module: &str,
-    name: &str,
-    fields: Vec<HaskellValue>,
-) -> Result<HaskellValue, BridgeError> {
-    let qualified = format!("{module}.{name}");
-    let constructor = table
-        .get_by_qualified_name(&qualified)
-        .ok_or(BridgeError::UnknownDataConName(qualified))?;
-    Ok(HaskellValue::Con(constructor, fields))
 }
 
 #[cfg(test)]

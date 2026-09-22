@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tidepool_bridge::HaskellValue;
-use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge::{BridgeError, FromHaskell, HaskellVisitor, ToHaskell};
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
@@ -23,8 +23,8 @@ use tidepool_runtime::session::{
     run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
     CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
     InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
-    TurnRequest, TurnResult,
+    ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
+    TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -817,6 +817,13 @@ fn usage_summary_value(
                     vec![thread.to_value(table)?, turn.to_value(table)?],
                 )?,
             };
+            let uncached_input_tokens = summary
+                .usage
+                .input_tokens
+                .checked_sub(summary.usage.cached_input_tokens)
+                .ok_or_else(|| {
+                    BridgeError::UnsupportedType("cached input tokens exceed input tokens".into())
+                })?;
             actor_context_constructor(
                 table,
                 "ProviderUsageSummary",
@@ -832,8 +839,7 @@ fn usage_summary_value(
                     )?,
                     summary.observations.to_value(table)?,
                     summary.usage.cached_input_tokens.to_value(table)?,
-                    (summary.usage.input_tokens - summary.usage.cached_input_tokens)
-                        .to_value(table)?,
+                    uncached_input_tokens.to_value(table)?,
                     summary.usage.output_tokens.to_value(table)?,
                     summary.usage.reasoning_output_tokens.to_value(table)?,
                     summary.usage.total_tokens.to_value(table)?,
@@ -1069,141 +1075,361 @@ fn agent_roster_value(
     )?)
 }
 
-fn agent_stop_value(
+fn visit_named(
     table: &DataConTable,
-    outcome: AgentStopProjection,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let (name, fields) = match outcome {
-        AgentStopProjection::StoppedNow => ("AgentStoppedNow", Vec::new()),
-        AgentStopProjection::StoppedRetaining(detail) => {
-            ("AgentStoppedRetaining", vec![detail.to_value(table)?])
+    visitor: &mut dyn HaskellVisitor,
+    module: &str,
+    name: &str,
+    arity: usize,
+    fields: impl FnOnce(&mut dyn HaskellVisitor) -> Result<(), BridgeError>,
+) -> Result<(), BridgeError> {
+    let qualified = format!("{module}.{name}");
+    let constructor = tidepool_bridge::get_qualified(table, &qualified, arity as u32)
+        .ok_or(BridgeError::UnknownDataConName(qualified))?;
+    visitor.begin_constructor(constructor, arity)?;
+    fields(visitor)?;
+    visitor.end_constructor()
+}
+
+fn actor_haskell_int(value: u64, label: &str) -> Result<i64, BridgeError> {
+    i64::try_from(value)
+        .map_err(|_| BridgeError::UnsupportedType(format!("{label} exceeds Haskell Int")))
+}
+
+fn visit_core(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    name: &str,
+    arity: usize,
+    fields: impl FnOnce(&mut dyn HaskellVisitor) -> Result<(), BridgeError>,
+) -> Result<(), BridgeError> {
+    visit_named(table, visitor, "Tidepool.Effects.Core", name, arity, fields)
+}
+
+struct RouteStateAnswer(Result<crate::request::routes::RouteState, crate::ReplyError>);
+
+impl tidepool_bridge::sealed::ToHaskellSealed for RouteStateAnswer {}
+impl ToHaskell for RouteStateAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        use crate::request::routes::RouteState;
+        match &self.0 {
+            Ok(RouteState::Waiting) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Watch.Internal",
+                "RouteWaiting",
+                0,
+                |_| Ok(()),
+            ),
+            Ok(RouteState::Running) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Watch.Internal",
+                "RouteRunning",
+                0,
+                |_| Ok(()),
+            ),
+            Ok(RouteState::Completed) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Watch.Internal",
+                "RouteCompleted",
+                0,
+                |_| Ok(()),
+            ),
+            Ok(RouteState::Failed(error)) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Watch.Internal",
+                "RouteFailed",
+                1,
+                |visitor| error.visit(table, visitor),
+            ),
+            Err(error) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Watch.Internal",
+                "RouteRejected",
+                1,
+                |visitor| error.visit(table, visitor),
+            ),
         }
-        AgentStopProjection::StoppedReleasing => ("AgentStoppedReleasing", Vec::new()),
-        AgentStopProjection::AlreadyStopped => ("AgentStopAlreadyStopped", Vec::new()),
-        AgentStopProjection::Unavailable => ("AgentStopUnavailable", Vec::new()),
-        AgentStopProjection::Unauthorized => ("AgentStopUnauthorized", Vec::new()),
-        AgentStopProjection::Failed(detail) => ("AgentStopFailed", vec![detail.to_value(table)?]),
-    };
-    Ok(actor_context_constructor(table, name, fields)?)
+    }
 }
 
-fn cleanup_plan_value(
-    table: &DataConTable,
-    plan: &CleanupPlanProjection,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let actors = plan
-        .actors
-        .iter()
-        .map(
-            |actor| -> Result<HaskellValue, ResidentActorWorkbenchError> {
-                let state = actor_context_constructor(
-                    table,
-                    if actor.terminal {
-                        "CleanupActorTerminal"
-                    } else {
-                        "CleanupActorRunning"
-                    },
-                    Vec::new(),
-                )?;
-                Ok(actor_context_constructor(
-                    table,
-                    "CleanupActorPlan",
-                    vec![
-                        actor_int(actor.actor.id.0)?.to_value(table)?,
-                        actor_int(actor.actor.incarnation.0)?.to_value(table)?,
-                        actor.label.clone().to_value(table)?,
-                        state,
-                        actor_int(actor.revision)?.to_value(table)?,
-                    ],
-                )?)
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?
-        .to_value(table)?;
-    let responses = plan
-        .pending_responses
-        .iter()
-        .map(|request| actor_int(request.0))
-        .collect::<Result<Vec<_>, _>>()?
-        .to_value(table)?;
-    let watches = plan
-        .pending_watches
-        .iter()
-        .map(|watch| actor_int(watch.0))
-        .collect::<Result<Vec<_>, _>>()?
-        .to_value(table)?;
-    Ok(actor_context_constructor(
-        table,
-        "CleanupPlan",
-        vec![
-            actor_int(plan.group.0)?.to_value(table)?,
-            actors,
-            responses,
-            watches,
-            plan.refusal.clone().to_value(table)?,
-        ],
-    )?)
+struct CallStatus(Option<String>);
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CallStatus {}
+impl ToHaskell for CallStatus {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match &self.0 {
+            Some(summary) => visit_core(table, visitor, "ActorCallFailed", 1, |visitor| {
+                summary.visit(table, visitor)
+            }),
+            None => visit_core(table, visitor, "ActorCallSucceeded", 0, |_| Ok(())),
+        }
+    }
 }
 
-fn cleanup_step_value(
-    table: &DataConTable,
-    step: CleanupStepProjection,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let ints = |values: Vec<u64>| -> Result<HaskellValue, ResidentActorWorkbenchError> {
-        values
-            .into_iter()
-            .map(actor_int)
-            .collect::<Result<Vec<_>, _>>()?
-            .to_value(table)
-            .map_err(ResidentActorWorkbenchError::Bridge)
-    };
-    let (name, fields) = match step {
-        CleanupStepProjection::ForgotResponses(requests) => (
-            "CleanupForgotResponses",
-            vec![ints(
-                requests.into_iter().map(|request| request.0).collect(),
-            )?],
-        ),
-        CleanupStepProjection::ForgotWatches(watches) => (
-            "CleanupForgotWatches",
-            vec![ints(watches.into_iter().map(|watch| watch.0).collect())?],
-        ),
-        CleanupStepProjection::StoppedActor(actor, outcome) => (
-            "CleanupStoppedActor",
-            vec![
-                actor_int(actor.id.0)?.to_value(table)?,
-                actor_int(actor.incarnation.0)?.to_value(table)?,
-                agent_stop_value(table, outcome)?,
-            ],
-        ),
-        CleanupStepProjection::ForgotActor(actor) => (
-            "CleanupForgotActor",
-            vec![
-                actor_int(actor.id.0)?.to_value(table)?,
-                actor_int(actor.incarnation.0)?.to_value(table)?,
-            ],
-        ),
-        CleanupStepProjection::ActorRetained {
-            actor,
-            requests,
-            watches,
-        } => (
-            "CleanupActorRetained",
-            vec![
-                actor_int(actor.id.0)?.to_value(table)?,
-                actor_int(actor.incarnation.0)?.to_value(table)?,
-                ints(requests.into_iter().map(|request| request.0).collect())?,
-                ints(watches.into_iter().map(|watch| watch.0).collect())?,
-            ],
-        ),
-        CleanupStepProjection::GroupRetired(group) => (
-            "CleanupGroupRetired",
-            vec![actor_int(group.0)?.to_value(table)?],
-        ),
-        CleanupStepProjection::Blocked(detail) => ("CleanupBlocked", vec![detail.to_value(table)?]),
-        CleanupStepProjection::StalePlan => ("CleanupStalePlan", Vec::new()),
-    };
-    Ok(actor_context_constructor(table, name, fields)?)
+enum ProgressAnswer {
+    Pending,
+    Closed,
+    Rejected(crate::ReplyError),
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for ProgressAnswer {}
+impl ToHaskell for ProgressAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match self {
+            Self::Pending => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Reply.Internal",
+                "ProgressPending",
+                0,
+                |_| Ok(()),
+            ),
+            Self::Closed => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Reply.Internal",
+                "ProgressClosed",
+                0,
+                |_| Ok(()),
+            ),
+            Self::Rejected(error) => visit_named(
+                table,
+                visitor,
+                "Tidepool.Agent.Reply.Internal",
+                "ProgressRejected",
+                1,
+                |visitor| error.visit(table, visitor),
+            ),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for AgentForgetProjection {}
+impl ToHaskell for AgentForgetProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match self {
+            Self::Forgotten => visit_core(table, visitor, "AgentForgotten", 0, |_| Ok(())),
+            Self::Running => visit_core(table, visitor, "AgentForgetRunning", 0, |_| Ok(())),
+            Self::Unavailable => {
+                visit_core(table, visitor, "AgentForgetUnavailable", 0, |_| Ok(()))
+            }
+            Self::Retained { requests, watches } => {
+                visit_core(table, visitor, "AgentForgetRetained", 2, |visitor| {
+                    requests
+                        .iter()
+                        .map(|request| actor_haskell_int(request.0, "request id"))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .visit(table, visitor)?;
+                    watches
+                        .iter()
+                        .map(|watch| actor_haskell_int(watch.0, "watch id"))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .visit(table, visitor)
+                })
+            }
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for AgentStopProjection {}
+impl ToHaskell for AgentStopProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match self {
+            Self::StoppedNow => visit_core(table, visitor, "AgentStoppedNow", 0, |_| Ok(())),
+            Self::StoppedRetaining(detail) => {
+                visit_core(table, visitor, "AgentStoppedRetaining", 1, |visitor| {
+                    detail.visit(table, visitor)
+                })
+            }
+            Self::StoppedReleasing => {
+                visit_core(table, visitor, "AgentStoppedReleasing", 0, |_| Ok(()))
+            }
+            Self::AlreadyStopped => {
+                visit_core(table, visitor, "AgentStopAlreadyStopped", 0, |_| Ok(()))
+            }
+            Self::Unavailable => visit_core(table, visitor, "AgentStopUnavailable", 0, |_| Ok(())),
+            Self::Unauthorized => {
+                visit_core(table, visitor, "AgentStopUnauthorized", 0, |_| Ok(()))
+            }
+            Self::Failed(detail) => visit_core(table, visitor, "AgentStopFailed", 1, |visitor| {
+                detail.visit(table, visitor)
+            }),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CleanupActorProjection {}
+impl ToHaskell for CleanupActorProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        visit_core(table, visitor, "CleanupActorPlan", 5, |visitor| {
+            actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
+            actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
+                .visit(table, visitor)?;
+            self.label.visit(table, visitor)?;
+            visit_core(
+                table,
+                visitor,
+                if self.terminal {
+                    "CleanupActorTerminal"
+                } else {
+                    "CleanupActorRunning"
+                },
+                0,
+                |_| Ok(()),
+            )?;
+            actor_haskell_int(self.revision, "cleanup revision")?.visit(table, visitor)
+        })
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CleanupPlanProjection {}
+impl ToHaskell for CleanupPlanProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        visit_core(table, visitor, "CleanupPlan", 5, |visitor| {
+            actor_haskell_int(self.group.0, "fork group id")?.visit(table, visitor)?;
+            self.actors.visit(table, visitor)?;
+            self.pending_responses
+                .iter()
+                .map(|request| actor_haskell_int(request.0, "request id"))
+                .collect::<Result<Vec<_>, _>>()?
+                .visit(table, visitor)?;
+            self.pending_watches
+                .iter()
+                .map(|watch| actor_haskell_int(watch.0, "watch id"))
+                .collect::<Result<Vec<_>, _>>()?
+                .visit(table, visitor)?;
+            self.refusal.visit(table, visitor)
+        })
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CleanupStepProjection {}
+impl ToHaskell for CleanupStepProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let ids = |visitor: &mut dyn HaskellVisitor, values: &[u64], label| {
+            values
+                .iter()
+                .copied()
+                .map(|value| actor_haskell_int(value, label))
+                .collect::<Result<Vec<_>, _>>()?
+                .visit(table, visitor)
+        };
+        match self {
+            Self::ForgotResponses(requests) => {
+                visit_core(table, visitor, "CleanupForgotResponses", 1, |visitor| {
+                    ids(
+                        visitor,
+                        &requests.iter().map(|request| request.0).collect::<Vec<_>>(),
+                        "request id",
+                    )
+                })
+            }
+            Self::ForgotWatches(watches) => {
+                visit_core(table, visitor, "CleanupForgotWatches", 1, |visitor| {
+                    ids(
+                        visitor,
+                        &watches.iter().map(|watch| watch.0).collect::<Vec<_>>(),
+                        "watch id",
+                    )
+                })
+            }
+            Self::StoppedActor(actor, outcome) => {
+                visit_core(table, visitor, "CleanupStoppedActor", 3, |visitor| {
+                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
+                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
+                        .visit(table, visitor)?;
+                    outcome.visit(table, visitor)
+                })
+            }
+            Self::ForgotActor(actor) => {
+                visit_core(table, visitor, "CleanupForgotActor", 2, |visitor| {
+                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
+                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
+                        .visit(table, visitor)
+                })
+            }
+            Self::ActorRetained {
+                actor,
+                requests,
+                watches,
+            } => visit_core(table, visitor, "CleanupActorRetained", 4, |visitor| {
+                actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
+                actor_haskell_int(actor.incarnation.0, "actor incarnation")?
+                    .visit(table, visitor)?;
+                requests
+                    .iter()
+                    .map(|request| actor_haskell_int(request.0, "request id"))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .visit(table, visitor)?;
+                watches
+                    .iter()
+                    .map(|watch| actor_haskell_int(watch.0, "watch id"))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .visit(table, visitor)
+            }),
+            Self::GroupRetired(group) => {
+                visit_core(table, visitor, "CleanupGroupRetired", 1, |visitor| {
+                    actor_haskell_int(group.0, "fork group id")?.visit(table, visitor)
+                })
+            }
+            Self::Blocked(detail) => visit_core(table, visitor, "CleanupBlocked", 1, |visitor| {
+                detail.visit(table, visitor)
+            }),
+            Self::StalePlan => visit_core(table, visitor, "CleanupStalePlan", 0, |_| Ok(())),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for CleanupReceiptProjection {}
+impl ToHaskell for CleanupReceiptProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        visit_core(table, visitor, "CleanupReceipt", 3, |visitor| {
+            self.plan.visit(table, visitor)?;
+            self.steps.visit(table, visitor)?;
+            self.complete.visit(table, visitor)
+        })
+    }
 }
 
 /// One fully captured boundary reached by an installed actor program.
@@ -1979,6 +2205,16 @@ pub enum ResidentActorWorkbenchError {
     ToolDeclarations(serde_json::Error),
 }
 
+/// Preserve the resident session's authoritative boundary classification.
+/// A rejected response leaves the parked effect available for retry; a
+/// consumed response has crossed that boundary even if running onward failed.
+fn classify_resumption(error: ResidentResumeError) -> ResidentActorWorkbenchError {
+    match error {
+        ResidentResumeError::Rejected(error) => ResidentActorWorkbenchError::Resident(error),
+        ResidentResumeError::Consumed(error) => ResidentActorWorkbenchError::Delivered(error),
+    }
+}
+
 impl<H, O> ResidentMachineAccess<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2259,8 +2495,8 @@ where
                     }
                 };
                 let settled = session
-                    .resume(hole, ())
-                    .map_err(ResidentActorWorkbenchError::Delivered)?;
+                    .resume_classified(hole, ())
+                    .map_err(classify_resumption)?;
                 if !matches!(
                     settled,
                     ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
@@ -3058,8 +3294,8 @@ where
                 let answer =
                     structured_introspection_answer(table, kind, inspected, &provenance, &current)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -4529,8 +4765,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(readiness.hole, ())
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(readiness.hole, ())
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -4636,8 +4872,8 @@ where
                         let value =
                             qualified_constructor(table, "Tidepool.Effects.Core", name, fields)?;
                         session
-                            .resume(hole, value)
-                            .map_err(ResidentActorWorkbenchError::Delivered)
+                            .resume_classified(hole, value)
+                            .map_err(classify_resumption)
                     })
                     .await?
             }
@@ -4831,8 +5067,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, ())
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, ())
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -4874,8 +5110,8 @@ where
                     )
                 })?;
                 session
-                    .resume(hole, value)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, value)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -4988,8 +5224,8 @@ where
                 ];
                 let answer = actor_context_constructor(table, "ActorContextInfo", fields)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5003,13 +5239,13 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let table = session.data_con_table();
-                let mut entries = Vec::with_capacity(roster.len());
-                for entry in roster {
-                    entries.push(agent_roster_value(table, entry)?);
-                }
+                let entries = roster
+                    .into_iter()
+                    .map(|entry| agent_roster_value(table, entry))
+                    .collect::<Result<Vec<_>, _>>()?;
                 session
-                    .resume(hole, entries)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, entries)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5032,8 +5268,8 @@ where
                     })
                     .transpose()?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5046,13 +5282,12 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
                 let answer = observation
-                    .map(|entry| agent_roster_value(table, entry))
+                    .map(|entry| agent_roster_value(session.data_con_table(), entry))
                     .transpose()?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5088,8 +5323,8 @@ where
                 };
                 let answer = actor_context_constructor(table, name, fields)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5140,8 +5375,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, outcome)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, outcome)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5154,11 +5389,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let answer = agent_stop_value(table, outcome)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, outcome)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5171,10 +5404,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = cleanup_plan_value(session.data_con_table(), &plan)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, plan)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5187,22 +5419,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let plan = cleanup_plan_value(table, &receipt.plan)?;
-                let steps = receipt
-                    .steps
-                    .into_iter()
-                    .map(|step| cleanup_step_value(table, step))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .to_value(table)?;
-                let answer = actor_context_constructor(
-                    table,
-                    "CleanupReceipt",
-                    vec![plan, steps, receipt.complete.to_value(table)?],
-                )?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, receipt)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5223,8 +5442,8 @@ where
                     )
                 })?;
                 session
-                    .resume(hole, Ok::<_, String>((group, group_path, paths)))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, Ok::<_, String>((group, group_path, paths)))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5239,8 +5458,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::ReplyResult::<()>(Err(error));
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5255,8 +5474,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::Response(observation);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5270,8 +5489,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, crate::request_effect::ReplyResult(outcome))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, crate::request_effect::ReplyResult(outcome))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5285,11 +5504,11 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(
+                    .resume_classified(
                         hole,
                         crate::request_effect::ReplyResult(outcome.map(|_| ())),
                     )
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5303,13 +5522,18 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let table = session.data_con_table();
-                let module = "Tidepool.Agent.Reply.Internal";
                 let answer = match observation {
                     Ok((Some(snapshot), _)) => {
-                        let name = format!("{module}.ProgressUpdate");
-                        let constructor = table
-                            .get_by_qualified_name(&name)
-                            .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(name))?;
+                        let constructor = tidepool_bridge::get_qualified(
+                            table,
+                            "Tidepool.Agent.Reply.Internal.ProgressUpdate",
+                            2,
+                        )
+                        .ok_or_else(|| {
+                            BridgeError::UnknownDataConName(
+                                "Tidepool.Agent.Reply.Internal.ProgressUpdate".into(),
+                            )
+                        })?;
                         let revision = i64::try_from(snapshot.revision).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "progress revision exceeds Haskell Int".into(),
@@ -5317,29 +5541,21 @@ where
                         })?;
                         let prefix = vec![revision.to_value(table)?];
                         return session
-                            .resume_framed_custody(hole, &snapshot.value, constructor, prefix)
-                            .map_err(ResidentActorWorkbenchError::Delivered);
+                            .resume_framed_custody_classified(
+                                hole,
+                                &snapshot.value,
+                                constructor,
+                                prefix,
+                            )
+                            .map_err(classify_resumption);
                     }
-                    Ok((None, closed)) => crate::request_effect::constructor(
-                        table,
-                        module,
-                        if closed {
-                            "ProgressClosed"
-                        } else {
-                            "ProgressPending"
-                        },
-                        vec![],
-                    )?,
-                    Err(error) => crate::request_effect::constructor(
-                        table,
-                        module,
-                        "ProgressRejected",
-                        vec![crate::request_effect::reply_error_value(error, table)?],
-                    )?,
+                    Ok((None, true)) => ProgressAnswer::Closed,
+                    Ok((None, false)) => ProgressAnswer::Pending,
+                    Err(error) => ProgressAnswer::Rejected(error),
                 };
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5354,8 +5570,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::Cancel(outcome);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5370,8 +5586,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::Abandon(outcome);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5386,8 +5602,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::ForgetResponse(outcome);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5402,8 +5618,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::Reply(observation);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5417,8 +5633,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let outcome = session
-                    .resume(receiver_continuation, true)
-                    .map_err(ResidentActorWorkbenchError::Delivered)?;
+                    .resume_classified(receiver_continuation, true)
+                    .map_err(classify_resumption)?;
                 let _ = session.close_realm(handler_realm);
                 Ok(outcome)
             })
@@ -5435,8 +5651,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::Watch(observation);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5449,27 +5665,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                use crate::request::routes::RouteState;
-                let table = session.data_con_table();
-                let (name, fields) = match observation {
-                    Ok(RouteState::Waiting) => ("RouteWaiting", vec![]),
-                    Ok(RouteState::Running) => ("RouteRunning", vec![]),
-                    Ok(RouteState::Completed) => ("RouteCompleted", vec![]),
-                    Ok(RouteState::Failed(error)) => ("RouteFailed", vec![error.to_value(table)?]),
-                    Err(error) => (
-                        "RouteRejected",
-                        vec![crate::request_effect::reply_error_value(error, table)?],
-                    ),
-                };
-                let answer = crate::request_effect::constructor(
-                    session.data_con_table(),
-                    "Tidepool.Agent.Watch.Internal",
-                    name,
-                    fields,
-                )?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, RouteStateAnswer(observation))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5510,8 +5708,8 @@ where
             .with_machine(context, move |session, _, _| {
                 let answer = crate::request_effect::RequestAnswer::ForgetWatch(outcome);
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5526,8 +5724,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, (name, arguments))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, (name, arguments))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5541,8 +5739,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume_handle(hole, value)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_handle_classified(hole, value)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5556,8 +5754,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, terminal)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, terminal)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5570,20 +5768,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let (name, fields) = match failure {
-                    Some(summary) => (
-                        "Tidepool.Effects.Core.ActorCallFailed",
-                        vec![summary.to_value(table)?],
-                    ),
-                    None => ("Tidepool.Effects.Core.ActorCallSucceeded", Vec::new()),
-                };
-                let constructor = table.get_by_qualified_name(name).ok_or_else(|| {
-                    tidepool_bridge::BridgeError::UnknownDataConName(name.to_owned())
-                })?;
                 session
-                    .resume(hole, HaskellValue::Con(constructor, fields))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, CallStatus(failure))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5597,8 +5784,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, terminal)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, terminal)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5736,7 +5923,7 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(
+                    .resume_classified(
                         hole,
                         (
                             actor.id.0 as i64,
@@ -5744,7 +5931,7 @@ where
                             allocated_label,
                         ),
                     )
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5760,7 +5947,7 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(
+                    .resume_classified(
                         hole,
                         Ok::<_, String>((
                             (
@@ -5771,7 +5958,7 @@ where
                             worktree,
                         )),
                     )
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5785,8 +5972,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, Err::<(), _>(detail))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, Err::<(), _>(detail))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5799,8 +5986,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 session
-                    .resume(hole, Ok::<(), String>(()))
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, Ok::<(), String>(()))
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -5833,8 +6020,8 @@ where
                 };
                 let answer = actor_context_constructor(table, name, fields)?;
                 session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Delivered)
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
