@@ -68,10 +68,11 @@ struct PreparedCandidate {
 #[derive(Default)]
 pub(crate) struct BindingIndex {
     /// Live `Val.G<g>` module names -- `PersistentSession::live_val_modules`.
-    /// A `BTreeSet` because generations are minted monotonically per bind, so
-    /// module names are already unique per live entry; this gives the sorted,
-    /// deduplicated output the old per-turn sort+dedup produced, for free.
-    live_modules: BTreeSet<String>,
+    /// One generated interface can publish several bindings (for example a
+    /// display page and its `cellDisplay` alias), so this is a refcount rather
+    /// than a set. Removing one name must not make the shared interface vanish
+    /// from later compiler injection while another name still imports it.
+    live_modules: BTreeMap<String, usize>,
     /// `(import identity, local generation)` pairs for every live prepared
     /// binding with a recorded identity -- `PersistentSession::prepared_retained`.
     prepared_retained: BTreeSet<(SymbolIdentity, u64)>,
@@ -120,7 +121,10 @@ impl BindingIndex {
     /// alias bind whose `BindingTable` call takes the entry by value and can
     /// fail, in which case indexing must not happen at all).
     pub(super) fn on_bind_record(&mut self, record: &BindRecord) {
-        self.live_modules.insert(record.module.module_name());
+        *self
+            .live_modules
+            .entry(record.module.module_name())
+            .or_insert(0) += 1;
         *self
             .root_refs
             .entry(record.root.addr() as usize)
@@ -140,7 +144,13 @@ impl BindingIndex {
     /// [`Self::on_evict`] for a pre-built [`BindRecord`] (see
     /// [`Self::on_bind_record`]'s rationale).
     pub(super) fn on_evict_record(&mut self, record: &BindRecord) -> bool {
-        self.live_modules.remove(&record.module.module_name());
+        let module = record.module.module_name();
+        if let Some(count) = self.live_modules.get_mut(&module) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.live_modules.remove(&module);
+            }
+        }
         self.prepared_retained
             .remove(&(record.identity.clone(), record.module.gen().0));
         if let Some(candidates) = self.prepared_by_identity.get_mut(&record.identity) {
@@ -170,7 +180,7 @@ impl BindingIndex {
 
     /// Sorted, deduplicated live `Val.G<g>` module names.
     pub(super) fn live_modules(&self) -> Vec<String> {
-        self.live_modules.iter().cloned().collect()
+        self.live_modules.keys().cloned().collect()
     }
 
     /// Sorted, deduplicated `(identity, generation)` pairs for every live
@@ -362,5 +372,33 @@ mod tests {
         assert!(index.prepared_retained().is_empty());
         assert_eq!(index.resolve_prepared(&id_x, None), None);
         assert_eq!(index.resolve_prepared(&id_y, None), None);
+    }
+
+    #[test]
+    fn evicting_one_binding_keeps_its_shared_value_module_live() {
+        let mut pointer_a: *mut u8 = std::ptr::null_mut();
+        let mut pointer_b: *mut u8 = std::ptr::null_mut();
+        let module = SessionModule::val(Generation(20));
+        let page = BindRecord {
+            id: SessionVarId::from_extract(1),
+            module,
+            root: fake_slot(&mut pointer_a),
+            identity: identity("__tidepoolPage20"),
+        };
+        let alias = BindRecord {
+            id: SessionVarId::from_extract(2),
+            module,
+            root: fake_slot(&mut pointer_b),
+            identity: identity("cellDisplay"),
+        };
+        let mut index = BindingIndex::new();
+        index.on_bind_record(&page);
+        index.on_bind_record(&alias);
+
+        index.on_evict_record(&alias);
+        assert_eq!(index.live_modules(), vec![module.module_name()]);
+
+        index.on_evict_record(&page);
+        assert!(index.live_modules().is_empty());
     }
 }
