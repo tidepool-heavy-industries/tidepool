@@ -169,9 +169,11 @@ the last accepted source, and sends a recovery notice before new work. Child
 conversations resume independently when their accepted source, process stop,
 lineage, launch policy, and optional worktree custody all verify. Their logical
 actor IDs remain stable and their incarnations advance. Actors whose evidence
-cannot be verified remain visibly unavailable. The run status also samples
-run-directory storage through a bounded walk and reports when that sample was
-truncated.
+cannot be verified remain visibly unavailable. Run status records recovered
+predecessor and successor identities, lost live state, and a bounded resource
+service snapshot with retained allocations and cleanup failures. It also
+samples run-directory storage through a bounded walk and reports when that
+sample was truncated.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
 

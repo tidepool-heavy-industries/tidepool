@@ -717,7 +717,7 @@ fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::erro
 
 fn durable_root_identity(
     records: &[tidepool_actor::DurableActorRecord],
-) -> Result<Option<ActorRef>, Box<dyn std::error::Error>> {
+) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
     records
         .iter()
         .filter(|record| {
@@ -727,7 +727,10 @@ fn durable_root_identity(
                 && record.admission.context_parent.is_none()
         })
         .max_by_key(|record| record.admission.actor.incarnation)
-        .map(|record| next_actor_incarnation(record.admission.actor))
+        .map(|record| {
+            next_actor_incarnation(record.admission.actor)
+                .map(|successor| (record.admission.actor, successor))
+        })
         .transpose()
 }
 
@@ -1069,8 +1072,8 @@ pub enum ActorHostReadiness {
         root: ActorRef,
         thread: QueueReadyThread,
     },
-    /// One predecessor conversation was independently verified and attached
-    /// to the same logical actor in this host incarnation.
+    /// One predecessor conversation was independently verified and its
+    /// replacement native application was admitted for the same logical actor.
     ActorRecovered {
         predecessor: ActorRef,
         actor: ActorRef,
@@ -1886,6 +1889,7 @@ struct InteractiveFleet {
     source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
     actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
+    recovered_root_predecessor: Option<ActorRef>,
 }
 
 #[derive(Clone)]
@@ -2001,17 +2005,18 @@ pub(crate) async fn run(
     forest.track_resource_release();
     let forest = Arc::new(forest);
     let recovered_root = durable_root_identity(&prior_actor_records)?;
+    let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
     forest
         .fence_recovery_identities(
             prior_actor_records
                 .iter()
                 .filter(|record| record.terminal.is_none())
                 .map(|record| record.admission.actor.id)
-                .chain(recovered_root.map(|actor| actor.id)),
+                .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
         .map_err(runtime_error)?;
     let (mut root_actor, mut root_task) = match recovered_root {
-        Some(identity) => {
+        Some((_, identity)) => {
             forest
                 .admit_root_with_identity(descriptor, outcome, identity)
                 .await?
@@ -2145,6 +2150,7 @@ pub(crate) async fn run(
             source_layers,
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
+            recovered_root_predecessor,
         },
         shutdown_rx,
         root_config_rx,
@@ -2996,6 +3002,7 @@ async fn run_interactive_applications(
         source_layers,
         actor_recovery,
         recovered_threads,
+        recovered_root_predecessor,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -3590,6 +3597,12 @@ async fn run_interactive_applications(
                             });
                         }
                         if actor == root_identity {
+                            if let Some(predecessor) = recovered_root_predecessor {
+                                let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                                    predecessor,
+                                    actor,
+                                });
+                            }
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
                         let pane = deployment.pane.clone();
@@ -7104,10 +7117,13 @@ mod tests {
         let records = vec![durable_root(first), durable_root(second)];
         assert_eq!(
             durable_root_identity(&records).unwrap(),
-            Some(ActorRef {
-                id: first.id,
-                incarnation: tidepool_actor::Incarnation(3),
-            })
+            Some((
+                second,
+                ActorRef {
+                    id: first.id,
+                    incarnation: tidepool_actor::Incarnation(3),
+                }
+            ))
         );
     }
 

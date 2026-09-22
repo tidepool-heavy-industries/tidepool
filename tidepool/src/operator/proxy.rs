@@ -391,7 +391,8 @@ mod tests {
                     serde_json::json!({"state": "failed", "error": error})
                 }
                 crate::shoal::RunPhase::AwaitingBinding { .. }
-                | crate::shoal::RunPhase::Ready { .. } => {
+                | crate::shoal::RunPhase::Ready { .. }
+                | crate::shoal::RunPhase::Recovering { .. } => {
                     unreachable!("not exercised by these tests")
                 }
             },

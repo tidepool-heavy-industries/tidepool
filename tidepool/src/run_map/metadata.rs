@@ -100,6 +100,7 @@ pub(super) fn read_root(run: &Path, read_bound: u64) -> RootBinding {
             root_thread,
         }) => (Some(root_actor), Some(root_thread.0)),
         Some(RunPhase::AwaitingBinding { root_actor }) => (Some(root_actor), None),
+        Some(RunPhase::Recovering { .. }) => (None, None),
         _ => (None, None),
     };
     let actor = match root_actor {
@@ -341,7 +342,7 @@ mod tests {
             "agent":{"model":"test","effort":"low"},
             "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"thread-root"}
         });
-        for version in [0, 5, u32::MAX] {
+        for version in [0, crate::shoal::STATUS_VERSION + 1, u32::MAX] {
             status["version"] = json!(version);
             // This shape would pass raw serde; only the owning decoder rejects it.
             assert!(serde_json::from_value::<RunStatus>(status.clone()).is_ok());

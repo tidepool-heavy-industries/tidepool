@@ -348,10 +348,11 @@ environment and the rest of the host filesystem stay reachable. Run it on a
 machine and in an account where that is acceptable, as you would any coding
 agent with shell access.
 
-Status and traces expose recovery generation and unavailable actors. Resource
-traces distinguish active and historical commands, retained allocations,
-cleanup failures, output truncation, service health, and bounded process,
-memory, pressure, CPU, and I/O observations. Existing cleanup and run-map
+Run status exposes recovery generation, predecessor-to-successor actor mappings,
+lost state, unavailable actors, and resource-service health. Its resource
+snapshot distinguishes active and historical commands, retained allocations,
+cleanup failures, and bounded process, memory, pressure, CPU, and I/O
+observations; traces also report output truncation. Existing cleanup and run-map
 commands report retained build storage, and each run status contains a bounded
 run-directory byte and entry count with an explicit truncation flag. These observations are diagnostic;
 this recovery work adds no new limits. Stronger host isolation would require a
