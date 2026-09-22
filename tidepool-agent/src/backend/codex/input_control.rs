@@ -3,7 +3,11 @@
 //! This is not an app-server API. The host and the already-running TUI use it
 //! over the actor-private Unix socket selected during hosted registration.
 
-use serde::{Deserialize, Serialize};
+use codex_shoal_protocol::{
+    Binding as BindingWire, Envelope as InputEnvelopeWire, InputControlRequest,
+    InputControlResponse, Mode as ModeWire, Outcome as OutcomeWire, Purpose as PurposeWire,
+    Target as TargetWire, INPUT_CONTROL_PATH, INPUT_CONTROL_PROTOCOL_VERSION,
+};
 
 use crate::interactive::{
     InputAdmission, InputEnvelopeError, InputOperationId, InputProducerControlOutcome,
@@ -11,106 +15,6 @@ use crate::interactive::{
     InteractiveInputMode, InteractiveInputTarget, QueueReadyThread,
 };
 use crate::BackendThreadId;
-
-pub(crate) const INPUT_CONTROL_PROTOCOL_VERSION: u32 = 4;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct BindingWire {
-    pub protocol_version: u32,
-    pub launch_id: String,
-    pub instance_id: String,
-    pub generation: u64,
-    pub nonce: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct InputEnvelopeWire {
-    pub producer_id: String,
-    pub sequence: u64,
-    pub purpose: PurposeWire,
-    pub mode: ModeWire,
-    pub target: TargetWire,
-    pub payload: Vec<u8>,
-    pub content_digest: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum PurposeWire {
-    Bootstrap,
-    Assignment,
-    RequestUpdate,
-    Notification,
-    OperatorInput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum ModeWire {
-    QueueOnly,
-    StartOrSteer,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct TargetWire {
-    pub conversation: String,
-    pub actor: String,
-    pub correlation: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) enum InputControlRequest {
-    Bind {
-        binding: BindingWire,
-    },
-    Submit {
-        binding: BindingWire,
-        envelope: InputEnvelopeWire,
-    },
-    Query {
-        binding: BindingWire,
-        producer_id: String,
-        sequence: u64,
-    },
-    Withdraw {
-        binding: BindingWire,
-        producer_id: String,
-        sequence: u64,
-    },
-    Seal {
-        binding: BindingWire,
-        producer_id: String,
-    },
-    Acknowledge {
-        binding: BindingWire,
-        producer_id: String,
-        through_sequence: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum OutcomeWire {
-    Admitted,
-    Dispatching,
-    Presented,
-    Withdrawn,
-    Rejected,
-    Unknown,
-    Compacted,
-    EvidenceUnavailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct InputControlResponse {
-    pub binding: BindingWire,
-    pub outcome: OutcomeWire,
-}
 
 fn binding(thread: &QueueReadyThread) -> Result<BindingWire, InteractiveInputError> {
     let value = thread.session_binding().ok_or_else(|| {
@@ -144,7 +48,7 @@ async fn send(
         .build()
         .map_err(|e| InteractiveInputError::NotSubmitted(e.to_string()))?;
     let response = client
-        .post("http://localhost/v1/input/control")
+        .post(format!("http://localhost{INPUT_CONTROL_PATH}"))
         .json(&request)
         .send()
         .await
@@ -277,8 +181,13 @@ pub(super) async fn acknowledge(
     })
 }
 
-impl InputEnvelopeWire {
-    pub(crate) fn from_envelope(value: &InteractiveInputEnvelope) -> Self {
+trait InputEnvelopeWireExt: Sized {
+    fn from_envelope(value: &InteractiveInputEnvelope) -> Self;
+    fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError>;
+}
+
+impl InputEnvelopeWireExt for InputEnvelopeWire {
+    fn from_envelope(value: &InteractiveInputEnvelope) -> Self {
         Self {
             producer_id: value.id().producer.as_str().to_string(),
             sequence: value.id().sequence.get(),
@@ -304,7 +213,7 @@ impl InputEnvelopeWire {
     }
 
     /// Recompute the canonical digest before this operation can cross native admission.
-    pub(crate) fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError> {
+    fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError> {
         let sequence =
             std::num::NonZeroU64::new(self.sequence).ok_or(InputControlWireError::ZeroSequence)?;
         let digest = decode_digest(&self.content_digest)?;

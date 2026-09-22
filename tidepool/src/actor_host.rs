@@ -6106,11 +6106,10 @@ mod tests {
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(log.reopen().unwrap()))
             .finish();
-        let error = tidepool_agent::UpdatePresentationError::NotSubmitted(
-            "connecting update proxy: controlled transport failure".into(),
-        );
         tracing::subscriber::with_default(subscriber, || {
-            presentation.not_presented(error.to_string())
+            presentation.not_presented(
+                "native input was not submitted: connecting update proxy: controlled transport failure",
+            )
         });
         let logged = std::fs::read_to_string(log.path()).unwrap();
         for expected in [
@@ -7131,28 +7130,6 @@ mod tests {
             thread: &'a QueueReadyThread,
         ) -> InteractiveFuture<'a, ()> {
             self.0.archive(cwd, thread)
-        }
-        fn present_update<'a>(
-            &'a self,
-            _cwd: &'a str,
-            _thread: &'a QueueReadyThread,
-            key: &'a str,
-            message: &'a str,
-        ) -> tidepool_agent::UpdatePresentationFuture<'a> {
-            Box::pin(async move {
-                self.0
-                    .messages
-                    .lock()
-                    .unwrap()
-                    .push(format!("{key}:{message}"));
-                if self.0.fail.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(tidepool_agent::UpdatePresentationError::Unconfirmed(
-                        "lost confirmation".into(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
         }
     }
 

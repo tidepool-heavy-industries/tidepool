@@ -268,27 +268,11 @@ codex app-server generate-json-schema --out tidepool-agent/fixtures/app-server-0
 
 ## Active interactive input
 
-`InteractiveAgentBackend::present_update` is distinct from queued assignment
-`push`. `UpdatePresentationError` distinguishes failure before submission from
-uncertainty after submission; the actor owner uses that distinction to retain
-or release its presentation fence. Its detail describes update delivery, never
-failure of the original agent run. Presentation custody logs every outcome with
-actor, request, update sequence, and correlation key, including dropped attempts.
-
-The Codex adapter connects through the selected installation's `app-server
-proxy`, using the existing `Session` transport/process owner. Native `turn/start`
-in this fork calls atomic `start_or_steer_turn`; it wakes an idle conversation or
-steers the active turn without changing thread configuration. No second queue
-assignment or new conversation is created.
-
-Confirmation tails the bound thread's rollout from the pre-submission offset
-and requires the exact `event_msg/user_message` correlation ID. The fork records
-that event after inserting the user prompt into history, following the current
-sampling and tool boundary, before the next model request. RPC acceptance,
-unrelated events, and partial JSONL records cannot confirm presentation.
-Connection has a 30-second deadline; submission plus confirmation has a
-five-minute deadline. Unknown outcomes are never retried. Closing the proxy
-reaps only that connection's child process, not the interactive daemon.
+`input_control` is the single bound-controller transport for queued and active
+input. Its durable operation identity distinguishes failure before submission
+from uncertainty after submission. Unknown outcomes are reconciled without
+implicit retries, and the generation and nonce challenge binds replies to the
+exact native application instance.
 
 Both direct app-server and proxy connections use `process::spawn_transport`.
 It sets all three streams to pipes immediately before spawn and enables
@@ -296,17 +280,9 @@ kill-on-drop, including during failed or cancelled initialization. The raw clien
 owns and drains stderr through the logging bridge; callers configure arguments
 and environment but cannot select incompatible stream ownership.
 
-The provider contract is source-verified in `turn_processor::turn_start_inner`,
-`session::turn::run_hooks_and_record_inputs`, and
-`Session::record_user_prompt_and_emit_turn_item`. Local tests exercise protocol
-plumbing and append/correlation races; live reasoning, tools, and idle-wakeup
-behavior still needs dogfooding against the selected fork binary.
-
-Further structural work: a backend-native correlated presentation receipt
-would avoid depending on rollout persistence and reading unrelated large
-records. Capability negotiation should establish safe steering semantics
-explicitly; CLI discovery alone cannot prove them. Keep those obligations at
-this boundary, rather than adding checks to each actor caller.
+The matched `codex-shoal-protocol` crate owns the private wire version, limits,
+and manifest. Installation discovery checks that manifest; live session binding
+then proves the selected process supports the exact controller generation.
 
 Hosted launches require an absolute `base_instructions_file` supplied by the
 host's prompt catalog. The Codex command owner passes it as a

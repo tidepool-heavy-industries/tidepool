@@ -9,6 +9,9 @@
   };
 
   inputs = {
+    # Nix 2.27+ honors this self attribute when the Tidepool flake is fetched,
+    # so the matched Codex source is present in recursive and remote builds.
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
@@ -18,7 +21,7 @@
     # Codex owns its own locked compiler/package graph. Do not force it onto
     # Tidepool's Rust overlay: the two workspaces intentionally have distinct
     # MSRV/toolchain timelines.
-    codex.url = "github:inanna-malick/codex/fc8e158d582d9f28767a94a76ccb45976e845977";
+    codex.url = "./vendor/codex";
     # Haskell this workspace compiles but does not carry: jev-dsl, pinned to
     # the same revision `examples/shoal-workspace/flake.nix` pins. Nothing is
     # built from it here; `[haskell.flake_sources]` in `.shoal/config.toml`
@@ -413,14 +416,9 @@
             ${interactiveCodex}/bin/codex --version
             test -x ${interactiveCodex}/bin/codex-code-mode-host
             ${interactiveCodex}/bin/codex-code-mode-host --help
-            ${interactiveCodex}/bin/codex --help | grep --fixed-strings -- '--host-dynamic-tools-socket'
-            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--destination-local'
-            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--after-call'
-            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--thread'
-            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--message'
-            ${interactiveCodex}/bin/codex app-server --help | grep --fixed-strings -- '--controller-token-file'
-            ${interactiveCodex}/bin/codex observe --help | grep --fixed-strings -- '--remote'
-            ${interactiveCodex}/bin/codex archive --help
+            ${interactiveCodex}/bin/codex --shoal-protocol-manifest \
+              | ${pkgs.jq}/bin/jq --exit-status \
+                  '.hostProtocolVersion == 4 and .inputControlProtocolVersion == 4 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
             touch "$out"
           '';
 

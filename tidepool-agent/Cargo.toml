@@ -11,6 +11,7 @@ rust-version.workspace = true
 description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabulary is contained here."
 
 [dependencies]
+codex-shoal-protocol.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 tidepool-model.workspace = true
 tidepool-bridge-effects.workspace = true

@@ -25,8 +25,6 @@ use crate::{
 };
 use tidepool_model::{ConversationTurn, ProviderObservation};
 
-#[path = "active_update.rs"]
-mod active_update;
 #[allow(dead_code)]
 #[path = "input_control.rs"]
 mod input_control;
@@ -78,7 +76,8 @@ prefix_rule(
     justification = "Inspection-only actors may inspect Git but must delegate repository mutation to a coding actor.",
 )
 "#;
-pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 4;
+pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 =
+    codex_shoal_protocol::HOST_PROTOCOL_VERSION;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
 ///
@@ -87,34 +86,24 @@ pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 4;
 pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, AgentBackendError> {
     let executable = resolve_executable()?;
     let version_output = probe(&executable, &["--version"], "read version").await?;
-    require_probe(
+    let manifest_output = probe(
         &executable,
-        &["--help"],
-        "host dynamic tools",
-        &["--host-dynamic-tools-socket"],
+        &["--shoal-protocol-manifest"],
+        "read Shoal protocol manifest",
     )
     .await?;
-    require_probe(
-        &executable,
-        &["fork", "--help"],
-        "destination-owned invocation forks",
-        &["--destination-local", "--after-call"],
-    )
-    .await?;
-    require_probe(
-        &executable,
-        &["queue", "--help"],
-        "queue delivery",
-        &["--thread", "--message"],
-    )
-    .await?;
-    require_probe(
-        &executable,
-        &["archive", "--help"],
-        "conversation archival",
-        &[],
-    )
-    .await?;
+    let manifest: codex_shoal_protocol::Manifest = serde_json::from_str(manifest_output.trim())
+        .map_err(|error| AgentBackendError::ProtocolRejected {
+            detail: format!("interactive Codex returned an invalid Shoal protocol manifest: {error}"),
+        })?;
+    let expected = codex_shoal_protocol::Manifest::default();
+    if manifest != expected {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: format!(
+                "interactive Codex Shoal protocol manifest does not match this Tidepool build: expected {expected:?}, found {manifest:?}"
+            ),
+        });
+    }
     let version = first_nonempty_line(&version_output).ok_or_else(|| {
         AgentBackendError::ProtocolRejected {
             detail: "interactive Codex returned an empty version".into(),
@@ -208,24 +197,6 @@ fn resolve_executable_from(configured: Option<OsString>) -> Result<PathBuf, Agen
     }
     std::fs::canonicalize(&path)
         .map_err(|error| unavailable("canonicalize interactive Codex", error))
-}
-
-async fn require_probe(
-    executable: &Path,
-    args: &[&str],
-    capability: &str,
-    needles: &[&str],
-) -> Result<(), AgentBackendError> {
-    let output = probe(executable, args, capability).await?;
-    if needles.iter().all(|needle| output.contains(needle)) {
-        return Ok(());
-    }
-    Err(AgentBackendError::ProtocolRejected {
-        detail: format!(
-            "interactive Codex lacks required {capability} support ({})",
-            needles.join(", ")
-        ),
-    })
 }
 
 async fn probe(
@@ -363,16 +334,6 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
             thread,
             message,
         ))
-    }
-
-    fn present_update<'a>(
-        &'a self,
-        _cwd: &'a str,
-        thread: &'a QueueReadyThread,
-        key: &'a str,
-        message: &'a str,
-    ) -> crate::UpdatePresentationFuture<'a> {
-        Box::pin(active_update::present(thread, key, message))
     }
 
     fn observe<'a>(

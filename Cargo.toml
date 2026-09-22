@@ -42,6 +42,7 @@ authors = ["Inanna Malick <inanna@recursion.wtf>"]
 rust-version = "1.89"
 
 [workspace.dependencies]
+codex-shoal-protocol = { path = "vendor/codex/codex-rs/shoal-protocol" }
 tidepool-actor = { version = "0.1.0", path = "tidepool-actor" }
 tidepool-agent = { version = "0.1.0", path = "tidepool-agent" }
 tidepool-atomic-write = { path = "tidepool-atomic-write" }
