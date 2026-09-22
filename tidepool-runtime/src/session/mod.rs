@@ -32,7 +32,9 @@ pub mod turn;
 pub mod view;
 pub mod workbench;
 
-pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
+pub use dialect::{
+    declaration_pragmas, generated_support_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS,
+};
 
 pub use inspection::{
     run_inspections, ClassMethodInfo, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,

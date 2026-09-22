@@ -1,4 +1,4 @@
-//! Five extension-set surfaces exist across the workspace and legitimately
+//! Six extension-set surfaces exist across the workspace and legitimately
 //! differ in scope — that's fine, as long as every delta is DECLARED and
 //! TESTED rather than incidental:
 //!
@@ -6,6 +6,9 @@
 //!     re-exported by `tidepool_mcp` for frontend callers.
 //!   - `tidepool_runtime::session::declaration_pragmas()` — EVAL_PRAGMAS +
 //!     `NoMonomorphismRestriction` (session decl modules generalize pure binds).
+//!   - `tidepool_runtime::session::generated_support_pragmas()` — EVAL_PRAGMAS
+//!     minus `QuasiQuotes`; generated static support never contains splices,
+//!     and enabling the extension disables safe resident compiler reuse.
 //!   - the `LANGUAGE` block inside
 //!     `tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE` — a PARSE-ONLY
 //!     subset (no typecheck/rename, so type-inference-affecting extensions are
@@ -31,8 +34,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use tidepool_mcp::{decl_pragmas, EVAL_PRAGMAS};
-use tidepool_runtime::session::render::ModuleEnv;
 use tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE;
+use tidepool_runtime::session::{generated_support_pragmas, render::ModuleEnv};
 
 /// Parse a `{-# LANGUAGE A, B, C #-}` block (or a bare `A, B, C` extension
 /// list, no pragma delimiters) into its set of extension names. Panics on a
@@ -113,6 +116,16 @@ fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
          documented delta (in this test AND DECL_TEMPLATE_SOURCE's doc \
          comment) if the change is intentional"
     );
+}
+
+#[test]
+fn generated_support_omits_only_quasiquotes() {
+    let eval = extension_set(EVAL_PRAGMAS);
+    let generated_text = generated_support_pragmas();
+    let generated = extension_set(&generated_text);
+    let mut expected = eval;
+    assert!(expected.remove("QuasiQuotes"));
+    assert_eq!(generated, expected);
 }
 
 /// `ModuleEnv::standalone_default()`'s pragma set must equal `decl_pragmas()`'s
