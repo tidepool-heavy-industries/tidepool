@@ -1046,14 +1046,13 @@ jsonSpecFor binder = do
       Right result -> pure result
 
 projectJsonRhs :: JsonSpec -> CgStgRhs -> P HeapRhs
-projectJsonRhs (DecodeJson textDataCon layout left right)
+projectJsonRhs (DecodeJson textDataCon left right)
     (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
   actual <- concat <$> mapM (argumentRepsForType . varType) parameters
   result <- repsForType resultType
   unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
     (failRepresentation "registered JSON parser has unexpected prepared entry reps")
   textConstructor <- internConstructor textDataCon
-  layout' <- traverse internConstructor layout
   left' <- internConstructor left
   right' <- internConstructor right
   textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
@@ -1062,24 +1061,23 @@ projectJsonRhs (DecodeJson textDataCon layout left right)
   parameters' <- mapM bindValue parameters
   signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
   body <- case parameters' of
-    [input] -> jsonDecodeBody textDataCon textConstructor layout' left' right' input
+    [input] -> jsonDecodeBody textDataCon textConstructor left' right' input
     _ -> failShape "registered JSON parser has unexpected prepared arity"
   pure (Function signature parameters' [] body)
  where scaledThing (Scaled _ ty) = ty
-projectJsonRhs (EncodeJson textDataCon layout)
+projectJsonRhs (EncodeJson textDataCon)
     (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
   actual <- concat <$> mapM (argumentRepsForType . varType) parameters
   result <- repsForType resultType
   unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
     (failRepresentation "registered JSON encoder has unexpected prepared entry reps")
-  layout' <- traverse internConstructor layout
   textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
   unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
     (failRepresentation "JSON encoder Text constructor must contain byte array, offset, length")
   parameters' <- mapM bindValue parameters
   signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
   encodeSignature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
-  encode <- internSyntheticOperation (Schema.JsonEncodeIdentity layout') encodeSignature
+  encode <- internSyntheticOperation Schema.JsonEncodeIdentity encodeSignature
   body <- case parameters' of
     [input] -> pure (Operation encode [Ref (Local input)])
     _ -> failShape "registered JSON encoder has unexpected prepared arity"
@@ -1087,13 +1085,12 @@ projectJsonRhs (EncodeJson textDataCon layout)
  where scaledThing (Scaled _ ty) = ty
 projectJsonRhs _ _ = failShape "registered JSON anchor is not a reentrant closure"
 
-jsonDecodeBody :: DataCon -> ConstructorId -> Schema.JsonLayout ConstructorId
-  -> ConstructorId -> ConstructorId -> ValueId -> P Expr
-jsonDecodeBody textDataCon textConstructor layout left right input = do
+jsonDecodeBody :: DataCon -> ConstructorId -> ConstructorId -> ConstructorId -> ValueId -> P Expr
+jsonDecodeBody textDataCon textConstructor left right input = do
   enter <- internSignature (Signature [] (Returns [LiftedRefRep]))
   parseSignature <- internSignature (Signature
     [UnliftedRefRep, IntRep 64, IntRep 64] (Returns [LiftedRefRep]))
-  parse <- internSyntheticOperation (Schema.JsonDecodeIdentity layout left right) parseSignature
+  parse <- internSyntheticOperation (Schema.JsonDecodeIdentity left right) parseSignature
   inputCase <- freshValue
   rawBytes <- freshValue
   rawOffset <- freshValue

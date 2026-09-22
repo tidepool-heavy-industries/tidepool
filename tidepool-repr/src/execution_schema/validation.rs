@@ -1983,31 +1983,20 @@ impl<'a> Validator<'a> {
         match identity {
             super::OperationIdentity::PrimOp(name) => self.check_text(name),
             super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
-            super::OperationIdentity::JsonDecode {
-                layout,
-                left,
-                right,
-            } => {
-                self.check_canonical_json_layout(layout)?;
+            super::OperationIdentity::JsonDecode { left, right } => {
+                self.require_json_layout()?;
                 self.check_json_decode_result(*left, *right)
             }
-            super::OperationIdentity::JsonEncode { layout } => {
-                self.check_canonical_json_layout(layout)
-            }
+            super::OperationIdentity::JsonEncode => self.require_json_layout(),
             super::OperationIdentity::Capability { name } => self.check_text(name),
             super::OperationIdentity::WiredInError { .. } => Ok(()),
         }
     }
 
-    fn check_canonical_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
-        let canonical = self.wire.json_layout.as_ref().ok_or_else(|| {
+    fn require_json_layout(&self) -> Result<(), ParseError> {
+        self.wire.json_layout.as_ref().ok_or_else(|| {
             ParseError::Malformed("JSON operation lacks program layout evidence".into())
         })?;
-        if layout != canonical {
-            return Err(ParseError::Malformed(
-                "JSON operation layout differs from program layout evidence".into(),
-            ));
-        }
         Ok(())
     }
 
@@ -2339,73 +2328,22 @@ mod tests {
         }
     }
 
-    fn json_layout(start: u32) -> super::super::JsonLayout {
-        let mut next = start;
-        let mut id = || {
-            let value = ConstructorId(next);
-            next += 1;
-            value
-        };
-        super::super::JsonLayout {
-            object: id(),
-            array: id(),
-            string: id(),
-            number: id(),
-            bool_: id(),
-            null: id(),
-            map_bin: id(),
-            map_tip: id(),
-            true_: id(),
-            false_: id(),
-            cons: id(),
-            nil: id(),
-            scientific: id(),
-            integer_small: id(),
-            integer_positive: id(),
-            integer_negative: id(),
-            text: id(),
-            int: id(),
-        }
-    }
-
     #[test]
-    fn json_codec_layout_rejects_duplicate_and_out_of_range_roles() {
+    fn json_operations_require_program_layout_evidence() {
         let program = valid_program();
         let mut validator = Validator::new(&program, DecodeLimits::default());
-        let unique_but_absent = super::super::OperationIdentity::JsonEncode {
-            layout: json_layout(0),
-        };
+        let encode = super::super::OperationIdentity::JsonEncode;
         assert!(matches!(
-            validator.check_operation_identity(&unique_but_absent),
+            validator.check_operation_identity(&encode),
             Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
         ));
 
-        let duplicate = super::super::OperationIdentity::JsonDecode {
-            layout: super::super::JsonLayout {
-                object: ConstructorId(0),
-                array: ConstructorId(0),
-                string: ConstructorId(0),
-                number: ConstructorId(0),
-                bool_: ConstructorId(0),
-                null: ConstructorId(0),
-                map_bin: ConstructorId(0),
-                map_tip: ConstructorId(0),
-                true_: ConstructorId(0),
-                false_: ConstructorId(0),
-                cons: ConstructorId(0),
-                nil: ConstructorId(0),
-                scientific: ConstructorId(0),
-                integer_small: ConstructorId(0),
-                integer_positive: ConstructorId(0),
-                integer_negative: ConstructorId(0),
-                text: ConstructorId(0),
-                int: ConstructorId(0),
-            },
+        let decode = super::super::OperationIdentity::JsonDecode {
             left: ConstructorId(0),
             right: ConstructorId(0),
         };
         assert!(matches!(
-            validator.check_operation_identity(&duplicate),
+            validator.check_operation_identity(&decode),
             Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
         ));
     }
@@ -2459,55 +2397,6 @@ mod tests {
                 root_mask: vec![],
             },
         }
-    }
-
-    #[test]
-    fn json_codec_layout_rejects_same_shape_wrong_identity() {
-        let roles = [
-            ("Tidepool.Aeson.Value", "Object"),
-            ("Tidepool.Aeson.Value", "Array"),
-            ("Tidepool.Aeson.Value", "String"),
-            ("Tidepool.Aeson.Value", "Number"),
-            ("Tidepool.Aeson.Value", "Bool"),
-            ("Tidepool.Aeson.Value", "Null"),
-            ("Data.Map.Internal", "Bin"),
-            ("Data.Map.Internal", "Tip"),
-            ("GHC.Types", "True"),
-            ("GHC.Types", "False"),
-            ("GHC.Types", ":"),
-            ("GHC.Types", "[]"),
-            ("Tidepool.Aeson.Scientific", "Scientific"),
-            ("GHC.Num.Integer", "IS"),
-            ("GHC.Num.Integer", "IP"),
-            ("GHC.Num.Integer", "IN"),
-            ("Data.Text.Internal", "Text"),
-            ("GHC.Types", "I#"),
-            ("GHC.Internal.Data.Either", "Left"),
-            ("GHC.Internal.Data.Either", "Right"),
-        ];
-        let mut program = valid_program();
-        program.constructors = roles
-            .iter()
-            .enumerate()
-            .map(|(index, (module, occurrence))| {
-                let mut declaration = empty_constructor(occurrence, 1, 1);
-                declaration.identity.module = (*module).into();
-                declaration.host_id = crate::DataConId(index as u64);
-                declaration
-            })
-            .collect();
-        // Keep the physical shape unchanged while changing the declared owner.
-        program.constructors[1].identity.module = "Impostor.Value".into();
-        let identity = super::super::OperationIdentity::JsonDecode {
-            layout: json_layout(0),
-            left: ConstructorId(18),
-            right: ConstructorId(19),
-        };
-        let mut validator = Validator::new(&program, DecodeLimits::default());
-        assert!(matches!(
-            validator.check_operation_identity(&identity),
-            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
-        ));
     }
 
     #[test]

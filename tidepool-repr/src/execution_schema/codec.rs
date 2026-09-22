@@ -583,14 +583,11 @@ impl Decoder {
                 };
                 super::OperationIdentity::WiredInError { kind }
             }
-            (4, 4) => super::OperationIdentity::JsonDecode {
-                layout: self.json_layout(&identity[1])?,
-                left: ConstructorId(u32_value(&identity[2], "JSON Left constructor")?),
-                right: ConstructorId(u32_value(&identity[3], "JSON Right constructor")?),
+            (4, 3) => super::OperationIdentity::JsonDecode {
+                left: ConstructorId(u32_value(&identity[1], "JSON Left constructor")?),
+                right: ConstructorId(u32_value(&identity[2], "JSON Right constructor")?),
             },
-            (5, 2) => super::OperationIdentity::JsonEncode {
-                layout: self.json_layout(&identity[1])?,
-            },
+            (5, 1) => super::OperationIdentity::JsonEncode,
             (0..=5, _) => {
                 return Err(ParseError::Malformed("invalid operation identity".into()));
             }

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 13;
-pub const EXECUTION_ABI_VERSION: u64 = 6;
+pub const SCHEMA_VERSION: u64 = 14;
+pub const EXECUTION_ABI_VERSION: u64 = 7;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -788,13 +788,10 @@ pub enum OperationIdentity {
         convention: ForeignConvention,
     },
     JsonDecode {
-        layout: JsonLayout,
         left: ConstructorId,
         right: ConstructorId,
     },
-    JsonEncode {
-        layout: JsonLayout,
-    },
+    JsonEncode,
     /// An explicitly catalogued missing runtime capability, never an arbitrary
     /// unresolved import. Keeps GHC's Returns signature; execution fails without
     /// publishing a result. Native admission checks the exact name/signature.

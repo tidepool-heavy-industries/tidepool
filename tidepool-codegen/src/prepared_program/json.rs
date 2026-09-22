@@ -121,16 +121,10 @@ pub(super) fn recognize(
     identity: &OperationIdentity,
     signature: &Signature,
 ) -> Option<(
-    JsonLayout,
     tidepool_repr::execution_schema::ConstructorId,
     tidepool_repr::execution_schema::ConstructorId,
 )> {
-    let OperationIdentity::JsonDecode {
-        layout,
-        left,
-        right,
-    } = identity
-    else {
+    let OperationIdentity::JsonDecode { left, right } = identity else {
         return None;
     };
     (signature.arguments
@@ -140,19 +134,15 @@ pub(super) fn recognize(
             RuntimeRep::Int(64),
         ]
         && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef]))
-    .then_some((*layout, *left, *right))
+    .then_some((*left, *right))
 }
 
-pub(super) fn recognize_encode(
-    identity: &OperationIdentity,
-    signature: &Signature,
-) -> Option<JsonLayout> {
-    let OperationIdentity::JsonEncode { layout } = identity else {
-        return None;
+pub(super) fn recognize_encode(identity: &OperationIdentity, signature: &Signature) -> bool {
+    let OperationIdentity::JsonEncode = identity else {
+        return false;
     };
-    (signature.arguments == [RuntimeRep::LiftedRef]
-        && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef]))
-    .then_some(*layout)
+    signature.arguments == [RuntimeRep::LiftedRef]
+        && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef])
 }
 
 pub(super) fn emit_parse_json(

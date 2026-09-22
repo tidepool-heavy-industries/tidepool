@@ -77,8 +77,8 @@ resolveJsonAuthority env = case lookupPackageName
           _ -> Nothing
       _ -> pure Nothing
 
-data JsonSpec = DecodeJson DataCon (JsonLayout DataCon) DataCon DataCon
-  | EncodeJson DataCon (JsonLayout DataCon)
+data JsonSpec = DecodeJson DataCon DataCon DataCon
+  | EncodeJson DataCon
   deriving stock (Eq)
 data JsonError = InvalidJsonType Text | BottomingJsonDefinition Text
   deriving stock (Eq, Show)
@@ -94,15 +94,15 @@ classifyJson authority@(JsonAuthority owner textUnit _) binder
         , Just (eitherTyCon, [failure, success]) <- splitTyConApp_maybe result
         , exact Nothing "GHC.Internal.Data.Either" "Either" eitherTyCon
         , isText failure, isValue success
-        , Just layout <- jsonLayoutForValue success
+        , Just _ <- jsonLayoutForValue success
         , Just left <- named "Left" (tyConDataCons eitherTyCon)
         , Just right <- named "Right" (tyConDataCons eitherTyCon) ->
-            Right (Just (DecodeJson textConstructor layout left right))
+            Right (Just (DecodeJson textConstructor left right))
       ("encodeValue", ([Scaled _ argument], result))
         | isValue argument
         , Just textConstructor <- textConstructorOf result
-        , Just layout <- jsonLayoutForValue argument ->
-            Right (Just (EncodeJson textConstructor layout))
+        , Just _ <- jsonLayoutForValue argument ->
+            Right (Just (EncodeJson textConstructor))
       _ -> Left (InvalidJsonType (label <> ": " <> Text.pack (showSDocUnsafe (ppr (idType binder)))))
  where
   name = varName binder

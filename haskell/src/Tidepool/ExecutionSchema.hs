@@ -23,8 +23,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 13
-executionAbiVersion = 6
+schemaVersion = 14
+executionAbiVersion = 7
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -99,8 +99,8 @@ data JsonLayout a = JsonLayout
 data OperationIdentity
   = PrimOpIdentity Text
   | IntrinsicIdentity Text ForeignConvention
-  | JsonDecodeIdentity (JsonLayout ConstructorId) ConstructorId ConstructorId
-  | JsonEncodeIdentity (JsonLayout ConstructorId)
+  | JsonDecodeIdentity ConstructorId ConstructorId
+  | JsonEncodeIdentity
   | CapabilityIdentity Text
   | WiredInErrorIdentity WiredInErrorKind
   deriving stock (Eq, Ord, Show, Generic)

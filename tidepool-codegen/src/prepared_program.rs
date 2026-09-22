@@ -161,6 +161,8 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("JSON operation was admitted without a program JSON layout")]
+    MissingJsonLayout,
     #[error("the program's root block could not be allocated")]
     RootBlock,
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]

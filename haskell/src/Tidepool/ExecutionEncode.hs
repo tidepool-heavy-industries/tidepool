@@ -135,9 +135,9 @@ encodeOperation operation = array
       IntrinsicIdentity symbol CCall -> tagged 1 [encodeString symbol, tag 0]
       CapabilityIdentity name -> tagged 2 [encodeString name]
       WiredInErrorIdentity kind -> tagged 3 [encodeWord (fromIntegral (fromEnum kind))]
-      JsonDecodeIdentity layout left right -> tagged 4
-        [encodeJsonLayout layout, encodeConstructorId left, encodeConstructorId right]
-      JsonEncodeIdentity layout -> tagged 5 [encodeJsonLayout layout]
+      JsonDecodeIdentity left right -> tagged 4
+        [encodeConstructorId left, encodeConstructorId right]
+      JsonEncodeIdentity -> tag 5
   , encodeSignatureId (operationSignature operation)
   ]
 
