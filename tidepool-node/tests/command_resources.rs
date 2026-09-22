@@ -1,4 +1,5 @@
-//! Run this target inside a fresh `systemd-run --user --scope -p Delegate=yes` scope.
+//! Run with `just test-command-resources-delegated`; the target needs an
+//! isolated delegated service cgroup with no other resident process.
 use std::{path::Path, sync::Arc, time::Duration};
 use tidepool_node::command_resources::{
     CommandResourcePolicy, CommandResourceStatus, CommandResources,

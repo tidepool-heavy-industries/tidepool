@@ -62,6 +62,11 @@ suite-plan crate:
 suite-check:
     {{ nix }} scripts/test-suite-check.sh
 
+# Exercise command admission, OOM, cancellation, and descendant cleanup in an
+# isolated delegated user service. This does not touch active Shoal services.
+test-command-resources-delegated:
+    {{ nix }} scripts/test-command-resources-delegated.sh
+
 # Run an inner-loop test selection derived from files changed since BASE.
 [positional-arguments]
 changed base="HEAD":
