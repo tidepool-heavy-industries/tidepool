@@ -5349,8 +5349,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer =
-                    crate::request_effect::rejected_reply_value(error, session.data_con_table())?;
+                let answer = crate::request_effect::ReplyResult::<()>(Err(error));
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5366,10 +5365,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::request_effect::response_observation_value(
-                    observation,
-                    session.data_con_table(),
-                )?;
+                let answer = crate::request_effect::RequestAnswer::Response(observation);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5468,8 +5464,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer =
-                    crate::request_effect::cancel_request_value(outcome, session.data_con_table())?;
+                let answer = crate::request_effect::RequestAnswer::Cancel(outcome);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5485,10 +5480,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::request_effect::abandon_response_value(
-                    outcome,
-                    session.data_con_table(),
-                )?;
+                let answer = crate::request_effect::RequestAnswer::Abandon(outcome);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5504,10 +5496,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::request_effect::forget_response_value(
-                    outcome,
-                    session.data_con_table(),
-                )?;
+                let answer = crate::request_effect::RequestAnswer::ForgetResponse(outcome);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5523,10 +5512,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::request_effect::reply_observation_value(
-                    observation,
-                    session.data_con_table(),
-                )?;
+                let answer = crate::request_effect::RequestAnswer::Reply(observation);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5559,10 +5545,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = crate::request_effect::watch_observation_value(
-                    observation,
-                    session.data_con_table(),
-                )?;
+                let answer = crate::request_effect::RequestAnswer::Watch(observation);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
@@ -5637,8 +5620,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer =
-                    crate::request_effect::forget_watch_value(outcome, session.data_con_table())?;
+                let answer = crate::request_effect::RequestAnswer::ForgetWatch(outcome);
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Delivered)
