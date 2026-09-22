@@ -104,6 +104,10 @@ enum Command {
         /// Execute the candidate workspace's model-free Haskell recipe checks.
         #[arg(long)]
         recipes: bool,
+        /// Run only this configured recipe entry (for example, Project.Checks.workbench).
+        /// Supplying it also enables recipe execution.
+        #[arg(long, value_name = "MODULE.FUNCTION")]
+        recipe: Option<String>,
     },
     /// Create a project-local actor run in its own tmux session.
     Init {
@@ -304,9 +308,11 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             path,
             ..Default::default()
         }),
-        Command::Check { workspace, recipes } => {
-            tidepool::exomonad::check(workspace, recipes).await
-        }
+        Command::Check {
+            workspace,
+            recipes,
+            recipe,
+        } => tidepool::exomonad::check_recipe(workspace, recipes, recipe).await,
         Command::Init {
             workspace,
             session,
@@ -449,6 +455,28 @@ mod tests {
                 .command,
             Command::Proxy { session, file: Some(file), json: true, fresh: false, actors: false }
                 if session == "run7" && file == std::path::Path::new("cell.hs")
+        ));
+    }
+
+    #[test]
+    fn check_cli_selects_one_configured_recipe() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "exomonad",
+                "check",
+                "--workspace",
+                "/tmp/project",
+                "--recipe",
+                "Project.JevChecks.reflex"
+            ])
+            .unwrap()
+            .command,
+            Command::Check {
+                workspace: Some(workspace),
+                recipes: false,
+                recipe: Some(recipe),
+            } if workspace == std::path::Path::new("/tmp/project")
+                && recipe == "Project.JevChecks.reflex"
         ));
     }
 }

@@ -30,6 +30,9 @@ checks = [
   "Project.Checks.workbench",
   "Project.CollaborationChecks.collaboration",
   "Project.SkillChecks.skills",
+  "Project.JevChecks.investigation",
+  "Project.JevChecks.review",
+  "Project.JevChecks.reflex",
 ]
 
 # Jev is compiled from the pinned upstream input; its value-typed facade lives

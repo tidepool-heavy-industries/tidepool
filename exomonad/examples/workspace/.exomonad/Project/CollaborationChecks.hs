@@ -9,7 +9,7 @@ import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
 
-import Project.Checks (script, checkImprovement)
+import Project.Checks (script, checkImprovementSelection)
 
 collaboration :: Member RecipeCheck effects => Eff effects ()
 collaboration = do
@@ -89,4 +89,4 @@ collaboration = do
   -- Feed this same repaired, accepted and incorporated work into the next-wave improvement.
   void $ turn owner "let ResponseReady reviewAnswer = accepted\nlet Produced (Accepted reviewed) = responseValue reviewAnswer\nlet delivered = Produced (Delivered reviewed (candidateCommit (reviewedCandidate reviewed)) [\"checked combined feature and plan\"]) :: Delivery\ninspectFull (deliverySummary delivered)"
   void $ turn owner "later <- snapshot\nlet packet = RsiInput (candidateCommit (reviewedCandidate reviewed)) \"Human requested: improve decision handoffs from this completed preparation.\" [] before later [deliverySummary delivered, \"Retained repair, accepted amendment, fresh consumer and failed/unconfirmed steering were exercised; no live usage measured.\"]\nlet improvementWave = \"requested-improvement\" :: ForkGroupLabel\nlet improvementLabel = \"workspace-style\" :: Label\nimprovement <- unfold (batch campaign improvementWave) (child (rsiBranch improvementLabel (atRef (GitRef (renderGitOid (rsiSource packet)))) packet))"
-  checkImprovement owner
+  checkImprovementSelection

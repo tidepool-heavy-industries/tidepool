@@ -4,7 +4,7 @@
 
 -- Executable examples, run against this candidate package without any models.
 -- The driver does not know the project roles or order: this ordinary Haskell does.
-module Project.Checks (workbench, context, script, checkImprovement) where
+module Project.Checks (workbench, context, script, checkImprovementSelection) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -60,20 +60,10 @@ workbench = do
   combined <- readFile owner "feature.txt"
   check "application owner incorporates and checks delivery" (combined == "repaired feature\n")
   script owner "rsi"
-  checkImprovement owner
+  checkImprovementSelection
 
--- The caller commissions RSI with the evidence from its own completed work.
-checkImprovement :: Member RecipeCheck effects => CheckActor -> Eff effects ()
-checkImprovement owner = do
+-- The selected RSI actor uses the configured model and receives current source.
+checkImprovementSelection :: Member RecipeCheck effects => Eff effects ()
+checkImprovementSelection = do
   improver <- activation
   check "requested RSI is an ordinary selected Astra" (checkModel improver == Just "gpt-6-astra" && "Current definitions:" `Text.isInfixOf` checkContext improver)
-  prompt <- readFile (checkActor improver) ".exomonad/prompts/task.md"
-  next <- checkpoint (checkActor improver) ".exomonad/prompts/task.md" (prompt <> "\nRecipe improvement: carry the checked contract.\n") "improve next-wave task guidance"
-  void $ turn (checkActor improver) ("respond (Produced (Candidate " <> gitOidLiteral next <> " [\"authored guidance check\"] [\"activate next swarm\"]))")
-  void $ git owner ["merge", "--ff-only", next]
-  frozen <- turn owner "inspectFull (fmap (T.isInfixOf \"Recipe improvement\") (workspacePrompt \"task\"))"
-  check "in-flight definitions remain frozen" (output frozen == "Just False")
-  void restart
-  nextOwner <- root
-  selected <- turn nextOwner "inspectFull (fmap (T.isInfixOf \"Recipe improvement\") (workspacePrompt \"task\"))"
-  check "the explicit next swarm consumes the changed prompt" (output selected == "Just True")

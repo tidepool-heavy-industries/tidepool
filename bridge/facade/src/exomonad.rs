@@ -485,6 +485,16 @@ pub async fn check(
     workspace: Option<PathBuf>,
     recipes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    check_recipe(workspace, recipes, None).await
+}
+
+/// Check a workspace, optionally running one configured recipe by its exact
+/// `MODULE.FUNCTION` entry.
+pub async fn check_recipe(
+    workspace: Option<PathBuf>,
+    recipes: bool,
+    recipe: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = resolve_workspace(workspace)?;
     let scratch = tempfile::tempdir()?;
     let selected = workspace::FrozenWorkspace::load(&workspace, scratch.path())?;
@@ -494,9 +504,11 @@ pub async fn check(
         "Modules: {}",
         selected.import_modules().collect::<Vec<_>>().join(", ")
     );
-    if recipes {
-        crate::actor_host::recipe_checks::run(&workspace, &selected).await?;
-        println!("Recipe checks finished in isolated resident sessions; no native workers or providers launched.");
+    if recipes || recipe.is_some() {
+        crate::actor_host::recipe_checks::run(&workspace, &selected, recipe.as_deref()).await?;
+        println!(
+            "Recipe checks finished in isolated resident sessions; no native workers or providers launched."
+        );
     } else {
         println!("No actors or providers launched; edits activate at the next swarm boundary.");
     }

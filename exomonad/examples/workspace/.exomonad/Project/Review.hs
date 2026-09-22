@@ -56,6 +56,7 @@ module Project.Review
   , reviewActor
     -- Pure helpers the root may reuse from a cell
   , riskCount
+  , riskCountAt
   , mergeOrder
   ) where
 
@@ -85,7 +86,13 @@ import Project.Reflex (classify, jevClasses)
 -- lowest risk merges first, ties broken by task name.
 riskCount :: ReviewState -> Int
 riskCount state =
-  length [key | (key, yes) <- reviewRisk state, yes > noulFloor (contractPolicy (reviewContract state))]
+  riskCountAt (noulFloor (contractPolicy (reviewContract state))) (reviewRisk state)
+
+-- | Count only risks above the contract's Noul floor. Kept pure so the
+-- deterministic ordering rule can be checked without asking Jev to score a
+-- candidate.
+riskCountAt :: Double -> [(Text, Double)] -> Int
+riskCountAt floor' risks = length [key | (key, score) <- risks, score > floor']
 
 mergeOrder :: [ReviewState] -> [(Text, Int)]
 mergeOrder states = foldr insert [] [(contractTask (reviewContract s), riskCount s) | s <- states]

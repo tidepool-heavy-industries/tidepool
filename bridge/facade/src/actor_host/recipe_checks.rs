@@ -15,13 +15,18 @@ use tidepool_effect::error::EffectError;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type CheckActor = (String, i64, i64);
 
-pub(crate) async fn run(workspace: &Path, selected: &FrozenWorkspace) -> Result<()> {
+pub(crate) async fn run(
+    workspace: &Path,
+    selected: &FrozenWorkspace,
+    recipe: Option<&str>,
+) -> Result<()> {
     if selected.checks.is_empty() {
         return Err(runtime_error(
             "no Haskell recipe checks configured in haskell.checks",
         ));
     }
-    for entry in &selected.checks {
+    let entries = select_checks(&selected.checks, recipe)?;
+    for entry in entries {
         println!("Recipe {entry}; definitions {}", selected.identity());
         let mut driver = Driver::start(workspace, selected.clone()).await?;
         let result = driver.evaluate(entry, selected);
@@ -46,6 +51,49 @@ pub(crate) async fn run(workspace: &Path, selected: &FrozenWorkspace) -> Result<
         );
     }
     Ok(())
+}
+
+fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&'a String>> {
+    match recipe {
+        None => Ok(checks.iter().collect()),
+        Some(requested) => match checks.iter().find(|entry| entry.as_str() == requested) {
+            Some(entry) => Ok(vec![entry]),
+            None => Err(runtime_error(format!(
+                "recipe {requested:?} is not configured; choose one of: {}",
+                checks.join(", ")
+            ))),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_checks;
+
+    #[test]
+    fn recipe_selector_matches_one_configured_entry_exactly() {
+        let checks = vec![
+            "Project.Checks.workbench".to_owned(),
+            "Project.JevChecks.reflex".to_owned(),
+        ];
+
+        assert_eq!(
+            select_checks(&checks, Some("Project.JevChecks.reflex")).unwrap(),
+            vec![&checks[1]]
+        );
+        assert_eq!(
+            select_checks(&checks, None).unwrap(),
+            vec![&checks[0], &checks[1]]
+        );
+    }
+
+    #[test]
+    fn recipe_selector_rejects_unconfigured_entries() {
+        let checks = vec!["Project.Checks.workbench".to_owned()];
+        let error = select_checks(&checks, Some("Project.Checks.missing")).unwrap_err();
+        assert!(error.to_string().contains("Project.Checks.missing"));
+        assert!(error.to_string().contains("Project.Checks.workbench"));
+    }
 }
 
 struct Driver {

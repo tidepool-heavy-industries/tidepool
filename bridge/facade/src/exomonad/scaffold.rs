@@ -44,6 +44,9 @@ checks = [
   "Project.Checks.workbench",
   "Project.CollaborationChecks.collaboration",
   "Project.SkillChecks.skills",
+  "Project.JevChecks.investigation",
+  "Project.JevChecks.review",
+  "Project.JevChecks.reflex",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
