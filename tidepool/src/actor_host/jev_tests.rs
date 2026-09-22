@@ -158,12 +158,6 @@ fn selected_shell_workspace(config: &mut ActorHostConfig) {
 }
 
 #[tokio::test]
-// Engine handoff: current HEAD first rejects the structured Bash argument map
-// with `a JSON map size requires I#`. Authenticating primitives as GHC.Types
-// and unwrapping Data.Map's strict size field reaches the selector, where the
-// prepared runtime then reports `bad pointer in JIT runtime` while constructing
-// the dynamic J.each/J.score request, before the Jev backend receives it.
-#[ignore = "prepared engine currently corrupts the selector request before Jev; unignore after the engine correctness rewrite"]
 async fn template_bash_scores_before_display_and_keeps_recovery() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
@@ -178,7 +172,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     )
     .await;
     let policy = Arc::clone(&campaign.root_installation.policy);
-    let invoked = tokio::spawn(async move {
+    let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
             policy.as_ref(),
             "bash",
@@ -196,14 +190,18 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         )
         .await
     });
-    let command_output = (1..=40)
+    let command_output = (1..=900)
         .map(|index| format!("background-{index}\n"))
         .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "ESSENTIAL-diagnostic\n");
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(commands.clone()));
-    let output = invoked.await.unwrap().to_string();
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands.clone()));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
     assert!(output.contains("ESSENTIAL-diagnostic"), "{output}");
     assert!(output.contains("<s"), "section markers missing: {output}");
     assert!(
@@ -215,8 +213,8 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         "recovery missing: {output}"
     );
     assert!(
-        !output.contains("background-1\nbackground-2"),
-        "raw output leaked before selection: {output}"
+        !output.lines().any(|line| line == "background-600"),
+        "a low-ranked section exceeded the selection budget: {output}"
     );
 
     let requests = backend.requests.lock();
