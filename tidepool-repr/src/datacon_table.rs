@@ -4,6 +4,7 @@ use crate::datacon::DataCon;
 use crate::execution_schema::JsonLayout;
 use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// The module-qualified identity of a constructor, used to distinguish a true
 /// varId collision from a harmless re-encounter of the same constructor. Falls
@@ -72,18 +73,13 @@ pub enum DataConCollision {
     },
 }
 
-/// Two or more DISTINCT constructors share both an unqualified name and a
-/// requested representation arity. [`DataConTable::get_by_name_arity_checked`]
-/// refuses to silently pick one (insertion order deciding encoding is exactly
-/// the freer-simple `Union`-eviction class of bug, one query-time step
-/// removed) — the caller must disambiguate via [`DataConTable::get_companion`]
-/// (sibling-group identity) or [`DataConTable::get_by_qualified_name`]
-/// (module-qualified identity) instead.
+/// Two or more constructors share an unqualified name and representation arity.
+/// Use [`DataConTable::get_by_qualified_name`] to resolve their identities.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "ambiguous DataCon lookup: {} constructors named {name:?} with arity {arity} — {candidates:?}. \
-     Insertion order cannot decide which one is correct; disambiguate via get_companion \
-     (sibling-group identity) or get_by_qualified_name (module-qualified identity).",
+     Insertion order cannot decide which one is correct; disambiguate via \
+     get_by_qualified_name (module-qualified identity).",
     candidates.len()
 )]
 pub struct AmbiguousDataCon {
@@ -100,6 +96,16 @@ pub struct AmbiguousDataCon {
 /// Populated during deserialization from the CBOR metadata section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataConTable {
+    metadata: Arc<DataConMetadata>,
+    /// Per-program JSON runtime IDs, attached only while a typed host value is
+    /// streamed through this table. Constructor metadata remains mergeable
+    /// without carrying another program's JSON authority forward.
+    json_layout: Option<JsonLayout<DataConId>>,
+}
+
+/// Constructor metadata is shared by response contexts and copied only on mutation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DataConMetadata {
     /// Mapping from unique DataConId to its metadata.
     by_id: HashMap<DataConId, DataCon>,
     /// Mapping from unqualified name to all DataConIds sharing that name.
@@ -108,12 +114,9 @@ pub struct DataConTable {
     by_qualified_name: HashMap<String, DataConId>,
     /// Mapping from parent-type name (e.g. "Verdict") to all DataConIds of
     /// that type, kept sorted by constructor TAG (declaration order) by
-    /// [`Self::sort_type_name_bucket`] — see that function for why insertion
+    /// [`DataConTable::sort_type_name_bucket`] — see that function for why insertion
     /// order cannot be trusted to already be in that order.
     by_type_name: HashMap<String, Vec<DataConId>>,
-    /// Type-sibling groups: DataConIds that appear together in case branches.
-    /// If Bin and Tip appear as alternatives in the same Case, they're siblings.
-    siblings: HashMap<DataConId, Vec<DataConId>>,
     /// Record field labels per constructor, in field order (from GHC's
     /// `dataConFieldLabels`). Only present for record constructors; positional
     /// constructors have no entry. Kept as a side-table (not on `DataCon`) so it
@@ -126,10 +129,6 @@ pub struct DataConTable {
     /// for the same reason as `field_labels`: pure render metadata, no effect
     /// on constructor identity/equality.
     field_types: HashMap<DataConId, Vec<String>>,
-    /// Per-program JSON runtime IDs, attached only while a typed host value is
-    /// streamed through this table. Constructor metadata remains mergeable
-    /// without carrying another program's JSON authority forward.
-    json_layout: Option<JsonLayout<DataConId>>,
 }
 
 impl DataConTable {
@@ -138,9 +137,13 @@ impl DataConTable {
         Self::default()
     }
 
-    /// Attach the compiler-authenticated JSON roles for one structural mount.
-    pub fn set_json_layout(&mut self, layout: JsonLayout<DataConId>) {
-        self.json_layout = Some(layout);
+    /// Share constructor metadata with exactly this program's JSON authority.
+    /// `None` clears any authority attached to the source context.
+    pub fn with_json_layout(&self, layout: Option<JsonLayout<DataConId>>) -> Self {
+        Self {
+            metadata: Arc::clone(&self.metadata),
+            json_layout: layout,
+        }
     }
 
     /// JSON roles attached by the owning prepared program, if any.
@@ -182,7 +185,7 @@ impl DataConTable {
     /// ingestion routes see byte-identical guard logic rather than two
     /// hand-maintained copies that could drift.
     fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
-        if let Some(existing) = self.by_id.get(&dc.id) {
+        if let Some(existing) = self.metadata.by_id.get(&dc.id) {
             if dc_identity(existing) != dc_identity(dc) {
                 return Err(DataConCollision::Id {
                     id: dc.id,
@@ -209,9 +212,10 @@ impl DataConTable {
             }
         }
         if let Some(qn) = &dc.qualified_name {
-            if let Some(&existing_id) = self.by_qualified_name.get(qn) {
+            if let Some(&existing_id) = self.metadata.by_qualified_name.get(qn) {
                 if existing_id != dc.id {
                     let existing_identity = self
+                        .metadata
                         .by_id
                         .get(&existing_id)
                         .map(|d| dc_identity(d).to_string())
@@ -238,6 +242,7 @@ impl DataConTable {
     /// Shared by both so there is exactly one implementation of the
     /// retain/re-push bookkeeping.
     fn upsert_no_sort(&mut self, dc: DataCon) -> String {
+        let metadata = Arc::make_mut(&mut self.metadata);
         let id = dc.id;
         let name = dc.name.clone();
         let qualified_name = dc.qualified_name.clone();
@@ -252,27 +257,27 @@ impl DataConTable {
         // keep its position, so skip the retain/re-push when the name is equal.
         let mut name_unchanged = false;
         let mut type_name_changed = false;
-        if let Some(old_dc) = self.by_id.insert(id, dc) {
+        if let Some(old_dc) = metadata.by_id.insert(id, dc) {
             if old_dc.name == name {
                 name_unchanged = true;
-            } else if let Some(vec) = self.by_name.get_mut(&old_dc.name) {
+            } else if let Some(vec) = metadata.by_name.get_mut(&old_dc.name) {
                 vec.retain(|&existing| existing != id);
                 if vec.is_empty() {
-                    self.by_name.remove(&old_dc.name);
+                    metadata.by_name.remove(&old_dc.name);
                 }
             }
             if old_dc.type_name != type_name {
                 type_name_changed = true;
-                if let Some(vec) = self.by_type_name.get_mut(&old_dc.type_name) {
+                if let Some(vec) = metadata.by_type_name.get_mut(&old_dc.type_name) {
                     vec.retain(|&existing| existing != id);
                     if vec.is_empty() {
-                        self.by_type_name.remove(&old_dc.type_name);
+                        metadata.by_type_name.remove(&old_dc.type_name);
                     }
                 }
             }
             if old_dc.qualified_name != qualified_name {
                 if let Some(ref old_qn) = old_dc.qualified_name {
-                    self.by_qualified_name.remove(old_qn);
+                    metadata.by_qualified_name.remove(old_qn);
                 }
             }
         } else {
@@ -282,16 +287,17 @@ impl DataConTable {
         // Insert the mapping for the new name (skipping an unchanged name so
         // its existing Vec position — and thus tie-break order — is preserved).
         if !name_unchanged {
-            self.by_name.entry(name).or_default().push(id);
+            metadata.by_name.entry(name).or_default().push(id);
         }
         if type_name_changed {
-            self.by_type_name
+            metadata
+                .by_type_name
                 .entry(type_name.clone())
                 .or_default()
                 .push(id);
         }
         if let Some(qn) = qualified_name {
-            self.by_qualified_name.insert(qn, id);
+            metadata.by_qualified_name.insert(qn, id);
         }
         type_name
     }
@@ -307,8 +313,9 @@ impl DataConTable {
     /// comparisons). Must be called for every bucket an upsert touched, even
     /// when the id was already in it — an overwrite may have changed its tag.
     fn sort_type_name_bucket(&mut self, type_name: &str) {
-        if let Some(bucket) = self.by_type_name.get_mut(type_name) {
-            let by_id = &self.by_id;
+        let metadata = Arc::make_mut(&mut self.metadata);
+        if let Some(bucket) = metadata.by_type_name.get_mut(type_name) {
+            let by_id = &metadata.by_id;
             bucket.sort_by_key(|i| (by_id.get(i).map(|d| d.tag).unwrap_or(0), i.0));
         }
     }
@@ -358,40 +365,43 @@ impl DataConTable {
 
     /// Look up by DataConId.
     pub fn get(&self, id: DataConId) -> Option<&DataCon> {
-        self.by_id.get(&id)
+        self.metadata.by_id.get(&id)
     }
 
     /// Look up by module-qualified name (e.g., "Data.Map.Bin"), returning the DataConId.
     pub fn get_by_qualified_name(&self, qname: &str) -> Option<DataConId> {
-        self.by_qualified_name.get(qname).copied()
+        self.metadata.by_qualified_name.get(qname).copied()
     }
 
     /// Record field labels for a constructor, in field order. Returns `None` for
     /// positional (non-record) constructors. Used by rendering to emit named-field
     /// JSON objects instead of positional `{"constructor", "fields"}`.
     pub fn field_labels_of(&self, id: DataConId) -> Option<&[String]> {
-        self.field_labels.get(&id).map(Vec::as_slice)
+        self.metadata.field_labels.get(&id).map(Vec::as_slice)
     }
 
     /// Attach record field labels to a constructor id. Empty label lists are
     /// ignored (positional constructors carry no entry).
     pub fn set_field_labels(&mut self, id: DataConId, labels: Vec<String>) {
         if !labels.is_empty() {
-            self.field_labels.insert(id, labels);
+            Arc::make_mut(&mut self.metadata)
+                .field_labels
+                .insert(id, labels);
         }
     }
 
     /// Iterate over all `(DataConId, labels)` field-label entries (for serialization).
     pub fn field_labels_iter(&self) -> impl Iterator<Item = (DataConId, &[String])> {
-        self.field_labels.iter().map(|(&id, v)| (id, v.as_slice()))
+        self.metadata
+            .field_labels
+            .iter()
+            .map(|(&id, v)| (id, v.as_slice()))
     }
 
     /// Rendered field types for a constructor, in field order. `None` for a
-    /// nullary constructor (no fields at all). Used by
-    /// `tidepool_harness::synopsis::type_document` to render a full
-    /// GHC-style `data` declaration instead of a names-only synopsis.
+    /// nullary constructor (no fields at all).
     pub fn field_types_of(&self, id: DataConId) -> Option<&[String]> {
-        self.field_types.get(&id).map(Vec::as_slice)
+        self.metadata.field_types.get(&id).map(Vec::as_slice)
     }
 
     /// Attach rendered field types to a constructor id. Empty type lists are
@@ -399,22 +409,28 @@ impl DataConTable {
     /// `set_field_labels`.
     pub fn set_field_types(&mut self, id: DataConId, types: Vec<String>) {
         if !types.is_empty() {
-            self.field_types.insert(id, types);
+            Arc::make_mut(&mut self.metadata)
+                .field_types
+                .insert(id, types);
         }
     }
 
     /// Iterate over all `(DataConId, types)` field-type entries (for serialization).
     pub fn field_types_iter(&self) -> impl Iterator<Item = (DataConId, &[String])> {
-        self.field_types.iter().map(|(&id, v)| (id, v.as_slice()))
+        self.metadata
+            .field_types
+            .iter()
+            .map(|(&id, v)| (id, v.as_slice()))
     }
 
     /// Look up by name, returning the DataConId.
     ///
     /// Returns `None` when multiple constructors share the same unqualified name,
     /// since the result would be ambiguous. Use `get_by_qualified_name`,
-    /// `get_by_name_arity`, or `get_companion` instead.
+    /// or `get_by_name_arity` instead.
     pub fn get_by_name(&self, name: &str) -> Option<DataConId> {
-        self.by_name
+        self.metadata
+            .by_name
             .get(name)
             .and_then(|vec| (vec.len() == 1).then(|| vec[0]))
     }
@@ -425,10 +441,15 @@ impl DataConTable {
     /// share the same unqualified name (e.g. `Array` from aeson vs GHC internals).
     /// Returns the last matching entry (preserving insertion-order preference).
     pub fn get_by_name_arity(&self, name: &str, arity: u32) -> Option<DataConId> {
-        self.by_name.get(name).and_then(|vec| {
+        self.metadata.by_name.get(name).and_then(|vec| {
             vec.iter()
                 .rev()
-                .find(|&&id| self.by_id.get(&id).is_some_and(|dc| dc.rep_arity == arity))
+                .find(|&&id| {
+                    self.metadata
+                        .by_id
+                        .get(&id)
+                        .is_some_and(|dc| dc.rep_arity == arity)
+                })
                 .copied()
         })
     }
@@ -449,13 +470,18 @@ impl DataConTable {
         name: &str,
         arity: u32,
     ) -> Result<Option<DataConId>, AmbiguousDataCon> {
-        let Some(ids) = self.by_name.get(name) else {
+        let Some(ids) = self.metadata.by_name.get(name) else {
             return Ok(None);
         };
         let mut candidates: Vec<DataConId> = ids
             .iter()
             .copied()
-            .filter(|id| self.by_id.get(id).is_some_and(|dc| dc.rep_arity == arity))
+            .filter(|id| {
+                self.metadata
+                    .by_id
+                    .get(id)
+                    .is_some_and(|dc| dc.rep_arity == arity)
+            })
             .collect();
         match candidates.len() {
             0 => Ok(None),
@@ -466,7 +492,8 @@ impl DataConTable {
                 candidates: candidates
                     .iter()
                     .map(|id| {
-                        self.by_id
+                        self.metadata
+                            .by_id
                             .get(id)
                             .map(|dc| dc_identity(dc).to_string())
                             .unwrap_or_else(|| format!("{id:?}"))
@@ -478,64 +505,41 @@ impl DataConTable {
 
     /// Return all DataConIds sharing a given name (in insertion order).
     pub fn get_all_by_name(&self, name: &str) -> &[DataConId] {
-        self.by_name.get(name).map_or(&[], |v| v.as_slice())
+        self.metadata
+            .by_name
+            .get(name)
+            .map_or(&[], |v| v.as_slice())
     }
 
     /// Resolve a rendered parent-type name (e.g. "Verdict") to its full
     /// constructor set, in declaration order. Empty when no constructor was
     /// recorded against that type name.
     pub fn constructors_of_type(&self, type_name: &str) -> Vec<DataConId> {
-        self.by_type_name
+        self.metadata
+            .by_type_name
             .get(type_name)
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Find a constructor by name+arity that is a type-sibling of `known_id`.
-    ///
-    /// Uses sibling groups populated by `populate_siblings_from_expr` — if two
-    /// DataCons appear as alternatives in the same case expression, they're from
-    /// the same type. Falls back to scanning all entries if no sibling info exists.
-    pub fn get_companion(&self, known_id: DataConId, name: &str, arity: u32) -> Option<DataConId> {
-        // First try sibling groups (reliable, derived from case branches)
-        if let Some(sibs) = self.siblings.get(&known_id) {
-            for &sib_id in sibs {
-                if let Some(dc) = self.by_id.get(&sib_id) {
-                    if dc.name == name && dc.rep_arity == arity {
-                        return Some(sib_id);
-                    }
-                }
-            }
-        }
-        // Fallback: just use get_by_name_arity
-        self.get_by_name_arity(name, arity)
-    }
-
-    /// Populate sibling groups by scanning case branches in an expression tree.
-    ///
-    /// DataCons that appear as alternatives in the same Case expression are from
-    /// the same algebraic type. This information is used by `get_companion` to
-    /// disambiguate constructors that share unqualified names (e.g., Bin/Tip from
-    /// Data.Map vs Data.Set).
-
     /// Number of entries.
     pub fn len(&self) -> usize {
-        self.by_id.len()
+        self.metadata.by_id.len()
     }
 
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.metadata.by_id.is_empty()
     }
 
     /// Look up constructor name by DataConId.
     pub fn name_of(&self, id: DataConId) -> Option<&str> {
-        self.by_id.get(&id).map(|dc| dc.name.as_str())
+        self.metadata.by_id.get(&id).map(|dc| dc.name.as_str())
     }
 
     /// Iterate over all data constructors.
     pub fn iter(&self) -> impl Iterator<Item = &DataCon> {
-        self.by_id.values()
+        self.metadata.by_id.values()
     }
 }
 
@@ -543,6 +547,83 @@ impl DataConTable {
 mod tests {
     use super::*;
     use crate::datacon::SrcBang;
+
+    #[test]
+    fn response_contexts_share_metadata_but_replace_json_authority() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon(1, "Example", 1, 0));
+        let layout = JsonLayout {
+            object: 1,
+            array: 2,
+            string: 3,
+            number: 4,
+            bool_: 5,
+            null: 6,
+            map_bin: 7,
+            map_tip: 8,
+            true_: 9,
+            false_: 10,
+            cons: 11,
+            nil: 12,
+            scientific: 13,
+            integer_small: 14,
+            integer_positive: 15,
+            integer_negative: 16,
+            text: 17,
+            int: 18,
+        }
+        .map(DataConId);
+        let first = table.with_json_layout(Some(layout));
+        let other_layout = layout.map(|id| DataConId(id.0 + 100));
+        let second = first.with_json_layout(Some(other_layout));
+        let without_authority = second.with_json_layout(None);
+        for context in [&first, &second, &without_authority] {
+            assert!(Arc::ptr_eq(&table.metadata, &context.metadata));
+            assert_eq!(context.get(DataConId(1)), table.get(DataConId(1)));
+        }
+        assert_eq!(first.json_layout(), Some(&layout));
+        assert_eq!(second.json_layout(), Some(&other_layout));
+        assert!(table.json_layout().is_none());
+        assert!(without_authority.json_layout().is_none());
+    }
+
+    #[test]
+    fn shared_table_mutation_keeps_snapshots_and_indexes_independent() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon_typed(1, "First", 1, 1, "Example"));
+        table.set_field_labels(DataConId(1), vec!["original".into()]);
+        table.set_field_types(DataConId(1), vec!["Int".into()]);
+        let snapshot = table.clone();
+        assert!(Arc::ptr_eq(&table.metadata, &snapshot.metadata));
+        table
+            .extend_checked([
+                make_datacon_typed(3, "Third", 3, 0, "Example"),
+                make_datacon_typed(2, "Second", 2, 0, "Example"),
+            ])
+            .unwrap();
+        assert!(!Arc::ptr_eq(&table.metadata, &snapshot.metadata));
+        let metadata = Arc::as_ptr(&table.metadata);
+        table.set_field_labels(DataConId(1), vec!["changed".into()]);
+        table.set_field_types(DataConId(1), vec!["Text".into()]);
+        assert_eq!(
+            Arc::as_ptr(&table.metadata),
+            metadata,
+            "unique metadata is mutated in place"
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.get_by_name("Second").is_none());
+        assert_eq!(
+            snapshot.field_labels_of(DataConId(1)).unwrap(),
+            ["original"]
+        );
+        assert_eq!(snapshot.field_types_of(DataConId(1)).unwrap(), ["Int"]);
+        assert_eq!(
+            table.constructors_of_type("Example"),
+            [DataConId(1), DataConId(2), DataConId(3)]
+        );
+        assert_eq!(table.field_labels_of(DataConId(1)).unwrap(), ["changed"]);
+        assert_eq!(table.field_types_of(DataConId(1)).unwrap(), ["Text"]);
+    }
 
     fn make_datacon(id: u64, name: &str, tag: u32, rep_arity: u32) -> DataCon {
         DataCon {
@@ -711,36 +792,6 @@ mod tests {
 
         assert_eq!(table.get_by_name_arity("Bin", 5), Some(DataConId(100)));
         assert_eq!(table.get_by_name_arity("Bin", 3), Some(DataConId(200)));
-    }
-
-    #[test]
-    fn test_get_companion_with_siblings() {
-        let mut table = DataConTable::new();
-        // Data.Map constructors
-        table.insert(make_datacon(100, "Bin", 1, 5));
-        table.insert(make_datacon(101, "Tip", 2, 0));
-        // Data.Set constructors (different IDs, same names)
-        table.insert(make_datacon(200, "Bin", 1, 3));
-        table.insert(make_datacon(201, "Tip", 2, 0));
-
-        // Simulate case branches: Bin(100) and Tip(101) appear together
-        table.siblings.insert(DataConId(100), vec![DataConId(101)]);
-        table.siblings.insert(DataConId(101), vec![DataConId(100)]);
-        // Bin(200) and Tip(201) appear together
-        table.siblings.insert(DataConId(200), vec![DataConId(201)]);
-        table.siblings.insert(DataConId(201), vec![DataConId(200)]);
-
-        // Given Map's Bin (100), find companion Tip → should be 101
-        assert_eq!(
-            table.get_companion(DataConId(100), "Tip", 0),
-            Some(DataConId(101))
-        );
-
-        // Given Set's Bin (200), find companion Tip → should be 201
-        assert_eq!(
-            table.get_companion(DataConId(200), "Tip", 0),
-            Some(DataConId(201))
-        );
     }
 
     #[test]

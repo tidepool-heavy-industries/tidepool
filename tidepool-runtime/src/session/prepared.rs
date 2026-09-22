@@ -951,10 +951,7 @@ fn build_structural_node(
     // this visit only: `serde_json::Value` then cannot borrow another
     // program's layout, and ordinary JSON effect replies work even when the
     // session table was assembled before this program installed.
-    let mut response_table = table.clone();
-    if let Some(layout) = facts.json_layout() {
-        response_table.set_json_layout(layout);
-    }
+    let response_table = table.with_json_layout(facts.json_layout());
     let mut visitor = StructuralAnswerVisitor {
         site,
         root,
@@ -3960,8 +3957,8 @@ mod tests {
             .expect("JSON layout IDs are declared");
         let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 64)
             .expect("bootstrap JSON mount fixture");
-        let mut table = json_mount_table();
-        table.set_json_layout(layout);
+        let table = json_mount_table();
+        let table = table.with_json_layout(Some(layout));
         let payload = serde_json::json!({
             "nested": [[{"key": "value", "n": serde_json::Value::Number("1000000000000000000000000000001".parse().expect("large JSON number"))}], [true, null]],
             "large": (0..128).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),

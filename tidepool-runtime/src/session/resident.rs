@@ -2206,10 +2206,9 @@ where
             &DataConTable,
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
     ) -> Result<(), ResidentError> {
-        let mut table = code.table.clone().into_owned();
-        if let Some(layout) = json_runtime_layout_optional(&code.prepared) {
-            table.set_json_layout(layout);
-        }
+        let table = code
+            .table
+            .with_json_layout(json_runtime_layout_optional(&code.prepared));
         self.state
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
