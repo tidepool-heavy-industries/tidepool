@@ -155,11 +155,15 @@ data PreparationKind = CheckOnly | PrepareStg
 data CheckedInterfaceUse
   = CheckedInterfaceLeaf
   | CheckedInterfaceNeededBy ModuleName
+  | CheckedInterfaceNeededForSessionInjection
 
 checkedInterfaceUse :: ModSummary -> Map.Map ModuleName ModuleName -> CheckedInterfaceUse
-checkedInterfaceUse summary laterConsumers =
-  maybe CheckedInterfaceLeaf CheckedInterfaceNeededBy
-    (Map.lookup (ms_mod_name summary) laterConsumers)
+checkedInterfaceUse summary laterConsumers
+  | Just (SessionModule LibMod _) <- parseSessionModule
+      (moduleNameString (ms_mod_name summary)) =
+      CheckedInterfaceNeededForSessionInjection
+  | otherwise = maybe CheckedInterfaceLeaf CheckedInterfaceNeededBy
+      (Map.lookup (ms_mod_name summary) laterConsumers)
 
 -- | The consumer maps line up with summaries: each map records normal home
 -- imports from only the modules after that position. Building them in one
@@ -1538,27 +1542,32 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
               parsed <- parseModule summary
               typed <- typecheckModule (pvTransformParsed variant summary parsed)
               let tcg = fst (tm_internals_ typed)
+                  retainInterface reason = do
+                    -- A later source module's normal home import resolves via
+                    -- this HPT entry. A source-less Val interface injected before
+                    -- a later module can also mention an earlier generated Lib
+                    -- without importing it from source. SOURCE imports keep using
+                    -- the boot iface installed by GHC's load phase, and no returned
+                    -- metadata consumer reads the target back through HPT.
+                    env <- getSession
+                    details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
+                    (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
+                      (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
+                        mkIfaceTc env Sf_None details summary Nothing tcg
+                    let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+                    setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+                    when timing $ liftIO $ hPutStrLn stderr $
+                      "tidepool-checked-interface-retained module="
+                        ++ moduleNameString (ms_mod_name summary) ++ reason
               case checkedInterfaceUse summary laterConsumers of
                 CheckedInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
                   "tidepool-checked-interface-elided module="
                     ++ moduleNameString (ms_mod_name summary)
                     ++ " reason=no-later-home-importer"
-                CheckedInterfaceNeededBy consumer -> do
-                  -- A later source module's normal home import resolves via
-                  -- this HPT entry. SOURCE imports keep using the boot iface
-                  -- installed by GHC's load phase, and no returned metadata
-                  -- consumer reads the target back through HPT.
-                  env <- getSession
-                  details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
-                  (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
-                    (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
-                      mkIfaceTc env Sf_None details summary Nothing tcg
-                  let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
-                  setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
-                  when timing $ liftIO $ hPutStrLn stderr $
-                    "tidepool-checked-interface-retained module="
-                      ++ moduleNameString (ms_mod_name summary)
-                      ++ " consumer=" ++ moduleNameString consumer
+                CheckedInterfaceNeededBy consumer ->
+                  retainInterface (" consumer=" ++ moduleNameString consumer)
+                CheckedInterfaceNeededForSessionInjection ->
+                  retainInterface " reason=session-value-interface"
               pure (if isTarget then Just tcg else Nothing)
         errors <- liftIO (nub . reverse <$> readIORef errorRef)
         cpBeforeMerge plan loadFlag errors

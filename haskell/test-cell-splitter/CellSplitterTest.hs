@@ -17,6 +17,8 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
+import Tidepool.ExtractRequest (InspectionRequest(..))
+import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
@@ -257,6 +259,19 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
           compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
       assertContains "metadata captures the checked target's types" "Box Int"
         (show (crCapturedTypes checked))
+      inspected <- runInspection
+        (crHscEnv checked)
+        (crTargetTcGblEnv checked)
+        (crTargetRdrEnv checked)
+        (crCapturedTypes checked)
+        [InspectTypeOf "value", InspectModule "MetadataTarget" False]
+      case inspected of
+        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
+          assertContains "inspection resolves a local probe without a target HPT interface"
+            "Box Int" rendered
+          unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
+            fail "metadata inspection could not browse the checked target module"
+        _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
       assertContains "metadata leaf skips its unused HPT interface"
