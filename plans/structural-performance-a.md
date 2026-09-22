@@ -10,10 +10,11 @@ category savings with defining-module savings.
 
 1. Eliminate full GHC interfaces for leaf targets only after proving no
    downstream compilation, metadata query, recovery, or TH consumer needs them.
-2. Package immutable Tidepool support under the toolchain identity; keep mutable
-   workspace, effect-row shims, and session generations outside that boundary.
-   Reuse existing artifact, export, and validity owners. Audit code retained
-   solely because support exports reside in authored programs.
+2. Keep immutable Tidepool support in the existing content-addressed source,
+   artifact, export, and validity owners. The attempted package manifest and
+   staging layer did not remain the supported boundary and has been retired;
+   mutable workspace, effect-row shims, and session generations remain outside
+   immutable source ownership.
 3. Compile expression display alongside the expression. Pass runtime budgets and
    presented keys as values; preserve observation publication before display
    failure, execute-once behavior, lexical aliases, and partial commits.
@@ -43,7 +44,8 @@ call-site evidence.
 - Remove JSON guard placeholder trees, bigint intermediate values, repeated
   observation bitmap/region copies, and eager observation-root reservation.
 - Audit linear constructor lookup in structural response validation.
-- Reuse immutable actor-spec artifacts with fresh actor instances and exact
+- Measure repeated actor-spec preparation before considering immutable artifact
+  reuse. Any later design must use fresh actor instances and exact
   source/import/effect/toolchain identity; never share a mutable live handle.
 - Prepare fixed root/spec test artifacts once with compiler dependency evidence,
   preserving fresh machines and separate crash/signal/global-state processes.
@@ -100,15 +102,16 @@ warm request spends 3.307s in Effects.Core, versus 37ms in its Expr module;
 Contract, Actors.Unfold, and Command take 372ms, 363ms, and 296ms respectively.
 These module numbers are subsets of the phase totals above.
 
-Priority is therefore (1) remove unnecessary quasiquotation from generated
-support only, retaining conservative validation and authored language behavior,
-then measure actual reuse; (2) fuse display preparation to remove whole compiler
-requests while preserving fresh lexical identities and failure publication;
-(3) reassess immutable-support packaging against the remaining measured cost.
-Packaging is held pending the cheaper reuse correction. Native lookup/interface
-micro-optimizations are not the primary notebook-latency work. Reuse and request
-removal overlap: measure the combined result rather than adding their projected
-savings.
+The historical priority was therefore (1) remove unnecessary quasiquotation
+from generated support only, retaining conservative validation and authored
+language behavior, then measure actual reuse; (2) fuse display preparation to
+remove whole compiler requests while preserving fresh lexical identities and
+failure publication; and (3) reassess immutable-support packaging against the
+remaining measured cost. The first two changes removed the measured need for a
+separate package boundary, and the later staging implementation was retired.
+Native lookup/interface micro-optimizations were not the primary notebook
+latency work. Reuse and request removal overlap: measure the combined result
+rather than adding their projected savings.
 
 The generated-support correction landed in `b5f094270`. Against the same frozen
 baseline workload, two current recurring one-statement cells measured 5.017s
@@ -312,15 +315,21 @@ questions that this implementation closes before handoff.
   daemon startup and signal cleanup. Selection tests: 16 passed; command tests:
   4 passed; shell syntax/Python compilation/diff check passed.
 
-### Completion state
+### Historical completion state
 
-The authorized implementation wave is complete. Stable support packaging and
-cross-actor spec artifact reuse remain evidence-gated: current profiles do not
-justify adding a new package/cache owner. Actor-spec timing is instrumented but
-has no controlled activation/reload workload result yet. Per-carrier native
-function/byte deltas are also unmeasured; the structural evidence proves one
-compiler request and one program for each Text/Job carrier, not a wall-time or
-native-byte claim.
+The preceding wave completed at the revision described by the historical
+integration evidence below. Its stable-support packaging proposal was later
+retired rather than promoted to a supported owner. Cross-actor spec artifact
+reuse remains evidence-gated: the profiles did not justify adding another
+cache owner. Per-carrier native function/byte deltas were not measured; the
+structural evidence proved one compiler request and one program for each
+Text/Job carrier, not a wall-time or native-byte claim.
+
+The current continuation is complete only after the authenticated JSON
+contract, compiler representation repair, actor response streaming, and safe
+JSON traversal have passed their focused and integrated acceptance checks.
+Current results are recorded separately below so historical schema and timing
+claims are not mistaken for the supported state.
 
 ### Retired selfharness requirements
 
@@ -409,7 +418,7 @@ No timings from concurrent-build runs will be presented as controlled speedups.
   already-shipped effects to the ordered declaration assertion. Facade/harness
   all-target consumer checks also passed.
 
-### Final integration and typed host boundary
+### Historical final integration and typed host boundary
 
 - `f13d8943f`, `5bc4c1bb3`: actor request JSON, retained tool-result Text, and
   command Job payloads use typed managed mounts. Payload bytes no longer enter
@@ -433,7 +442,7 @@ No timings from concurrent-build runs will be presented as controlled speedups.
   edges and one lockfile package. Remaining machete reports are derive/build
   script inputs with verified consumers.
 
-Passed integration checks: `just quick` (722 tests); `just fixtures-check`
+Historical integration checks passed: `just quick` (722 tests); `just fixtures-check`
 (812 projection/validation/admission/compilation cases, 705 executable cases,
 zero failures, all structural cohorts, seven embedded artifacts); bridge suite
 (70); typed JSON/Text/Job carrier execution; A-to-B captured-input retention;
@@ -449,6 +458,75 @@ found a stale oracle fingerprint after `Job` changed from `newtype` to strict
 `data`, and regeneration changed only that fingerprint before the full rerun
 passed. Intermediate test failures are not counted as passed coverage.
 
-Unrun: the approximately two-hour `just verify`, by repository policy. No
-controlled actor-spec activation/reload timing or isolated per-carrier native
-byte measurement was claimed.
+Unrun in that historical wave: the approximately two-hour `just verify`, by
+repository policy. No controlled actor-spec activation/reload timing or
+isolated per-carrier native-byte measurement was claimed.
+
+## Structural finish wave: 2026-09-22
+
+This continuation retires unsupported build surfaces, establishes one
+compiler-authenticated JSON contract, repairs constructor representation
+consistency, streams actor responses, and bounds JSON traversal ownership.
+The schema is version 14 with worker ABI 7; all seven registered embedded
+artifacts were regenerated through their canonical producers.
+
+### Implemented parcels
+
+- `a2c7faa30`, `505795f3f`, `1972dc9cb`: retired the selfharness and operator
+  web crates from supported workspace/deployment/selection graphs while
+  retaining their source. Removed immutable-support staging and compiler-bound
+  wrappers, restored the content-addressed Core/Authored source owner, and
+  prevented automatic binary discovery.
+- `5c12d3af0`, `79f639e52`, `04504eab0`, `05e8177f6`, `5d911c263`,
+  `9626578a1`, `f3869ecc6`, `427ea3087`: centralized the 18 named JSON roles in the
+  program contract, authenticated nominal identities and dependency owners,
+  kept decode `Left`/`Right` operation-local, attached the parked program's
+  layout to structural replies, shared immutable constructor metadata without
+  deep response copies, removed eager JSON trees, and corrected the
+  compiler-derived GHC role fixtures.
+- `9f23cbf2b`, `134f59690`, `7070338b4`, `8b19d8a14`, `a59c979ef`,
+  `e062b5ee0`, `287308aac`: made
+  representation flags canonical before GHC loading, preserved prepared home
+  interfaces and TH bytecode, rejected conflicting constructor evidence before
+  publication across independent type graphs, retained that evidence at the
+  canonical interner, removed the Scientific boxed-exponent fallback, and
+  pinned the installed `Either` owner used by native decode.
+- `29a7f8792`, `86ce60320`, `c1e6ec554`, `3a3db0a02`, `e07cfe7ad`,
+  `2cd399277`: classified continuation responses from frame consumption,
+  streamed wait/poll and every supported actor response projection, removed
+  superseded eager builders, and consolidated framed-custody validation.
+- `bc89ce165`, `12c105e06`, `457631734`, `f701519e4`: replaced list-wide JSON
+  identity history with rooted Brent detection, bounded Value/map ancestor
+  tracking, prompt temporary-root release, geometric fallible free-list growth,
+  duplicate-key cleanup, primary-error preservation, real traversal metrics,
+  and the intrinsic scope required while forcing lazy observations.
+- `d25a4baf2`, `d238731d5`, `55ec05422`: selected shared shell output through
+  Jev using the existing response contract, kept intrinsic fallback demand
+  conservative through optimization, and authenticated every embedded source
+  which can change the worker. Its compiler and runtime regressions are part of
+  the joined acceptance boundary rather than a separate performance claim.
+
+### Current evidence and remaining gate
+
+Focused compiler, schema, runtime, actor, and GC checks pass, including the
+compiler-produced Scientific installation test, shadow dependency rejection,
+parked JSON reply, actor reload, classified response retry, real JSON failure
+recovery, and the serial codegen suite. The supported Cargo all-target check
+and `just quick` also pass. Independent GC review accepted rooted-cycle,
+temporary-root, cleanup-error, and lazy-force ownership after the concrete
+failure repairs. Independent compiler/schema review accepted canonical
+cross-graph constructor interning, authenticated `Either`/JSON ownership,
+prepared-interface consistency, conservative intrinsic demand, and COW
+authority clearing; its stale provenance comment was corrected in
+`4860ab773`. Exact final integration counts, matched workload
+measurements, and the final revision are recorded after the one complete
+`just fixtures-check` run; `just verify` remains intentionally unrun by
+repository policy.
+
+### Required second-pass audit
+
+After this finish wave is integrated and measured, run a fresh review for
+correctness gaps and missing low-cost structural or performance wins. Keep the
+audit narrow and evidence-led: repair concrete findings, remove newly obsolete
+paths, and measure before proposing another cache, package boundary, request
+batcher, or dispatch redesign.
