@@ -128,7 +128,7 @@ fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
 fn probe_import(module: &str, include: &[PathBuf]) -> Result<(), tidepool_runtime::CompileError> {
     let src = format!(
         "{pragmas}\nmodule LibProbe where\nimport {module}\n__libProbe__ :: ()\n__libProbe__ = ()\n",
-        pragmas = crate::EVAL_PRAGMAS,
+        pragmas = tidepool_runtime::session::generated_support_pragmas(),
     );
     let refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
     tidepool_runtime::compile_haskell(&src, "__libProbe__", &refs).map(|_| ())
