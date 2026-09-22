@@ -1761,56 +1761,52 @@ internSignature signature = do
 
 internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
-  known <- gets constructors
-  case lookup con known of
-    Just identity -> pure identity
-    Nothing -> do
-      reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
-      -- GHC expands strictness along with representation arguments: a strict
-      -- unboxed tuple does not make its lifted components strict. Resolve all
-      -- representations first, before calling the fixed-representation helper.
-      let marks = map isMarkedStrict (dataConRuntimeRepStrictness con)
-      if length marks /= length reps
-        then failRepresentation "constructor runtime strictness/representation arity mismatch"
-        else pure ()
-      let fieldStrictness = zipWith (\strict rep -> strict || isUnboxed rep) marks reps
-      resultReps <- repsForType (dataConOrigResTy con)
-      resultRep <- case resultReps of
-        [rep@LiftedRefRep] -> pure rep
-        [rep@UnliftedRefRep] -> pure rep
-        _ -> failRepresentation "heap constructor lacks a managed result representation"
-      layout <- layoutFor reps
-      tag <- checkedWord32 "constructor tag" (dataConTag con)
-      familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
-      prior <- gets constructorDecls
-      let declaration = ConstructorDecl
-            (nameSymbol "constructor" (dataConName con))
-            (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
-            resultRep reps fieldStrictness layout tag familySize
-            (varId (dataConWorkId con))
-          nominal = constructorIdentity declaration
-          -- 'DataCon' equality follows a GHC object, not its durable nominal
-          -- identity. The same source can therefore reach this boundary via a
-          -- separately loaded interface. Only one physical declaration may be
-          -- published for that nominal constructor.
-          priorNominal =
-            [ (ConstructorId (fromIntegral index), existing)
-            | (index, existing) <- zip [0 :: Int ..] prior
-            , constructorIdentity existing == nominal
-            ]
-      case priorNominal of
-        [] -> do
-          let identity = ConstructorId (fromIntegral (length prior))
-          modify' (\current -> current
-            { constructors = constructors current <> [(con, identity)]
-            , constructorDecls = constructorDecls current <> [declaration] })
-          pure identity
-        [(identity, existing)]
-          | existing == declaration -> pure identity
-          | otherwise -> failRepresentation (constructorConflict existing declaration)
-        _ -> failRepresentation
-          ("nominal constructor has multiple declarations before interning: "
-            <> symbolText nominal)
+  reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
+  -- GHC expands strictness along with representation arguments: a strict
+  -- unboxed tuple does not make its lifted components strict. Resolve all
+  -- representations first, before calling the fixed-representation helper.
+  let marks = map isMarkedStrict (dataConRuntimeRepStrictness con)
+  if length marks /= length reps
+    then failRepresentation "constructor runtime strictness/representation arity mismatch"
+    else pure ()
+  let fieldStrictness = zipWith (\strict rep -> strict || isUnboxed rep) marks reps
+  resultReps <- repsForType (dataConOrigResTy con)
+  resultRep <- case resultReps of
+    [rep@LiftedRefRep] -> pure rep
+    [rep@UnliftedRefRep] -> pure rep
+    _ -> failRepresentation "heap constructor lacks a managed result representation"
+  layout <- layoutFor reps
+  tag <- checkedWord32 "constructor tag" (dataConTag con)
+  familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
+  prior <- gets constructorDecls
+  let declaration = ConstructorDecl
+        (nameSymbol "constructor" (dataConName con))
+        (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
+        resultRep reps fieldStrictness layout tag familySize
+        (varId (dataConWorkId con))
+      nominal = constructorIdentity declaration
+      -- 'DataCon' equality follows a GHC object, not its durable nominal
+      -- identity. The same source can therefore reach this boundary via a
+      -- separately loaded interface. Only one physical declaration may be
+      -- published for that nominal constructor.
+      priorNominal =
+        [ (ConstructorId (fromIntegral index), existing)
+        | (index, existing) <- zip [0 :: Int ..] prior
+        , constructorIdentity existing == nominal
+        ]
+  case priorNominal of
+    [] -> do
+      let identity = ConstructorId (fromIntegral (length prior))
+      modify' (\current -> current
+        { constructors = constructors current <> [(con, identity)]
+        , constructorDecls = constructorDecls current <> [declaration] })
+      pure identity
+    [(identity, existing)]
+      | existing == declaration -> pure identity
+      | otherwise -> lift (Left (InvalidPreparedIdentity (constructorConflict existing declaration)))
+    _ -> lift . Left . InvalidPreparedIdentity $
+      ("nominal constructor has multiple declarations before interning: "
+        <> symbolText nominal)
   where
     scaledThing (Scaled _ ty) = ty
     isUnboxed LiftedRefRep = False

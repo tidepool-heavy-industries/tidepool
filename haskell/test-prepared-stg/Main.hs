@@ -9,10 +9,14 @@ import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
+import GHC.Core.DataCon qualified as DC
+import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Id (idName)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, setNameUnique)
+import GHC.Types.Unique (mkUnique)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Id.Make (nospecId)
 import GHC.Types.RepType (typePrimRep_maybe)
@@ -202,6 +206,7 @@ verifyConstructorRepresentations dir = do
     ["IntRep"]
   assertMetadataReps "Scientific" scientificMetadataPlainResult scientificMetadataQuotedResult
     ["BoxedRep (Just Lifted)", "IntRep"]
+  verifyRepeatedConstructorEvidence strictPlainResult
   plainProgram <- project scientificPlainResult "ScientificPlain"
   quotedProgram <- project scientificQuotedResult "ScientificQuoted"
   plainDecl <- namedDeclaration "Scientific" plainProgram
@@ -275,6 +280,46 @@ verifyConstructorRepresentations dir = do
   hasOccurrence occurrence declaration =
     Schema.symbolModule (Schema.constructorIdentity declaration) == "Tidepool.Aeson.Scientific"
       && Schema.symbolOccurrence (Schema.constructorIdentity declaration) == fromString occurrence
+
+-- Independently construct conflicting GHC evidence at the shared projection
+-- boundary. Equal GHC uniques are not proof of equal physical declarations.
+verifyRepeatedConstructorEvidence :: PreparedPipelineResult -> IO ()
+verifyRepeatedConstructorEvidence result = do
+  let originals = [ con | prepared <- pprModules result
+        , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
+        , (con, _) <- rows, occNameString (nameOccName (dataConName con)) == "I#" ]
+  original <- case originals of
+    con : _ -> pure con
+    [] -> ioError (userError "constructor collision fixture lacks I# evidence")
+  let clone name fields = DC.mkDataCon name False name (DC.dataConSrcBangs original)
+        [] [] [] (DC.dataConConcreteTyVars original) [] [] [] fields
+        (DC.dataConOrigResTy original) NoPromInfo (DC.dataConTyCon original)
+        (DC.dataConTag original) [] (DC.dataConWorkId original) DC.NoDataConRep
+      name = dataConName original
+      otherName = setNameUnique name (mkUnique 'z' 54321)
+      fields = DC.dataConOrigArgTys original
+      conflictingFields = [Scaled multiplicity wordPrimTy | Scaled multiplicity _ <- fields]
+      replace pair prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
+              (concatMap (\row@(con, children) -> if con == original
+                then [(first, children) | first <- pair] else [row]) rows)
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      project pair = projectEntry
+        (result { pprModules = map (replace pair) (pprModules result) })
+        "StrictPlainMetadata" "noUnpack" mempty
+      rejects pair = case project pair of
+        Left (Projection.InvalidPreparedIdentity detail) ->
+          assert ("conflicting physical declarations" `Text.isInfixOf` detail)
+            ("unexpected constructor rejection: " ++ show detail)
+        outcome -> ioError (userError ("conflicting constructor evidence was not rejected: "
+          ++ either show (const "accepted") outcome))
+  assertProjects "identical constructor provenance" (project [original, clone otherName fields])
+  mapM_ (\changed -> do
+    rejects [original, changed]
+    rejects [changed, original])
+    [clone name conflictingFields, clone otherName conflictingFields]
 
 assertWireSite :: String -> Schema.SiteDelivery -> String
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
