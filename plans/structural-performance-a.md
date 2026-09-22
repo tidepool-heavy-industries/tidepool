@@ -531,10 +531,14 @@ one ignored, and supported Cargo all-target compilation passed. Matched workload
 measurements and the final post-audit revision are recorded after the required
 second pass; `just verify` remains intentionally unrun by repository policy.
 
-### Required second-pass audit
+### Second-pass audit
 
-After this finish wave is integrated and measured, run a fresh review for
-correctness gaps and missing low-cost structural or performance wins. Keep the
-audit narrow and evidence-led: repair concrete findings, remove newly obsolete
-paths, and measure before proposing another cache, package boundary, request
-batcher, or dispatch redesign.
+The fresh post-integration pass found three bounded gaps and repaired them:
+canonical constructor validation now retains evidence at the shared interner
+instead of rebuilding an ephemeral declaration inventory; retained-import
+fixtures distinguish the projection-only opaque boundary from real optimized
+compiler behavior; and `a77f11b25` gives worker freshness, the toolchain doctor,
+and changed-test selection one owner for all five Template Haskell embedded
+authority sources. Its 33 selection/freshness tests, Bash syntax checks,
+ShellCheck, and workspace metadata audit passed. No additional cache, package
+boundary, request batcher, or dispatch redesign was justified.
