@@ -322,7 +322,7 @@ pub fn run_llm_turn() -> Effect {
         // `fork.rs`'s matching comment.
         polymorphism: Polymorphism::None,
         // No real `tidepool-handlers` handler (see the module doc).
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

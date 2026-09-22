@@ -210,7 +210,7 @@ pub fn actor_kernel() -> Effect {
         ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

@@ -45,7 +45,7 @@ pub fn lookup() -> Effect {
             body: HelperBody::Pointfree,
         }],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }
@@ -261,7 +261,7 @@ mod tests {
     fn lookup_is_actor_serviced_and_retains_typed_reference_identity() {
         let effect = lookup();
         assert!(effect.validate().is_ok());
-        assert!(!effect.dispatched);
+        assert!(!effect.generated_handler);
         assert_eq!(
             effect.constructor_signatures(),
             vec!["LookupRaw :: LookupRequest -> Lookup LookupBatch"]

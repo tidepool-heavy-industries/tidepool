@@ -304,7 +304,7 @@ pub fn agent_inspection() -> Effect {
         ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

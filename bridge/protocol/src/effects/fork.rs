@@ -146,7 +146,7 @@ pub fn fork() -> Effect {
         // the GADT/row level binds at an invocation site.
         polymorphism: Polymorphism::None,
         // No real `tidepool-handlers` handler (see the module doc).
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

@@ -67,7 +67,7 @@ pub fn read_state() -> Effect {
             body: HelperBody::Nullary,
         }],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

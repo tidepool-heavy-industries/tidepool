@@ -130,7 +130,7 @@ pub fn journal() -> Effect {
             },
         ],
         polymorphism: Polymorphism::None,
-        dispatched: true,
+        generated_handler: true,
         caller_principal: false,
     }
 }

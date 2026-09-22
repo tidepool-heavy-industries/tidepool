@@ -2,7 +2,7 @@
 //!
 //! `ask schema prompt` (structured operator elicitation) — the fallback
 //! [`crate::schema::HandlingClass::Ask`] routing, and also the shape a
-//! malformed `AskUserWith` degrades to (handled at the harness plane, not
+//! malformed `AskUserWith` degrades to (handled by the harness, not
 //! here — see the runtime's decoder contract).
 //!
 //! Hand-carried Haskell decl: `bridge/mcp/src/effect_defs.rs`'s `AskWith`
@@ -94,7 +94,7 @@ pub fn ask() -> Effect {
         // `HelperBody`'s reviewed shapes; deferred alongside Fork/RunLlmTurn/
         // Finalize/Green rather than flipped with a wrong or raw-hatch
         // rendering.
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

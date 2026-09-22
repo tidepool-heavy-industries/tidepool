@@ -55,7 +55,7 @@ pub fn console() -> Effect {
         // `tidepool-handlers` (out of scope for this migration — see
         // `suspension_roster`'s doc). `true` documents the real shape even
         // though this Effect stays out of `effects::all()` for now.
-        dispatched: true,
+        generated_handler: true,
         caller_principal: false,
     }
 }

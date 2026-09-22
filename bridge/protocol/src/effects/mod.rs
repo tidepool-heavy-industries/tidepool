@@ -55,10 +55,10 @@ use crate::schema::Effect;
 /// Every effect whose contract this crate owns AND generates files for.
 ///
 /// `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`/`Actor` sit
-/// alongside the four dispatched base effects here even though they have no
-/// `tidepool-handlers` `EffectHandler` (`Effect::dispatched` is `false` for
+/// alongside the four generated-handler base effects here even though they have no
+/// `tidepool-handlers` `EffectHandler` (`Effect::generated_handler` is `false` for
 /// all seven) — `decl_rs` still owns their Haskell decl text; `crate::gen::
-/// all_files` reads `dispatched` to skip `handler_rs`/`wire_rs`/`adapter_rs`
+/// all_files` reads `generated_handler` to skip `handler_rs`/`wire_rs`/`adapter_rs`
 /// for them rather than emitting glue for a handler that does not exist.
 /// The first six are ALSO listed in [`suspension_roster`] because the
 /// transitional harness needs their decoders. `Actor` is projected separately
@@ -143,7 +143,7 @@ pub fn all_described() -> Vec<Effect> {
 /// stay hand-carried for an unrelated reason: their macro ALSO feeds a real
 /// `tidepool-handlers` `EffectHandler` projection, so flipping either would
 /// need `tidepool-handlers` edits, out of this migration's scope (see each
-/// module's `dispatched` doc). `Ask`/`Console`/`Subagent` do not flip through
+/// module's `generated_handler` doc). `Ask`/`Console`/`Subagent` do not flip through
 /// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
 /// [`crate::gen::adapter_rs`], only through [`crate::gen::suspension_req_rs`].
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/

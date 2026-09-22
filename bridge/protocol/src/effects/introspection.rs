@@ -62,7 +62,7 @@ pub fn introspection() -> Effect {
             },
         ],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn structured_introspection_schema_is_actor_serviced_and_typed() {
         let effect = introspection();
-        assert!(!effect.dispatched);
+        assert!(!effect.generated_handler);
         assert!(effect.validate().is_ok());
         assert_eq!(
             effect.constructor_signatures(),

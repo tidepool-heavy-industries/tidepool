@@ -110,8 +110,8 @@ pub struct Effect {
     /// See [`Polymorphism`]'s own variants for the two real shapes this
     /// migration found.
     pub polymorphism: Polymorphism,
-    /// Does this effect have a real `tidepool-handlers` `EffectHandler` that
-    /// dispatches its verbs? `true` for an ordinary base effect (`Exec`,
+    /// Should generation emit `tidepool-handlers` `EffectHandler` glue for
+    /// this effect? `true` for an ordinary base effect (`Exec`,
     /// `Worktree`, …) — [`crate::gen::all_files`] emits `handler_rs`/`wire_rs`/
     /// `adapter_rs` output for it into `tidepool-handlers`/
     /// `tidepool-bridge-effects`. `false` for a SUSPENDING effect (`AskUser`,
@@ -122,7 +122,7 @@ pub struct Effect {
     /// no handler struct for it to dispatch into. Such an effect can still
     /// contribute its DECL text (`decl_rs`) once its helpers are fully
     /// schema-representable, entirely independent of this flag.
-    pub dispatched: bool,
+    pub generated_handler: bool,
     /// Does this effect's handler need to know WHICH actor asked?
     ///
     /// An ordinary handler answers the same way for every caller, so its

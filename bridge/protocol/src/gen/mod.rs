@@ -69,20 +69,21 @@ pub fn header(prefix: &str, what: &str) -> String {
 ///
 /// `decl_rs` runs unconditionally for every effect — it is pure Haskell decl
 /// data, needed regardless of whether a real handler exists. `handler_rs`/
-/// Wire records are shared by dispatching and actor-interpreted effects.
-/// Non-dispatching effects opt in through explicit Rust wire names; actor-local
-/// live types remain Haskell-only. Handler and domain adapters require dispatch.
+/// Wire records are shared by generated-handler and actor-interpreted effects.
+/// Effects without generated handler glue opt in through explicit Rust wire names; actor-local
+/// live types remain Haskell-only. Handler and domain adapters require
+/// generated-handler glue.
 #[must_use]
 pub fn all_files(effects: &[Effect]) -> Vec<GeneratedFile> {
     let mut out = Vec::new();
     for e in effects {
         out.push(decl_rs::file(e));
         if wire_rs::has_wire_types(e)
-            && (e.dispatched || e.type_defs.iter().all(|t| t.wire_rust.is_some()))
+            && (e.generated_handler || e.type_defs.iter().all(|t| t.wire_rust.is_some()))
         {
             out.push(wire_rs::file(e));
         }
-        if e.dispatched {
+        if e.generated_handler {
             out.push(handler_rs::file(e));
             if adapter_rs::has_adapters(e) {
                 out.push(adapter_rs::file(e));
@@ -90,13 +91,17 @@ pub fn all_files(effects: &[Effect]) -> Vec<GeneratedFile> {
         }
     }
     out.push(decl_rs::module_index(effects));
-    let dispatched: Vec<Effect> = effects.iter().filter(|e| e.dispatched).cloned().collect();
-    out.push(handler_rs::module_index(&dispatched));
+    let generated_handlers: Vec<Effect> = effects
+        .iter()
+        .filter(|e| e.generated_handler)
+        .cloned()
+        .collect();
+    out.push(handler_rs::module_index(&generated_handlers));
     let wire: Vec<_> = effects
         .iter()
         .filter(|e| {
             wire_rs::has_wire_types(e)
-                && (e.dispatched || e.type_defs.iter().all(|t| t.wire_rust.is_some()))
+                && (e.generated_handler || e.type_defs.iter().all(|t| t.wire_rust.is_some()))
         })
         .cloned()
         .collect();

@@ -50,7 +50,7 @@ pub fn sleep() -> Effect {
             body: HelperBody::Pointfree,
         }],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

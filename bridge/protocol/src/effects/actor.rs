@@ -486,7 +486,7 @@ pub fn actor() -> Effect {
         // raw helper here.
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

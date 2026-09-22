@@ -229,7 +229,7 @@ pub fn green() -> Effect {
         // result polymorphism in Haskell-managed storage.
         polymorphism: Polymorphism::None,
         // There is deliberately no `GreenHandler` (see the module doc).
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

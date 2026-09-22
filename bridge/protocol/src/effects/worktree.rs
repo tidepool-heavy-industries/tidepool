@@ -113,7 +113,7 @@ pub fn worktree() -> Effect {
         verbs: verbs(),
         helpers: helpers(),
         polymorphism: Polymorphism::None,
-        dispatched: true,
+        generated_handler: true,
         caller_principal: false,
     }
 }

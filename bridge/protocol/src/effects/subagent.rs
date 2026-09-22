@@ -119,10 +119,10 @@ pub fn subagent() -> Effect {
         ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        // Same double-duty shape as Console (see that module's `dispatched`
+        // Same double-duty shape as Console (see that module's `generated_handler`
         // doc): the hand macro also feeds `tidepool-handlers`'s real
         // `SubagentHandler` projection, out of this migration's scope.
-        dispatched: true,
+        generated_handler: true,
         caller_principal: false,
     }
 }

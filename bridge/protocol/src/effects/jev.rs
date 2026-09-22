@@ -71,7 +71,7 @@ pub fn jev() -> Effect {
         }],
         helpers: vec![],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

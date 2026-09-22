@@ -132,7 +132,7 @@ pub fn ask_user() -> Effect {
             },
         ],
         polymorphism: Polymorphism::None,
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }

@@ -238,7 +238,7 @@ fn effect(
         verbs,
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        dispatched: true,
+        generated_handler: true,
         caller_principal: false,
     }
 }

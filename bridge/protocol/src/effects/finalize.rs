@@ -130,7 +130,7 @@ pub fn finalize() -> Effect {
         // verb-local. See `Polymorphism::ArgBound`'s own doc.
         polymorphism: Polymorphism::ArgBound { tyvar: "v" },
         // No real `tidepool-handlers` handler (see the module doc).
-        dispatched: false,
+        generated_handler: false,
         caller_principal: false,
     }
 }
