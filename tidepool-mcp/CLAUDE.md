@@ -2,15 +2,11 @@
 
 ## Charter
 
-This crate owns the one-shot `eval`/`resume`/`abort` MCP tools, effect
-definitions and generated projections, eval preambles, and shared MCP
-transport helpers. Concrete handlers live in `tidepool-handlers`; paths and
-caches live in `tidepool-toolchain`; resident-session protocol lives in
-`tidepool-repl` (currently not a Cargo workspace member — its `Cargo.toml`
-was removed under the in-progress STG cutover; source remains on disk).
-
-The live eval API reference is the tool description emitted by the server. Do
-not duplicate its verb catalog here.
+This crate owns effect declarations and generated projections, Haskell eval
+preambles, source assembly, and response validation. Concrete handlers live in
+`tidepool-handlers`; paths and caches live in `tidepool-toolchain`; resident
+sessions live in `tidepool-runtime`. Transport and actor hosting belong to their
+production consumers, not this declaration layer.
 
 ## Effect definitions
 
