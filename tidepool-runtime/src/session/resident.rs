@@ -1746,6 +1746,17 @@ where
         hole: ResidentHole,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_handle_classified(hole, custody)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_handle`] retaining whether the parked frame consumed
+    /// the delivered custody before a failure.
+    pub fn resume_handle_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: RootCustody,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         self.settle_dropped_custody();
         let seed = hole.seed();
         let cont_id = match hole {
@@ -2218,6 +2229,19 @@ where
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_framed_custody_classified(hole, custody, constructor, prefix)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_framed_custody`] retaining whether the parked frame
+    /// consumed the framed handle before a failure.
+    pub fn resume_framed_custody_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<HaskellValue>,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
         };
@@ -3325,18 +3349,7 @@ where
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
-        let frame = self
-            .parked
-            .iter()
-            .find_map(|(name, frame)| (name == &id).then_some(*frame));
         self.reenter(&id, ResidentResumeInput::Response(answer), seed, None)
-            .map_err(|error| match frame {
-                Some(frame) if self.state.parked_ids().contains(&frame) => {
-                    ResidentResumeError::Rejected(error)
-                }
-                Some(_) => ResidentResumeError::Consumed(error),
-                None => ResidentResumeError::Rejected(error),
-            })
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -3356,6 +3369,7 @@ where
             HoleSeed::Plain,
             None,
         )
+        .map_err(ResidentResumeError::into_inner)
     }
 
     fn reenter(
@@ -3364,15 +3378,17 @@ where
         input: ResidentResumeInput,
         seed: HoleSeed,
         additional_provenance: Option<&ProgramProvenance>,
-    ) -> Result<ResidentOutcome, ResidentError> {
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
         // we). A mismatch leaves every parked frame intact.
         let Some(&(_, frame_id)) = self.parked.iter().find(|(h, _)| h == cont_id) else {
-            return Err(ResidentError::WrongContinuation {
-                attempted: cont_id.to_string(),
-                pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
-            });
+            return Err(ResidentResumeError::Rejected(
+                ResidentError::WrongContinuation {
+                    attempted: cont_id.to_string(),
+                    pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
+                },
+            ));
         };
         let mut provenance = self
             .parked_provenance
@@ -3380,7 +3396,10 @@ where
             .map(|value| (**value).clone())
             .unwrap_or_default();
         if let Some(additional) = additional_provenance {
-            provenance.merge(additional)?;
+            provenance
+                .merge(additional)
+                .map_err(ResidentError::from)
+                .map_err(ResidentResumeError::Rejected)?;
         }
         let provenance = Arc::new(provenance);
         // The machine is authoritative on whether the frame was actually
@@ -3394,6 +3413,13 @@ where
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
         self.reenter_prepared(cont_id, frame_id, input, seed, provenance)
+            .map_err(|error| {
+                if self.state.parked_ids().contains(&frame_id) {
+                    ResidentResumeError::Rejected(error)
+                } else {
+                    ResidentResumeError::Consumed(error)
+                }
+            })
     }
 
     /// Move the machine onto a stack-sized eval thread, run `body`, and move the
