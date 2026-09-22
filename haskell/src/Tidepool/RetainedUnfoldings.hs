@@ -22,14 +22,9 @@
 -- specialised worker such as @$wproducerFn@), with no trace of the original
 -- occurrence left to match against the retained map.
 --
--- Patching this after the fact -- rewriting a compiled retained module's
--- own 'GHC.Unit.Module.ModDetails.ModDetails'/'GHC.Unit.Module.ModIface.ModIface'
--- once 'Tidepool.GhcPipeline' has it in hand -- does not reach far enough
--- either: for the plain (non-session) pipeline, that hook
--- ('CompilePlan.cpAfterModule') is a no-op, and the module that actually
--- puts a retained id's optimized unfolding into 'HomePackageTable' scope is
--- GHC's own @load'@, which this pipeline never gets a per-module callback
--- into.
+-- Replacing a home interface after its dependencies have compiled cannot
+-- undo inlining performed by load's own compiler pipeline. Withholding must
+-- therefore apply before either pipeline simplifies the defining module.
 --
 -- The one seam that reaches BOTH @load'@'s internal simplification and this
 -- pipeline's own later @core2core@ redo is the seam GHC itself exposes for

@@ -571,14 +571,14 @@ runPipelineSelectedRetaining selection retained path includes = do
 data TierPolicy
   = OptimizeEveryModule
     -- ^ 'core2core' every module, INTERLEAVED: each module runs
-    -- typecheck→desugar→'core2core'→'cpAfterModule' before the next module
-    -- starts. The session path requires this ordering — its 'cpAfterModule'
-    -- registers a deferred module's iface in the HPT, and a LATER deferred
-    -- module's TYPECHECK resolves its @import@ out of that entry.
+    -- typecheck→desugar→'core2core'→interface registration before the next
+    -- module starts. Deferred session modules require this ordering: each
+    -- importer resolves dependencies from their freshly registered interfaces.
   | OptimizeCoreReachable
     -- ^ E6 (tiered -O2): STAGE the loop — parse/typecheck/desugar every
-    -- module first, then run 'core2core' (canonicalizeDFlags' -O2 + exposed
-    -- unfoldings) only for the target and its Core-reachable dependencies.
+    -- module first to select the closure, then recheck and optimize only the
+    -- target and its Core-reachable dependencies in dependency order. Rechecking
+    -- makes each importer consume the interface paired with prepared code.
     -- Staging is forced by the rule itself: 'reachableModuleClosure' is
     -- computed over EVERY module's desugared Core, so no module's tier is
     -- known until all desugars have run. A module outside the closure still
@@ -628,15 +628,6 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpNeedsInterface :: HomeInterfaceUse -> ModSummary -> Bool
-    -- ^ Whether this variant needs an HPT registration after compiling the
-    -- module. The shared cycle uses the same decision for fresh and memoized
-    -- bodies, so a cached leaf cannot become an interface-less dependency.
-  , cpAfterModule :: Word64 -> InterfaceReuse -> HomeInterfaceUse -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
-      -> Ghc (Maybe Integer, Maybe RegisteredInterface)
-    -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
-    -- guts. The session path registers deferred modules into the HPT and
-    -- returns the thin registration value for later warm cycles.
   , cpTier :: TierPolicy
   , cpBeforeMerge :: SuccessFlag -> [String] -> Ghc ()
     -- ^ Runs after the compile loop and its phase emits, before the guts are
@@ -842,7 +833,7 @@ data GutsMemoEntry = GutsMemoEntry
   , gmeOutput :: Maybe ModuleOutput
   , gmePrepared :: Maybe PreparedModule
   , gmeInterface :: Maybe HomeModInfo
-    -- ^ Thin interface registration material for a deferred session module.
+    -- ^ Exact prepared interface for later importers, without TH linkables.
     -- Re-adding it after load clears the HPT does not require retaining the
     -- HscEnv, TcGblEnv, or pre-tidy ModGuts that produced it.
   }
@@ -1105,12 +1096,9 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                                  , mfResultType = mResTy
                                  , mfReferencedModules = moduleRefs desugared }
               -- The per-module back half: the optimized-Core pass, the
-              -- variant's post-compile hook (session: HPT registration of a
-              -- deferred module, which is why it sees the PRE-externalize guts and
-              -- the module's own typechecked env), then stable name
-              -- externalization. Returns the pre-externalize 'simplified' guts so a
-              -- resident session can repeat HPT registration on later requests;
-              -- direct compilation discards it.
+              -- shared interface registration, then stable name externalization.
+              -- Interface construction and prepared lowering share the same tidy
+              -- result; the memo retains the interface alongside its prepared body.
               compileBack interfaceUse mf = do
                 liftIO (modifyIORef' backCountRef (+ 1))
                 (simplified, coreMs) <- timeSection $
@@ -1120,7 +1108,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
-                (mInterfaceMs, mRegistration) <- cpAfterModule plan requestIdentity interfaceReuse
+                (mInterfaceMs, mRegistration) <- registerPreparedInterface timing requestIdentity interfaceReuse
                   interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
                 liftIO $ recordInterface (mfSummary mf) mInterfaceMs
                 let externalized = externalizeInternalTops simplified
@@ -1270,28 +1258,20 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                 let mn = ms_mod_name modSum
                 cached <- lookupValidMemo modSum
                 case cached of
-                  -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
-                  -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
-                  -- re-run 'cpAfterModule' unconditionally: it is a no-op for any
-                  -- module not deferred THIS cycle (the overwhelming common case —
-                  -- see the haddock above), and for a module that IS deferred
-                  -- again this cycle (the incremental-population gap this memo
-                  -- closes) it re-registers the already-built thin interface
-                  -- into the HPT that 'load'' just wiped.
+                  -- A memo hit reuses the prepared body and its exact interface.
+                  -- Reinstall it after load's HPT rebuild before any importer runs.
                   Just entry
                     | Just output <- gmeOutput entry
                     , Just prepared <- gmePrepared entry
-                    , not (cpNeedsInterface plan interfaceUse modSum) || isJust (gmeInterface entry) -> do
+                    , not (needsPreparedInterface interfaceUse) || isJust (gmeInterface entry) -> do
                     recordValidity modSum True
                     rememberPreparedSiblings prepared
-                    forM_ (gmeInterface entry) $ \hmi -> do
-                      current <- getSession
-                      setSession (hscUpdateHPT (\hpt -> addToHpt hpt mn hmi) current)
+                    forM_ (gmeInterface entry) (installPreparedInterface mn)
                     pure (CachedObservation modSum entry, output, Just prepared)
                   _ -> do
                     recordValidity modSum (isJust cached)
                     when (isJust cached) (memoMiss modSum
-                      (if cpNeedsInterface plan interfaceUse modSum
+                      (if needsPreparedInterface interfaceUse
                         then "required-interface-not-retained"
                         else "executable-body-not-prepared"))
                     mf <- compileFront modSum
@@ -1390,12 +1370,15 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             prepared
                             mInterface)))
                       Nothing -> pure ()
-                  compileReachable modSum f moduleFacts = do
-                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack HomeInterfaceLeaf f
+                  compileReachable interfaceUse modSum moduleFacts = do
+                    -- The reachability pass ran against load's interfaces. Recheck
+                    -- against the exact prepared dependencies registered so far.
+                    f <- compileFront modSum
+                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse f
                     prepared <- prepareSelected f simplified mRegisteredTidy
                     rememberExecutable modSum r prepared mInterface moduleFacts
                     pure [(r, prepared)]
-              rs <- fmap concat $ forM (zip observations' facts) $ \(observation, moduleFacts) ->
+              rs <- fmap concat $ forM (zip3 observations' facts interfaceUses) $ \(observation, moduleFacts, interfaceUse) ->
                 let modSum = observationSummary observation
                 in if ms_mod_name modSum `Set.member` reachableMods
                   then case observation of
@@ -1405,15 +1388,15 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                     -- the optimizer pass entirely.
                     CachedObservation _ entry
                       | Just output <- gmeOutput entry
-                      , Just prepared <- gmePrepared entry -> do
+                      , Just prepared <- gmePrepared entry
+                      , not (needsPreparedInterface interfaceUse) || isJust (gmeInterface entry) -> do
                         rememberPreparedSiblings prepared
+                        forM_ (gmeInterface entry) (installPreparedInterface (ms_mod_name modSum))
                         pure [(output, Just prepared)]
                     CachedObservation _ _ -> do
                       memoMiss modSum "validation-only-promoted"
-                      fresh <- compileFront modSum
-                      freshFacts <- liftIO (frontFacts fresh)
-                      compileReachable modSum fresh freshFacts
-                    FreshObservation f -> compileReachable modSum f moduleFacts
+                      compileReachable interfaceUse modSum moduleFacts
+                    FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
                   -- Not reachable: retain only dependency and type facts. A
                   -- later cycle that finds the module reachable promotes it by
                   -- compiling a real executable body; compact validation facts
@@ -1925,6 +1908,38 @@ configureBuildProducts baseline mDir dflags = case mDir of
       | gopt Opt_WriteInterface baseline = gopt_set dflags Opt_WriteInterface
       | otherwise = gopt_unset dflags Opt_WriteInterface
 
+-- | Importers and prepared code must share the same tidy result. In particular,
+-- load's bytecode interfaces can describe private bindings eliminated by the
+-- extraction optimizer. Keep their linkables for later Template Haskell splices
+-- while replacing their compiler-facing details and unfoldings.
+needsPreparedInterface :: HomeInterfaceUse -> Bool
+needsPreparedInterface HomeInterfaceLeaf = False
+needsPreparedInterface _ = True
+
+registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> HomeInterfaceUse
+  -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
+  -> Ghc (Maybe Integer, Maybe RegisteredInterface)
+registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified
+  | not (needsPreparedInterface interfaceUse) = pure (Nothing, Nothing)
+  | otherwise = do
+      ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
+      liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
+        "module_interface" "tidy" tidyMs
+      (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
+        (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
+          mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+      let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
+      installPreparedInterface (ms_mod_name modSum) hmi
+      pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
+
+-- Keep request-local executable state out of the reusable prepared memo.
+installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()
+installPreparedInterface name hmi = do
+  current <- getSession
+  let linkable = maybe emptyHomeModInfoLinkable hm_linkable
+        (lookupHpt (hsc_HPT current) name)
+  setSession (hscUpdateHPT (\hpt -> addToHpt hpt name (hmi {hm_linkable = linkable})) current)
+
 -- | The normal (non-session) variant: no injection, and E6's Core-reachability
 -- tier. Everything else is 'runCompile'.
 normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
@@ -1960,8 +1975,6 @@ normalVariant purpose path = do
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpNeedsInterface = \_ _ -> False
-      , cpAfterModule = \_ _ _ _ _ _ _ -> pure (Nothing, Nothing)
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
         -- already threw a spanned 'SourceError' from inside the compile loop
@@ -2001,11 +2014,12 @@ normalVariant purpose path = do
 --      included — is excluded from the @load'@ graph (it cannot be compiled
 --      before the Val ifaces exist) and compiled instead in the
 --      dependency-directed loop, which also registers it back into the HPT
---      ('cpAfterModule').
+--      ('registerPreparedInterface').
 --
 -- Its tier is 'OptimizeEveryModule'. Compiling every home module to full -O2
 -- guts (rather than extracting only the target and resolving its library
--- calls from HPT ifaces) is load-bearing — see 'cpAfterModule' below. A
+-- calls from HPT ifaces) keeps executable dependencies paired with their
+-- registered interfaces. A
 -- reference turn imports @Tidepool.Prelude@ via the eval preamble; the
 -- @load'@ also keeps those source deps "loaded" (GHC-58427).
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
@@ -2023,9 +2037,6 @@ sessionVariant purpose scope path = do
    , pvPlan = \timing modGraphRaw -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
-          isSessionLib ms = case parseSessionModule (moduleNameString (ms_mod_name ms)) of
-            Just (SessionModule LibMod _) -> True
-            _                             -> False
           -- Everything that (directly or transitively) imports an injected
           -- Val module can't go through the @load'@ below — its import can
           -- only resolve once dependency-directed injection has happened. This
@@ -2044,11 +2055,6 @@ sessionVariant purpose scope path = do
                   ]
             in if grown == seed then seed else closure grown
           deferredMods = closure (Set.fromList (targetModName' : excludedVal))
-          shouldRegister interfaceUse modSum =
-            (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum)
-              && case interfaceUse of
-                HomeInterfaceLeaf -> False
-                _ -> True
           -- Exclude every deferred module (target ∪ transitive Val-importers)
           -- from the load' graph. A @load'@ that reaches one of them (e.g.
           -- @LoadDependenciesOf targetHUM@, whose @createBuildPlan@ includes
@@ -2135,34 +2141,6 @@ sessionVariant purpose scope path = do
                   modifyIORef' injectedRef
                     (`Set.union` Set.fromList (map renderSessionModule needed))
                   modifyIORef' injectMsRef (+ injectMs)
-          -- A deferred module was excluded from @load'@, so a later source
-          -- importer must receive a real HPT entry after its Val interfaces
-          -- are injected. A generated Lib is also retained because a
-          -- source-less Val interface can name it without a source import.
-          -- Leaf targets need neither registration nor a second tidy pass.
-        , cpNeedsInterface = shouldRegister
-        , cpAfterModule = \requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified ->
-            if shouldRegister interfaceUse modSum
-              then do
-                (cgGuts, modDetails, tidyMs) <- do
-                  ((guts, details), elapsed) <- timeSection $ liftIO $ hscTidy hscEnv simplified
-                  liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
-                    "module_interface" "tidy" elapsed
-                  pure (guts, details, elapsed)
-                (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
-                  (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
-                    mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
-                let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
-                hscEnvNow <- getSession
-                setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
-                pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
-              else do
-                when (timing && (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum)) $
-                  liftIO $ hPutStrLn stderr $
-                    "tidepool-prepared-interface-elided module="
-                      ++ moduleNameString (ms_mod_name modSum)
-                      ++ " reason=no-later-home-importer"
-                pure (Nothing, Nothing)
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
         , cpBeforeMerge = \_ _ ->

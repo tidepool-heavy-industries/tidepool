@@ -153,6 +153,28 @@ verifyJsonDependencyAuthority dir = do
   assert (substitutedAuthority == Nothing)
     "JSON authority admitted a same-shaped Scientific dependency with changed semantics"
 
+-- An O0 bytecode interface exposes a private helper that the prepared O2 body
+-- removes. Importers must receive the prepared owner's interface, including on
+-- a warm request where that owner comes from the compiler memo.
+verifyPreparedPrivateImports :: IO ()
+verifyPreparedPrivateImports = do
+  let source = "test-prepared-stg/PreparedPrivateClient.hs"
+      includes = ["test-prepared-stg"]
+      check label result = case projectEntry result "PreparedPrivateClient" "result" Map.empty of
+        Left failure -> ioError (userError (label ++ ": " ++ show failure))
+        Right program -> assert
+          (all ((/= "main") . Schema.symbolUnit . Schema.globalIdentity) (Schema.programGlobals program))
+          (label ++ ": unresolved home implementation " ++ show (Schema.programGlobals program))
+  direct <- runPipelineSelected PreparedStg source includes
+  check "private TH dependency, direct" direct
+  withResidentPipelineSelected includes $ \compile -> do
+    cold <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    check "private TH dependency, cold" cold
+    warm <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    check "private TH dependency, warm" warm
+    assert (preparedShape cold == preparedShape warm)
+      "warm private TH dependency changed prepared module shape"
+
 -- | TH's bytecode provisioning must not change a constructor declared by an
 -- unchanged home module.  The graph checks run after metadata preparation and
 -- before projection or execution; the executable checks then compare the
@@ -416,16 +438,22 @@ main = do
         , "{-# OPAQUE runLLMTurn #-}"
         , "runLLMTurn :: forall a. String -> Maybe a"
         , "runLLMTurn _ = Nothing"
+        , "{-# OPAQUE runLLMTurnSited #-}"
         , "runLLMTurnSited :: forall a. Int -> String -> Maybe a"
         , "runLLMTurnSited _ _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFork #-}"
         , "runLLMTurnFork :: forall a. String -> Maybe (Either InvocationExit a)"
         , "runLLMTurnFork _ = Nothing"
+        , "{-# OPAQUE runLLMTurnForkSited #-}"
         , "runLLMTurnForkSited :: forall a. Int -> String -> Maybe (Either InvocationExit a)"
         , "runLLMTurnForkSited _ _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFanout #-}"
         , "runLLMTurnFanout :: forall a. [String] -> Maybe [Either InvocationExit a]"
         , "runLLMTurnFanout _ = Nothing"
+        , "{-# OPAQUE runLLMTurnFanoutSited #-}"
         , "runLLMTurnFanoutSited :: forall a. Int -> [String] -> Maybe [Either InvocationExit a]"
         , "runLLMTurnFanoutSited _ _ = Nothing"
+        , "{-# OPAQUE forkAllSited #-}"
         , "forkAllSited :: forall a. Int -> String -> Maybe [a]"
         , "forkAllSited _ _ = Nothing"
         , "keepForkAllSited :: Maybe [Bool]"
@@ -453,6 +481,7 @@ main = do
         (\result entry -> projectEntry result "TypeEvidence" entry mempty)
         (\result entry auxEntries ->
           projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
+      verifyPreparedPrivateImports
       verifyConstructorRepresentations dir
       verifyJsonDependencyAuthority dir
       writeFile target validTarget
@@ -477,7 +506,7 @@ main = do
         -- Fully applied to a computed argument, so the simplifier cannot
         -- eta-reduce it to a partial, unelaborated verb occurrence.
         , "polyHelper label = runLLMTurn @a (label ++ \"!\")"
-        , "{-# NOINLINE polyHelper #-}"
+        , "{-# OPAQUE polyHelper #-}"
         , "polyNested :: forall a. Bool -> String -> Maybe a"
         , "polyNested flag label = if flag then runLLMTurn @a label else Nothing"
         , "{-# NOINLINE polyNested #-}"
