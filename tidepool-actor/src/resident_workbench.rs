@@ -20,10 +20,11 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, CheckedExpressionPlan,
-    DeclarationReceipt, ExpressionPresentation, InspectionQuery, InspectionRequest, OutputSink,
-    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    SourceImports, TurnClassification, TurnKind, TurnRequest, TurnResult,
+    run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
+    CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -548,6 +549,12 @@ pub struct ResidentActorWorkbench<H, O> {
     request: Option<crate::RequestId>,
     type_modules: Arc<[String]>,
     json_input: Option<serde_json::Value>,
+}
+
+#[derive(tidepool_bridge_derive::ToHaskell)]
+enum HostCommandJob {
+    #[haskell(module = "Tidepool.Command.Types", name = "Job")]
+    Job(String),
 }
 
 /// Live execution state for one workbench item that suspended on an actor
@@ -2473,24 +2480,13 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, source| {
-                let scope = context.placement.lexical_scope;
-                let trusted_imports =
-                    SourceImports::from_specs(["qualified Data.Text as ShoalToolResultText"]);
-                let literal =
-                    tidepool_runtime::session::escape_workbench_haskell_string(&result);
-                let declaration = format!(
-                    "{binding} :: ShoalToolResultText.Text\n{binding} = ShoalToolResultText.pack \"{literal}\""
-                );
-                let mut imports = source.workbench_imports.clone();
-                imports.extend(&trusted_imports);
-                session
-                    .define_scoped_with_imports_in(scope, &[&declaration], &imports)
-                    .map_err(|error| {
+                mount_text_binding(session, context, source, &[], &binding, &result).map_err(
+                    |error| {
                         ResidentActorWorkbenchError::InputMount(format!(
                             "the whole result could not be bound as {binding}: {error}"
                         ))
-                    })?;
-                Ok(())
+                    },
+                )
             })
             .await
     }
@@ -2608,145 +2604,164 @@ where
         context: crate::ActorSessionContext,
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
+        let json_input = self.json_input.clone();
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
         let mut source = self.access.source.clone();
-        source.preamble = format!(
-            "{}{}",
-            source.preamble,
-            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
-        )
-        .into();
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         let result = self
             .access
             .with_machine(context, move |session, context, _| {
-                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
-                    if session.machine_disposition()
-                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
-                    {
-                        return Err(ResidentActorWorkbenchError::MachineLost);
-                    }
-                    let candidate_module = session.next_declaration_module().ok_or_else(|| {
-                        ResidentActorWorkbenchError::CompileInfrastructure(
-                            "resident cell session has no declaration plane".into(),
-                        )
-                    })?;
-                    source.preamble = match (response.as_ref(), request) {
-                        (Some(response), Some(request)) => response.request_preamble(
-                            &source.preamble,
-                            request,
-                            &context.haskell_effects_alias,
-                        ),
-                        (None, None) => source.preamble.to_string(),
-                        _ => unreachable!("request workbench scope is constructed atomically"),
-                    }
+                let mounted_input = json_input
+                    .as_ref()
+                    .map(|input| mount_json_input(session, context, &source, &type_modules, input))
+                    .transpose()?;
+                if let Some(input) = &mounted_input {
+                    source
+                        .workbench_imports
+                        .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
+                    source.preamble = format!(
+                        "{}\ninput = TidepoolHostInput.{}\n",
+                        source.preamble, input.name
+                    )
                     .into();
-                    source.preamble = actor_preamble(&source.preamble, context).into();
-                    let compile_view =
-                        actor_compile_view(session, context, &source, &type_modules)?;
-                    let prepared = source.prepare(&compile_view);
-                    let check_preamble =
-                        cell_module_preamble(&prepared.preamble, &candidate_module.module_name())?;
-                    let template = resident_cell_check_template(
-                        &check_preamble,
-                        &context.haskell_effects_alias,
-                        &prepared.imports,
-                    );
-                    let compile_view_evidence =
-                        cell_check_evidence(&compile_view, &template, &prepared);
-                    let include = prepared
-                        .include
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>();
-                    let cell_check_request = || CellCheckRequest {
-                        cell_text: &cell_source,
-                        template: &template,
-                        include: &include,
-                        session_root: compile_view.session_root(),
-                        inject_modules: &prepared.injected,
-                        compile_generation: compile_view.next_value_generation().0,
-                        compile_view_evidence: &compile_view_evidence,
-                    };
-                    let checked = match check_cell(cell_check_request()) {
-                        Ok(checked) => checked,
-                        Err(failure) => {
-                            // The same-cell shape: this cell both RE-DECLARES a
-                            // name and USES it from a bind statement in the SAME
-                            // cell. The check module above is already named for
-                            // the CANDIDATE next generation (`candidate_module`,
-                            // holding the cell's own fresh declaration) while
-                            // `prepared.imports` still names the CURRENT
-                            // generation unqualified (built before this cell's
-                            // own redeclarations were known) — both visible at
-                            // once. Retry exactly once with that collision
-                            // hidden, the same shadowing every other generation
-                            // boundary already gets via `render_module`.
-                            let mut patched_imports = None;
-                            if classify_compile(&failure.error).class == FailureClass::UserHaskell {
-                                if let Some(previous_module) = compile_view.library() {
-                                    let previous_module = previous_module.module_name();
-                                    let message =
-                                        tidepool_runtime::session::render_cell_compile_error(
-                                            &failure.error,
-                                            &cell_source,
-                                        );
-                                    let names =
+                }
+                let prepared =
+                    tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
+                        if session.machine_disposition()
+                            == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+                        {
+                            return Err(ResidentActorWorkbenchError::MachineLost);
+                        }
+                        let candidate_module =
+                            session.next_declaration_module().ok_or_else(|| {
+                                ResidentActorWorkbenchError::CompileInfrastructure(
+                                    "resident cell session has no declaration plane".into(),
+                                )
+                            })?;
+                        source.preamble = match (response.as_ref(), request) {
+                            (Some(response), Some(request)) => response.request_preamble(
+                                &source.preamble,
+                                request,
+                                &context.haskell_effects_alias,
+                            ),
+                            (None, None) => source.preamble.to_string(),
+                            _ => unreachable!("request workbench scope is constructed atomically"),
+                        }
+                        .into();
+                        source.preamble = actor_preamble(&source.preamble, context).into();
+                        let compile_view =
+                            actor_compile_view(session, context, &source, &type_modules)?;
+                        let prepared = source.prepare(&compile_view);
+                        let check_preamble = cell_module_preamble(
+                            &prepared.preamble,
+                            &candidate_module.module_name(),
+                        )?;
+                        let template = resident_cell_check_template(
+                            &check_preamble,
+                            &context.haskell_effects_alias,
+                            &prepared.imports,
+                        );
+                        let compile_view_evidence =
+                            cell_check_evidence(&compile_view, &template, &prepared);
+                        let include = prepared
+                            .include
+                            .iter()
+                            .map(PathBuf::as_path)
+                            .collect::<Vec<_>>();
+                        let cell_check_request = || CellCheckRequest {
+                            cell_text: &cell_source,
+                            template: &template,
+                            include: &include,
+                            session_root: compile_view.session_root(),
+                            inject_modules: &prepared.injected,
+                            compile_generation: compile_view.next_value_generation().0,
+                            compile_view_evidence: &compile_view_evidence,
+                        };
+                        let checked = match check_cell(cell_check_request()) {
+                            Ok(checked) => checked,
+                            Err(failure) => {
+                                // The same-cell shape: this cell both RE-DECLARES a
+                                // name and USES it from a bind statement in the SAME
+                                // cell. The check module above is already named for
+                                // the CANDIDATE next generation (`candidate_module`,
+                                // holding the cell's own fresh declaration) while
+                                // `prepared.imports` still names the CURRENT
+                                // generation unqualified (built before this cell's
+                                // own redeclarations were known) — both visible at
+                                // once. Retry exactly once with that collision
+                                // hidden, the same shadowing every other generation
+                                // boundary already gets via `render_module`.
+                                let mut patched_imports = None;
+                                if classify_compile(&failure.error).class
+                                    == FailureClass::UserHaskell
+                                {
+                                    if let Some(previous_module) = compile_view.library() {
+                                        let previous_module = previous_module.module_name();
+                                        let message =
+                                            tidepool_runtime::session::render_cell_compile_error(
+                                                &failure.error,
+                                                &cell_source,
+                                            );
+                                        let names =
                                         tidepool_runtime::session::turn::same_cell_value_collisions(
                                             &message,
                                             &previous_module,
                                             &candidate_module.module_name(),
                                         );
-                                    patched_imports = hide_same_cell_collisions(
-                                        &prepared.imports,
-                                        &previous_module,
-                                        &names,
-                                    );
-                                }
-                            }
-                            match patched_imports {
-                                Some(patched_imports) => {
-                                    let retried_template = resident_cell_check_template(
-                                        &check_preamble,
-                                        &context.haskell_effects_alias,
-                                        &patched_imports,
-                                    );
-                                    let retried_evidence = cell_check_evidence(
-                                        &compile_view,
-                                        &retried_template,
-                                        &prepared,
-                                    );
-                                    match check_cell(CellCheckRequest {
-                                        template: &retried_template,
-                                        compile_view_evidence: &retried_evidence,
-                                        ..cell_check_request()
-                                    }) {
-                                        Ok(checked) => checked,
-                                        Err(failure) => {
-                                            return Err(cell_check_error(failure, &cell_source))
-                                        }
+                                        patched_imports = hide_same_cell_collisions(
+                                            &prepared.imports,
+                                            &previous_module,
+                                            &names,
+                                        );
                                     }
                                 }
-                                None => return Err(cell_check_error(failure, &cell_source)),
+                                match patched_imports {
+                                    Some(patched_imports) => {
+                                        let retried_template = resident_cell_check_template(
+                                            &check_preamble,
+                                            &context.haskell_effects_alias,
+                                            &patched_imports,
+                                        );
+                                        let retried_evidence = cell_check_evidence(
+                                            &compile_view,
+                                            &retried_template,
+                                            &prepared,
+                                        );
+                                        match check_cell(CellCheckRequest {
+                                            template: &retried_template,
+                                            compile_view_evidence: &retried_evidence,
+                                            ..cell_check_request()
+                                        }) {
+                                            Ok(checked) => checked,
+                                            Err(failure) => {
+                                                return Err(cell_check_error(failure, &cell_source))
+                                            }
+                                        }
+                                    }
+                                    None => return Err(cell_check_error(failure, &cell_source)),
+                                }
                             }
-                        }
-                    };
-                    let prepared = prepare_cell_in_session(
-                        session,
-                        context,
-                        &source,
-                        &context.haskell_effects_alias,
-                        &type_modules,
-                        &checked,
-                        &cell_source,
-                        &checked.compile_view_evidence,
-                        compile_view,
-                    )?;
-                    Ok((checked, prepared))
-                })
+                        };
+                        let prepared = prepare_cell_in_session(
+                            session,
+                            context,
+                            &source,
+                            &context.haskell_effects_alias,
+                            &type_modules,
+                            &checked,
+                            &cell_source,
+                            &checked.compile_view_evidence,
+                            compile_view,
+                        )?;
+                        Ok((checked, prepared))
+                    });
+                if let Some(input) = mounted_input {
+                    session.retire_host_binding_owner(&input.binder);
+                }
+                prepared
             })
             .await;
         cancel_on_drop.0 = None;
@@ -2890,12 +2905,6 @@ where
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
-        turn_source.preamble = format!(
-            "{}{}",
-            turn_source.preamble,
-            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
-        )
-        .into();
         self.access
             .with_machine(context, move |session, context, _| {
                 turn_source.preamble = match (response.as_ref(), request) {
@@ -2946,39 +2955,33 @@ where
         context: crate::ActorSessionContext,
         job: String,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        self.access.with_machine(context, move |session, context, source| {
-            let scope = context.placement.lexical_scope;
-            let names: Vec<_> = session.workbench_bindings_in(scope).into_iter().map(|binding| binding.name).collect();
-            let trusted_imports = SourceImports::from_specs([
-                "qualified Tidepool.Command.Types as ShoalCommandBinding",
-                "qualified Data.Text as ShoalCommandText",
-            ]);
-            let literal = tidepool_runtime::session::escape_workbench_haskell_string(&job);
-            let declaration_for = |binding: &str| format!(
-                "{binding} :: ShoalCommandBinding.Job\n{binding} = ShoalCommandBinding.Job (ShoalCommandText.pack \"{literal}\")"
-            );
-            for name in &names {
-                if name.strip_prefix("job").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
-                    && session.workbench_declaration_matches_in(scope, name, &declaration_for(name), &trusted_imports)
-                {
-                    return Ok(name.clone());
+        self.access
+            .with_machine(context, move |session, context, source| {
+                let scope = context.placement.lexical_scope;
+                if let Some(binding) = session.host_text_binding_in(scope, &job) {
+                    return Ok(binding);
                 }
-            }
-            let mut index = session.val_gen().0;
-            let binding = loop {
-                let name = format!("job{index}");
-                if !names.contains(&name) { break name; }
-                index += 1;
-            };
-            let mut imports = source.workbench_imports.clone();
-            imports.extend(&trusted_imports);
-            let declaration = declaration_for(&binding);
-            session.define_scoped_with_imports_in(scope, &[&declaration], &imports)
-                .map_err(|error| ResidentActorWorkbenchError::InputMount(format!(
-                    "command {job} remains owned, but its automatic binding failed: {error}"
-                )))?;
-            Ok(binding)
-        }).await
+                let names: Vec<_> = session
+                    .workbench_bindings_in(scope)
+                    .into_iter()
+                    .map(|binding| binding.name)
+                    .collect();
+                let mut index = session.val_gen().0;
+                let binding = loop {
+                    let name = format!("job{index}");
+                    if !names.contains(&name) {
+                        break name;
+                    }
+                    index += 1;
+                };
+                mount_command_job(session, context, source, &binding, &job).map_err(|error| {
+                    ResidentActorWorkbenchError::InputMount(format!(
+                        "command {job} remains owned, but its automatic binding failed: {error}"
+                    ))
+                })?;
+                Ok(binding)
+            })
+            .await
     }
 
     /// Service structured inspection without holding the resident machine
@@ -6605,6 +6608,234 @@ where
         .with_type_modules(type_modules))
 }
 
+/// Compile one fresh, payload-independent value interface. Its binder is
+/// unique to this mount, so a later request cannot replace the global slot a
+/// previously compiled closure captured.
+fn compile_host_binding<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    binding: &str,
+    type_name: &str,
+    anchor: &str,
+    imports: SourceImports,
+) -> Result<(BoundBinder, CompiledTurn, tidepool_repr::Generation), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let view = actor_compile_view(session, context, source, type_modules)?
+        .with_workbench_imports(&imports);
+    let generation = view.next_value_generation();
+    let prepared = source.prepare(&view);
+    let templates = resident_workbench_templates(
+        &prepared.preamble,
+        &context.haskell_effects_alias,
+        &prepared.imports,
+    );
+    let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+    let turn = format!("{binding} <- pure (({anchor}) :: {type_name})");
+    let retained = session.prepared_retained();
+    let result = run_turn(TurnRequest {
+        turn_text: &turn,
+        templates: &templates,
+        include: &include,
+        session_root: view.session_root(),
+        inject_modules: &prepared.injected,
+        gen: generation.0,
+        verdict: Some(generated_bind_verdict(binding)),
+        target: None,
+        retained_imports: &retained,
+    })
+    .map_err(|failure| {
+        ResidentActorWorkbenchError::InputMount(
+            tidepool_runtime::session::render_turn_compile_error(
+                &failure.error,
+                failure.attempted_source.as_deref(),
+                &turn,
+                "<host carrier>",
+            ),
+        )
+    })?;
+    let TurnResult::Bind {
+        mut bound,
+        compiled,
+        ..
+    } = result
+    else {
+        return Err(ResidentActorWorkbenchError::InputMount(
+            "host interface did not compile as a bind".into(),
+        ));
+    };
+    if bound.len() != 1 || bound[0].name != binding {
+        return Err(ResidentActorWorkbenchError::InputMount(format!(
+            "host interface expected one `{binding}` binder"
+        )));
+    }
+    Ok((bound.remove(0), compiled, generation))
+}
+
+struct MountedHostInput {
+    binder: BoundBinder,
+    module: String,
+    name: String,
+}
+
+fn mount_json_input<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    input: &serde_json::Value,
+) -> Result<MountedHostInput, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let binding = fresh_host_binding_name(session, context.placement.lexical_scope, "Input");
+    let (binder, compiled, generation) = compile_host_binding(
+        session,
+        context,
+        source,
+        type_modules,
+        &binding,
+        "TidepoolHostJson.Value",
+        "object [\"anchor\" .= toJSON [TidepoolHostJson.String \"\", TidepoolHostJson.Number (TidepoolHostJson.scientific 0 0), TidepoolHostJson.Bool True, TidepoolHostJson.Null]]",
+        SourceImports::from_specs([
+            "qualified Tidepool.Aeson as TidepoolHostJson",
+            "Tidepool.Aeson (object, (.=), toJSON)",
+        ]),
+    )?;
+    session
+        .mount_json_binding_in(
+            context.placement.lexical_scope,
+            &binder,
+            generation,
+            compiled.into_code(),
+            input,
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    if let Err(error) = session.hide_host_binding_in(context.placement.lexical_scope, &binder) {
+        session.retire_host_binding_owner(&binder);
+        return Err(ResidentActorWorkbenchError::Resident(error));
+    }
+    Ok(MountedHostInput {
+        module: binder.module.clone(),
+        name: binder.name.clone(),
+        binder,
+    })
+}
+
+fn mount_text_binding<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    binding: &str,
+    text: &str,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let (binder, compiled, generation) = compile_host_binding(
+        session,
+        context,
+        source,
+        type_modules,
+        binding,
+        "TidepoolHostText.Text",
+        "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length",
+        SourceImports::from_specs([
+            "qualified Data.Text as TidepoolHostText",
+            "qualified Data.Text.Internal as TidepoolHostTextInternal",
+            "qualified GHC.Exts as TidepoolHostExts",
+        ]),
+    )?;
+    session
+        .mount_text_binding_in(
+            context.placement.lexical_scope,
+            &binder,
+            generation,
+            compiled.into_code(),
+            text,
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)
+}
+
+fn fresh_host_binding_name<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+    category: &str,
+) -> String
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let used = session
+        .workbench_bindings_in(scope)
+        .into_iter()
+        .map(|binding| binding.name)
+        .chain(
+            session
+                .current_decl_heads_in(scope)
+                .into_iter()
+                .map(|(name, _)| name),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let generation = session.val_gen().0;
+    (0_u64..)
+        .map(|ordinal| format!("__tidepool{category}{generation}_{ordinal}"))
+        .find(|candidate| !used.contains(candidate))
+        .expect("unbounded internal host binding namespace")
+}
+
+fn mount_command_job<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    binding: &str,
+    job: &str,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let (binder, compiled, generation) = compile_host_binding(
+        session,
+        context,
+        source,
+        &[],
+        binding,
+        "TidepoolHostJob.Job",
+        "TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length)",
+        SourceImports::from_specs([
+            "qualified Tidepool.Command.Types as TidepoolHostJob",
+            "qualified Data.Text as TidepoolHostText",
+            "qualified Data.Text.Internal as TidepoolHostTextInternal",
+            "qualified GHC.Exts as TidepoolHostExts",
+        ]),
+    )?;
+    session
+        .mount_typed_binding_in(
+            context.placement.lexical_scope,
+            &binder,
+            generation,
+            compiled.into_code(),
+            tidepool_runtime::session::HostBindingType::COMMAND_JOB,
+            &HostCommandJob::Job(job.to_owned()),
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    if let Err(error) =
+        session.tag_host_text_binding_in(context.placement.lexical_scope, &binder, job.to_owned())
+    {
+        session.retire_host_binding_owner(&binder);
+        return Err(ResidentActorWorkbenchError::Resident(error));
+    }
+    Ok(())
+}
+
 fn cell_check_evidence(
     view: &crate::ActorCompileView,
     template: &str,
@@ -7108,6 +7339,117 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    fn host_mount_fixture() -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+
+        tidepool_testing::eval_harness::require_extract();
+        let declarations = [tidepool_mcp::notifications_decl()];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::prelude_path());
+        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/actors"));
+        let preamble = insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "qualified Tidepool.Actors.Shoal as Shoal",
+        );
+        let effects_alias = "'[Shoal.Notifications]";
+        let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
+        let session_root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            session_id,
+            session_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("declaration plane")
+        .with_validation_include(include.clone());
+        let mut session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        let lexical_scope = session.mint_isolated_scope();
+        let resource_scope = RealmId::fresh();
+        session
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope,
+                    resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("actor execution context");
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: crate::ActorPlacement {
+                session: session_id,
+                resource_scope,
+                lexical_scope,
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: effects_alias.into(),
+            source_layer: std::sync::Arc::from([]),
+        };
+        (
+            session,
+            context,
+            ActorWorkbenchSource::new(preamble, include),
+            session_root,
+        )
+    }
+
+    #[test]
+    fn typed_host_mount_carriers_compile_and_bind() {
+        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let input = mount_json_input(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &serde_json::json!({
+                "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
+            }),
+        )
+        .expect("nested JSON carrier mounts");
+        assert!(session
+            .binding_names_in(context.placement.lexical_scope)
+            .iter()
+            .all(|name| name != &input.name));
+
+        mount_text_binding(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            "tool_result",
+            "tool output",
+        )
+        .expect("Text carrier mounts");
+        mount_command_job(
+            &mut session,
+            &context,
+            &source,
+            "job_binding",
+            "command job",
+        )
+        .expect("newtype Job carrier mounts through Text representation");
+        assert_eq!(
+            session.host_text_binding_in(context.placement.lexical_scope, "command job"),
+            Some("job_binding".into())
+        );
+        session.retire_host_binding_owner(&input.binder);
+    }
 
     fn introspection_error_table() -> DataConTable {
         use tidepool_repr::{DataCon, DataConId};

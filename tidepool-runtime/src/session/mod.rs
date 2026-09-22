@@ -78,8 +78,8 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    ProgramProvenance, ProgramProvenanceError, ResidentDisplayBundle, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, SessionRunContext,
+    HostBindingType, ProgramProvenance, ProgramProvenanceError, ResidentDisplayBundle,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
@@ -87,13 +87,13 @@ pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
 pub use workbench::{
     classify_workbench_item, detect_hoisted_declaration_collision, escape_workbench_haskell_string,
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
-    run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
-    BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, SourceOrderCollision,
-    WorkSequence, WorkbenchBinding, WorkbenchBindingKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
+    ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
+    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

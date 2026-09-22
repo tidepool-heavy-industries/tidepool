@@ -1052,6 +1052,14 @@ impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
             .map_err(|error| BridgeError::InternalError(error.to_string()))?;
         self.attach(ManagedField::Node(node))
     }
+
+    fn expected_field_rep(&self) -> Option<RuntimeRep> {
+        let frame = self.frames.last()?;
+        self.builder
+            .constructor_field_rep(frame.host_id, frame.fields.len())
+            .ok()
+            .flatten()
+    }
 }
 
 /// Whether two site rows from two programs carry the same evidence: the same
@@ -1445,6 +1453,41 @@ fn resolve_prepared_import<'a>(
 }
 
 impl PreparedEngine {
+    /// Stream a structurally encoded host value into the resident heap. The
+    /// caller supplies the compiler-authenticated constructor table for the
+    /// typed binding it will mount; no source-text representation is involved.
+    pub fn build_host_value(
+        &mut self,
+        realm: RealmId,
+        value: &dyn tidepool_bridge::ToHaskell,
+        table: &DataConTable,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = {
+            let mut visitor = ManagedMountVisitor {
+                builder: &mut builder,
+                frames: Vec::new(),
+                root: None,
+            };
+            value
+                .visit(table, &mut visitor)
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?;
+            visitor
+                .finish()
+                .map_err(|error| PreparedRuntimeError::HostMount {
+                    detail: error.to_string(),
+                })?
+        };
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Stream a host JSON document into the resident heap. The caller supplies
     /// the compiler-authenticated table for the binding it will mount; this
     /// method deliberately has no source-text representation or parser path.
@@ -1498,7 +1541,8 @@ impl PreparedEngine {
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
         let text_id = table
             .get_by_qualified_name("Data.Text.Internal.Text")
-            .or_else(|| table.get_by_name_arity_checked("Text", 3).ok().flatten())
+            .or_else(|| table.get_by_qualified_name("Data.Text.Text"))
+            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 3))
             .ok_or_else(|| PreparedRuntimeError::HostMount {
                 detail: "the compiler table does not declare Data.Text.Internal.Text".into(),
             })?;
@@ -3725,8 +3769,8 @@ mod tests {
             (122, "IN", 1, Some("GHC.Num.Integer.IN")),
             (130, "True", 0, Some("GHC.Internal.Types.True")),
             (131, "False", 0, Some("GHC.Internal.Types.False")),
-            (140, "Bin", 5, Some("Data.Map.Bin")),
-            (141, "Tip", 0, Some("Data.Map.Tip")),
+            (140, "Bin", 5, Some("Data.Map.Internal.Bin")),
+            (141, "Tip", 0, Some("Data.Map.Internal.Tip")),
             (150, "I#", 1, Some("GHC.Internal.Types.I#")),
             (160, "Text", 3, Some("Data.Text.Internal.Text")),
             (170, ":", 2, Some("GHC.Internal.Types.:")),

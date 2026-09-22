@@ -17,7 +17,7 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIface, parseSessionModule, sessionBinderName
   , sessionModuleString, writeSessionIface )
-import Tidepool.TypePolicy (stabilizeEffectRows)
+import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
 
 -- | Describe and publish the values materialized by one session bind. The
 -- captured result type is split for multi-binds, checked for cross-compilation
@@ -45,14 +45,16 @@ mkBoundBinders bindNames generation root result = do
             moduleName = sessionModuleString sessionModule
             tier = if isClosureType persistedType then RetainOpaque else ForceData
             displayType = renderType ty
-        in (BoundBinder name varId moduleName tier displayType, occurrence, persistedType)
+            rootHead = rootNominalHeadOfType persistedType
+        in (BoundBinder name varId moduleName tier displayType rootHead, occurrence, persistedType)
       built = zipWith build bindNames componentTypes
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIface hsc sessionModule [(occ, ty) | (_, occ, ty) <- built]
   writeSessionIface hsc root sessionModule iface
-  forM_ binders $ \(BoundBinder name varId moduleName tier displayType) ->
+  forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead) ->
     hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
-      ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", varId " ++ show varId ++ ")"
+      ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", root " ++ show rootHead
+      ++ ", varId " ++ show varId ++ ")"
   pure binders
 
 parseValModule :: String -> Maybe SessionModule

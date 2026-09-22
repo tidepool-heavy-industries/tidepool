@@ -1097,6 +1097,7 @@ data BoundBinder = BoundBinder
   , bbModule      :: String
   , bbTier        :: ValueTier
   , bbTypeDisplay :: String
+  , bbRootHead    :: Maybe NominalHead
   } deriving (Eq, Show)
 
 -- | The rich result of a @--turn@ run. 'TDecl' never compiles — its

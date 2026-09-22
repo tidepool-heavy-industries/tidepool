@@ -23,7 +23,8 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectConte
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
-    BindingName, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
+    BindingName, DataConId, DataConTable, Generation, MonotonicIdIssuer, SessionModule,
+    SessionVarId,
 };
 
 use crate::render::EvalResult;
@@ -109,6 +110,41 @@ pub struct SessionRunContext {
     pub resource_scope: RealmId,
     pub lexical_scope: ScopeId,
     pub principal: PrincipalId,
+}
+
+/// A compiler-issued host mount must have this exact outer nominal type. The
+/// unit is carried by [`BoundBinder::root_head`]; module and type constructor
+/// identify the shipped surface the host builder knows how to construct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostBindingType {
+    module: &'static str,
+    name: &'static str,
+    constructors: &'static [&'static str],
+}
+
+impl HostBindingType {
+    pub const JSON_VALUE: Self = Self {
+        module: "Tidepool.Aeson.Value",
+        name: "Value",
+        constructors: &[
+            "Tidepool.Aeson.Value.Object",
+            "Tidepool.Aeson.Value.Array",
+            "Tidepool.Aeson.Value.String",
+            "Tidepool.Aeson.Value.Number",
+            "Tidepool.Aeson.Value.Bool",
+            "Tidepool.Aeson.Value.Null",
+        ],
+    };
+    pub const TEXT: Self = Self {
+        module: "Data.Text.Internal",
+        name: "Text",
+        constructors: &["Data.Text.Text"],
+    };
+    pub const COMMAND_JOB: Self = Self {
+        module: "Tidepool.Command.Types",
+        name: "Job",
+        constructors: &["Tidepool.Command.Types.Job"],
+    };
 }
 
 impl SessionRunContext {
@@ -1066,6 +1102,14 @@ pub struct ResidentSession<H, O> {
     parked: Vec<(String, ContinuationId)>,
     parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
     binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
+    /// Host-owned text identities for materialized bindings whose equality is
+    /// meaningful to a caller (currently retained command jobs). The binding
+    /// table remains the owner of reachability and scope retirement; this map
+    /// only records a payload identity for deduplication.
+    host_text_bindings: HashMap<SessionVarId, String>,
+    /// Private request carriers remain rooted for closures that captured them,
+    /// but never become ordinary unqualified workbench vocabulary.
+    hidden_host_bindings: HashMap<SessionVarId, ()>,
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
@@ -1103,6 +1147,8 @@ where
             parked: Vec::new(),
             parked_provenance: HashMap::new(),
             binding_provenance: HashMap::new(),
+            host_text_bindings: HashMap::new(),
+            hidden_host_bindings: HashMap::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
@@ -1356,7 +1402,17 @@ where
     /// Immutable compile environment for `scope`, suitable for carrying out of
     /// a registry peek before a blocking GHC invocation.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<super::SessionCompileView> {
-        self.state.compile_view_in(scope)
+        let hidden = self
+            .state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .filter(|(_, entry)| self.hidden_host_bindings.contains_key(&entry.id))
+            .map(|(name, _)| name.0.clone())
+            .collect::<Vec<_>>();
+        self.state
+            .compile_view_in(scope)
+            .map(|view| view.hide_value_names(&hidden))
     }
 
     /// Capture an exact, selective declaration surface from `scope` for a
@@ -1746,20 +1802,20 @@ where
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         value: &serde_json::Value,
     ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
-        self.validate_compiled_mount_target(scope, binder, gen)?;
-        self.state
-            .merge_table(table)
-            .map_err(ResidentError::TableCollision)?;
-        let realm = self.run_context.resource_scope;
-        let handle = self
-            .state
-            .require_prepared()?
-            .build_host_json(realm, value, table)?;
-        self.mount_host_handle_prepared(scope, binder, gen, handle)
+        self.validate_compiled_mount_target(
+            scope,
+            binder,
+            gen,
+            &code,
+            HostBindingType::JSON_VALUE,
+        )?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
+            engine.build_host_json(realm, value, table)
+        })
     }
 
     /// The `Text` sibling of [`Self::mount_json_binding_in`]. It is for host
@@ -1771,20 +1827,138 @@ where
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         text: &str,
     ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
-        self.validate_compiled_mount_target(scope, binder, gen)?;
-        self.state
-            .merge_table(table)
-            .map_err(ResidentError::TableCollision)?;
-        let realm = self.run_context.resource_scope;
-        let handle = self
+        self.mount_text_binding_as_in(scope, binder, gen, code, HostBindingType::TEXT, text)
+    }
+
+    /// Mount the runtime `Text` representation under a compiler-issued
+    /// logical binder whose newtype erases to `Text` at STG. `Job` is the
+    /// current shipped use: its nominal root is still checked before the
+    /// exact `Text` descriptor is authenticated and built.
+    pub fn mount_text_binding_as_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        expected: HostBindingType,
+        text: &str,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
+        self.validate_text_runtime_constructor(&code)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
+            engine.build_host_text(realm, text, table)
+        })
+    }
+
+    /// Build and mount a compiler-typed structural host value. The caller's
+    /// compiler-issued binder and constructor table are the type authority;
+    /// the host value is never rendered as Haskell source.
+    pub fn mount_typed_binding_in<T>(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        expected: HostBindingType,
+        value: &T,
+    ) -> Result<(), ResidentError>
+    where
+        T: tidepool_bridge::ToHaskell,
+    {
+        self.settle_dropped_custody();
+        self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
+            engine.build_host_value(realm, value, table)
+        })
+    }
+
+    /// Record a host `Text` identity after its freshly minted compiler binder
+    /// has been mounted. This supports deduplication without comparing source
+    /// text. The identity disappears when its value binding leaves the live
+    /// table.
+    pub fn tag_host_text_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        text: String,
+    ) -> Result<(), ResidentError> {
+        let id = SessionVarId::from_extract(binder.var_id);
+        let current = self
             .state
-            .require_prepared()?
-            .build_host_text(realm, text, table)?;
-        self.mount_host_handle_prepared(scope, binder, gen, handle)
+            .resolve_in(scope, &binder.name)
+            .filter(|entry| entry.scope == scope && entry.id == id)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host text binding `{}` is not current in its lexical scope",
+                    binder.name
+                ))))
+            })?;
+        if current.id != id {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host text binding identity changed before tagging".into(),
+            ))));
+        }
+        self.host_text_bindings.insert(id, text);
+        Ok(())
+    }
+
+    /// Make a freshly mounted request carrier private to the source preamble
+    /// that aliases it. It remains injected and rooted for closures compiled
+    /// during that request, but ordinary future cells cannot name it.
+    pub fn hide_host_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        let id = SessionVarId::from_extract(binder.var_id);
+        let current = self
+            .state
+            .resolve_in(scope, &binder.name)
+            .filter(|entry| entry.scope == scope && entry.id == id)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host binding `{}` is not current in its lexical scope",
+                    binder.name
+                ))))
+            })?;
+        if current.id != id {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "host binding identity changed before hiding".into(),
+            ))));
+        }
+        self.hidden_host_bindings.insert(id, ());
+        Ok(())
+    }
+
+    /// Withdraw a private request carrier from future source views while any
+    /// prepared work that already leased it retains its exact generation.
+    pub fn retire_host_binding_owner(&mut self, binder: &BoundBinder) {
+        let id = SessionVarId::from_extract(binder.var_id);
+        self.state.retire_binding_owner(id);
+        self.hidden_host_bindings.remove(&id);
+    }
+
+    /// The current materialized binding in `scope` carrying this exact host
+    /// text identity. This compares retained host data, never rendered source.
+    #[must_use]
+    pub fn host_text_binding_in(&self, scope: ScopeId, text: &str) -> Option<String> {
+        self.state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .find_map(|(name, entry)| {
+                (entry.scope == scope
+                    && self
+                        .host_text_bindings
+                        .get(&entry.id)
+                        .is_some_and(|identity| identity == text))
+                .then(|| name.0.clone())
+            })
     }
 
     fn validate_compiled_mount_target(
@@ -1792,6 +1966,8 @@ where
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
+        code: &TurnCode<'_>,
+        expected: HostBindingType,
     ) -> Result<(), ResidentError> {
         if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
@@ -1805,7 +1981,150 @@ where
                 ),
             ))));
         }
+        let Some(root) = &binder.root_head else {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` has no nominal root type evidence",
+                    binder.name
+                ),
+            ))));
+        };
+        if root.unit.is_empty() || root.module != expected.module || root.name != expected.name {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "compiled binder `{}` has root {}:{}:{}; host mount requires {}.{}",
+                    binder.name, root.unit, root.module, root.name, expected.module, expected.name,
+                ),
+            ))));
+        }
+        for qualified in expected.constructors {
+            let id = self
+                .host_constructor_id(&code.table, expected, qualified)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                        "host mount requires compiler constructor {qualified}"
+                    ))))
+                })?;
+            let family = code
+                .prepared
+                .constructors()
+                .iter()
+                .find(|declaration| declaration.host_id == id)
+                .map(|declaration| &declaration.family)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                        "host mount constructor {qualified} has no prepared family identity"
+                    ))))
+                })?;
+            if family.unit != root.unit
+                || family.module != root.module
+                || family.namespace != "type"
+                || family.occurrence != root.name
+                || family.record_parent.is_some()
+            {
+                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    format!(
+                        "compiled binder `{}` root {}:{}:{} does not match constructor family {}:{}:{}:{}",
+                        binder.name,
+                        root.unit,
+                        root.module,
+                        root.name,
+                        family.unit,
+                        family.module,
+                        family.namespace,
+                        family.occurrence,
+                    ),
+                ))));
+            }
+        }
         Ok(())
+    }
+
+    /// `Text` is the actual runtime representation for direct Text mounts and
+    /// for shipped newtypes such as `Job`. The table supplies the exact host
+    /// id; the prepared declaration supplies the defining family and unit.
+    fn validate_text_runtime_constructor(&self, code: &TurnCode<'_>) -> Result<(), ResidentError> {
+        let qualified = "Data.Text.Text";
+        let id = self
+            .host_constructor_id(&code.table, HostBindingType::TEXT, qualified)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host Text mount requires compiler constructor {qualified}"
+                ))))
+            })?;
+        let family = code
+            .prepared
+            .constructors()
+            .iter()
+            .find(|declaration| declaration.host_id == id)
+            .map(|declaration| &declaration.family)
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    "host Text constructor has no prepared family identity".into(),
+                )))
+            })?;
+        if family.unit.is_empty()
+            || family.module != "Data.Text.Internal"
+            || family.namespace != "type"
+            || family.occurrence != "Text"
+            || family.record_parent.is_some()
+        {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
+                    "host Text constructor has unexpected family {}:{}:{}:{}",
+                    family.unit, family.module, family.namespace, family.occurrence,
+                ),
+            ))));
+        }
+        Ok(())
+    }
+
+    fn host_constructor_id(
+        &self,
+        table: &DataConTable,
+        expected: HostBindingType,
+        qualified: &str,
+    ) -> Option<DataConId> {
+        table.get_by_qualified_name(qualified).or_else(|| {
+            (expected == HostBindingType::TEXT && qualified == "Data.Text.Text")
+                .then(|| table.get_by_qualified_name("Data.Text.Internal.Text"))
+                .flatten()
+        })
+    }
+
+    /// Install, build, bind, and unpin one payload-independent interface as
+    /// one transaction. A carrier program is needed to bootstrap a fresh
+    /// machine, but it owns no live value after the handle is adopted by the
+    /// binding table, so its install pin must never escape this method.
+    fn mount_host_value_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        build: impl FnOnce(
+            &mut super::prepared::PreparedEngine,
+            RealmId,
+            &DataConTable,
+        ) -> Result<PreparedHandle, PreparedRuntimeError>,
+    ) -> Result<(), ResidentError> {
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        let table = code.table;
+        let program = self.state.install_prepared(code.prepared.into_owned())?;
+        let realm = self.run_context.resource_scope;
+        let mounted = (|| {
+            let handle = {
+                let engine = self.state.require_prepared()?;
+                build(engine, realm, &table)?
+            };
+            self.mount_host_handle_prepared(scope, binder, gen, handle)
+        })();
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
+        mounted
     }
 
     /// Install a just-built host handle. Unlike externally supplied custody,
@@ -1825,12 +2144,6 @@ where
                 "host binding mount produced a handle with no hosting program".into(),
             ))));
         };
-        if let Err(error) = self.state.retract_in(scope, &binder.name) {
-            if let Some(engine) = self.state.prepared_mut() {
-                engine.release(handle);
-            }
-            return Err(error.into());
-        }
         if let Err(error) = self.bind_prepared(program, scope, gen, &[(binder, handle)]) {
             return Err(error);
         }
@@ -1861,7 +2174,6 @@ where
                 "compiled binding mount received an unknown or already-consumed handle".into(),
             ))));
         };
-        self.state.retract_in(scope, &binder.name)?;
         // `bind_prepared` owns the handle from here, releasing it on failure.
         transfer.commit();
         self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
@@ -1995,6 +2307,7 @@ where
             .bindings()
             .iter_current_in(self.state.scope_tree(), scope)
             .into_iter()
+            .filter(|(_, entry)| !self.hidden_host_bindings.contains_key(&entry.id))
             .map(|(name, _)| name.0.clone())
             .collect()
     }
@@ -2137,7 +2450,12 @@ where
     /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
-        self.state.retire_scope(scope)
+        let retirement = self.state.retire_scope(scope);
+        self.host_text_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        self.hidden_host_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        retirement
     }
 
     fn provenance_for(&self, sites: &[YieldSite]) -> Result<Arc<ProgramProvenance>, ResidentError> {
@@ -3113,6 +3431,10 @@ where
         }
         released.extend(self.state.bindings_mut().collect_observations());
         let binding_count = self.state.release_binding_roots(released);
+        self.host_text_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        self.hidden_host_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
         if let Some(engine) = self.state.prepared_mut() {

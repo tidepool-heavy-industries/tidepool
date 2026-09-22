@@ -259,8 +259,8 @@ encodeBoundBinders :: [BoundBinder] -> Encoding
 encodeBoundBinders bs = encodeListLen (fromIntegral (length bs)) <> foldMap encodeBoundBinder bs
 
 encodeBoundBinder :: BoundBinder -> Encoding
-encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
-  encodeListLen 5
+encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead) =
+  encodeListLen 6
   <> encodeString (T.pack name)
   <> encodeWord64 varid
   <> encodeString (T.pack modul)
@@ -268,6 +268,10 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
       ForceData -> "ForceData"
       RetainOpaque -> "RetainOpaque")
   <> encodeString (T.pack tdisp)
+  <> maybe encodeNull encodeHead rootHead
+  where
+    encodeHead (NominalHead unit headModule headName) =
+      encodeListLen 3 <> encodeString unit <> encodeString headModule <> encodeString headName
 
 -- | @modules@ (the third element, added alongside @site@/@type@ — see
 -- @modules@ is the defining-module set a shim

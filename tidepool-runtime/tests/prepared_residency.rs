@@ -120,6 +120,45 @@ impl Notebook {
         compiled
     }
 
+    /// Compile against the session's current source view while giving the
+    /// extractor every still-live value interface needed to link retained
+    /// closures. Shadowed generations stay injected but are not imported
+    /// unqualified, so a rebound name remains unambiguous to new source.
+    fn compile_in_current_value_view(&mut self, text: &str) -> TurnResult {
+        self.generation += 1;
+        let imports = self
+            .session
+            .current_val_modules()
+            .into_iter()
+            .map(|module| format!("{module}\n"))
+            .collect::<String>();
+        let templates = resident_workbench_templates(&self.preamble, &self.effect_stack, &imports);
+        let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
+        let injected = self.session.inject_val_modules();
+        let retained = self.session.prepared_retained();
+        run_turn(TurnRequest {
+            turn_text: text,
+            templates: &templates,
+            include: &include,
+            session_root: self.root.path(),
+            inject_modules: &injected,
+            gen: self.generation,
+            verdict: None,
+            target: None,
+            retained_imports: &retained,
+        })
+        .unwrap_or_else(|failure| {
+            panic!(
+                "{text:?} failed to compile: {}\n{}",
+                tidepool_runtime::classify_compile(&failure.error).message,
+                failure
+                    .attempted_source
+                    .as_deref()
+                    .unwrap_or("<no attempted source>")
+            )
+        })
+    }
+
     /// Install the immutable artifact afresh on every turn. Compilation is
     /// shared; mutable heap state and program retirement are still exercised.
     fn expression(&mut self, compiled: &CompiledTurn) {
@@ -353,4 +392,83 @@ fn prepared_session_large_promotion_triggers_an_early_major_collection() {
          trigger in `PreparedEngine::major_collection_due` should fire well before the next \
          install-count boundary at N={N}"
     );
+}
+
+#[test]
+fn fresh_host_binders_preserve_prior_request_input_for_captured_closures() {
+    use tidepool_codegen::scope::ScopeId;
+
+    let mut notebook = Notebook::new();
+    let mount = |notebook: &mut Notebook, payload: serde_json::Value| {
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = notebook.compile_in_current_value_view(
+            "input <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]])",
+        )
+        else {
+            panic!("input interface must compile as a bind");
+        };
+        let [binder] = bound.as_slice() else {
+            panic!("input interface must produce exactly one binder");
+        };
+        let constructors = compiled
+            .table
+            .iter()
+            .filter_map(|con| con.qualified_name.clone())
+            .collect::<Vec<_>>();
+        notebook
+            .session
+            .mount_json_binding_in(
+                ScopeId::ROOT,
+                binder,
+                Generation(notebook.generation),
+                compiled.into_code(),
+                &payload,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "mount compiler-authenticated JSON input ({binder:?}; {constructors:?}): {error}"
+                )
+            });
+    };
+
+    mount(&mut notebook, serde_json::json!({"request": "A"}));
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile_in_current_value_view(
+        "fromA <- pure (\\() -> case input of { Aeson.Object fields -> if Map.member \"request\" fields then 11 :: Int else 0; _ -> 0 })",
+    )
+    else {
+        panic!("request-A closure must compile as a bind");
+    };
+    let [from_a] = bound.as_slice() else {
+        panic!("request-A closure must produce exactly one binder");
+    };
+    let outcome = notebook
+        .session
+        .run_bind_with_sites(
+            "request_a_capture",
+            compiled.into_code(),
+            from_a,
+            Generation(notebook.generation),
+        )
+        .expect("capture request-A input in closure");
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+
+    mount(&mut notebook, serde_json::json!({"request": "B"}));
+    assert_eq!(notebook.session.val_gen(), Generation(notebook.generation));
+
+    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view("fromA ()")
+    else {
+        panic!("request-A closure invocation must compile as an expression");
+    };
+    let outcome = notebook
+        .session
+        .run_with_sites("request_a_snapshot", compiled.into_code())
+        .expect("request-A closure remains runnable after request-B mount");
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("request-A closure invocation did not complete: {outcome:?}");
+    };
+    assert_eq!(result.to_json(), serde_json::json!([11, "11"]));
 }

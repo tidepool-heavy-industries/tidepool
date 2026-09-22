@@ -160,6 +160,16 @@ impl SessionCompileView {
         self
     }
 
+    /// Keep selected live values injected for already-compiled references,
+    /// while withholding their unqualified exports from a new source turn.
+    #[must_use]
+    pub fn hide_value_names(mut self, names: &[String]) -> Self {
+        for (_, published) in &mut self.visible_value_names {
+            published.retain(|name| !names.contains(name));
+        }
+        self
+    }
+
     /// Current scope bindings take precedence over implicit vocabulary imports,
     /// just as they do in persisted declaration modules.
     #[must_use]

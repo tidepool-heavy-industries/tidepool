@@ -3,6 +3,7 @@ module Tidepool.TypePolicy
   , isGhcCompilerTyCon
   , modulesOfType
   , nominalHeadsOfType
+  , rootNominalHeadOfType
   , NominalHead(..)
   , TypeNodeId(..)
   , TypeNodeG(..)
@@ -34,6 +35,7 @@ import GHC.Core.TyCon
   ( TyCon, isAlgTyCon, isFamilyTyCon, isNewTyCon, isPrimTyCon
   , isTypeSynonymTyCon, newTyConEtadRhs, tyConDataCons, tyConName )
 import GHC.Core.Type (coreView, expandTypeSynonyms, mkAppTys, splitTyConApp_maybe)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.RepType (PrimRep(..), typePrimRep_maybe)
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -306,6 +308,27 @@ nominalHeadsOfType ty = List.sort . List.nub $ headTyCon ty ++
         , nhModule = T.pack (moduleNameString (moduleName m))
         , nhName = T.pack (occNameString (nameOccName (tyConName tc)))
         }
+
+-- | The exact nominal type constructor at a value boundary. Unlike
+-- 'nominalHeadsOfType', this never descends into arguments: a @Text@ nested
+-- in @Job Text@ is not evidence that the value itself is @Text@.
+rootNominalHeadOfType :: Type -> Maybe NominalHead
+rootNominalHeadOfType ty = go body
+  where
+    (_, _, body) = tcSplitSigmaTy ty
+    go candidate = case coreView candidate of
+      Just expanded -> go expanded
+      Nothing -> case candidate of
+        CastTy inner _ -> go inner
+        _ -> case splitTyConApp_maybe candidate of
+          Just (tc, _) -> do
+            m <- nameModule_maybe (tyConName tc)
+            pure NominalHead
+              { nhUnit = T.pack (unitIdString (moduleUnitId m))
+              , nhModule = T.pack (moduleNameString (moduleName m))
+              , nhName = T.pack (occNameString (nameOccName (tyConName tc)))
+              }
+          Nothing -> Nothing
 
 -- | Replace effect-row aliases with their exact underlying @Eff '[...]@ type.
 --

@@ -58,6 +58,10 @@ pub struct BoundBinder {
     pub tier: ValueTier,
     /// `ppr` of the bound value's type, for `:t`.
     pub type_display: String,
+    /// Exact nominal root of the persisted binding type, when its outer type
+    /// is a type constructor. This is compiler-issued structural evidence,
+    /// never parsed from `type_display` or inferred from nested type heads.
+    pub root_head: Option<NominalHead>,
 }
 
 /// The three mutually-exclusive shapes a turn can take (GHC-sourced).
@@ -2528,7 +2532,7 @@ fn decode_export_items(v: &CborValue) -> Result<Vec<ExportItem>, CompileError> {
 }
 
 fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
-    let arr = cbor_expect_array_len(v, 5, "BoundBinder")?;
+    let arr = cbor_expect_array_len(v, 6, "BoundBinder")?;
     let name = cbor_expect_text(&arr[0], "BoundBinder name")?.to_string();
     let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
     let module = cbor_expect_text(&arr[2], "BoundBinder module")?.to_string();
@@ -2542,12 +2546,24 @@ fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
         }
     };
     let type_display = cbor_expect_text(&arr[4], "BoundBinder typeDisplay")?.to_string();
+    let root_head = match &arr[5] {
+        CborValue::Null => None,
+        head => {
+            let head = cbor_expect_array_len(head, 3, "BoundBinder nominal root")?;
+            Some(NominalHead {
+                unit: cbor_expect_text(&head[0], "BoundBinder root unit")?.to_owned(),
+                module: cbor_expect_text(&head[1], "BoundBinder root module")?.to_owned(),
+                name: cbor_expect_text(&head[2], "BoundBinder root name")?.to_owned(),
+            })
+        }
+    };
     Ok(BoundBinder {
         name,
         var_id,
         module,
         tier,
         type_display,
+        root_head,
     })
 }
 

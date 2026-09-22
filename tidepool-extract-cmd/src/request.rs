@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v10";
-const MAGIC: &[u8; 8] = b"TPREQ010";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v11";
+const MAGIC: &[u8; 8] = b"TPREQ011";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
@@ -677,7 +677,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v10 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v11 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -1090,6 +1090,7 @@ mod tests {
             "--worker-request-v7",
             "--worker-request-v8",
             "--worker-request-v9",
+            "--worker-request-v10",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -1109,6 +1110,8 @@ mod tests {
             b"TPREQ006",
             b"TPREQ007",
             b"TPREQ008",
+            b"TPREQ009",
+            b"TPREQ010",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());

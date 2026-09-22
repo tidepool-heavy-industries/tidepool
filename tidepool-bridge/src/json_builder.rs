@@ -22,6 +22,7 @@
 //! (key sorting and resolving [`JsonConIds`]) on top of them.
 
 use crate::{BridgeError, HaskellValue, HaskellVisitor};
+use tidepool_repr::execution_schema::RuntimeRep;
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// `DataConId`s of every constructor needed to build a `HaskellValue`.
@@ -71,56 +72,37 @@ impl JsonConIds {
     /// Resolve constructor ids from a table. Returns `None` if any Haskell value,
     /// `Data.Map` / `Text` constructor is absent.
     ///
-    /// Tip resolution uses `get_companion` first so that when both
-    /// `Data.Map.Tip` and `Data.Set.Tip` are present (cross-module closure) the
-    /// `Tip` that is actually a sibling of the resolved `Bin` is chosen.
+    /// Every constructor is resolved by a qualified compiler identity. A
+    /// unique bare same-shape constructor is still an impostor, not a safe
+    /// fallback for an authenticated host mount.
     pub fn from_table(table: &DataConTable) -> Option<Self> {
-        fn named(
-            table: &DataConTable,
-            qualified: &[&str],
-            name: &str,
-            arity: u32,
-        ) -> Option<DataConId> {
-            qualified
-                .iter()
-                .find_map(|qualified| {
-                    table
-                        .get_by_qualified_name(qualified)
-                        .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == arity))
-                })
-                .or_else(|| table.get_by_name_arity_checked(name, arity).ok().flatten())
+        fn named(table: &DataConTable, qualified: &[&str], arity: u32) -> Option<DataConId> {
+            qualified.iter().find_map(|qualified| {
+                table
+                    .get_by_qualified_name(qualified)
+                    .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == arity))
+            })
         }
 
-        let bin = named(table, &["Data.Map.Bin"], "Bin", 5)?;
-        let tip = table
-            .get_by_qualified_name("Data.Map.Tip")
-            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 0))
-            .or_else(|| table.get_companion(bin, "Tip", 0))
-            .or_else(|| named(table, &[], "Tip", 0))?;
         Some(JsonConIds {
-            object: named(table, &["Tidepool.Aeson.Value.Object"], "Object", 1)?,
-            array: named(table, &["Tidepool.Aeson.Value.Array"], "Array", 1)?,
-            string: named(table, &["Tidepool.Aeson.Value.String"], "String", 1)?,
-            number: named(table, &["Tidepool.Aeson.Value.Number"], "Number", 1)?,
-            scientific: named(
-                table,
-                &["Tidepool.Aeson.Scientific.Scientific"],
-                "Scientific",
-                2,
-            )?,
-            is: named(table, &["GHC.Num.Integer.IS"], "IS", 1)?,
-            ip: named(table, &["GHC.Num.Integer.IP"], "IP", 1)?,
-            in_: named(table, &["GHC.Num.Integer.IN"], "IN", 1)?,
-            bool_con: named(table, &["Tidepool.Aeson.Value.Bool"], "Bool", 1)?,
-            null: named(table, &["Tidepool.Aeson.Value.Null"], "Null", 0)?,
-            true_con: named(table, &["GHC.Internal.Types.True"], "True", 0)?,
-            false_con: named(table, &["GHC.Internal.Types.False"], "False", 0)?,
-            bin,
-            tip,
-            i_hash: named(table, &["GHC.Internal.Types.I#"], "I#", 1)?,
-            text: named(table, &["Data.Text.Internal.Text"], "Text", 3)?,
-            cons: named(table, &["GHC.Internal.Types.:"], ":", 2)?,
-            nil: named(table, &["GHC.Internal.Types.[]"], "[]", 0)?,
+            object: named(table, &["Tidepool.Aeson.Value.Object"], 1)?,
+            array: named(table, &["Tidepool.Aeson.Value.Array"], 1)?,
+            string: named(table, &["Tidepool.Aeson.Value.String"], 1)?,
+            number: named(table, &["Tidepool.Aeson.Value.Number"], 1)?,
+            scientific: named(table, &["Tidepool.Aeson.Scientific.Scientific"], 2)?,
+            is: named(table, &["GHC.Num.Integer.IS"], 1)?,
+            ip: named(table, &["GHC.Num.Integer.IP"], 1)?,
+            in_: named(table, &["GHC.Num.Integer.IN"], 1)?,
+            bool_con: named(table, &["Tidepool.Aeson.Value.Bool"], 1)?,
+            null: named(table, &["Tidepool.Aeson.Value.Null"], 0)?,
+            true_con: named(table, &["GHC.Types.True", "GHC.Internal.Types.True"], 0)?,
+            false_con: named(table, &["GHC.Types.False", "GHC.Internal.Types.False"], 0)?,
+            bin: named(table, &["Data.Map.Internal.Bin"], 5)?,
+            tip: named(table, &["Data.Map.Internal.Tip"], 0)?,
+            i_hash: named(table, &["GHC.Types.I#", "GHC.Internal.Types.I#"], 1)?,
+            text: named(table, &["Data.Text.Internal.Text", "Data.Text.Text"], 3)?,
+            cons: named(table, &["GHC.Types.:", "GHC.Internal.Types.:"], 2)?,
+            nil: named(table, &["GHC.Types.[]", "GHC.Internal.Types.[]"], 0)?,
         })
     }
 }
@@ -149,9 +131,13 @@ fn visit_map(
     let mid = entries.len() / 2;
     let (key, value) = entries[mid];
     visitor.begin_constructor(ids.bin, 5)?;
-    visitor.begin_constructor(ids.i_hash, 1)?;
-    visitor.literal(Literal::LitInt(entries.len() as i64))?;
-    visitor.end_constructor()?;
+    if matches!(visitor.expected_field_rep(), Some(RuntimeRep::Int(_))) {
+        visitor.literal(Literal::LitInt(entries.len() as i64))?;
+    } else {
+        visitor.begin_constructor(ids.i_hash, 1)?;
+        visitor.literal(Literal::LitInt(entries.len() as i64))?;
+        visitor.end_constructor()?;
+    }
     visit_text(key, ids, visitor)?;
     visit_json(value, ids, visitor)?;
     visit_map(&entries[..mid], ids, visitor)?;
@@ -364,24 +350,33 @@ mod tests {
         ];
 
         for (i, (name, tag, arity)) in cons.iter().enumerate() {
+            let qualified_name = match *name {
+                "Object" | "Array" | "String" | "Number" | "Bool" | "Null" => {
+                    format!("Tidepool.Aeson.Value.{name}")
+                }
+                "Scientific" => "Tidepool.Aeson.Scientific.Scientific".into(),
+                "IS" | "IP" | "IN" => format!("GHC.Num.Integer.{name}"),
+                "True" | "False" | "I#" | ":" | "[]" => format!("GHC.Types.{name}"),
+                "Bin" | "Tip" => format!("Data.Map.Internal.{name}"),
+                "Text" => "Data.Text.Internal.Text".into(),
+                _ => unreachable!("complete JSON test constructor family"),
+            };
             t.insert(DataCon {
                 id: DataConId(i as u64),
                 name: (*name).into(),
                 tag: *tag,
                 rep_arity: *arity,
                 field_bangs: vec![],
-                qualified_name: None,
+                qualified_name: Some(qualified_name),
                 type_name: String::new(),
             });
         }
         t
     }
 
-    /// `Data.Map` and `Data.Set` both register a bare-name `Tip`; `from_table`
-    /// must still resolve via `get_companion` — the `Tip` that is actually a
-    /// sibling of the resolved `Bin` — not just the first bare-name match.
+    /// An unrelated bare constructor cannot alter an anchored JSON family.
     #[test]
-    fn json_con_ids_resolves_tip_companion_over_bare_name_collision() {
+    fn json_con_ids_ignores_bare_tip_impostor() {
         let mut table = json_test_table();
         // Add a second "Tip" with a far-away id (simulating Data.Set.Tip).
         table.insert(DataCon {
@@ -393,7 +388,7 @@ mod tests {
             qualified_name: None,
             type_name: String::new(),
         });
-        let ids = JsonConIds::from_table(&table).expect("table has all JSON constructors");
+        let ids = JsonConIds::from_table(&table).expect("table has anchored JSON constructors");
         let json = serde_json::json!({"key": "value"});
         let val = json_to_value(&json, &ids).unwrap();
         match &val {
@@ -403,22 +398,24 @@ mod tests {
     }
 
     #[test]
-    fn json_con_ids_rejects_same_shape_user_constructor_without_a_qualified_anchor() {
-        let mut table = json_test_table();
-        table
-            .insert_checked(DataCon {
-                id: DataConId(501),
-                name: "Object".into(),
-                tag: 1,
-                rep_arity: 1,
-                field_bangs: vec![],
-                qualified_name: Some("User.Object".into()),
-                type_name: "UserValue".into(),
-            })
-            .expect("distinct user constructor");
+    fn json_con_ids_rejects_unique_same_shape_impostor_family() {
+        let mut table = DataConTable::new();
+        for (id, name, arity) in [(501, "Object", 1), (502, "Array", 1), (503, "String", 1)] {
+            table
+                .insert_checked(DataCon {
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!("User.{name}")),
+                    type_name: "UserValue".into(),
+                })
+                .expect("distinct user constructor");
+        }
         assert!(
             JsonConIds::from_table(&table).is_none(),
-            "an unqualified JSON family must not select a same-name, same-arity user constructor"
+            "a unique bare same-shape family must not satisfy authenticated JSON construction"
         );
     }
 
@@ -448,13 +445,23 @@ mod tests {
             ("I#", 13, 1),
         ];
         for (i, (name, tag, arity)) in cons.iter().enumerate() {
+            let qualified_name = match *name {
+                "Object" | "Array" | "String" | "Number" | "Bool" | "Null" => {
+                    format!("Tidepool.Aeson.Value.{name}")
+                }
+                "Scientific" => "Tidepool.Aeson.Scientific.Scientific".into(),
+                "IS" | "IP" | "IN" => format!("GHC.Num.Integer.{name}"),
+                "True" | "False" | "I#" | ":" | "[]" => format!("GHC.Types.{name}"),
+                "Text" => "Data.Text.Internal.Text".into(),
+                _ => unreachable!("complete JSON test constructor family"),
+            };
             t.insert(DataCon {
                 id: DataConId(i as u64),
                 name: (*name).into(),
                 tag: *tag,
                 rep_arity: *arity,
                 field_bangs: vec![],
-                qualified_name: None,
+                qualified_name: Some(qualified_name),
                 type_name: String::new(),
             });
         }
@@ -465,7 +472,7 @@ mod tests {
             tag: 1,
             rep_arity: 5,
             field_bangs: vec![],
-            qualified_name: Some("Data.Map.Bin".into()),
+            qualified_name: Some("Data.Map.Internal.Bin".into()),
             type_name: String::new(),
         });
         t.insert(DataCon {
@@ -474,7 +481,7 @@ mod tests {
             tag: 2,
             rep_arity: 0,
             field_bangs: vec![],
-            qualified_name: Some("Data.Map.Tip".into()),
+            qualified_name: Some("Data.Map.Internal.Tip".into()),
             type_name: String::new(),
         });
         // Data.Set constructors with SAME unqualified names

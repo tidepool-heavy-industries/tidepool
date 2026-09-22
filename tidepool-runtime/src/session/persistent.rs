@@ -211,6 +211,26 @@ impl PersistentSession {
         }
         released
     }
+
+    /// Drop one newly published value when no compiled turn can yet have
+    /// captured it. This is deliberately narrower than name retraction:
+    /// callers must supply the exact id, so an older captured generation is
+    /// never disturbed.
+    pub fn discard_unleased_binding(&mut self, id: SessionVarId) -> bool {
+        let Some(entry) = self.bindings.remove_live(id) else {
+            return false;
+        };
+        self.release_binding_roots(vec![entry]);
+        true
+    }
+
+    /// Retire one owner while preserving it until any existing dependency
+    /// lease settles. This is the request-carrier lifecycle primitive.
+    pub fn retire_binding_owner(&mut self, id: SessionVarId) {
+        if let Some(entry) = self.bindings.retire_owner(id) {
+            self.release_binding_roots(vec![entry]);
+        }
+    }
     /// The accumulated constructor table.
     pub fn session_table(&self) -> &DataConTable {
         &self.session_table

@@ -464,6 +464,31 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         Ok(ManagedNode { node })
     }
 
+    /// The worker representation for one authenticated field. Structural
+    /// encoders query only the field they are about to emit, avoiding a
+    /// per-node shape allocation for large values.
+    pub fn constructor_field_rep(
+        &self,
+        host_id: DataConId,
+        logical_index: usize,
+    ) -> Result<Option<RuntimeRep>, ExecutionError> {
+        let descriptor = self
+            .machine
+            .interner
+            .by_host(host_id)
+            .map(|(_, descriptor)| descriptor)
+            .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?;
+        Ok(descriptor
+            .payload()
+            .logical_to_stored()
+            .get(logical_index)
+            .map(|stored| {
+                stored
+                    .and_then(|index| descriptor.payload().fields().get(index as usize))
+                    .map_or(RuntimeRep::Void, |field| field.rep())
+            }))
+    }
+
     #[cfg(test)]
     fn temporary_root_metrics(&self) -> (usize, usize) {
         self.core.root_metrics()

@@ -458,6 +458,29 @@ impl BindingTable {
         Some(entry)
     }
 
+    /// Retire one exact owner without touching older captured generations.
+    /// A leased entry leaves the current frame now and is released after its
+    /// final lease; an unleased entry is returned to the session owner now.
+    pub fn retire_owner(&mut self, id: SessionVarId) -> Option<BindingEntry> {
+        let entry = self.live.get(&id)?;
+        if let Some(frame) = self.current.get_mut(&entry.scope) {
+            if frame.get(&entry.name) == Some(&id) {
+                frame.remove(&entry.name);
+            }
+        }
+        if self.leases.get(&id).copied().unwrap_or(0) > 0 {
+            self.retired_owners.insert(id);
+            None
+        } else {
+            let removed = self.live.remove(&id);
+            if removed.is_some() {
+                self.retired_owners.remove(&id);
+                self.scope_local_aliases.remove(&id);
+            }
+            removed
+        }
+    }
+
     /// Evict every binding born in `scope`'s OWN frame (shadowed older gens
     /// included) and drop the frame itself. Returns the evicted entries, in
     /// ascending id order for determinism.

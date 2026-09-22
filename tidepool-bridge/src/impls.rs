@@ -482,8 +482,11 @@ impl ToHaskell for String {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        let text_id = get_resilient(table, "Text", 3)
-            .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
+        let text_id = table
+            .get_by_qualified_name("Data.Text.Text")
+            .or_else(|| table.get_by_qualified_name("Data.Text.Internal.Text"))
+            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 3))
+            .ok_or_else(|| BridgeError::UnknownDataConName("Data.Text.Text".into()))?;
         visitor.begin_constructor(text_id, 3)?;
         visitor.byte_array(self.as_bytes().to_vec())?;
         visitor.literal(Literal::LitInt(0))?;

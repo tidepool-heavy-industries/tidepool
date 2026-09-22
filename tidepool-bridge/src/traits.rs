@@ -1,5 +1,6 @@
 use crate::error::BridgeError;
 use crate::HaskellValue;
+use tidepool_repr::execution_schema::RuntimeRep;
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Implementation detail for sealing traits.
@@ -53,6 +54,14 @@ pub trait HaskellVisitor {
     fn end_constructor(&mut self) -> Result<(), BridgeError>;
     fn literal(&mut self, literal: Literal) -> Result<(), BridgeError>;
     fn byte_array(&mut self, bytes: Vec<u8>) -> Result<(), BridgeError>;
+
+    /// The representation expected for the next constructor field, when the
+    /// sink constructs directly against authenticated descriptors. Structural
+    /// encoders can use this to select an unboxed worker field instead of
+    /// manufacturing a boxed source-level wrapper.
+    fn expected_field_rep(&self) -> Option<RuntimeRep> {
+        None
+    }
 }
 
 #[derive(Default)]
