@@ -1,58 +1,15 @@
 //! Private commands use the same owning-TUI socket as active input.
 use crate::{AgentBackendError, NativeCommandOperation, NativeCommandReply, QueueReadyThread};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tidepool_bridge_effects::{
     CommandOutput, CommandPage, CommandPosition, CommandSpec, CommandStream,
 };
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Request<'a> {
-    thread_id: &'a str,
-    id: &'a str,
-    #[serde(flatten)]
-    operation: Operation,
-}
-#[derive(Serialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-enum Operation {
-    Start {
-        spec: CommandSpec,
-    },
-    Wait,
-    Output {
-        bytes: usize,
-    },
-    Read {
-        stream: CommandStream,
-        position: CommandPosition,
-    },
-    Input {
-        text: String,
-    },
-    CloseInput,
-    Resize {
-        rows: u16,
-        columns: u16,
-    },
-    Cancel,
-}
-#[derive(Deserialize)]
-#[serde(tag = "result", content = "value", rename_all = "snake_case")]
-enum Response {
-    State(State),
-    Output(CommandOutput),
-    Page(CommandPage),
-    Acknowledged,
-}
-#[derive(Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-enum State {
-    Starting,
-    Finished { exit_code: i32, cancelled: bool },
-    Failed { detail: String },
-}
+type Request = codex_shoal_protocol::CommandRequest<CommandSpec, CommandStream, CommandPosition>;
+type Operation =
+    codex_shoal_protocol::CommandOperation<CommandSpec, CommandStream, CommandPosition>;
+type Response = codex_shoal_protocol::CommandResponse<CommandOutput, CommandPage>;
+use codex_shoal_protocol::CommandState as State;
 
 pub(super) async fn request(
     thread: &QueueReadyThread,
@@ -82,10 +39,13 @@ pub(super) async fn request(
         NativeCommandOperation::Cancel => Operation::Cancel,
     };
     let mut response = client
-        .post("http://localhost/v1/commands")
+        .post(format!(
+            "http://localhost{}",
+            codex_shoal_protocol::COMMAND_PATH
+        ))
         .json(&Request {
-            thread_id: &thread.id().0,
-            id,
+            thread_id: thread.id().0.clone(),
+            id: id.to_owned(),
             operation,
         })
         .send()

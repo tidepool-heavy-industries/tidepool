@@ -2,55 +2,13 @@
 
 use std::{num::NonZeroU64, path::PathBuf, time::Duration};
 
-use serde::{Deserialize, Serialize};
-
 use crate::interactive::{PublicationOperation, PublicationReply};
 use crate::{AgentBackendError, QueueReadyThread};
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Request<'a> {
-    thread_id: &'a str,
-    sequence: NonZeroU64,
-    operation: Operation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expected_identity: Option<Identity>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Identity {
-    pid: u32,
-    start_ticks: u64,
-    mount_namespace_inode: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-enum Operation {
-    Begin,
-    Finish,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-enum Reply {
-    Ready {
-        pid: u32,
-        #[serde(rename = "startTicks")]
-        start_ticks: u64,
-        #[serde(rename = "mountNamespaceInode")]
-        mount_namespace_inode: u64,
-        #[serde(rename = "cgroupPath")]
-        cgroup_path: PathBuf,
-    },
-    Settled,
-    Busy,
-    Conflict,
-    Unavailable {
-        reason: String,
-    },
-}
+use codex_shoal_protocol::WorkspaceProcessIdentity as Identity;
+use codex_shoal_protocol::WorkspacePublicationOperation as Operation;
+use codex_shoal_protocol::WorkspacePublicationReply as Reply;
+use codex_shoal_protocol::WorkspacePublicationRequest as Request;
 
 pub(super) async fn request(
     thread: &QueueReadyThread,
@@ -89,7 +47,7 @@ pub(super) async fn request(
         }
         let _driver = Driver(driver);
         let body = serde_json::to_vec(&Request {
-            thread_id: &thread.id().0,
+            thread_id: thread.id().0.clone(),
             sequence,
             operation: match operation {
                 PublicationOperation::Begin { .. } => Operation::Begin,
@@ -106,7 +64,7 @@ pub(super) async fn request(
             }),
         })
         .map_err(unconfirmed)?;
-        let request = hyper::Request::post("/v1/workspace/publication")
+        let request = hyper::Request::post(codex_shoal_protocol::WORKSPACE_PUBLICATION_PATH)
             .header("Host", "localhost")
             .header("Content-Type", "application/json")
             .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
@@ -129,27 +87,31 @@ pub(super) async fn request(
             .await
             .map_err(unconfirmed)?
             .to_bytes();
-        Ok(match serde_json::from_slice(&body).map_err(unconfirmed)? {
-            Reply::Ready {
-                pid,
-                start_ticks,
-                mount_namespace_inode,
-                cgroup_path,
-            } if pid > 0 && mount_namespace_inode > 0 && cgroup_path.is_absolute() => {
-                PublicationReply::Ready {
-                    peer_pid,
+        Ok(
+            match serde_json::from_slice::<Reply<PathBuf>>(&body).map_err(unconfirmed)? {
+                Reply::Ready {
                     pid,
                     start_ticks,
                     mount_namespace_inode,
                     cgroup_path,
+                } if pid > 0 && mount_namespace_inode > 0 && cgroup_path.is_absolute() => {
+                    PublicationReply::Ready {
+                        peer_pid,
+                        pid,
+                        start_ticks,
+                        mount_namespace_inode,
+                        cgroup_path,
+                    }
                 }
-            }
-            Reply::Ready { .. } => return Err(unconfirmed("invalid native publication identity")),
-            Reply::Settled => PublicationReply::Settled,
-            Reply::Busy => PublicationReply::Busy,
-            Reply::Conflict => PublicationReply::Conflict,
-            Reply::Unavailable { reason } => PublicationReply::Unavailable { detail: reason },
-        })
+                Reply::Ready { .. } => {
+                    return Err(unconfirmed("invalid native publication identity"))
+                }
+                Reply::Settled => PublicationReply::Settled,
+                Reply::Busy => PublicationReply::Busy,
+                Reply::Conflict => PublicationReply::Conflict,
+                Reply::Unavailable { reason } => PublicationReply::Unavailable { detail: reason },
+            },
+        )
     })
     .await
     .map_err(unconfirmed)?

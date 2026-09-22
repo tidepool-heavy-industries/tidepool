@@ -76,8 +76,7 @@ prefix_rule(
     justification = "Inspection-only actors may inspect Git but must delegate repository mutation to a coding actor.",
 )
 "#;
-pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 =
-    codex_shoal_protocol::HOST_PROTOCOL_VERSION;
+pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = codex_shoal_protocol::HOST_PROTOCOL_VERSION;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
 ///
@@ -94,7 +93,9 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
     .await?;
     let manifest: codex_shoal_protocol::Manifest = serde_json::from_str(manifest_output.trim())
         .map_err(|error| AgentBackendError::ProtocolRejected {
-            detail: format!("interactive Codex returned an invalid Shoal protocol manifest: {error}"),
+            detail: format!(
+                "interactive Codex returned an invalid Shoal protocol manifest: {error}"
+            ),
         })?;
     let expected = codex_shoal_protocol::Manifest::default();
     if manifest != expected {
