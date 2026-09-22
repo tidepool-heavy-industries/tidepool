@@ -15,12 +15,11 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellSourceSpan, InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, TurnKind, TypeMatchQuality,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    CellSourceSpan, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
+    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -2613,6 +2612,21 @@ where
                 self.environment
                     .runner
                     .resume_agent_observation(context.clone(), inspection.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::Lookup {
+                continuation,
+                request,
+            } => Box::pin(async move {
+                self.environment
+                    .runner
+                    .application_workbench()
+                    .resume_lookup(
+                        context.clone(),
+                        continuation,
+                        request,
+                        self.environment.usage_pointers,
+                    )
                     .await
             }),
             ResidentActorBoundary::Introspection {
@@ -5595,10 +5609,6 @@ where
         mut request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
-        let lookup_call = request
-            .tool_call()
-            .filter(|call| call.name == crate::lookup_tool::LOOKUP_TOOL)
-            .cloned();
         let status_call = request
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
@@ -5608,8 +5618,7 @@ where
             .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
             .cloned();
         let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
-            call.name != crate::lookup_tool::LOOKUP_TOOL
-                && call.name != crate::status_tool::STATUS_TOOL
+            call.name != crate::status_tool::STATUS_TOOL
                 && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
         }) {
             let tools = self
@@ -5764,121 +5773,6 @@ where
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output,
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: None,
-                }],
-                1,
-                1,
-                None,
-            )));
-        }
-        if let Some(call) = lookup_call {
-            let prepared = crate::lookup_tool::prepare(call.arguments).map_err(|error| {
-                workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )
-            })?;
-            // Whether the batch needs the extractor at all is decided by query
-            // shape alone (a `doc`/rejected query needs nothing), so that
-            // check does not need this turn's imports and can run before the
-            // machine is checked out.
-            let needs_inspection = prepared.iter().any(|query| {
-                !matches!(
-                    query.kind,
-                    crate::lookup_tool::PreparedLookupKind::Doc(_)
-                        | crate::lookup_tool::PreparedLookupKind::Rejected(_)
-                )
-            });
-            let prepared_for_queries = prepared.clone();
-            let (inspected, live_modules) = if needs_inspection {
-                workbench
-                    .lookup_inspections(context.clone(), move |imports: &str| {
-                        prepared_for_queries
-                            .iter()
-                            .flat_map(|query| match &query.kind {
-                                crate::lookup_tool::PreparedLookupKind::Name(name) => {
-                                    // A dotted, lowercase-final name is a
-                                    // qualified value or field
-                                    // (`Cmd.exitCode`); a miss on it browses
-                                    // the qualifier's real module (resolved
-                                    // from this turn's own imports, never a
-                                    // hand-maintained alias table) in the same
-                                    // batch, so `lookup_response` can suggest
-                                    // the closest export without a second
-                                    // round trip. The pairing is decided here
-                                    // by shape alone, matching how
-                                    // `lookup_response` decides how many
-                                    // results to consume for this query.
-                                    match crate::lookup_tool::qualifier_and_identifier(name) {
-                                        Some((qualifier, _identifier)) => {
-                                            let module =
-                                                crate::lookup_tool::resolve_qualifier_module(
-                                                    imports, qualifier,
-                                                )
-                                                .unwrap_or_else(|| qualifier.to_string());
-                                            vec![
-                                                InspectionQuery::Info(name.clone()),
-                                                InspectionQuery::Browse {
-                                                    module,
-                                                    expanded: false,
-                                                },
-                                            ]
-                                        }
-                                        None => vec![InspectionQuery::Info(name.clone())],
-                                    }
-                                }
-                                // Only GHC knows whether `Cmd.RunResult` is a
-                                // name in this scope or a module. Both
-                                // interpretations go out in this batch, in
-                                // this order, and `lookup_response` picks per
-                                // result: the worker isolates rejection per
-                                // query, so a module browse still costs one
-                                // round trip and a qualified name is no
-                                // longer answered `no match` for being
-                                // dotted.
-                                crate::lookup_tool::PreparedLookupKind::Qualified(name) => vec![
-                                    InspectionQuery::Info(name.clone()),
-                                    InspectionQuery::Browse {
-                                        module: name.clone(),
-                                        expanded: false,
-                                    },
-                                ],
-                                crate::lookup_tool::PreparedLookupKind::Type(query) => {
-                                    vec![InspectionQuery::TypeSearch(query.clone())]
-                                }
-                                crate::lookup_tool::PreparedLookupKind::Doc(_) => Vec::new(),
-                                crate::lookup_tool::PreparedLookupKind::Rejected(_) => Vec::new(),
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .map_err(|error| workbench_failure(&[], 0, 1, error))?
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let response = lookup_response_with_usage_pointers(
-                prepared,
-                inspected,
-                &live_modules,
-                workbench.workspace_modules(),
-                self.environment.usage_pointers,
-            );
-            return Ok(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Committed,
-                vec![WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: 0,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output: response.render_text(),
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
@@ -6143,7 +6037,7 @@ where
                     };
                     // The tool-result boundary: the result exists and has not
                     // been returned. Only a hosted tool call reaches here —
-                    // `lookup`, `status` and `reload_agent_spec` never acquire
+                    // `status` and `reload_agent_spec` never acquire
                     // a dispatcher, and an authored cell is not a tool call at
                     // all — so a broken slot can never block its own repair.
                     let output = match (request.tool_call().cloned(), tool_dispatch.as_ref()) {
@@ -8531,297 +8425,11 @@ fn workbench_response(
 #[cfg(test)]
 fn lookup_response(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
-    inspected: Vec<InspectionResult>,
+    inspected: Vec<tidepool_runtime::session::InspectionResult>,
     live_modules: &[String],
     workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
-    lookup_response_with_usage_pointers(prepared, inspected, live_modules, workspace_modules, &[])
-}
-
-fn lookup_response_with_usage_pointers(
-    prepared: Vec<crate::lookup_tool::PreparedLookup>,
-    inspected: Vec<InspectionResult>,
-    live_modules: &[String],
-    workspace_modules: &[String],
-    usage_pointers: crate::UsagePointerTable,
-) -> crate::lookup_tool::LookupResponse {
-    use crate::lookup_tool::{
-        LookupEntry, LookupEntryKind, LookupInterpretation, LookupOrigin, LookupOutcome,
-        LookupResult, MatchQuality, PreparedLookupKind,
-    };
-
-    const MATCH_LIMIT: usize = 20;
-    let mut inspected = inspected.into_iter();
-    let results = prepared
-        .into_iter()
-        .map(|prepared| match prepared.kind {
-            PreparedLookupKind::Rejected(diagnostic) => LookupResult {
-                query: prepared.query,
-                outcome: LookupOutcome::Rejected { diagnostic },
-            },
-            PreparedLookupKind::Doc(topic) => {
-                match crate::prompt_catalog::workbench_doc(&topic, workspace_modules) {
-                    Ok(body) => LookupResult::found(
-                        prepared.query,
-                        vec![LookupEntry {
-                            name: topic,
-                            defining_module: None,
-                            kind: LookupEntryKind::Documentation,
-                            signature_or_declaration: body.into(),
-                            origin: LookupOrigin::Documentation,
-                            quality: MatchQuality::Exact,
-                            availability:
-                                tidepool_runtime::session::InspectionAvailability::Unknown,
-                            usage_pointer: None,
-                        }],
-                        MATCH_LIMIT,
-                    ),
-                    Err(diagnostic) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
-                }
-            }
-            PreparedLookupKind::Name(ref name) => {
-                // A dotted, lowercase-final name (`Cmd.exitCode`) sent a
-                // paired qualifier `Browse` in the same batch (built above,
-                // in `execute_workbench`); every other `Name` shape consumes
-                // exactly one result. This mirrors that same shape-based
-                // decision so the two stay aligned without threading a count
-                // through the response.
-                let qualifier_shaped = crate::lookup_tool::qualifier_and_identifier(name).is_some();
-                let info_result = inspected.next();
-                let browse_result = if qualifier_shaped {
-                    inspected.next()
-                } else {
-                    None
-                };
-                match info_result {
-                    Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
-                        prepared.query,
-                        entries
-                            .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
-                            .collect(),
-                        MATCH_LIMIT,
-                    ),
-                    Some(InspectionResult::NotFound { .. }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::Name],
-                            suggestions: near_match_suggestions(name, browse_result),
-                        },
-                    },
-                    Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected { diagnostic },
-                    },
-                    Some(other) => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: format!(
-                                "lookup worker returned unexpected result: {other:?}"
-                            ),
-                        },
-                    },
-                    None => LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::Rejected {
-                            diagnostic: "lookup worker omitted a result".into(),
-                        },
-                    },
-                }
-            }
-            // The batch carried `Info` then `Browse` for this one query, so the
-            // name answer is taken when GHC has one and the module browse is
-            // read only when it does not. Both results are consumed either way,
-            // which is what keeps the remaining queries aligned.
-            PreparedLookupKind::Qualified(_) => match (inspected.next(), inspected.next()) {
-                (Some(InspectionResult::Info { entries, .. }), _) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (Some(InspectionResult::Ambiguous { entries, .. }), _) => LookupResult::ambiguous(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (_, Some(InspectionResult::Browse { entries, .. })) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (by_name, by_module) => unresolved_qualified(prepared.query, by_name, by_module),
-            },
-            PreparedLookupKind::Type(_) => match inspected.next() {
-                Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
-                    LookupResult {
-                        query: prepared.query,
-                        outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::TypeSearch],
-                            suggestions: Vec::new(),
-                        },
-                    }
-                }
-                Some(InspectionResult::TypeMatches { matches, .. }) => LookupResult::found(
-                    prepared.query,
-                    matches
-                        .into_iter()
-                        .map(|entry| LookupEntry {
-                            name: entry.name.clone(),
-                            defining_module: entry.module.clone(),
-                            kind: LookupEntryKind::Value,
-                            signature_or_declaration: format!(
-                                "{} :: {}",
-                                entry.name, entry.signature
-                            ),
-                            origin: lookup_origin(entry.module.as_deref(), live_modules),
-                            quality: match entry.quality {
-                                TypeMatchQuality::Exact => MatchQuality::Exact,
-                                TypeMatchQuality::Usable => MatchQuality::Usable,
-                            },
-                            availability: entry.availability,
-                            usage_pointer: crate::usage_pointer::pointer_for(
-                                usage_pointers,
-                                &entry.name,
-                            ),
-                        })
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-                Some(other) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
-                    },
-                },
-                None => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: "lookup worker omitted a result".into(),
-                    },
-                },
-            },
-        })
-        .collect();
-    fn info_lookup_entry(
-        entry: tidepool_runtime::session::InfoEntry,
-        live_modules: &[String],
-        usage_pointers: crate::UsagePointerTable,
-    ) -> LookupEntry {
-        let kind = match entry.kind.as_str() {
-            "class-method" => LookupEntryKind::ClassMethod,
-            "record-selector" => LookupEntryKind::RecordSelector,
-            "constructor" => LookupEntryKind::Constructor,
-            "type" => LookupEntryKind::Type,
-            "coercion" => LookupEntryKind::Coercion,
-            _ => LookupEntryKind::Value,
-        };
-        let usage_pointer = crate::usage_pointer::pointer_for(usage_pointers, &entry.name);
-        LookupEntry {
-            name: entry.name,
-            defining_module: entry.module.clone(),
-            kind,
-            signature_or_declaration: entry.display,
-            origin: lookup_origin(entry.module.as_deref(), live_modules),
-            quality: MatchQuality::Exact,
-            availability: entry.availability,
-            usage_pointer,
-        }
-    }
-
-    /// The closest exported names under a missed qualifier, read from the
-    /// same-batch `Browse` of that qualifier's real module (see
-    /// `crate::lookup_tool::resolve_qualifier_module`). Empty when the query
-    /// was not qualifier-shaped, the browse itself failed (an unresolvable
-    /// qualifier, most likely), or nothing in it was close enough to suggest.
-    fn near_match_suggestions(name: &str, browse: Option<InspectionResult>) -> Vec<String> {
-        let Some((_qualifier, identifier)) = crate::lookup_tool::qualifier_and_identifier(name)
-        else {
-            return Vec::new();
-        };
-        let Some(InspectionResult::Browse { entries, .. }) = browse else {
-            return Vec::new();
-        };
-        let candidates: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
-        crate::lookup_tool::near_matches(identifier, &candidates, 5)
-    }
-
-    /// Neither interpretation of a dotted capitalized query produced entries.
-    /// A miss reports both attempts, so a reader is never left guessing which
-    /// question was asked; a real diagnostic from either side outranks it,
-    /// because a failed query is not evidence the name does not exist.
-    fn unresolved_qualified(
-        query: String,
-        by_name: Option<InspectionResult>,
-        by_module: Option<InspectionResult>,
-    ) -> LookupResult {
-        let diagnostic = [by_name, by_module]
-            .into_iter()
-            .find_map(|result| match result {
-                Some(
-                    InspectionResult::NotFound { .. } | InspectionResult::ModuleNotFound { .. },
-                ) => None,
-                Some(InspectionResult::Rejected { diagnostic }) => Some(diagnostic),
-                Some(other) => Some(format!(
-                    "lookup worker returned unexpected result: {other:?}"
-                )),
-                None => Some("lookup worker omitted a result".into()),
-            });
-        LookupResult {
-            query,
-            outcome: match diagnostic {
-                Some(diagnostic) => LookupOutcome::Rejected { diagnostic },
-                None => LookupOutcome::NotFound {
-                    attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
-                    suggestions: Vec::new(),
-                },
-            },
-        }
-    }
-
-    fn lookup_origin(module: Option<&str>, live_modules: &[String]) -> LookupOrigin {
-        if module.is_some_and(|module| live_modules.iter().any(|live| live == module)) {
-            LookupOrigin::LiveBinding
-        } else {
-            LookupOrigin::ModuleExport
-        }
-    }
-
-    let response = crate::lookup_tool::LookupResponse { results };
-    // Discovery is part of a cell's story: what was asked, and what the model
-    // was actually shown in reply. Rendering costs an allocation, so ask
-    // first whether anything is listening.
-    if tracing::enabled!(target: "shoal::content", tracing::Level::INFO) {
-        tracing::info!(
-            target: "shoal::content",
-            rendered = %response.render_text(),
-            "lookup answered"
-        );
-    }
-    response
+    crate::lookup_tool::resolve(prepared, inspected, live_modules, workspace_modules, &[])
 }
 
 #[cfg(test)]
@@ -8951,6 +8559,7 @@ mod tests {
                 InspectionResult::Info {
                     query: "awaitSettled".into(),
                     entries: vec![InfoEntry {
+                        references: vec![],
                         name: "awaitSettled".into(),
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
                         kind: "value".into(),
@@ -8965,6 +8574,7 @@ mod tests {
                 InspectionResult::TypeMatches {
                     query: "Response result -> Await (Settlement result)".into(),
                     matches: vec![TypeMatch {
+                        references: vec![],
                         name: "awaitSettled".into(),
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
                         signature: "Response result -> Await (Settlement result)".into(),
@@ -9005,6 +8615,7 @@ mod tests {
 
     fn info_entry(name: &str, module: &str, kind: &str, display: &str) -> InfoEntry {
         InfoEntry {
+            references: vec![],
             name: name.into(),
             module: Some(module.into()),
             kind: kind.into(),

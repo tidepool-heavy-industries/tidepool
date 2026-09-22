@@ -2185,7 +2185,7 @@ fn compile_root(
                     .workspace_inputs
                     .as_ref()
                     .and_then(|inputs| inputs.tools.as_deref())
-                    .unwrap_or("Tidepool.Command.Tools.tools"),
+                    .unwrap_or("Tidepool.Tools.tools"),
             )
             // Rule two of spec discovery. Rule one is a file in an actor's own
             // checkout and belongs to no run-wide value; this key is how a

@@ -37,6 +37,7 @@ pub use jev::{unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure};
 mod kernel;
 mod lineage;
 mod local_actor;
+mod lookup;
 pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;

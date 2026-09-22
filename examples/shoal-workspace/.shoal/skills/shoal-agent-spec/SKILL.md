@@ -120,8 +120,10 @@ model would see it, already bounded for display, so a command's complete output
 is reached through its retained job, not through the slot's input. The result waits for it, up to
 five minutes. If it fails or runs out of time the result is delivered unchanged
 with one line naming `after-tool#N`; `status` has the rest. A slot's own tool
-use never triggers the slot. `lookup`, `status`, `reload_agent_spec` and
-authored cells are never shown to it, so a broken slot cannot block its repair.
+use never triggers the slot. `status`, `reload_agent_spec` and authored cells
+are never shown to it, so a broken slot cannot block its repair. The template
+`lookup` is an ordinary precompiled tool and follows the same slot policy as
+your other tools; its Jev selection runs in its body.
 
 ## Writing a slot you would leave on
 

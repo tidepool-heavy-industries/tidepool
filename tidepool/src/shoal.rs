@@ -1700,11 +1700,11 @@ mod tests {
             ),
             (
                 ".shoal/AgentSpec.hs",
-                include_str!("../../.shoal/AgentSpec.hs"),
+                include_str!("../../examples/shoal-workspace/.shoal/AgentSpec.hs"),
             ),
             (
                 ".shoal/Project/Tools.hs",
-                include_str!("../../.shoal/Project/Tools.hs"),
+                include_str!("../../examples/shoal-workspace/.shoal/Project/Tools.hs"),
             ),
             (
                 ".shoal/Project/Watchdog.hs",
@@ -1718,12 +1718,14 @@ mod tests {
             );
         }
         let spec = std::fs::read_to_string(workspace.path().join(".shoal/AgentSpec.hs")).unwrap();
-        assert!(spec.contains("afterTool = Just afterEachTool"), "{spec}");
-        assert!(spec.contains("Abstained"), "{spec}");
+        assert!(spec.contains("specTools = Tools.tools"), "{spec}");
         let tools =
             std::fs::read_to_string(workspace.path().join(".shoal/Project/Tools.hs")).unwrap();
-        assert!(tools.contains("shell :: Shell.ShellTools mode"), "{tools}");
-        assert!(tools.contains("triageSearch"), "{tools}");
+        assert!(
+            tools.contains("shell :: Command.ShellTools mode"),
+            "{tools}"
+        );
+        assert!(tools.contains("inspection = Lookup.tools"), "{tools}");
     }
 
     /// Every workspace skill lands, and the links a client discovers them

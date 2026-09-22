@@ -93,6 +93,10 @@ fn emit_scaffold_package(repository: PathBuf) {
         ".shoal/Project/Shell.hs".to_owned(),
         repository.join("examples/shoal-workspace/.shoal/Project/Shell.hs"),
     ));
+    entries.push((
+        ".shoal/Project/Lookup.hs".to_owned(),
+        repository.join("examples/shoal-workspace/.shoal/Project/Lookup.hs"),
+    ));
     // The worked-example watchdog: a set of monitors a parent may install on
     // the children it spawns. The starter `AgentSpec.hs` does not turn it on
     // (its slot keeps abstaining); the module ships so a project can adopt it

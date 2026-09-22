@@ -25,7 +25,7 @@ maximum_depth = 8
 
 [haskell]
 source_roots = ["."]
-modules = ["Project.Shell"]
+modules = ["Project.Shell", "Project.Lookup"]
 spec = "AgentSpec.agentSpec"
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in

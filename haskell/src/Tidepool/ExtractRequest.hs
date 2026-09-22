@@ -49,6 +49,7 @@ data RequestField
   | InspectInfo String
   | InspectBrowse String
   | InspectBrowseExpanded String
+  | InspectScopeBrowse
   | InspectSearch String
   | InspectStructuredInfo StructuredInspection
   | InspectStructuredType StructuredInspection
@@ -133,6 +134,7 @@ data InspectionRequest
   = InspectTypeOf String
   | InspectNameInfo String
   | InspectModule String Bool
+  | InspectScope
   | InspectTypeSearch String
   | InspectStructuredInfoOf StructuredInspection
   | InspectStructuredTypeOf StructuredInspection
@@ -198,6 +200,8 @@ requestFromFields = foldl apply emptyWorkerRequest
         { requestInspections = requestInspections request ++ [InspectModule name False] }
       InspectBrowseExpanded name -> request
         { requestInspections = requestInspections request ++ [InspectModule name True] }
+      InspectScopeBrowse -> request
+        { requestInspections = requestInspections request ++ [InspectScope] }
       InspectSearch query -> request
         { requestInspections = requestInspections request ++ [InspectTypeSearch query] }
       InspectStructuredInfo query -> request
@@ -280,6 +284,7 @@ encodeField field = case field of
   InspectTypeBatch value -> taggedText 40 value
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
+  InspectScopeBrowse -> BS.singleton 43
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -383,6 +388,7 @@ pField bytes = do
     40 -> mapParser InspectTypeBatch pText rest
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
+    43 -> Right (InspectScopeBrowse, rest)
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

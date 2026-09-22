@@ -20,6 +20,7 @@ pub mod green;
 pub mod introspection;
 pub mod jev;
 pub mod journal;
+pub mod lookup;
 pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
@@ -53,6 +54,7 @@ pub use green::*;
 pub use introspection::*;
 pub use jev::*;
 pub use journal::*;
+pub use lookup::*;
 pub use notifications::*;
 pub use read_state::*;
 pub use recipe_check::*;
@@ -83,6 +85,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_decl(),
         actor_context_decl(),
         introspection_decl(),
+        lookup_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
         sleep_decl(),

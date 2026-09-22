@@ -623,6 +623,26 @@ struct RequestWorkbenchScope<'a> {
     type_modules: &'a [String],
 }
 
+impl RequestWorkbenchScope<'_> {
+    fn source(
+        &self,
+        source: &ActorWorkbenchSource,
+        context: &crate::ActorSessionContext,
+    ) -> ActorWorkbenchSource {
+        let mut source = source.clone();
+        source.preamble = match (self.response, self.request) {
+            (Some(response), Some(request)) => {
+                response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
+            }
+            (None, None) => source.preamble.to_string(),
+            _ => unreachable!("request workbench scope is constructed atomically"),
+        }
+        .into();
+        source.preamble = actor_preamble(&source.preamble, context).into();
+        source
+    }
+}
+
 pub(crate) enum ResidentWorkbenchStep {
     Committed {
         output: String,
@@ -1706,6 +1726,10 @@ pub(crate) enum ResidentActorBoundary {
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
     AgentAttachment(ResidentAgentAttachment),
+    Lookup {
+        continuation: ResidentHole,
+        request: crate::lookup::LookupRequest,
+    },
     Introspection {
         continuation: ResidentHole,
         query: tidepool_runtime::session::NameQuery,
@@ -1858,6 +1882,7 @@ impl ResidentActorBoundary {
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
             Self::AgentAttachment(_) => "agent attachment",
+            Self::Lookup { .. } => "lookup",
             Self::Introspection { kind, .. } => match kind {
                 StructuredInspectionKind::Info => "structured info",
                 StructuredInspectionKind::Type => "structured type",
@@ -1967,6 +1992,7 @@ enum ResidentRequest {
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
     AgentInspection(crate::generated::agent_inspection::AgentInspectionReq),
+    Lookup(crate::generated::lookup::LookupReq),
     Introspection(crate::generated::introspection::IntrospectionReq),
     AgentLaunch(crate::generated::agent_launch::AgentLaunchReq),
     Forks(crate::generated::forks::ForksReq),
@@ -2024,6 +2050,7 @@ impl ResidentRequest {
             Self::AgentInspection,
             crate::generated::agent_inspection::AgentInspectionReq
         );
+        try_member!(Self::Lookup, crate::generated::lookup::LookupReq);
         try_member!(
             Self::Introspection,
             crate::generated::introspection::IntrospectionReq
@@ -2105,6 +2132,7 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
+            Self::Lookup(_) => "lookup",
             Self::Introspection(
                 crate::generated::introspection::IntrospectionReq::IntrospectionInfoWith(..),
             ) => "structured info",
@@ -2334,13 +2362,6 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     pub(crate) fn with_json_input(mut self, input: Option<serde_json::Value>) -> Self {
         self.json_input = input;
         self
-    }
-
-    /// The workspace's own Haskell modules, for `doc` to name beside its
-    /// built-in topics. Empty when this session has no `FrozenWorkspace`.
-    #[must_use]
-    pub(crate) fn workspace_modules(&self) -> &[String] {
-        &self.access.source.workspace_modules
     }
 }
 
@@ -3262,68 +3283,61 @@ where
             .await
     }
 
-    /// `build_queries` receives the exact imports text this turn's inspection
-    /// module will compile with
-    /// ([`ActorWorkbenchSource::prepare`]-assembled, one import spec per
-    /// line) and returns the queries to run — so a query that needs to know
-    /// what a short qualifier actually resolves to (see
-    /// `crate::lookup_tool::resolve_qualifier_module`) can be built with that
-    /// answer in hand, in the same batch and the same extractor round trip as
-    /// every other query in the lookup.
-    pub(crate) async fn lookup_inspections(
+    /// Execute lookup queries and candidate discovery against one immutable compile view.
+    pub(crate) async fn resume_lookup(
         &self,
         context: crate::ActorSessionContext,
-        build_queries: impl FnOnce(&str) -> Vec<InspectionQuery> + Send + 'static,
-    ) -> Result<
-        (
-            Vec<tidepool_runtime::session::InspectionResult>,
-            Vec<String>,
-        ),
-        ResidentActorWorkbenchError,
-    > {
-        let response = self.response.clone();
-        let request = self.request;
+        hole: ResidentHole,
+        request: crate::lookup::LookupRequest,
+        usage: crate::UsagePointerTable,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let source = RequestWorkbenchScope {
+            response: self.response.as_ref(),
+            request: self.request,
+            type_modules: &self.type_modules,
+        }
+        .source(&self.access.source, &context);
         let type_modules = Arc::clone(&self.type_modules);
-        let mut source = self.access.source.clone();
         self.access
             .with_machine(context, move |session, context, _| {
-                source.preamble = match (response.as_ref(), request) {
-                    (Some(response), Some(request)) => response.request_preamble(
-                        &source.preamble,
-                        request,
-                        &context.haskell_effects_alias,
-                    ),
-                    (None, None) => source.preamble.to_string(),
-                    _ => unreachable!("request workbench scope is constructed atomically"),
-                }
-                .into();
-                source.preamble = actor_preamble(&source.preamble, context).into();
-                let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
-                let prepared = source.prepare(&compile_view);
-                let queries = build_queries(&prepared.imports);
+                let view = actor_compile_view(session, context, &source, &type_modules)?;
+                let provenance = structured_provenance(
+                    &view,
+                    &source,
+                    tidepool_runtime::session::NameScope::Current,
+                );
+                let prepared = source.prepare(&view);
                 let include = prepared
                     .include
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
-                let results = run_inspections(InspectionRequest {
-                    preamble: &prepared.preamble,
-                    imports: &prepared.imports,
-                    include: &include,
-                    session_root: compile_view.session_root(),
-                    inject_modules: &prepared.injected,
-                    queries: &queries,
-                    effects: Some(&context.haskell_effects_alias),
-                })
-                .map_err(ResidentActorWorkbenchError::Compile)?;
-                if results.len() != queries.len() {
-                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                        "lookup returned {} results for {} queries",
-                        results.len(),
-                        queries.len()
-                    )));
-                }
-                Ok((results, prepared.injected))
+                let answer = crate::lookup::execute(
+                    request,
+                    provenance.fingerprint,
+                    &prepared.imports,
+                    &prepared.injected,
+                    &source.workspace_modules,
+                    usage,
+                    |queries| {
+                        if queries.is_empty() {
+                            return Ok(vec![]);
+                        }
+                        run_inspections(InspectionRequest {
+                            preamble: &prepared.preamble,
+                            imports: &prepared.imports,
+                            include: &include,
+                            session_root: view.session_root(),
+                            inject_modules: &prepared.injected,
+                            queries,
+                            effects: Some(&context.haskell_effects_alias),
+                        })
+                        .map_err(|error| error.to_string())
+                    },
+                );
+                session
+                    .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
             })
             .await
     }
@@ -3542,16 +3556,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let mut source = source.clone();
-    source.preamble = match (scope.response, scope.request) {
-        (Some(response), Some(request)) => {
-            response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
-        }
-        (None, None) => source.preamble.to_string(),
-        _ => unreachable!("request workbench scope is constructed atomically"),
-    }
-    .into();
-    source.preamble = actor_preamble(&source.preamble, context).into();
+    let source = scope.source(source, context);
     let compiled = match compile_block(
         session,
         context,
@@ -4287,6 +4292,7 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Lookup(crate::generated::lookup::LookupReq::LookupRaw(request)) => Ok(ResidentActorBoundary::Lookup { continuation: hole, request: crate::lookup::LookupRequest::from_value(&request, session.data_con_table())? }),
                     ResidentRequest::Introspection(
                         crate::generated::introspection::IntrospectionReq::IntrospectionInfoWith(
                             query,

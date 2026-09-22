@@ -112,6 +112,8 @@ is the spawning actor or `Nothing` for a root.
 
 Start from this guide and the assignment; no startup inventory ritual.
 `lookup` accepts names, modules, and Hoogle-like types such as `:: Cmd.Command -> _`.
+It may attach up to four Jev-selected related declarations or alternatives;
+original failures remain failures. Look up qualified names explicitly for more detail.
 `polymorphic` is usable with call-site constraints; `unknown` needs more type
 information. Use `doc topics` for guides and workspace modules; inspect their
 exports/source where needed. `status` offers `summary`, `detailed`, `recovery`,

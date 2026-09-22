@@ -77,6 +77,7 @@ pub enum ActorEffectKey {
     Console,
     Actor,
     Reflect,
+    Lookup,
     /// Reloading the source layer the holder's own cells compile against. The
     /// root's layer is the run's; an actor launched with a checkout has its
     /// own, captured from that checkout. The key names the verb, never the
@@ -106,6 +107,7 @@ impl ActorEffectKey {
             Self::Console => "Console",
             Self::Actor => "Actor",
             Self::Reflect => "Reflect",
+            Self::Lookup => "Lookup",
             Self::Source => "Source",
         }
     }
@@ -153,6 +155,7 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                ActorEffectKey::Lookup,
                 ActorEffectKey::Source,
             ],
         )
@@ -184,6 +187,7 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                ActorEffectKey::Lookup,
             ],
         )
     }
@@ -220,6 +224,7 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                ActorEffectKey::Lookup,
                 // A coding actor reloads the source layer of the checkout it
                 // holds, which is where its own authored Haskell lives. It
                 // cannot reach the run's layer: its service is bound to its
@@ -266,6 +271,7 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                ActorEffectKey::Lookup,
             ],
         )
     }
@@ -533,7 +539,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Sleep, Notifications, Jev, Commands, Console, Actor, Reflect]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Sleep, Notifications, Jev, Commands, Console, Actor, Reflect, Lookup]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

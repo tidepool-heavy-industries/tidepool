@@ -71,6 +71,7 @@ enum Field {
     InspectInfo(String),
     InspectBrowse(String),
     InspectBrowseExpanded(String),
+    InspectScopeBrowse,
     InspectSearch(String),
     InspectStructuredInfo(StructuredInspection),
     InspectStructuredType(StructuredInspection),
@@ -153,6 +154,7 @@ impl ExtractRequest {
                 Some("--inspect-info") => request.fields.push(Field::InspectInfo(
                     text_value(&mut args, "--inspect-info")?.into(),
                 )),
+                Some("--inspect-scope-browse") => request.fields.push(Field::InspectScopeBrowse),
                 Some("--inspect-browse") => request.fields.push(Field::InspectBrowse(
                     text_value(&mut args, "--inspect-browse")?.into(),
                 )),
@@ -231,6 +233,7 @@ impl ExtractRequest {
                 28 => Field::InspectOut(decoder.os_string()?),
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
+                43 => Field::InspectScopeBrowse,
                 31 => Field::Cell,
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
                 33 => Field::CellOut(decoder.os_string()?),
@@ -413,6 +416,10 @@ impl ExtractRequest {
         self.fields.push(Field::InspectInfo(name.to_owned()));
     }
 
+    pub(crate) fn inspect_scope_browse(&mut self) {
+        self.fields.push(Field::InspectScopeBrowse);
+    }
+
     pub(crate) fn inspect_browse(&mut self, module: &str, expanded: bool) {
         self.fields.push(if expanded {
             Field::InspectBrowseExpanded(module.to_owned())
@@ -490,6 +497,7 @@ impl ExtractRequest {
                 Field::InspectBrowseExpanded(value) => {
                     flag(&mut flags, "--inspect-browse-expanded", OsStr::new(value))
                 }
+                Field::InspectScopeBrowse => flags.push("--inspect-scope-browse".into()),
                 Field::InspectSearch(value) => {
                     flag(&mut flags, "--inspect-search", OsStr::new(value))
                 }
@@ -765,6 +773,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectOut(value) => tagged_frame(out, 28, value),
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
+        Field::InspectScopeBrowse => out.push(43),
         Field::InspectSearch(value) => tagged_frame(out, 35, OsStr::new(value)),
         Field::InspectStructuredInfo(query) => encode_structured(out, 36, query),
         Field::InspectStructuredType(query) => encode_structured(out, 37, query),
@@ -1158,6 +1167,7 @@ mod tests {
             "Tidepool.Prelude".into(),
             "--inspect-browse-expanded".into(),
             "Tidepool.Actors.Shoal".into(),
+            "--inspect-scope-browse".into(),
             "--inspect-search".into(),
             "Response result -> Await (Settlement result)".into(),
             "--inspect-out".into(),

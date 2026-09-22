@@ -62,7 +62,8 @@ nothing, when a workspace is already there. It writes:
 | `.shoal/config.toml` | models, effort, the Haskell source roots, and the jev-dsl source pin |
 | `.shoal/Jev/Operators.hs` | the Jev operators, fixed to Tidepool's value type; cells reach it as `J` |
 | `.shoal/AgentSpec.hs` | the agent spec: which tools the agent is offered and what runs after each tool call |
-| `.shoal/Project/Tools.hs` | the tools record: the shell tools, and one starter tool of your own |
+| `.shoal/Project/Tools.hs` | the tools record: shell and lookup, extended with your own tools |
+| `.shoal/Project/Lookup.hs` | lookup enrichment policy: Jev-selected related declarations and alternatives |
 | `.shoal/skills/` | the workspace skills an agent loads by name |
 | `.agents/skills/` | links into `.shoal/skills/`, which is where the client looks for skills |
 | `flake.nix`, `flake.lock` | only when the project has none: one input, pinning jev-dsl |
@@ -77,6 +78,18 @@ resolves, a session still starts, without `J`, and the agent is told so.
 
 Child agents are launched from committed checkouts. Commit the package before
 you ask an agent to delegate.
+
+## Migrating an existing workspace lookup
+
+`lookup` is now supplied by the workspace agent spec rather than installed
+as a special hosted tool. Existing workspaces must copy `Project/Lookup.hs`
+from the shipped template and register its tool in their `Project.Tools` and
+`AgentSpec`, following the template
+[`Project.Tools`](../examples/shoal-workspace/.shoal/Project/Tools.hs).
+Use the argument object `{"queries": ["name", "Module.name"]}`.
+The tool preserves original lookup results and may add up to four related
+declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
+remain raw. Run `shoal check` before reloading the agent spec.
 
 ## `shoal check`: typecheck the workspace without starting anything
 

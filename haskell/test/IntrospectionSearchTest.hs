@@ -108,6 +108,16 @@ main = do
     fail ("qualified operator was not a usable expression: " ++ show qualifiedMatches)
   unless (ambiguousNames == ["A.clash", "B.clash"]) $
     fail ("ambiguous imports did not choose qualified spellings: " ++ show ambiguousMatches)
+  unless (any (\result -> typeMatchName result == "candidateNum"
+      && any ((== "Num") . identifierName) (typeMatchReferences result)) numMatches) $
+    fail "constrained type search lost its compiler-resolved class reference"
+  unless (any (\result -> typeMatchName result == "wildUseful"
+      && all (`elem` map identifierName (typeMatchReferences result)) ["Int", "Maybe", "Char"]) wildMatches) $
+    fail "nested type search lost its compiler-resolved nominal references"
+  unless (any (\result -> typeMatchName result == "candidatePromoted"
+      && any (\reference -> identifierName reference == "True"
+          && identifierNamespace reference == ConstructorIdentifier) (typeMatchReferences result)) anyMatches) $
+    fail "promoted constructor reference lost its constructor namespace"
   let returnedUse = root </> "ReturnedUse.hs"
   qualified <- case qualifiedNames of
     [name] -> pure name
@@ -154,9 +164,10 @@ fixture :: String
 fixture =
   unlines
     [ "{-# LANGUAGE PartialTypeSignatures #-}",
-      "{-# LANGUAGE RankNTypes #-}",
+      "{-# LANGUAGE RankNTypes, DataKinds #-}",
       "module LookupFixture where",
       "import qualified QualifiedSource as Q",
+      "import Data.Proxy (Proxy)",
       "import AmbigA",
       "import AmbigB",
       "import qualified AmbigA as A",
@@ -185,6 +196,8 @@ fixture =
       "candidatePlain = id",
       "queryPlain :: a -> a",
       "queryPlain = id",
+      "candidatePromoted :: Proxy 'True -> Bool",
+      "candidatePromoted = undefined",
       "candidateMismatch :: Int -> Bool",
       "candidateMismatch = undefined",
       "queryRank :: (forall a. a -> a) -> Int",

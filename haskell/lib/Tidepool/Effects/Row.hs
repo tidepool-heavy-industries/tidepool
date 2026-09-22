@@ -23,6 +23,7 @@ import Tidepool.Effects.Core
   , Console
   , Notifications
   , Jev
+  , Lookup
   , Sleep
   , Actor
   , AgentInspection
@@ -85,4 +86,5 @@ instance KnownEffect Notifications where effectWitness = EffectWitness EffectNot
 instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
 instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
 instance KnownEffect Reflect where effectWitness = EffectWitness EffectReflect
+instance KnownEffect Lookup where effectWitness = EffectWitness EffectLookup
 instance KnownEffect Source where effectWitness = EffectWitness EffectSource

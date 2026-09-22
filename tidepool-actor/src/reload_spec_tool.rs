@@ -60,11 +60,7 @@ mod tests {
 
     #[test]
     fn every_actor_local_tool_fits_the_providers_description_limit() {
-        for tool in [
-            declaration(),
-            crate::lookup_tool::declaration(),
-            crate::status_tool::declaration(),
-        ] {
+        for tool in [declaration(), crate::status_tool::declaration()] {
             let length = tool.description().chars().count();
             assert!(
                 length <= PROVIDER_DESCRIPTION_LIMIT,

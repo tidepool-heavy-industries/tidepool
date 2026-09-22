@@ -29,10 +29,10 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
 import Data.Generics (everything, everywhereM, mkM, mkQ)
-import Data.List (nub, nubBy, sortOn)
+import Data.List (isPrefixOf, nub, nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust, listToMaybe)
-import GHC.Core.TyCo.FVs (tyCoVarsOfTypes)
+import GHC.Core.TyCo.FVs (tyCoVarsOfTypes, tyConsOfType)
 import GHC.Core.TyCo.Subst (emptySubst, extendTvSubst)
 import GHC.Core.Type (getTyVar_maybe, splitTyConApp_maybe, substTy)
 import GHC.Tc.Solver (tcCheckWanteds)
@@ -62,6 +62,7 @@ import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
 import GHC.Types.FieldLabel (flLabel, flSelector)
 import GHC.Types.Var (varName)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitFunTys, tcSplitSigmaTy)
 import GHC.Utils.Outputable (Outputable, defaultSDocContext, ppr, renderWithContext)
 import Tidepool.ExtractRequest
@@ -75,7 +76,8 @@ data InfoEntry = InfoEntry
     infoModule :: Maybe String,
     infoKind :: String,
     infoDisplay :: String,
-    infoAvailability :: Availability
+    infoAvailability :: Availability,
+    infoReferences :: [IdentifierRef]
   }
   deriving (Eq, Show)
 
@@ -115,7 +117,8 @@ data TypeMatch = TypeMatch
     typeMatchModule :: Maybe String,
     typeMatchSignature :: String,
     typeMatchQuality :: TypeMatchQuality,
-    typeMatchAvailability :: Availability
+    typeMatchAvailability :: Availability,
+    typeMatchReferences :: [IdentifierRef]
   }
   deriving (Eq, Show)
 
@@ -124,7 +127,7 @@ data IdentifierNamespace
   | TypeIdentifier
   | ConstructorIdentifier
   | FieldIdentifier
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data IdentifierRef = IdentifierRef
   { identifierModule :: String,
@@ -463,7 +466,8 @@ searchTypeMatchesWithContext context rdrEnv queryBinder query = do
           typeMatchSignature =
             renderWithContext defaultSDocContext (ppr candidate),
           typeMatchQuality = quality,
-          typeMatchAvailability = availability
+          typeMatchAvailability = availability,
+          typeMatchReferences = typeReferences candidate
         }
 
     matchKey result =
@@ -507,6 +511,12 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
         pure (typeIndex, results ++ [result])
+      InspectScope -> do
+        let names = nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
+              not ("__tidepool_" `isPrefixOf` occNameString (nameOccName name))]
+        entries <- browseEntries context True names
+        pure (typeIndex, results ++ [InspectionBrowse "" True
+          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries)])
       InspectModule moduleName expanded -> do
         result <- inspectModule context moduleName expanded
         pure (typeIndex, results ++ [result])
@@ -681,9 +691,53 @@ identifierRef name thing = IdentifierRef
       AnId identifier | isRecordSelector identifier -> FieldIdentifier
       AnId _ -> ValueIdentifier
       AConLike _ -> ConstructorIdentifier
+      ATyCon _ | isDataConName name -> ConstructorIdentifier
       ATyCon _ -> TypeIdentifier
       ACoAxiom _ -> TypeIdentifier
   }
+
+-- | Immediate nominal references, obtained from compiler declarations. Member
+-- visibility matches the declaration renderer; following a reference never
+-- recursively traverses the referenced declaration.
+declarationReferences :: [Name] -> TyThing -> [IdentifierRef]
+declarationReferences visible thing = orderedReferences $
+  maybe [] (pure . identifierRefForThing) (tyThingParent_maybe thing)
+    ++ case thing of
+      AnId identifier -> typeReferences (idType identifier)
+      AConLike (RealDataCon constructor) -> constructorReferences constructor
+      AConLike (PatSynCon _) -> []
+      ATyCon tyCon
+        | Just cls <- tyConClass_maybe tyCon ->
+            concatMap typeReferences (classSCTheta cls)
+              ++ concatMap (\method -> identifierRefForThing (AnId method)
+                  : typeReferences (idType method))
+                (filter ((`elem` visible) . getName) (classMethods cls))
+        | Just rhs <- synTyConRhs_maybe tyCon -> typeReferences rhs
+        | isAlgTyCon tyCon -> concatMap constructorReferences
+            (filter ((`elem` visible) . getName) (tyConDataCons tyCon))
+        | otherwise -> typeReferences (tyConKind tyCon)
+      ACoAxiom _ -> []
+  where
+    constructorReferences constructor =
+      identifierRefForThing (AConLike (RealDataCon constructor))
+        : typeReferences (dataConDisplayType False constructor)
+          ++ [ IdentifierRef
+                (maybe "" (moduleNameString . moduleName) (nameModule_maybe name))
+                (occNameString (nameOccName name)) FieldIdentifier
+             | field <- dataConFieldLabels constructor,
+               let name = flSelector field,
+               name `elem` visible
+             ]
+
+-- tyConsOfType includes nominal types underneath applications and constraints.
+-- Sort by stable identity rather than GHC's allocation-dependent Unique order.
+typeReferences :: Type -> [IdentifierRef]
+typeReferences = orderedReferences . map (identifierRefForThing . ATyCon)
+  . nonDetEltsUniqSet . tyConsOfType
+
+orderedReferences :: [IdentifierRef] -> [IdentifierRef]
+orderedReferences = nub . sortOn (\reference ->
+  (identifierModule reference, identifierName reference, identifierNamespace reference))
 
 queryProvenance :: StructuredInspection -> ScopeProvenance
 queryProvenance query = ScopeProvenance
@@ -770,7 +824,8 @@ entriesFor context visible names = fmap concat $ forM names $ \name -> do
                   infoModule = definingModule,
                   infoKind = thingKind thing,
                   infoDisplay = display,
-                  infoAvailability = availability
+                  infoAvailability = availability,
+                  infoReferences = declarationReferences visible thing
                 }
             ]
 
@@ -787,7 +842,7 @@ browseEntries context expanded names = do
   forM visible $ \(name, thing) -> do
     availability <- thingAvailability context thing
     let display =
-          if expanded
+          if expanded && isJust (tyThingParent_maybe thing)
             then renderWithContext defaultSDocContext (pprTyThing showEverything thing)
             else visibleDisplay exportedNames thing
         definingModule = moduleNameString . moduleName <$> nameModule_maybe name
@@ -796,7 +851,8 @@ browseEntries context expanded names = do
             infoModule = definingModule,
             infoKind = thingKind thing,
             infoDisplay = display,
-            infoAvailability = availability
+            infoAvailability = availability,
+            infoReferences = declarationReferences exportedNames thing
           }
   where
     hasExportedParent exported thing = case tyThingParent_maybe thing of
@@ -837,12 +893,12 @@ thingKind thing = case thing of
 render :: Outputable value => value -> String
 render = renderWithContext defaultSDocContext . ppr
 
--- | Private V5 batch receipt. The outer list is @['TPINSP005', results]@.
+-- | Private V6 batch receipt. The outer list is @['TPINSP006', results]@.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString
 encodeInspectionResults results =
   toStrictByteString $
     encodeListLen 2
-      <> encodeString "TPINSP005"
+      <> encodeString "TPINSP006"
       <> encodeListLen (fromIntegral (length results))
       <> foldMap encodeResult results
   where
@@ -880,16 +936,17 @@ encodeInspectionResults results =
     encodeEntries entries =
       encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries
     encodeEntry entry =
-      encodeListLen 5
+      encodeListLen 6
         <> text (infoName entry)
         <> maybe encodeNull text (infoModule entry)
         <> text (infoKind entry)
         <> text (infoDisplay entry)
         <> encodeAvailability (infoAvailability entry)
+        <> encodeList encodeIdentifierRef (infoReferences entry)
     encodeTypeMatches matches =
       encodeListLen (fromIntegral (length matches)) <> foldMap encodeTypeMatch matches
     encodeTypeMatch match =
-      encodeListLen 5
+      encodeListLen 6
         <> text (typeMatchName match)
         <> maybe encodeNull text (typeMatchModule match)
         <> text (typeMatchSignature match)
@@ -897,6 +954,7 @@ encodeInspectionResults results =
           TypeMatchExact -> "Exact"
           TypeMatchUsable -> "Usable")
         <> encodeAvailability (typeMatchAvailability match)
+        <> encodeList encodeIdentifierRef (typeMatchReferences match)
     encodeAvailability = encodeString . T.pack . show
     text = encodeString . T.pack
 
