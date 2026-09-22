@@ -28,7 +28,9 @@ import GHC.Builtin.Types (intDataCon, mkListTy)
 import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView)
+import GHC.Core.Type
+  ( mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView
+  , isLiftedTypeKind, typeKind )
 import GHC.Core.TyCon (TyCon, tyConArity)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy)
 import GHC.Driver.Env (HscEnv, lookupType)
@@ -333,11 +335,14 @@ syntheticSiteId identity =
 -- with an unconstructible synthetic one. A nullary result type also has no
 -- index. Only the index is interned; the request type itself is a GADT the
 -- type policy refuses.
+-- Indices of other kinds, such as an effect-profile witness's effect list,
+-- are not reply values and must not acquire host-answer sites.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)
     | length arguments == tyConArity family
     , index : _ <- reverse arguments
+    , isLiftedTypeKind (typeKind index)
     , hasNominalHead index -> Just index
   _ -> Nothing
 

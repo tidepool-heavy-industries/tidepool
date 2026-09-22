@@ -99,6 +99,9 @@ runTypeEvidenceChecks directory project projectWithAux = do
   functionWire <- program "functionRequest"
   assert (null (programVerbSites functionWire))
     "a function reply index acquired a synthetic site"
+  profileWire <- program "profileWitness"
+  assert (null (programVerbSites profileWire))
+    "an effect-list witness acquired a synthetic reply site"
   progressWire <- program "progressRequest"
   progressNode <- verbAnswer progressWire "ObserveProgress"
   case progressNode of

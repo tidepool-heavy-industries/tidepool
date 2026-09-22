@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -O1 #-}
@@ -22,6 +23,12 @@ data Progress progress
   = ProgressPending
   | ProgressUpdate progress
   | ProgressClosed
+
+data EffectProfile (protocol :: Type -> Type) (effects :: [Type -> Type]) where
+  ReadOnly :: EffectProfile protocol '[protocol, Maybe]
+
+profileWitness :: EffectProfile Maybe '[Maybe, Maybe]
+profileWitness = ReadOnly
 
 boolAnswer :: Maybe Bool
 boolAnswer = runLLMTurn @Bool "bool"
