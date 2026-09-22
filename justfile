@@ -103,12 +103,6 @@ doctor:
 exomonad-init *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"
 
-# Disabled: the current root-only prompt does not install a verified child
-# monitor. Redesign this smoke before enabling it again.
-[positional-arguments]
-exomonad-smoke *args:
-    {{ exomonad_nix }} exomonad/scripts/exomonad-smoke.sh "$@"
-
 # Build Exomonad from this checkout and run it against the independent console
 # repository. Extra arguments are forwarded to `exomonad init`.
 [positional-arguments]
