@@ -56,7 +56,8 @@ cargo test --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd \
   --test import_fixtures -- --ignored --nocapture
 
 ( cd haskell && cabal test execution-schema-encode \
-    --test-options="--write-schema6-fixture=$work_root/schema6-intrinsic.cbor" \
+    --test-option=--write-schema6-fixture \
+    --test-option="$work_root/schema6-intrinsic.cbor" \
     --test-show-details=direct )
 cp -- "$work_root/schema6-intrinsic.cbor" \
   "$repo_root/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"

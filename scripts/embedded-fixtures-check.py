@@ -74,7 +74,7 @@ def main() -> int:
     for path_name in paths:
         path = ROOT / path_name
         data = path.read_bytes()
-        if len(data) < 8 or data[0] != 0x90 or data[1:6] != b"eTPST" or data[6:7] != b"G":
+        if len(data) < 8 or data[0] != 0x91 or data[1:6] != b"eTPST" or data[6:7] != b"G":
             raise SystemExit(f"{path_name}: invalid TPSTG prepared envelope")
         if data[7] != expected_version:
             raise SystemExit(
