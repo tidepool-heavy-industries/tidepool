@@ -34,22 +34,23 @@
 
 use crate::support;
 
-use tidepool_harness::engine::{
+use exomonad_harness::engine::{
     self, finalize_typed_request_prompt, template_turn_for, CompiledTurn, EngineConfig,
 };
-use tidepool_harness::typed_request_agent_decls;
+use exomonad_harness::typed_request_agent_decls;
 use tidepool_runtime::CompileError;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
 /// The answerer's real compile setup: its scoped `[AskUser, Fork, ReadState, Green, Finalize]`
 /// row plus `examples/harness` on the include path, so `HarnessTypes` (and its
-/// `Decision`) resolves — exactly what `tidepool-selfharness` wires.
+/// `Decision`) resolves — exactly what `exomonad-selfharness` wires.
 fn answerer_cfg() -> EngineConfig {
     let mut cfg = EngineConfig::from_decls(
         typed_request_agent_decls(),
@@ -57,7 +58,7 @@ fn answerer_cfg() -> EngineConfig {
         None,
     )
     .expect("answerer engine config");
-    cfg.include.push(repo_root().join("examples/harness"));
+    cfg.include.push(repo_root().join("exomonad/examples/harness"));
     cfg
 }
 
@@ -100,8 +101,8 @@ fn compile_turn(
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
 }
 
@@ -273,8 +274,8 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
             &src,
             "result",
             &target.include,
-            tidepool_harness::timing::NO_NODE,
-            tidepool_harness::timing::NO_ROUND,
+            exomonad_harness::timing::NO_NODE,
+            exomonad_harness::timing::NO_ROUND,
         )
     };
 

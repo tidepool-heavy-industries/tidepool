@@ -168,7 +168,7 @@ impl EventJournal {
         })?;
         if let Some(repair) = &torn {
             eprintln!(
-                "tidepool-worktree: event journal {} line {} is a torn final row, \
+                "exomonad-worktree: event journal {} line {} is a torn final row, \
                  truncating it away: {}",
                 path.display(),
                 repair.line_no,

@@ -40,7 +40,7 @@ import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-import Tidepool.Actors.Shoal (GitOid)
+import Tidepool.Actors.Exomonad (GitOid)
 import Tidepool.Worktree (renderGitOid)
 
 import Project.Reflex (Reflex)

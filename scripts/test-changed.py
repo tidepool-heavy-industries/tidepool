@@ -22,7 +22,7 @@ EXTRACTOR_FREE = (
 
 # Retained reference source has no supported build or test obligation.
 RETIRED_SOURCES = (
-    Path("tidepool-harness"), Path("tidepool-web"),
+    Path("exomonad/harness"), Path("exomonad/web"),
     Path("bridge/facade/src/bin/tidepool-selfharness.rs"),
     Path("bridge/facade/src/bin/tidepool-selfharness"),
 )
@@ -60,7 +60,7 @@ def cabal_components(root, changed):
         directories = re.search(r"(?m)^  hs-source-dirs:\s*([^\n]+)", component)
         if directories is None:
             return ["all"]
-        roots = [root / "haskell" / directory for directory in re.split(r"[,\s]+", directories[1].strip())]
+        roots = [root / "bridge/haskell" / directory for directory in re.split(r"[,\s]+", directories[1].strip())]
         if any((root / path).is_relative_to(directory) for path in changed for directory in roots):
             selected.add(name)
     while True:
@@ -88,7 +88,7 @@ def cabal_embedded_library_source_changes(manifest, changed):
         return False
     patterns = [entry for line in extra_sources[1].splitlines()
                 for entry in re.split(r"[,\s]+", line.split("--", 1)[0].strip()) if entry]
-    haskell_changes = [Path(path).relative_to("haskell") for path in changed
+    haskell_changes = [Path(path).relative_to("bridge/haskell") for path in changed
                        if Path(path).is_relative_to("bridge/haskell/lib")]
     return any(path.match(pattern) for path in haskell_changes for pattern in patterns)
 
@@ -217,7 +217,7 @@ def commands(selections, obligations, actions, components=None):
     if "registration" in actions:
         result.append(["scripts/test-suite-check.sh"])
     if "haskell" in actions:
-        result.append(["bash", "-c", 'cd haskell && cabal build "$@"', "cabal-components", *(components or ["all"])])
+        result.append(["bash", "-c", 'cd bridge/haskell && cabal build "$@"', "cabal-components", *(components or ["all"])])
     for name, targets in sorted(selections.items()):
         # One invocation per package, deduplicating unit and suite targets.
         prefix = (["cargo", "nextest", "run", "--profile", "battery", "--no-fail-fast"]

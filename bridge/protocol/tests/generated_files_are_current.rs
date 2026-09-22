@@ -61,7 +61,7 @@ fn generated_files_are_current() {
 
 /// As [`generated_files_are_current`], for the suspension-decode roster
 /// ([`tidepool_protocol::effects::suspension_roster`]) MINUS `Ask` — the
-/// decode-only request enums `tidepool-harness`'s `classify_hole` consumes.
+/// decode-only request enums `exomonad-harness`'s `classify_hole` consumes.
 /// A separate test, not a shared loop over both file sets: the two rosters
 /// are deliberately disjoint (see `effects::suspension_roster`'s doc), and a
 /// failure here should never be confused with a decl-side staleness. `Ask`
@@ -86,7 +86,7 @@ fn runtime_generated_files_are_current() {
 }
 
 /// As [`harness_generated_files_are_current`], for the actor-runtime decoder
-/// emitted into `tidepool-actor` rather than the transitional harness.
+/// emitted into `exomonad-actor` rather than the transitional harness.
 #[test]
 fn actor_generated_files_are_current() {
     assert_current(tidepool_protocol::actor_generated_files(), "actor decode");

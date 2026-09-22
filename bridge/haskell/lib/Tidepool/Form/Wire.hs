@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The JSON transport for 'FormShape' — the Haskell half of a contract
--- whose Rust half is @tidepool-harness@'s @selfharness::operator@ module
+-- whose Rust half is @exomonad-harness@'s @selfharness::operator@ module
 -- documentation. That documentation is NORMATIVE: it states what
 -- @#[derive(Serialize, Deserialize)]@ with @rename_all = \"snake_case\"@
 -- actually produces for the shape enum, one worked example per shape, and

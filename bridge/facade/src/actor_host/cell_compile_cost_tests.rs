@@ -38,7 +38,7 @@ struct CellCostObservation<'a> {
     statements: Option<u64>,
     compiler_requests: u64,
     wall_ms: u128,
-    machine: Option<tidepool_actor::ResidentMachineMeasurement>,
+    machine: Option<exomonad_actor::ResidentMachineMeasurement>,
 }
 
 pub(super) fn report(
@@ -65,7 +65,7 @@ pub(super) fn report(
 
 /// Six statements, no declaration: two pure `let`s, a bind whose value a later
 /// statement reads, another `let`, a second bind, and a final expression. This
-/// is the shape a Shoal cell has — the statements are cheap, so what the
+/// is the shape an Exomonad cell has — the statements are cheap, so what the
 /// dispatch costs is almost entirely per-request compiler overhead.
 const SIX_STATEMENT_CELL: &str = "let xs = [1 .. 10 :: Int]\n\
      let ys = map (* 2) xs\n\
@@ -82,7 +82,7 @@ const ONE_STATEMENT_CELL: &str = "sum [1 .. 10 :: Int]\n";
 #[ignore = "reports compile-request counts and timings; wants a live compiler daemon"]
 async fn cell_compile_cost_measurement() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info,tidepool_extract_cmd::endpoint=debug,tidepool_actor::resident_workbench=debug")
+        .with_env_filter("warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info,tidepool_extract_cmd::endpoint=debug,exomonad_actor::resident_workbench=debug")
         .without_time()
         .try_init();
     let daemon = std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some();

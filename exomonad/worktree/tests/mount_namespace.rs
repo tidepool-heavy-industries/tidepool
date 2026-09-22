@@ -3,11 +3,11 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
-use tidepool_node::MountNamespace;
-use tidepool_worktree::git::inspect;
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::InProgressKind;
-use tidepool_worktree::{
+use exomonad_node::MountNamespace;
+use exomonad_worktree::git::inspect;
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::InProgressKind;
+use exomonad_worktree::{
     BranchName, GitOid, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
     WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
@@ -39,7 +39,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     );
     let prepared = manager
         .prepare_inherited_source(
-            &tidepool_worktree::WorktreeSource::CurrentRepository,
+            &exomonad_worktree::WorktreeSource::CurrentRepository,
             &tidepool_repr::ActorPath::parse("root/child").unwrap(),
         )
         .unwrap();
@@ -50,7 +50,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     }
     let view = root.join("view");
     let common = inspect::git_common_dir(repository.git(), repository.path()).unwrap();
-    let namespace = tidepool_node::ProcessMountBoundary::new(
+    let namespace = exomonad_node::ProcessMountBoundary::new(
         &cwd,
         [repository.path().to_owned(), root.join("managed")],
         [common],
@@ -272,7 +272,7 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         "inherited\n"
     );
     let serialized = serde_json::to_vec(&namespace.entry().unwrap()).unwrap();
-    let entry: tidepool_node::NamespaceEntry = serde_json::from_slice(&serialized).unwrap();
+    let entry: exomonad_node::NamespaceEntry = serde_json::from_slice(&serialized).unwrap();
     let mut prepared = entry
         .command(&view, std::ffi::OsStr::new("/bin/sh"))
         .unwrap();
@@ -281,7 +281,7 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     let next_work = storage.path().join("next-work");
     std::fs::create_dir(&next_upper).unwrap();
     std::fs::create_dir(&next_work).unwrap();
-    let rotation = tidepool_node::OverlayRotation::prepare(
+    let rotation = exomonad_node::OverlayRotation::prepare(
         &view,
         &[base.clone(), upper.clone()],
         &next_upper,
@@ -312,16 +312,16 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     assert!(namespace.prepare_overlay_rotation(rotation).is_err());
     assert!(matches!(
         publication.apply().1,
-        tidepool_node::OverlayRotationOutcome::Unconfirmed(_)
+        exomonad_node::OverlayRotationOutcome::Unconfirmed(_)
     ));
     assert!(std::fs::read_dir(&next_upper).unwrap().next().is_none());
     let mut invalid: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
     invalid["start_ticks"] = 0.into();
-    let invalid: tidepool_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
+    let invalid: exomonad_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
     assert!(invalid.command(&view, "/bin/sh".as_ref()).is_err());
     let mut invalid: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
     invalid["identity"]["root_mount"] = 0.into();
-    let invalid: tidepool_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
+    let invalid: exomonad_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
     assert!(invalid.command(&view, "/bin/sh".as_ref()).is_err());
     assert!(manager.list().unwrap()[0].present);
     assert!(namespace.try_exists(&view.join("renamed")).unwrap());
@@ -359,7 +359,7 @@ fn activation_replaces_only_the_expected_preparation_view() {
         .unwrap();
     let visible = storage.path().join("visible");
     std::fs::create_dir(&visible).unwrap();
-    let boundary = tidepool_node::ProcessMountBoundary::new(
+    let boundary = exomonad_node::ProcessMountBoundary::new(
         handle.cwd(),
         [repository.path().to_owned(), storage.path().join("managed")],
         [inspect::git_common_dir(repository.git(), repository.path()).unwrap()],

@@ -17,8 +17,8 @@ name = "tidepool"
 path = "src/main.rs"
 
 [[bin]]
-name = "shoal"
-path = "src/bin/shoal.rs"
+name = "exomonad"
+path = "src/bin/exomonad.rs"
 
 [[bin]]
 name = "tidepool-compile-report"
@@ -36,12 +36,12 @@ tidepool-codegen.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
-tidepool-worktree.workspace = true
-tidepool-agent.workspace = true
+exomonad-worktree.workspace = true
+exomonad-agent.workspace = true
 codex-shoal-protocol.workspace = true
-tidepool-actor.workspace = true
-tidepool-tool.workspace = true
-tidepool-node.workspace = true
+exomonad-actor.workspace = true
+exomonad-tool.workspace = true
+exomonad-node.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-extract-cmd.workspace = true
 serde.workspace = true

@@ -6,7 +6,7 @@
 // worked out in `jev-integration/src/transport.rs` (no redirects, no
 // retries, streamed body with a hard cap, sensitive bearer header) but
 // exposes a typed `JevFailure` and folds key resolution + call budgeting in,
-// since this is the handler Shoal actually dispatches against.
+// since this is the handler Exomonad actually dispatches against.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

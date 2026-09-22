@@ -62,7 +62,7 @@ use crate::schema::Effect;
 /// for them rather than emitting glue for a handler that does not exist.
 /// The first six are ALSO listed in [`suspension_roster`] because the
 /// transitional harness needs their decoders. `Actor` is projected separately
-/// into `tidepool-actor`, the crate that owns its orchestration. In both cases
+/// into `exomonad-actor`, the crate that owns its orchestration. In both cases
 /// declaration and decode generators read the same effect data for disjoint
 /// purposes.
 #[must_use]
@@ -118,7 +118,7 @@ pub fn all_described() -> Vec<Effect> {
     all()
 }
 
-/// The suspension-decode roster: every effect `tidepool-harness`'s
+/// The suspension-decode roster: every effect `exomonad-harness`'s
 /// `classify_hole` needs constructor names + payload shapes for, generated as
 /// decode-only request enums into `exomonad/harness/src/generated/`.
 ///
@@ -149,7 +149,7 @@ pub fn all_described() -> Vec<Effect> {
 /// [`crate::gen::adapter_rs`], only through [`crate::gen::suspension_req_rs`].
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
 /// `Journal`) are NOT repeated here — their request enums already exist,
-/// generated into `tidepool-handlers`, and `tidepool-harness` (a dependent of
+/// generated into `tidepool-handlers`, and `exomonad-harness` (a dependent of
 /// that crate already) reuses them directly rather than duplicating a second
 /// generated copy.
 ///

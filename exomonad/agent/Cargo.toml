@@ -1,5 +1,5 @@
 [package]
-name = "tidepool-agent"
+name = "exomonad-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,21 +13,21 @@ description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabu
 [dependencies]
 codex-shoal-protocol.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-tidepool-model.workspace = true
+exomonad-model.workspace = true
 tidepool-bridge-effects.workspace = true
 codex-codes = "=0.146.4"
 # The shared readable-executable-file check (std-only zero-dep leaf) — see
 # process.rs's is_readable_executable_file.
 tidepool-extract-cmd.workspace = true
 tidepool-atomic-write.workspace = true
-tidepool-tool.workspace = true
+exomonad-tool.workspace = true
 # pidfd_open/pidfd_send_signal + poll for the app-server canceller: a cycle
 # thread blocked in a seam call holds `&mut` on its backend, so reaping it
 # from another thread goes by pidfd (see driver.rs's PidFdSlot docs).
 rustix = { version = "1", features = ["process", "event"] }
 parking_lot.workspace = true
 tidepool-repr.workspace = true
-tidepool-worktree.workspace = true
+exomonad-worktree.workspace = true
 reqwest.workspace = true
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

@@ -112,7 +112,7 @@ depSpecsT =
     , "[dependencies]"
     , "serde = \"1\""
     , "clap = { version = \"4.4\", features = [\"derive\"] }"
-    , "tidepool-repr = { path = \"../tidepool-repr\" }"
+    , "tidepool-repr = { path = \"../tidepool/repr\" }"
     , "anyhow.workspace = true"
     , "[dev-dependencies]"
     , "proptest = \"1\""

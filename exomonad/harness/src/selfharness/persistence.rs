@@ -178,7 +178,7 @@ impl LoopIteration {
 /// `acquire_lease`, and named here (beside the error it gates) rather than
 /// in `resume.rs`, so the constant and the message that tells an operator to
 /// set it can never drift apart.
-pub const LEASE_TAKEOVER_ENV_VAR: &str = "TIDEPOOL_SELFHARNESS_TAKEOVER";
+pub const LEASE_TAKEOVER_ENV_VAR: &str = "EXOMONAD_SELFHARNESS_TAKEOVER";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -197,7 +197,7 @@ pub enum PersistenceError {
          refusing to join it (joining would double-run every effect that process already \
          committed — writes, commits, model calls). If pid {pid} is genuinely gone (a stale \
          record after a reboot, or a pid a killed process's slot was reused by something \
-         unrelated), set TIDEPOOL_SELFHARNESS_TAKEOVER=1 and restart to forcibly take over the \
+         unrelated), set EXOMONAD_SELFHARNESS_TAKEOVER=1 and restart to forcibly take over the \
          run; otherwise stop that process first."
     )]
     LiveLeaseHeld { run_id: String, pid: u32 },
@@ -419,7 +419,7 @@ pub fn default_settings_path() -> PathBuf {
 /// stream. Sits alongside `checkpoint.json`/`transcript.jsonl` under the same
 /// dir.
 ///
-/// The production binary (`bridge/facade/src/bin/tidepool-selfharness.rs`)
+/// The production binary (`bridge/facade/src/bin/exomonad-selfharness.rs`)
 /// does NOT write to this exact path: `LogWriter` refuses to overwrite an
 /// existing run's log, so each boot mints its own `log-<epoch>.jsonl`
 /// sibling in this function's PARENT directory (only the directory comes

@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use tidepool_node::DurableInbox;
+use exomonad_node::DurableInbox;
 
 use super::Frame;
 
-pub use tidepool_node::InboxError as QueueError;
+pub use exomonad_node::InboxError as QueueError;
 
 /// Rendered-text specialization used by the operator listen channel.
 pub struct FrameQueue {

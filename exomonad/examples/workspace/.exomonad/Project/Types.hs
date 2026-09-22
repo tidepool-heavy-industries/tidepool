@@ -1,7 +1,7 @@
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal (AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel)
+import Tidepool.Actors.Exomonad (AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel)
 import Tidepool.Worktree (renderGitOid)
 
 -- A task is the understanding handed to a fresh context, not a workflow stage.

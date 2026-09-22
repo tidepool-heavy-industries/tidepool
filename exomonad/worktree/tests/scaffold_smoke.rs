@@ -1,4 +1,4 @@
-use tidepool_worktree::testing::{fingerprint, TestRepo};
+use exomonad_worktree::testing::{fingerprint, TestRepo};
 
 #[test]
 fn scripted_writer_drives_a_real_repository() {

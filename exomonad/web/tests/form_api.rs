@@ -1,5 +1,5 @@
 //! HTTP-level integration tests for the testing-convenience form API
-//! (`tidepool_web::formapi`): `GET`/`POST /node/{node}/api/form` mounted
+//! (`exomonad_web::formapi`): `GET`/`POST /node/{node}/api/form` mounted
 //! alongside the browser routes, gated by an explicit `enabled` bool.
 //!
 //! Same shape as `tests/operator_gate.rs`: boot the real router on an
@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
-use tidepool_web::{router_with_form_api, AppState};
+use exomonad_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
+use exomonad_web::{router_with_form_api, AppState};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormShape {

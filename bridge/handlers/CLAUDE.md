@@ -4,8 +4,8 @@
 (Console/KV/FsRead/FsWrite/Http/Exec/Llm/Git/Time/Meta/Event/Worktree/Subagent) and stack
 assembly (`build_base_stack`). Does NOT belong: effect/verb type definitions
 (`tidepool-mcp`'s `effect_defs.rs` / `tidepool-protocol`'s schema), the git
-primitives a `WorktreeHandler` call wraps (`tidepool-worktree`), the coding
-backend a `SubagentHandler` drives (`tidepool-agent`).
+primitives a `WorktreeHandler` call wraps (`exomonad-worktree`), the coding
+backend a `SubagentHandler` drives (`exomonad-agent`).
 
 The Rust side of every `<Eff>Req` — Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git,
 Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls`
@@ -33,16 +33,16 @@ One module per effect under `src/handlers/`:
 - `src/handlers/time.rs` — `TimeReq`/`TimeHandler`
 - `src/handlers/meta.rs` — `MetaReq`/`MetaHandler` (debug path only)
 - `src/handlers/event.rs` — repository-event subscribe/drain/unsubscribe over
-  `tidepool_worktree::EventJournal`; not in the `base_effects!`
+  `exomonad_worktree::EventJournal`; not in the `base_effects!`
   default row
 - `src/handlers/worktree.rs` — `WorktreeReq`/`WorktreeHandler` over
-  `tidepool_worktree::create`/`registry`/`git`; also not in the
+  `exomonad_worktree::create`/`registry`/`git`; also not in the
   `base_effects!` default row — see `exomonad/worktree/CLAUDE.md`
 - `src/handlers/journal.rs`, `journal_version.rs` — the durable append-only
   run journal, one JSON line per `record`, and its wire-format version stamp on
   `tidepool_repr::version_ladder`
 - `src/handlers/source.rs` — reloading a run's own workspace Haskell source.
-  The capture, typecheck and publication live in `tidepool::shoal::source`;
+  The capture, typecheck and publication live in `tidepool::exomonad::source`;
   this module is the effect's request decoding and wire conversion
 - `src/handlers/jev.rs` — the Jev HTTP client behind the `Jev` effect
 - `src/handlers/agent.rs` — the agent effect's request handling
@@ -89,7 +89,7 @@ the Haskell union position is not a handler slot.
 ## Subagent handler: six verbs, one saga, a bounded cycle table
 
 `SubagentHandler` (`src/handlers/agent.rs`) serves six verbs over ONE saga
-(`tidepool_agent::spawn`), in three shapes:
+(`exomonad_agent::spawn`), in three shapes:
 
 - `SubagentSpawn` — the whole saga behind one blocking call.
 - `SubagentBegin`/`SubagentResume` — the same saga driven one stop at a time,

@@ -3,7 +3,7 @@
 //! Owns exact actor identity and lifecycle, typed live-value mailboxes,
 //! resident agent sessions, Haskell actor startup, and supervision. Machine
 //! execution remains in `tidepool-runtime`;
-//! provider transport remains behind `tidepool-model`'s seams.
+//! provider transport remains behind `exomonad-model`'s seams.
 //!
 //! A resident root or child is a persistent actor application, not one model
 //! round. Ordinary provider output termination makes it idle; reply settlement
@@ -75,6 +75,7 @@ pub use conversation::{ConversationFuture, ConversationReader, ConversationUnava
 // `EffectiveRole` are this crate's own; a conversation's speaker is the
 // provider's, hence the alias.
 pub use descriptor::ActorDescriptor;
+pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
@@ -110,7 +111,7 @@ pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
 };
 pub use profile::ActorEffectProfile;
-pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;
+pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fingerprint;
 pub use recovery::{
     ActorRecoveryJournal, DurableActorAdmission, DurableActorApplication, DurableActorRecord,
     DurableActorTerminal,
@@ -159,7 +160,6 @@ pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,
     ActorTerminal, RetainedActorExit,
 };
-pub use tidepool_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::ActorWaitError;

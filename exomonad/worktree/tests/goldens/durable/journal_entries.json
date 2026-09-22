@@ -14,7 +14,7 @@
               "4444444444444444444444444444444444444444"
             ]
           },
-          "branch": "tidepool/worktree/sample-wt-finalized-0002",
+          "branch": "exomonad/worktree/sample-wt-finalized-0002",
           "observed_at_ms": 1700000010000
         }
       },
@@ -81,7 +81,7 @@
               ]
             ]
           },
-          "branch": "tidepool/worktree/sample-wt-finalized-0002",
+          "branch": "exomonad/worktree/sample-wt-finalized-0002",
           "observed_at_ms": 1700000030000
         }
       }
@@ -98,7 +98,7 @@
           "old_head": null,
           "new_head": "6666666666666666666666666666666666666666",
           "kind": "Rewound",
-          "branch": "tidepool/worktree/sample-wt-finalized-0002",
+          "branch": "exomonad/worktree/sample-wt-finalized-0002",
           "observed_at_ms": 1700000040000
         }
       }
@@ -115,7 +115,7 @@
           "old_head": "6666666666666666666666666666666666666666",
           "new_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "kind": "Switched",
-          "branch": "tidepool/worktree/other-branch",
+          "branch": "exomonad/worktree/other-branch",
           "observed_at_ms": 1700000050000
         }
       }

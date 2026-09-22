@@ -1,11 +1,11 @@
 //! Run inside a fresh delegated systemd scope with the native test executable.
 use super::*;
-use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
+use exomonad_node::command_resources::{CommandResourcePolicy, CommandResources};
 
 #[tokio::test]
-#[ignore = "requires delegated cgroups and SHOAL_NATIVE_RESOURCE_TEST executable"]
+#[ignore = "requires delegated cgroups and EXOMONAD_NATIVE_RESOURCE_TEST executable"]
 async fn matched_native_command_resources() {
-    let native = std::env::var_os("SHOAL_NATIVE_RESOURCE_TEST").expect("native test executable");
+    let native = std::env::var_os("EXOMONAD_NATIVE_RESOURCE_TEST").expect("native test executable");
     let owner = CommandResources::delegated(CommandResourcePolicy {
         general_bytes: 512 * 1024 * 1024,
         protected_bytes: 0,
@@ -20,7 +20,7 @@ async fn matched_native_command_resources() {
         HostDynamicToolService::new(test_endpoint(), directory.path().join("binding.json"), None)
             .unwrap()
             .with_command_resources(Some((
-                tidepool_node::command_resources::CommandResourceClient::local(owner.clone()),
+                exomonad_node::command_resources::CommandResourceClient::local(owner.clone()),
                 "native".into(),
             )));
     let control = service.control();
@@ -29,7 +29,7 @@ async fn matched_native_command_resources() {
         .args([
             "--ignored",
             "--exact",
-            "shoal_command_resources",
+            "exomonad_command_resources",
             "--nocapture",
         ])
         .env("CODEX_WORKSPACE_SNAPSHOTS", "1")
@@ -44,7 +44,7 @@ async fn matched_native_command_resources() {
     for id in ["held-one", "held-two"] {
         assert!(matches!(
             owner.acquire("native", id).await.unwrap(),
-            tidepool_node::command_resources::CommandResourceStatus::Admitted { .. }
+            exomonad_node::command_resources::CommandResourceStatus::Admitted { .. }
         ));
     }
     let client = reqwest::Client::builder()
@@ -61,7 +61,7 @@ async fn matched_native_command_resources() {
             .unwrap()
             .error_for_status()
             .unwrap()
-            .json::<tidepool_node::command_resources::CommandResourceStatus>()
+            .json::<exomonad_node::command_resources::CommandResourceStatus>()
             .await
             .unwrap()
     });
@@ -75,7 +75,7 @@ async fn matched_native_command_resources() {
     control.quiesce();
     assert!(matches!(
         queued.await.unwrap(),
-        tidepool_node::command_resources::CommandResourceStatus::CancelledBeforeStart
+        exomonad_node::command_resources::CommandResourceStatus::CancelledBeforeStart
     ));
     control.drain();
     server.await.unwrap().unwrap();

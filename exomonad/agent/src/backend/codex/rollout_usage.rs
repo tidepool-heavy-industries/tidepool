@@ -4,12 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead};
 
-use serde_json::Value;
-use tidepool_model::{
+use exomonad_model::{
     ProviderFailure, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
     ProviderUsageCompleteness, ProviderUsageObservation, ProviderUsageScope, ProviderUsageSnapshot,
     ProviderUsageSummary, TokenUsage,
 };
+use serde_json::Value;
 
 /// Explicit offline selection; never inferred from provider-home or fork history.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -772,10 +772,10 @@ mod tests {
         let source = format!(
             "{source}\n{}",
             json!({"type":"turn_context","payload":{
-            "model":"gpt-5.6-sol","effort":"low"}})
+            "model":"gpt-6-sol","effort":"low"}})
         );
         let snapshot = observe(source.as_bytes(), "child").unwrap();
-        assert_eq!(snapshot.confirmed_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(snapshot.confirmed_model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(snapshot.confirmed_effort.as_deref(), Some("low"));
     }
 

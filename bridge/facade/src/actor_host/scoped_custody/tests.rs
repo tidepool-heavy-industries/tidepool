@@ -1,13 +1,13 @@
 use super::*;
 use crate::actor_host::*;
-use tidepool_actor::ForkWorkspaceCustody;
-use tidepool_node::{
+use exomonad_actor::ForkWorkspaceCustody;
+use exomonad_node::{
     run_process_supervisor, LaunchReservation, ProcessInvocation, ProcessMountBoundary,
     ProcessSupervisorClient, ProcessSupervisorManifest,
 };
 
 struct Fixture {
-    _repo: tidepool_worktree::testing::TestRepo,
+    _repo: exomonad_worktree::testing::TestRepo,
     _runtime: tempfile::TempDir,
     tree: WorktreeHandle,
     custody: Arc<ActorWorkspaceCustody>,
@@ -16,7 +16,7 @@ struct Fixture {
 #[test]
 fn replacement_transfers_unlaunched_workspace_without_old_guard_release() {
     let fixture = Fixture::new(901);
-    let successor = ActorRef::first(tidepool_actor::ActorId(902));
+    let successor = ActorRef::first(exomonad_actor::ActorId(902));
     let bindings = fixture.custody.bindings.clone();
     let principal = WorktreePrincipal::exact_actor("scope-test", 902, 1);
     let transferred = fixture.custody.transfer_to(successor).unwrap();
@@ -42,8 +42,8 @@ fn replacement_transfers_unlaunched_workspace_without_old_guard_release() {
 #[test]
 fn replacement_can_restore_original_workspace_owner_before_cutover() {
     let fixture = Fixture::new(905);
-    let original = ActorRef::first(tidepool_actor::ActorId(905));
-    let successor = ActorRef::first(tidepool_actor::ActorId(906));
+    let original = ActorRef::first(exomonad_actor::ActorId(905));
+    let successor = ActorRef::first(exomonad_actor::ActorId(906));
     let bindings = fixture.custody.bindings.clone();
     let transferred = fixture.custody.transfer_to(successor).unwrap();
     let restored = transferred.transfer_to(original).unwrap();
@@ -69,7 +69,7 @@ fn replacement_can_restore_original_workspace_owner_before_cutover() {
 fn replacement_cannot_transfer_workspace_with_uncertain_process_custody() {
     let fixture = Fixture::new(903);
     fixture.custody.process_may_exist();
-    let successor = ActorRef::first(tidepool_actor::ActorId(904));
+    let successor = ActorRef::first(exomonad_actor::ActorId(904));
     assert!(fixture.custody.transfer_to(successor).is_err());
     assert!(fixture.custody.binding.lock().is_some());
     assert_eq!(
@@ -86,7 +86,7 @@ fn replacement_cannot_transfer_workspace_with_uncertain_process_custody() {
 
 impl Fixture {
     fn new(id: u64) -> Self {
-        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
         repo.writer()
             .commit_file("README.md", "seed", "seed")
             .unwrap();
@@ -94,11 +94,11 @@ impl Fixture {
         let (manager, mut bindings) =
             actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
         let tree = manager
-            .create(&tidepool_worktree::WorktreeSpec::from_current_repository(
+            .create(&exomonad_worktree::WorktreeSpec::from_current_repository(
                 "scope",
             ))
             .unwrap();
-        let actor = ActorRef::first(tidepool_actor::ActorId(id));
+        let actor = ActorRef::first(exomonad_actor::ActorId(id));
         let binding = bindings
             .bind(
                 tree.id(),
@@ -368,11 +368,11 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
     let map = owners();
     fixture.register(&map);
     assert!(matches!(
-        fixture.claim(&map, ActorRef::first(tidepool_actor::ActorId(2))),
+        fixture.claim(&map, ActorRef::first(exomonad_actor::ActorId(2))),
         Err(ScopedClaimError::WrongActor)
     ));
     let mut next = fixture.custody.actor;
-    next.incarnation = tidepool_actor::Incarnation(2);
+    next.incarnation = exomonad_actor::Incarnation(2);
     assert!(matches!(
         fixture.claim(&map, next),
         Err(ScopedClaimError::WrongActor)
@@ -447,7 +447,7 @@ fn scoped_custody_cancellation_cannot_fabricate_not_spawned() {
         fixture.custody.state.lock().launch,
         LaunchCustody::ScopedClaimed
     ));
-    let successor = ActorRef::first(tidepool_actor::ActorId(2));
+    let successor = ActorRef::first(exomonad_actor::ActorId(2));
     assert!(fixture.custody.transfer_to(successor).is_err());
     fixture.retained();
 }
@@ -527,7 +527,7 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
                     panic!("retained exact scope")
                 };
                 assert!(
-                    matches!(scope.observation().unwrap(), tidepool_node::ScopeObservation::ProcessStopped(retained)
+                    matches!(scope.observation().unwrap(), exomonad_node::ScopeObservation::ProcessStopped(retained)
                     if retained.monitor_status() == status.monitor_status())
                 );
             }
@@ -782,7 +782,7 @@ async fn scoped_custody_production_handoff_recovers_completed_and_timed_out_flee
         let carrier = RetainedInteractiveFleet::from_error(error.as_mut()).unwrap();
         assert_eq!(carrier.unfinished.is_none(), completed);
         let mut wrong = fixture.custody.actor;
-        wrong.incarnation = tidepool_actor::Incarnation(2);
+        wrong.incarnation = exomonad_actor::Incarnation(2);
         assert!(matches!(
             carrier.recover_process(wrong, RetainedProcessOperation::Observe, deadline()),
             Err(RetainedProcessError::NoScopedActor)

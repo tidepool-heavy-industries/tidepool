@@ -5,7 +5,7 @@
 pub fn agent_launch_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "AgentLaunch",
-        description: "Private fresh-agent launch substrate used by the Shoal facade.",
+        description: "Private fresh-agent launch substrate used by the Exomonad facade.",
         prompt_card: None,
         constructors: &[
             "AgentLaunchWith :: Text -> (Int -> Eff childEffs ()) -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> AgentLaunch (Int, Int, Text)",

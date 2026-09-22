@@ -27,20 +27,21 @@ use std::sync::Arc;
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::harness::Session;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
-use tidepool_harness::{typed_request_agent_decls, Harness, TurnOutcome};
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::harness::Session;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::tree::NodeId;
+use exomonad_harness::{typed_request_agent_decls, Harness, TurnOutcome};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::SessionLib;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -51,7 +52,7 @@ fn prelude_dir() -> PathBuf {
 /// The C2 fixture dir — `Toolkit` (several function fields + an ordinary one)
 /// and `Focus` (function-typed at top level).
 fn scope_spike_dir() -> PathBuf {
-    repo_root().join("examples/harness/scope-spike")
+    repo_root().join("exomonad/examples/harness/scope-spike")
 }
 
 fn header(tag: &str) -> LogHeader {
@@ -119,9 +120,9 @@ fn build_shared_session(cfg: &EngineConfig, decl_root: &std::path::Path) -> Sess
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         kv_path: tidepool_runtime::paths::cache_dir().join("scope-spike-kv.json"),
         llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
-            .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+            .unwrap_or_else(|_| "gpt-6-luna".to_string()),
     };
-    let stack: tidepool_harness::harness::BoxedStack =
+    let stack: exomonad_harness::harness::BoxedStack =
         Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
     let lib = SessionLib::open(
         SessionId(0),

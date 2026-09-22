@@ -1,6 +1,6 @@
-# Shoal API
+# Exomonad API
 
-The default notebook scope is `Tidepool.Actors.Shoal`, plus configured workspace
+The default notebook scope is `Tidepool.Actors.Exomonad`, plus configured workspace
 modules. `Cmd`, `J`, `R`, `T`, `Map`, and `Set` name commands, Jev, record actors,
 text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in scope.
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
@@ -58,8 +58,8 @@ commit through `responseWorktree`; inspect it from your repository view with
 at that revision; give the reviewer the contract and implementer reference for
 repairs. Reviewers running checks need coding authority. Integrate the accepted
 revision with `tryMerge` for a managed target or ordinary Git in your checkout;
-verify that resulting revision before delivery. Load `shoal-review` for the
-compiled project review/repair recipe and `shoal-unfold` for submission evidence.
+verify that resulting revision before delivery. Load `exomonad-review` for the
+compiled project review/repair recipe and `exomonad-unfold` for submission evidence.
 
 ## Core signatures
 
@@ -119,10 +119,10 @@ information. Use `doc topics` for guides and workspace modules; inspect their
 exports/source where needed. `status` offers `summary`, `detailed`, `recovery`,
 `lineage`, `trace`, and `bindings` for runtime uncertainty.
 
-Load the relevant skill at an unfamiliar boundary: `shoal-command` for retained
-output/stdin/completion; `shoal-workbench` for parser/type/display recovery;
-`shoal-jev` for typed judgment composition; `shoal-unfold` for delegation/source;
-`shoal-coordinate`, `shoal-fork`, `shoal-orchestrate`, and `shoal-review` for project
-coordination; `shoal-define-actors` for custom event handlers; `shoal-cleanup` for
-retirement; `shoal-agent-spec` for tools and after-tool reload. Use the corresponding
+Load the relevant skill at an unfamiliar boundary: `exomonad-command` for retained
+output/stdin/completion; `exomonad-workbench` for parser/type/display recovery;
+`exomonad-jev` for typed judgment composition; `exomonad-unfold` for delegation/source;
+`exomonad-coordinate`, `exomonad-fork`, `exomonad-orchestrate`, and `exomonad-review` for project
+coordination; `exomonad-define-actors` for custom event handlers; `exomonad-cleanup` for
+retirement; `exomonad-agent-spec` for tools and after-tool reload. Use the corresponding
 `doc` topic as fallback. Distinguish shipped APIs from project/example-only helpers.

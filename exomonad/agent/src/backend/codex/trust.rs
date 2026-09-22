@@ -2,7 +2,7 @@
 //!
 //! Codex's TUI requires an exact project path to be trusted in the user config;
 //! a `-c projects.<path>.trust_level=...` override does not bypass that prompt.
-//! Shoal therefore presents every actor repository at one stable virtual path
+//! Exomonad therefore presents every actor repository at one stable virtual path
 //! and performs the same persisted decision as selecting “Yes” for that path
 //! in the TUI. Generated repositories never accumulate config entries. This is
 //! deliberately limited to interactive actors: headless agent cycles retain

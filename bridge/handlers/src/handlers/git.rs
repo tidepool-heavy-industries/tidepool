@@ -1,6 +1,6 @@
+use exomonad_worktree::git::GitCli;
 use std::path::PathBuf;
 use tidepool_bridge_effects::{GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry};
-use tidepool_worktree::git::GitCli;
 
 // ============================================================================
 // Tag 7: Git (read-only repository queries)
@@ -31,7 +31,7 @@ impl GitHandler {
         GitCli::new()
             .run(&self.root, args)
             .map(|out| out.stdout)
-            .map_err(|receipt: tidepool_worktree::error::GitFailureReceipt| {
+            .map_err(|receipt: exomonad_worktree::error::GitFailureReceipt| {
                 let stderr = receipt.stderr.trim().to_string();
                 let code = receipt.exit_code.unwrap_or(-1) as i64;
                 if stderr.contains("bad revision")

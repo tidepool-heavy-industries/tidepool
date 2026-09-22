@@ -7,8 +7,8 @@
 use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
+use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tidepool_runtime::session::{ResidentHole, WorkbenchExecutionId, WorkbenchRequest};
-use tidepool_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tokio::sync::oneshot;
 
 const WORKBENCH_IDLE: u8 = 0;
@@ -224,7 +224,7 @@ impl WorkbenchExecutionControl {
 /// A policy waiting for its next invocation.
 pub(crate) struct ResidentToolAwait {
     pub(crate) continuation: ResidentHole,
-    pub(crate) declarations: Vec<tidepool_tool::ToolDeclaration>,
+    pub(crate) declarations: Vec<exomonad_tool::ToolDeclaration>,
     pub(crate) synopsis: String,
     pub(crate) initial_user_message: Option<String>,
 }

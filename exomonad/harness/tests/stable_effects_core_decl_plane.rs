@@ -7,14 +7,15 @@
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::typed_request_agent_decls;
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::typed_request_agent_decls;
 use tidepool_runtime::session::SessionLib;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 

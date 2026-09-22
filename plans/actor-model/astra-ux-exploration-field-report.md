@@ -12,16 +12,16 @@ There was no recurrence of the heap failure. The observer then interviewed the
 retained root directly through tmux, including a follow-up challenging proposed
 new APIs. This was a bounded run, not proof of days-long reliability.
 
-- Workspace: `/tmp/shoal-console-ux-exploration`, an independent clone of Shoal
+- Workspace: `/tmp/exomonad-console-ux-exploration`, an independent clone of Exomonad
   Console. Shared source checkout and main branch were not modified.
-- tmux: `shoal-console-ux-exploration`; retained root pane `%443`.
+- tmux: `exomonad-console-ux-exploration`; retained root pane `%443`.
 - Run: `62f1be60-63e5-4943-9c5c-6ab39bca91a8`.
 - Root: `01a070ce-99d5-76c3-8838-69ba779e3601`.
 - Coding child: `01a070d0-7999-7fc2-b28d-17be9283eff3`.
 - Research child: `01a070d0-7a4b-7321-8068-1f9346f6d8cf`.
 - Codex runtime: `118e1cfcd1d7dd120460ff0685e976f0d17327dc`.
-- Prompt: `/tmp/shoal-ux-exploration-prompt.md`.
-- Host log: workspace `.shoal/logs/62f1be60-63e5-4943-9c5c-6ab39bca91a8.log`.
+- Prompt: `/tmp/exomonad-ux-exploration-prompt.md`.
+- Host log: workspace `.exomonad/logs/62f1be60-63e5-4943-9c5c-6ab39bca91a8.log`.
 - Full transcripts: Codex session JSONL files dated 2026-09-05 containing the
   thread UUIDs above.
 
@@ -33,7 +33,7 @@ The maximum measured sample difference was 56 thousandths. The experiment
 distinguished numerical equality from coincidence after integer row projection.
 
 Candidate `a0a964f990022e3a9e462798dcabb1073376bc49`, branch
-`shoal/overlap/experiment/branches/counterexample`, adds a real-renderer test
+`exomonad/overlap/experiment/branches/counterexample`, adds a real-renderer test
 and an evidence note. Child output reported
 `cargo test complete_cell_overlap_can_hide_distinct_domain_samples -- --nocapture`
 passed, with formatting and default build-directory policy. The root reviewed
@@ -92,7 +92,7 @@ turning a suspicion into `row`, `sameCell`, and enumerated counterexamples felt
 better than reconstructing prose arguments or disposable scripts. Full context
 mostly accelerated coordination; retained executable models affected reasoning.
 
-It would choose Shoal for differential testing, protocol analysis, competing
+It would choose Exomonad for differential testing, protocol analysis, competing
 implementations, and other campaigns with a durable conceptual model. It would
 currently prefer an ordinary harness for a localized or mostly sequential fix.
 Managing repository, actor, response, and language state imposed real attention
@@ -127,5 +127,5 @@ task-specific projections should be tried first.
   postconditions over existing file/Git owners. This could replace disposable
   parsing and bookkeeping scripts without creating another Git or process API.
 
-The next development milestone is a real Shoal improvement authored and reviewed
-inside Shoal, with the outer harness available for observation and recovery.
+The next development milestone is a real Exomonad improvement authored and reviewed
+inside Exomonad, with the outer harness available for observation and recovery.

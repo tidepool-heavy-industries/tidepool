@@ -2,7 +2,7 @@
 //! receipts. **A human runs this deliberately** — it spends the operator's
 //! ChatGPT tokens and is never wired into a suite or a battery tier.
 //!
-//!     cargo run -p tidepool-agent --example live_one_cycle
+//!     cargo run -p exomonad-agent --example live_one_cycle
 //!
 //! Before running it: know the model policy, which lines to paste back as
 //! evidence, the stop-and-hold rule, and the ONE-attempt rule (a
@@ -31,11 +31,11 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use tidepool_agent::backend::codex::isolation::{self, ConfigSnapshot};
-use tidepool_agent::backend::codex::CodexAgentBackend;
-use tidepool_agent::seam::{CycleResultPayload, ModelPolicy, ReasoningEffort};
-use tidepool_agent::{CoupledSpawner, SpawnRequest, SpawnWorkspace};
-use tidepool_worktree::{GitCli, WorktreeManager, WorktreeRegistry, WorktreeSpec};
+use exomonad_agent::backend::codex::isolation::{self, ConfigSnapshot};
+use exomonad_agent::backend::codex::CodexAgentBackend;
+use exomonad_agent::seam::{CycleResultPayload, ModelPolicy, ReasoningEffort};
+use exomonad_agent::{CoupledSpawner, SpawnRequest, SpawnWorkspace};
+use exomonad_worktree::{GitCli, WorktreeManager, WorktreeRegistry, WorktreeSpec};
 
 /// The word the worker is asked to produce. Distinctive enough that finding it
 /// in the payload is evidence the turn actually ran, not that a default

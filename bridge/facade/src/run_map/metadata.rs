@@ -1,11 +1,11 @@
 //! Bounded metadata projection; these observations never grant runtime custody.
 use super::Evidence;
-use crate::shoal::{RunPhase, RunStatus};
+use crate::exomonad::{RunPhase, RunStatus};
+use exomonad_actor::ActorRef;
 use serde::Serialize;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
-use tidepool_actor::ActorRef;
 
 #[derive(Debug, Serialize)]
 pub struct RootBinding {
@@ -49,7 +49,7 @@ impl RootBinding {
 }
 
 /// Projects recorded text, not the versioned QueueReadyThread proof returned by
-/// tidepool_agent::read_interactive_binding. Never use this as launch readiness.
+/// exomonad_agent::read_interactive_binding. Never use this as launch readiness.
 pub(super) fn binding_thread(path: &Path, read_bound: u64) -> Evidence<String> {
     let value = (|| -> Option<String> {
         let mut bytes = Vec::new();
@@ -92,7 +92,7 @@ pub(super) fn read_root(run: &Path, read_bound: u64) -> RootBinding {
         if bytes.len() as u64 == read_bound {
             return None;
         }
-        crate::shoal::decode_run_status(&bytes).ok()
+        crate::exomonad::decode_run_status(&bytes).ok()
     })();
     let (root_actor, expected_thread) = match status.map(|status| status.phase) {
         Some(RunPhase::Ready {
@@ -342,7 +342,7 @@ mod tests {
             "agent":{"model":"test","effort":"low"},
             "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"thread-root"}
         });
-        for version in [0, crate::shoal::STATUS_VERSION + 1, u32::MAX] {
+        for version in [0, crate::exomonad::STATUS_VERSION + 1, u32::MAX] {
             status["version"] = json!(version);
             // This shape would pass raw serde; only the owning decoder rejects it.
             assert!(serde_json::from_value::<RunStatus>(status.clone()).is_ok());

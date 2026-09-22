@@ -1166,7 +1166,7 @@ mod tests {
             "--inspect-browse".into(),
             "Tidepool.Prelude".into(),
             "--inspect-browse-expanded".into(),
-            "Tidepool.Actors.Shoal".into(),
+            "Tidepool.Actors.Exomonad".into(),
             "--inspect-scope-browse".into(),
             "--inspect-search".into(),
             "Response result -> Await (Settlement result)".into(),

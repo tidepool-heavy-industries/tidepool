@@ -3,7 +3,7 @@
 ## Status
 
 This is the earlier self-harness design for `exomonad/harness-dogfooding/devswarm/`.
-It is not the current Shoal implementation plan or a live campaign assignment.
+It is not the current Exomonad implementation plan or a live campaign assignment.
 [NEXT.md](../NEXT.md) owns
 the current direction: Astra-authored plans, Sol execution and tagged Astra work,
 with application acceptance outside the self-hosting repository. The migration
@@ -38,7 +38,7 @@ tree, but it is not DevSwarm's execution engine.
 
 This self-harness uses multi-round fork sessions that may delegate recursively
 and retire after `finalize` within a loop iteration. That lifecycle is specific
-to this driver; current Shoal actors retain their contexts after typed replies.
+to this driver; current Exomonad actors retain their contexts after typed replies.
 
 ## Organization and authority
 
@@ -123,7 +123,7 @@ functions over paths, task text, reports, or any other useful local data.
 ## Platform issues
 
 These proposals address the self-harness driver's workspace and re-entry model.
-They are not a current inventory of Shoal actor capabilities. Revalidate an owning
+They are not a current inventory of Exomonad actor capabilities. Revalidate an owning
 source and consumer before carrying any proposal into active implementation.
 
 ### DS-01 — Node-scoped workspace and store

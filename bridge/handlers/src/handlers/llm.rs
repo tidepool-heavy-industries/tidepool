@@ -7,7 +7,7 @@
 // bodies below are hand-written.
 tidepool_mcp::llm_effect_def!(crate::effect_glue::effect_rust_projection);
 
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-luna";
 
 pub struct LlmHandler {
     client: genai::Client,
@@ -364,14 +364,20 @@ mod tests {
             LlmHandler::effective_model("ollama:llama3.2".into()),
             "ollama:llama3.2"
         );
-        assert_eq!(LlmHandler::effective_model("gpt-4o".into()), "gpt-4o");
+        assert_eq!(
+            LlmHandler::effective_model("gpt-6-luna".into()),
+            "gpt-6-luna"
+        );
 
         std::env::set_var("TIDEPOOL_LLM_PROVIDER", "openai");
         assert_eq!(
-            LlmHandler::effective_model("openai:gpt-4o".into()),
-            "gpt-4o"
+            LlmHandler::effective_model("openai:gpt-6-luna".into()),
+            "gpt-6-luna"
         );
-        assert_eq!(LlmHandler::effective_model("gpt-4o".into()), "gpt-4o");
+        assert_eq!(
+            LlmHandler::effective_model("gpt-6-luna".into()),
+            "gpt-6-luna"
+        );
         assert_eq!(
             LlmHandler::effective_model("ollama:llama3.2".into()),
             DEFAULT_OPENAI_MODEL
@@ -398,8 +404,8 @@ mod tests {
             "ollama::llama3.2"
         );
         assert_eq!(
-            LlmHandler::normalize_model("gpt-4o-mini".into()),
-            "gpt-4o-mini"
+            LlmHandler::normalize_model("gpt-6-luna".into()),
+            "gpt-6-luna"
         );
         assert_eq!(
             LlmHandler::normalize_model("qwen2.5:7b".into()),
@@ -413,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_call_budget_resets_per_clone() {
-        let handler = LlmHandler::new("gpt-4o-mini".into());
+        let handler = LlmHandler::new("gpt-6-luna".into());
         handler
             .call_count
             .store(LLM_MAX_CALLS, std::sync::atomic::Ordering::Relaxed);
@@ -517,7 +523,7 @@ mod tests {
             return;
         }
         let client = genai::Client::default();
-        let model = "gpt-4o-mini";
+        let model = "gpt-6-luna";
 
         let resp = client
             .exec_chat(

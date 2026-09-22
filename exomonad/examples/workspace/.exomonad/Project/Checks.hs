@@ -14,7 +14,7 @@ import qualified Data.Text as Text
 import Tidepool.Check
 
 script :: Member RecipeCheck effects => CheckActor -> Text -> Eff effects ()
-script actor name = readFile actor (".shoal/checks/" <> name <> ".hs") >>= void . turn actor
+script actor name = readFile actor (".exomonad/checks/" <> name <> ".hs") >>= void . turn actor
 
 context :: Member RecipeCheck effects => Eff effects ()
 context = void startComponent
@@ -26,7 +26,7 @@ startComponent = do
   void $ turn owner ("let baseline = " <> gitOidLiteral baseline)
   script owner "component-setup"
   lead <- activation
-  check "fresh Sol lead receives the engineering rationale" (checkModel lead == Just "gpt-5.6-sol" && "Display edges must not fabricate authority or lose actors." `Text.isInfixOf` checkContext lead)
+  check "fresh Sol lead receives the engineering rationale" (checkModel lead == Just "gpt-6-sol" && "Display edges must not fabricate authority or lose actors." `Text.isInfixOf` checkContext lead)
   pure (owner, lead)
 
 workbench :: Member RecipeCheck effects => Eff effects ()
@@ -67,8 +67,8 @@ checkImprovement :: Member RecipeCheck effects => CheckActor -> Eff effects ()
 checkImprovement owner = do
   improver <- activation
   check "requested RSI is an ordinary selected Astra" (checkModel improver == Just "gpt-6-astra" && "Current definitions:" `Text.isInfixOf` checkContext improver)
-  prompt <- readFile (checkActor improver) ".shoal/prompts/task.md"
-  next <- checkpoint (checkActor improver) ".shoal/prompts/task.md" (prompt <> "\nRecipe improvement: carry the checked contract.\n") "improve next-wave task guidance"
+  prompt <- readFile (checkActor improver) ".exomonad/prompts/task.md"
+  next <- checkpoint (checkActor improver) ".exomonad/prompts/task.md" (prompt <> "\nRecipe improvement: carry the checked contract.\n") "improve next-wave task guidance"
   void $ turn (checkActor improver) ("respond (Produced (Candidate " <> gitOidLiteral next <> " [\"authored guidance check\"] [\"activate next swarm\"]))")
   void $ git owner ["merge", "--ff-only", next]
   frozen <- turn owner "inspectFull (fmap (T.isInfixOf \"Recipe improvement\") (workspacePrompt \"task\"))"

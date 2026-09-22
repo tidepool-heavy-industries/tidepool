@@ -66,7 +66,6 @@ class ExtractHelpers(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="extract helpers ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / "haskell").mkdir()
         (self.root / "bin").mkdir()
         for directory in ("bridge/haskell/src", "bridge/haskell/app", "bridge/haskell/lib/Tidepool/Aeson",
                           "bridge/haskell/lib/Tidepool/Command", "bridge/haskell/lib/Tidepool/Data",

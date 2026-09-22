@@ -32,7 +32,7 @@ diagOnly2 t = T.unlines (take 26
       , not (T.isInfixOf "could not compile" l) ])
 
 do
-  let fx n = ".shoal/examples/fixtures/" <> n <> "-check.out"
+  let fx n = ".exomonad/examples/fixtures/" <> n <> "-check.out"
   rs <- mapM (\n -> sh ["cat", fx n] >>= fairRoute n . diagOnly2)
              ["4610b5e", "f726882", "53ad43c"]
   pure (String (T.intercalate " | " rs))

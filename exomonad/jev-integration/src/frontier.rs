@@ -271,7 +271,7 @@ fn noise_case(model: &str, noise_count: usize) -> Case {
 
 fn microprogram_case(model: &str, sample: usize) -> Case {
     Case {
-        name: format!("shoal-microprogram-fanout-{sample}"),
+        name: format!("exomonad-microprogram-fanout-{sample}"),
         request: json!({"model":model,"state":{
             "goal":"Explain and safely advance a duplicate visible history row after message retry.",
             "observations":{
@@ -285,7 +285,7 @@ fn microprogram_case(model: &str, sample: usize) -> Case {
                 "duplicate_callback":"Receiver deduplication is required for stable message IDs",
                 "duplicate_visibility":"Undecided"
             },
-            "ownership":{"inbox":"node","callback_delivery":"actor","visible_projection":"shoal"},
+            "ownership":{"inbox":"node","callback_delivery":"actor","visible_projection":"exomonad"},
             "wake_policy":"Wake immediately only for active outage, data loss, deadlock, or a decision blocking all useful work; otherwise queue for normal wake."
         },"questions":{
             "mechanism":{"type":"choice","instructions":"Which mechanism directly explains the second callback?","criteria":{

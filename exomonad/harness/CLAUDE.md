@@ -1,4 +1,4 @@
-# tidepool-harness — resident typed-yield harness
+# exomonad-harness — resident typed-yield harness
 
 ## Charter
 
@@ -8,7 +8,7 @@ forks, operator interaction, durable harness events, and restart handling.
 
 It does not own the JIT (`tidepool-codegen`), the machine-session primitive
 (`tidepool-runtime`), concrete base-effect handlers (`tidepool-handlers`), or
-operator rendering (`tidepool-web`).
+operator rendering (`exomonad-web`).
 
 Read module documentation for local algorithms. This file records only the
 cross-module constraints that are easy to violate.
@@ -36,7 +36,7 @@ it through runtime resource scopes and do not own or remove it.
 
 All Haskell compilation goes through
 `tidepool_runtime::artifacts::compile_targets`, backed by the compiled-artifact
-cache in `tidepool-toolchain`. Do not add a cache-free compile path or a second
+cache in `exomonad-toolchain`. Do not add a cache-free compile path or a second
 extractor frontend here.
 
 Cache keys must include every input that can alter emitted artifacts. Mutable
@@ -121,7 +121,7 @@ that cannot be reconstructed. Never rotate while parked holes remain.
 
 The run lease prevents two live selfharness processes from repeating external
 effects and racing checkpoints in the same log directory. A lease held by a
-different live PID is a hard refusal. `TIDEPOOL_SELFHARNESS_TAKEOVER=1` is the
+different live PID is a hard refusal. `EXOMONAD_SELFHARNESS_TAKEOVER=1` is the
 explicit operator override; takeover archives the previous lease.
 
 There are two durable event streams:
@@ -147,7 +147,7 @@ This crate is GHC-heavy and skipped by the quick nextest filter. Run a targeted
 test with:
 
 ```bash
-scripts/battery.sh -p tidepool-harness -E 'test(<name>)'
+scripts/battery.sh -p exomonad-harness -E 'test(<name>)'
 ```
 
 Use the binary groups in `scripts/battery-shard.sh` for broader coverage.

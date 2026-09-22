@@ -11,13 +11,13 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::{
+use exomonad_harness::engine;
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{LogHeader, LogWriter};
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
@@ -46,7 +46,8 @@ fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -55,7 +56,7 @@ fn prelude_dir() -> PathBuf {
 }
 
 fn examples_harness_dir() -> PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {

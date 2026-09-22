@@ -46,4 +46,4 @@ is needed.
 Declarations and bindings persist between cells. Earlier closures retain the
 definitions they captured; rebinding a name does not rewrite them.
 
-skill: shoal-workbench
+skill: exomonad-workbench

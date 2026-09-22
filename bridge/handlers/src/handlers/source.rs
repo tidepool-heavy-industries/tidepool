@@ -18,7 +18,7 @@ pub use crate::generated::source::{SourceError, SourceReq};
 
 /// What a run must be able to do for `Source` to answer.
 ///
-/// Implemented by the Shoal composition root, which owns the frozen workspace,
+/// Implemented by the Exomonad composition root, which owns the frozen workspace,
 /// every actor's live source layer, and the driver compile that decides
 /// whether a candidate revision typechecks.
 ///

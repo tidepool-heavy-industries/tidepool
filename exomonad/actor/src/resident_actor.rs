@@ -1805,8 +1805,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// from `tidepool`'s composition root into
     /// `ActorRuntimeObservation::source_drift`, since the data — the source
     /// layer's active/disk revision, the checkout's Git state, and the
-    /// frozen workspace's — lives in `tidepool::shoal::source` and
-    /// `tidepool` depends on `tidepool-actor` (see `tidepool/Cargo.toml`),
+    /// frozen workspace's — lives in `tidepool::exomonad::source` and
+    /// `tidepool` depends on `exomonad-actor` (see `tidepool/Cargo.toml`),
     /// never the reverse. See `render_source_drift_section` just below
     /// `same_session_identifiers`. One piece is left out rather than
     /// guessed at even there: no build script or embedded string anywhere in
@@ -1815,7 +1815,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// that the binary-revision comparison is unavailable, rather than
     /// inventing one. Which agent-spec revision each actor activated is
     /// omitted for a similar reason: no such tracking exists in
-    /// `tidepool-actor` today, and this view does not invent any.
+    /// `exomonad-actor` today, and this view does not invent any.
     fn live_status_text(
         &self,
         actor: ActorRef,
@@ -4297,13 +4297,13 @@ where
             return reload_receipt("not swapped", started, receipt);
         };
         let changes =
-            tidepool_tool::surface::compare_surfaces(&active.declarations, &candidate.declarations);
+            exomonad_tool::surface::compare_surfaces(&active.declarations, &candidate.declarations);
         if !changes.is_empty() {
             receipt.push(format!(
                 "refused: the rebuilt spec declares a different surface, and the tool list was \
                  registered once for this session. The previous record is still serving calls; \
                  a changed surface takes effect at your next incarnation.\n{}",
-                tidepool_tool::surface::describe_changes(&changes)
+                exomonad_tool::surface::describe_changes(&changes)
             ));
             return reload_receipt("refused", started, receipt);
         }
@@ -5639,8 +5639,8 @@ where
                     tools.declarations.iter().any(|tool| {
                         tool.name() == call.name
                             && match tool {
-                                tidepool_tool::HostedTool::Custom(_) => call.arguments.is_string(),
-                                tidepool_tool::HostedTool::Function(_) => {
+                                exomonad_tool::HostedTool::Custom(_) => call.arguments.is_string(),
+                                exomonad_tool::HostedTool::Function(_) => {
                                     call.arguments.is_object()
                                 }
                             }
@@ -5913,7 +5913,7 @@ where
                 },
             );
             tracing::info!(
-                target: "shoal::content",
+                target: "exomonad::content",
                 parent: &unit_span,
                 index,
                 source = %block.source,
@@ -7041,7 +7041,7 @@ where
     fn tool<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        invocation: tidepool_tool::ToolInvocation,
+        invocation: exomonad_tool::ToolInvocation,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<serde_json::Value>, KernelInvocationFailure>,
@@ -7060,7 +7060,7 @@ where
             };
             if !awaiting.declarations.iter().any(|tool| {
                 tool.name == invocation.name
-                    && tidepool_tool::HostedTool::from(tool.clone()).accepts(&invocation.arguments)
+                    && exomonad_tool::HostedTool::from(tool.clone()).accepts(&invocation.arguments)
             }) {
                 self.standing = ResidentStanding::Tools(awaiting);
                 return Err(KernelInvocationFailure::Rejected {
@@ -7069,8 +7069,8 @@ where
                 });
             }
             let arguments = match invocation.arguments {
-                tidepool_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
-                tidepool_tool::ToolArguments::Structured(value) => value,
+                exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
+                exomonad_tool::ToolArguments::Structured(value) => value,
             };
             let mut outcome = self
                 .environment
@@ -7309,7 +7309,7 @@ where
     fn reconcile_workbench_cancellation(
         &self,
         execution: WorkbenchExecutionId,
-        invocation: Option<tidepool_tool::ToolInvocationContext>,
+        invocation: Option<exomonad_tool::ToolInvocationContext>,
     ) -> crate::WorkbenchCancellationOutcome {
         let invocation = invocation.map(crate::resident_tools::WorkbenchCallKey::from);
         self.workbench_executions
@@ -7789,7 +7789,7 @@ pub struct ActorGraphNode {
     pub terminal: Option<ActorTerminal>,
     pub workbench: crate::ActorWorkbenchPosture,
     pub provider_thread: Option<String>,
-    pub provider_turn: Option<tidepool_model::ProviderTurnObservation>,
+    pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
     pub provider_observation_stale: bool,
     pub bound_worktree: Option<String>,
     pub active_requests: Vec<crate::RequestId>,
@@ -8545,7 +8545,7 @@ fn workbench_response(
     // what each input unit actually produced.
     for item in &items {
         tracing::info!(
-            target: "shoal::content",
+            target: "exomonad::content",
             index = item.index,
             status = ?item.status,
             output_bytes = item.output.len(),
@@ -8565,7 +8565,7 @@ fn workbench_response(
         }
         for diagnostic in &item.diagnostics {
             tracing::info!(
-                target: "shoal::content",
+                target: "exomonad::content",
                 index = item.index,
                 diagnostic = ?diagnostic,
                 "input unit diagnostic"
@@ -8711,7 +8711,7 @@ mod tests {
             .iter()
             .find(|line| line["fields"]["message"] == "input unit receipt")
             .expect("every terminal path renders its receipts once");
-        assert_eq!(receipt["target"], "shoal::content");
+        assert_eq!(receipt["target"], "exomonad::content");
         assert_eq!(receipt["spans"][0]["execution"], "exec-3");
         assert_eq!(receipt["fields"]["index"], 0);
         assert_eq!(receipt["fields"]["status"], "Committed");
@@ -9396,7 +9396,7 @@ mod tests {
     #[test]
     fn recovered_workbench_fences_unsettled_native_calls_and_conflicting_input() {
         let invocation =
-            crate::resident_tools::WorkbenchCallKey::from(tidepool_tool::ToolInvocationContext {
+            crate::resident_tools::WorkbenchCallKey::from(exomonad_tool::ToolInvocationContext {
                 context_call_id: Some("outer".into()),
                 thread_id: "thread".into(),
                 turn_id: "turn".into(),
@@ -9472,7 +9472,7 @@ mod tests {
     #[test]
     fn interrupted_recovery_reads_only_the_exact_terminal_execution() {
         let invocation =
-            crate::resident_tools::WorkbenchCallKey::from(tidepool_tool::ToolInvocationContext {
+            crate::resident_tools::WorkbenchCallKey::from(exomonad_tool::ToolInvocationContext {
                 context_call_id: Some("outer".into()),
                 thread_id: "thread".into(),
                 turn_id: "turn".into(),

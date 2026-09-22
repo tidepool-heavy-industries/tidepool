@@ -27,7 +27,7 @@ pub use overlay::{
 
 /// Re-exec target after a mount transition's syscall-only pre-exec phase.
 /// Test harnesses accept this as an unmatched filter and exit successfully.
-pub const MOUNT_HELPER_COMMAND: &str = "__tidepool_mount_helper";
+pub const MOUNT_HELPER_COMMAND: &str = "__exomonad_mount_helper";
 
 /// A retained filesystem view captured from an owned live process.
 ///
@@ -460,7 +460,7 @@ impl HelperExec {
             Mode::empty(),
         )?;
         let arguments = [
-            CString::new("tidepool-mount-helper").map_err(io::Error::other)?,
+            CString::new("exomonad-mount-helper").map_err(io::Error::other)?,
             CString::new(MOUNT_HELPER_COMMAND).map_err(io::Error::other)?,
         ];
         let mut helper = Box::new(Self {

@@ -10,14 +10,14 @@
 # A workspace's generated state, wherever the workspace lives. The
 # anchored patterns above only match a workspace at the repository root,
 # so an example workspace's nix-store symlinks were stageable by accident.
-**/.shoal/logs/
-**/.shoal/sessions/
-**/.shoal/runtime/
-**/.shoal/build/
 **/.exomonad/logs/
 **/.exomonad/sessions/
 **/.exomonad/runtime/
 **/.exomonad/build/
+**/.shoal/logs/
+**/.shoal/sessions/
+**/.shoal/runtime/
+**/.shoal/build/
 # API keys dropbox — must NEVER be allowlisted back in
 .tidepool/secrets/
 !.tidepool/lib/

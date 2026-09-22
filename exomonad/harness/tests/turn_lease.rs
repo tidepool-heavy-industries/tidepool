@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, Role, StreamSink, TurnRequest, TurnResponse,
     Usage,
 };
-use tidepool_harness::tree::NodeState;
-use tidepool_harness::{Harness, HarnessError, TurnOutcome};
+use exomonad_harness::tree::NodeState;
+use exomonad_harness::{Harness, HarnessError, TurnOutcome};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -109,7 +109,7 @@ impl ModelProvider for FailFirstProvider {
 
 fn assistant_turn_deltas(
     log_path: &std::path::Path,
-    node: tidepool_harness::tree::NodeId,
+    node: exomonad_harness::tree::NodeId,
 ) -> usize {
     let (_h, events) = LogReader::open(log_path).expect("open log");
     events

@@ -1,4 +1,4 @@
-launchRead <- Cmd.run [bash|cat .agents/skills/shoal-command/SKILL.md; cat plans/parallel-dogfood/next-wave/{resume.md,README.md}; cat plans/parallel-dogfood/planner.md|]
+launchRead <- Cmd.run [bash|cat .agents/skills/exomonad-command/SKILL.md; cat plans/parallel-dogfood/next-wave/{resume.md,README.md}; cat plans/parallel-dogfood/planner.md|]
 -- fixture-step
 foregroundResult <- Cmd.run [bash|
 printf 'once\n' >> foreground-start-count

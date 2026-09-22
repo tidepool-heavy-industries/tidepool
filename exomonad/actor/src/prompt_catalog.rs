@@ -1,10 +1,8 @@
 use std::borrow::Cow;
 
 const HOSTED_DESCRIPTION_LIMIT: usize = 1024;
-const HASKELL_TOOL_DESCRIPTION: &str =
-    include_str!("../../prompts/haskell-tool-description.md");
-const HASKELL_TOOL_INSTRUCTIONS: &str =
-    include_str!("../../prompts/haskell-tool-instructions.md");
+const HASKELL_TOOL_DESCRIPTION: &str = include_str!("../../prompts/haskell-tool-description.md");
+const HASKELL_TOOL_INSTRUCTIONS: &str = include_str!("../../prompts/haskell-tool-instructions.md");
 
 const fn utf8_char_count(value: &str) -> usize {
     let bytes = value.as_bytes();
@@ -59,7 +57,7 @@ impl PromptId {
 }
 
 /// Fingerprint of the hosted Haskell tool description and instructions that
-/// join every Shoal actor's effective provider prompt. The composition root
+/// join every Exomonad actor's effective provider prompt. The composition root
 /// combines this with its role-specific developer prompt fingerprint so cache
 /// observations never silently omit the tool surface.
 pub fn hosted_prompt_fingerprint() -> String {
@@ -87,34 +85,34 @@ pub(crate) struct PromptArtifact {
     pub(crate) body: &'static str,
 }
 
-/// `workspace_modules` names the Shoal workspace's own configured Haskell
+/// `workspace_modules` names the Exomonad workspace's own configured Haskell
 /// modules (`FrozenWorkspace::modules`, threaded through
 /// `ActorWorkbenchSource::with_workspace_modules`). Empty for the operator
 /// workbench, tests, and a workspace with no `[haskell] modules`; in that
 /// case the topics list and unknown-topic error are unchanged from before
 /// workspace modules existed.
-/// The skills a Shoal workspace ships, named so an unknown topic can point at
+/// The skills an Exomonad workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
 const SHIPPED_SKILLS: [&str; 11] = [
-    "shoal-jev",
-    "shoal-orchestrate",
-    "shoal-unfold",
-    "shoal-workbench",
-    "shoal-cleanup",
-    "shoal-fork",
-    "shoal-coordinate",
-    "shoal-review",
-    "shoal-command",
-    "shoal-define-actors",
-    "shoal-agent-spec",
+    "exomonad-jev",
+    "exomonad-orchestrate",
+    "exomonad-unfold",
+    "exomonad-workbench",
+    "exomonad-cleanup",
+    "exomonad-fork",
+    "exomonad-coordinate",
+    "exomonad-review",
+    "exomonad-command",
+    "exomonad-define-actors",
+    "exomonad-agent-spec",
 ];
 
 /// A topic naming a shipped skill, either bare (`command`) or in full
-/// (`shoal-command`).
+/// (`exomonad-command`).
 fn skill_for_topic(topic: &str) -> Option<&'static str> {
     SHIPPED_SKILLS
         .into_iter()
-        .find(|skill| *skill == topic || skill.strip_prefix("shoal-") == Some(topic))
+        .find(|skill| *skill == topic || skill.strip_prefix("exomonad-") == Some(topic))
 }
 
 pub(crate) fn workbench_doc(
@@ -122,49 +120,43 @@ pub(crate) fn workbench_doc(
     workspace_modules: &[String],
 ) -> Result<Cow<'static, str>, String> {
     match topic {
-        "tree" | "worktree" | "worktrees" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/tree.md"
-        ))),
+        "tree" | "worktree" | "worktrees" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/tree.md")))
+        }
         "workbench" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/docs/workbench.md"
         ))),
-        "request" | "requests" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/request.md"
-        ))),
-        "unfold" | "fork" | "forks" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/unfold.md"
-        ))),
-        "jev" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/jev.md"
-        ))),
-        "actors" | "actor" | "record" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/actors.md"
-        ))),
-        "watch" | "watches" | "poll" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/watch.md"
-        ))),
+        "request" | "requests" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/request.md"))),
+        "unfold" | "fork" | "forks" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/unfold.md")))
+        }
+        "jev" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/jev.md"))),
+        "actors" | "actor" | "record" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/actors.md")))
+        }
+        "watch" | "watches" | "poll" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/watch.md")))
+        }
         "deadline" | "deadlines" | "duration" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/docs/deadline.md"
         ))),
-        "cleanup" | "clean" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/cleanup.md"
-        ))),
+        "cleanup" | "clean" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/cleanup.md"))),
         "refinement" | "refine" | "followup" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/docs/refinement.md"
         ))),
-        "lineage" | "status" | "trace" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/lineage.md"
-        ))),
+        "lineage" | "status" | "trace" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/lineage.md")))
+        }
         "recovery" | "recover" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/docs/recovery.md"
         ))),
-        "reflect" | "conversation" | "history" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/reflect.md"
-        ))),
+        "reflect" | "conversation" | "history" => {
+            Ok(Cow::Borrowed(include_str!("../../prompts/docs/reflect.md")))
+        }
         "help" | "topics" => {
             let mut body = String::from(
-                "Shoal topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-orchestrate (the implement/review/repair/merge loop as one record actor), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-agent-spec (your own tools, after-tool slot, and watchdog heuristics on children — all read, edited and reloaded live), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
+                "Exomonad topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
+                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-jev (judgment-model packets and gates), exomonad-orchestrate (the implement/review/repair/merge loop as one record actor), exomonad-unfold (multi-child unfolds and reading a child's commit), exomonad-workbench (cells that typecheck the first time), exomonad-cleanup (retiring workers and groups), exomonad-agent-spec (your own tools, after-tool slot, and watchdog heuristics on children — all read, edited and reloaded live), exomonad-fork, exomonad-coordinate, exomonad-review, exomonad-command, exomonad-define-actors.",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
@@ -175,12 +167,12 @@ pub(crate) fn workbench_doc(
             Ok(Cow::Owned(body))
         }
         other => {
-            let mut message = format!("unknown Shoal documentation topic `{other}`");
+            let mut message = format!("unknown Exomonad documentation topic `{other}`");
             // A topic that names a shipped skill is the most likely thing the
             // asker actually wanted, and the seat's own rule is to load the
             // skill before falling back to a topic. Saying so costs one line
             // and saves a search; a live lead asked `doc command` while
-            // `shoal-command` sat unmentioned, then spent four lookup rounds
+            // `exomonad-command` sat unmentioned, then spent four lookup rounds
             // guessing names.
             if let Some(skill) = skill_for_topic(other) {
                 message.push_str(&format!(
@@ -241,11 +233,11 @@ mod tests {
         // Every topic with a workspace skill names it on its last line, and the
         // topic listing names the skills beside the topics.
         for (topic, skill) in [
-            ("actors", "shoal-define-actors"),
-            ("cleanup", "shoal-cleanup"),
-            ("jev", "shoal-jev"),
-            ("unfold", "shoal-unfold"),
-            ("workbench", "shoal-workbench"),
+            ("actors", "exomonad-define-actors"),
+            ("cleanup", "exomonad-cleanup"),
+            ("jev", "exomonad-jev"),
+            ("unfold", "exomonad-unfold"),
+            ("workbench", "exomonad-workbench"),
         ] {
             let body = workbench_doc(topic, &[]).unwrap();
             assert_eq!(
@@ -261,19 +253,19 @@ mod tests {
 
     #[test]
     fn an_unknown_topic_naming_a_shipped_skill_says_so() {
-        // A live lead asked `doc command` while `shoal-command` — whose whole
+        // A live lead asked `doc command` while `exomonad-command` — whose whole
         // subject is running commands — went unmentioned, then spent four
         // lookup rounds guessing constructor names.
         let refusal = workbench_doc("command", &[]).unwrap_err();
         assert!(
-            refusal.contains("`shoal-command` skill covers this"),
+            refusal.contains("`exomonad-command` skill covers this"),
             "{refusal}"
         );
-        assert!(refusal.starts_with("unknown Shoal documentation topic `command`"));
+        assert!(refusal.starts_with("unknown Exomonad documentation topic `command`"));
 
         // The full name works too, and so does every other shipped skill that
         // is not already a topic in its own right.
-        for topic in ["shoal-command", "review", "coordinate", "orchestrate"] {
+        for topic in ["exomonad-command", "review", "coordinate", "orchestrate"] {
             let refusal = workbench_doc(topic, &[]).unwrap_err();
             assert!(
                 refusal.contains("skill covers this"),

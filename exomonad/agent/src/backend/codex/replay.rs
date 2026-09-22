@@ -9,7 +9,7 @@
 //! against real bytes, not encoded by hand in
 //! [`crate::backend::mock::MockBackend`]: a hand-written imitation can only
 //! ever encode what its author believed the server does.
-//! `tidepool-harness`'s `ReplayProvider` is the named precedent for this
+//! `exomonad-harness`'s `ReplayProvider` is the named precedent for this
 //! shape.
 //!
 //! The frames replayed here were produced by one recorded live turn
@@ -741,7 +741,7 @@ mod tests {
                 codex_codes::methods::INITIALIZE,
                 &codex_codes::InitializeParams {
                     client_info: codex_codes::ClientInfo {
-                        name: "tidepool-agent".to_string(),
+                        name: "exomonad-agent".to_string(),
                         title: None,
                         version: "0.1.0".to_string(),
                     },

@@ -2,7 +2,7 @@
 
 `bridge/haskell/test-prepared-stg/M3Vertical.hs` is the producer fixture; its checked
 schema-v4 output is `bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor`, generated
-with `cd haskell && cabal run execution-schema-projection -- test-prepared-stg/fixtures/m3-vertical.cbor`.
+with `cd bridge/haskell && cabal run execution-schema-projection -- test-prepared-stg/fixtures/m3-vertical.cbor`.
 The envelope has 13 fields: field 10 is a program-wide postorder expression
 arena, field 11 holds top binding groups with body indices into that arena,
 and field 12 is the entry value ID. Each structural child index precedes its

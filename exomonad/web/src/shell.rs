@@ -12,8 +12,8 @@
 //! so an operator's toggle survives any number of live patches.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
-use tidepool_harness::provider::oauth::ReasoningEffort;
-use tidepool_harness::provider::settings::{ModelSettings, MODEL_ALLOWLIST};
+use exomonad_harness::provider::oauth::ReasoningEffort;
+use exomonad_harness::provider::settings::{ModelSettings, MODEL_ALLOWLIST};
 
 /// The full page: `<head>` with inline [`CSS`] + [`JS`], `<body>` with a
 /// masthead and the `#tree` outline — one stable `.node-slot` wrapper per
@@ -32,7 +32,7 @@ use tidepool_harness::provider::settings::{ModelSettings, MODEL_ALLOWLIST};
 /// rendered as an ordinary escaped text node like everything else here.
 ///
 /// `dial` — the operator's live model/effort settings, when the boot path
-/// has wired a [`tidepool_harness::provider::settings::SharedModelSettings`]
+/// has wired a [`exomonad_harness::provider::settings::SharedModelSettings`]
 /// handle onto the [`crate::AppState`] (see
 /// [`crate::AppState::set_model_settings`]) — renders [`model_dial`] showing
 /// the CURRENT values, never a write-only form. `None` renders no dial at
@@ -49,7 +49,7 @@ pub fn page(
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "tidepool — operator" }
+                title { "exomonad — operator" }
                 style { (PreEscaped(CSS)) }
                 script { (PreEscaped(CORE_JS)) }
                 script { (PreEscaped(JS)) }
@@ -58,7 +58,7 @@ pub fn page(
                 main class="sheet" {
                     header class="masthead" {
                         div class="mast-title" {
-                            span class="mark" { "tidepool" }
+                            span class="mark" { "exomonad" }
                             span class="mast-sub" { "self-iterating harness — operator console" }
                             @if let Some(id) = run_id {
                                 span class="run-id" data-node="run-id" { "run " (id) }
@@ -895,14 +895,14 @@ mod tests {
     /// write-only form.
     #[test]
     fn masthead_shows_the_dial_with_current_values_selected_when_wired() {
-        let current = ModelSettings::new("gpt-5.6-sol", ReasoningEffort::High);
+        let current = ModelSettings::new("gpt-6-sol", ReasoningEffort::High);
         let doc = page(vec![], None, Some(&current)).into_string();
         assert!(doc.contains("class=\"model-dial\""), "{doc}");
         for m in MODEL_ALLOWLIST {
             assert!(doc.contains(&format!("value=\"{m}\"")), "{doc}");
         }
         assert!(
-            doc.contains("value=\"gpt-5.6-sol\" selected"),
+            doc.contains("value=\"gpt-6-sol\" selected"),
             "the current model must be pre-selected: {doc}"
         );
         assert!(
@@ -910,7 +910,7 @@ mod tests {
             "the current effort must be pre-selected: {doc}"
         );
         // A non-current option is rendered but NOT selected.
-        assert!(!doc.contains("value=\"gpt-5.6-terra\" selected"), "{doc}");
+        assert!(!doc.contains("value=\"gpt-6-astra\" selected"), "{doc}");
     }
 
     /// No dial wired (`None`) renders no dial markup at all — the same

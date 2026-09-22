@@ -3,14 +3,14 @@
 {-# LANGUAGE TypeOperators #-}
 
 -- Project-sized defaults for authored actor records. Runtime roles, scheduling
--- and resource authority remain with Shoal's existing owners.
+-- and resource authority remain with Exomonad's existing owners.
 module Project.Actors (CoordinationEffects, coordinationActor, releaseGroup) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Row (knownEffects)
 
 type CoordinationEffects api = LocalEffects api '[Replies, Actor, Notifications]

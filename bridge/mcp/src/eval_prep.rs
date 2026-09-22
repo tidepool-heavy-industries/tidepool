@@ -75,7 +75,7 @@ pub fn with_session_effects(mut handler_decls: Vec<EffectDecl>) -> Vec<EffectDec
 /// handler stacks use [`with_session_effects`] too.
 ///
 /// A surface that genuinely services more than this — the harness Agent turn
-/// (`tidepool-harness::engine::agent_decls`) dispatches `ForkWith`/
+/// (`exomonad-harness::engine::agent_decls`) dispatches `ForkWith`/
 /// `ForkAllWith` through its own `classify_hole`, which this engine's parser
 /// does not — builds its own WIDER roster by appending to this one's output
 /// explicitly (`agent_decls`'s doc has the details), rather than this
@@ -353,7 +353,7 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
         out.push_str(&format!("type M = Eff {}\n", row_type(row_effects, row)));
         // A throwaway value binding that forces `M` (hence the whole applied
         // row, including a pinned `Finalize <T>`'s answer type) to resolve —
-        // the probe target `tidepool-harness::engine::validate_finalize_row`
+        // the probe target `exomonad-harness::engine::validate_finalize_row`
         // extracts to catch an unresolved row application HERE rather than as
         // a confusing cascade in whatever turn module happens to import this
         // shim (see that function's doc). Never called; dead by construction.
@@ -632,7 +632,7 @@ pub enum Render {
 /// resolved type with its own `Show` instance available, so `__anchor`
 /// resolves trivially and changes nothing observable — this is why it's safe
 /// to add without threading the hole's concrete answer type through at all,
-/// only a per-turn boolean (see `tidepool-harness::engine::template_turn_for`).
+/// only a per-turn boolean (see `exomonad-harness::engine::template_turn_for`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TurnTemplate<'a> {
     pub preamble: &'a str,
@@ -650,7 +650,7 @@ pub struct TurnTemplate<'a> {
     /// [`Self::render_entry_wrapper`]/[`Self::render_entry_body`] `result`
     /// itself uses, so the two are identical by construction rather than a
     /// hand-copied second shape that can drift from the template it imitates
-    /// (`tidepool-harness`'s render+loop fusion is the first caller). Empty
+    /// (`exomonad-harness`'s render+loop fusion is the first caller). Empty
     /// by default (`..Default::default()`), so every pre-existing caller's
     /// output is byte-identical to before this field existed — see
     /// `template_haskell_pin` in this module's tests. Only the PRIMARY entry
@@ -674,7 +674,7 @@ pub struct TurnTemplate<'a> {
     /// `runDelegate` peels back from, while `self.effect_stack` (this
     /// entry's own signature) keeps naming the REAL, dispatched OUTER row.
     /// This is the "wrap lives in the template's RESULT position" mechanism
-    /// (`tidepool-harness::engine::delegate_aware_preamble`'s doc has the
+    /// (`exomonad-harness::engine::delegate_aware_preamble`'s doc has the
     /// full story, including why `M` is redefined locally rather than
     /// touched here) — `code` itself is never textually rewritten. Default
     /// `false`: every pre-existing caller's bytes are unchanged.

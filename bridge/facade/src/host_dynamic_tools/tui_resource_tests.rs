@@ -2,13 +2,13 @@
 use super::*;
 use crate::host_dynamic_tools::{HostDynamicToolService, MODEL_OUTPUT_LIMIT};
 use axum::{extract::State, routing::post, Json, Router};
-use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::PathBuf, sync::Mutex as StdMutex, time::Duration};
-use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
-use tidepool_node::{
+use exomonad_node::command_resources::{CommandResourcePolicy, CommandResources};
+use exomonad_node::{
     ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient, ProcessSupervisorManifest,
     ProcessSupervisorObservation, ServiceEnvironment, TmuxLaunch, TmuxSession,
 };
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, path::PathBuf, sync::Mutex as StdMutex, time::Duration};
 use tokio::net::UnixListener;
 
 #[derive(Clone)]
@@ -16,7 +16,7 @@ struct Provider {
     requests: Arc<StdMutex<Vec<Value>>>,
     steps: Arc<Vec<Option<String>>>,
     work: PathBuf,
-    shell: tidepool_agent::InteractiveShellTools,
+    shell: exomonad_agent::InteractiveShellTools,
 }
 
 async fn response(
@@ -55,14 +55,14 @@ async fn response(
             "content":[{"type":"output_text","text":"{\"title\":\"Exercise resource limits\"}"}]})
     } else if index == 0 {
         let args = match provider.shell {
-            tidepool_agent::InteractiveShellTools::Native => {
+            exomonad_agent::InteractiveShellTools::Native => {
                 json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000})
             }
-            tidepool_agent::InteractiveShellTools::Hosted => {
+            exomonad_agent::InteractiveShellTools::Hosted => {
                 json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "memory_mib":64,"yield_time_ms":30000})
             }
         };
-        json!({"type":"function_call", "call_id":"initial-oom", "name":match provider.shell { tidepool_agent::InteractiveShellTools::Native => "exec_command", tidepool_agent::InteractiveShellTools::Hosted => "bash" }, "arguments":args.to_string()})
+        json!({"type":"function_call", "call_id":"initial-oom", "name":match provider.shell { exomonad_agent::InteractiveShellTools::Native => "exec_command", exomonad_agent::InteractiveShellTools::Hosted => "bash" }, "arguments":args.to_string()})
     } else if index == 40 {
         json!({"type":"function_call", "call_id":"structured-40", "name":"bash",
             "arguments":json!({"cmd":"python3 -c 'import sys; sys.stdout.buffer.write(bytes([255])*9000)'", "memory_mib":64,"yield_time_ms":30000}).to_string()})
@@ -299,24 +299,24 @@ impl Drop for NativeFixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires delegated cgroups, SHOAL_RESOURCE_CODEX_BIN and SHOAL_RESOURCE_HOST_BIN"]
+#[ignore = "requires delegated cgroups, EXOMONAD_RESOURCE_CODEX_BIN and EXOMONAD_RESOURCE_HOST_BIN"]
 async fn full_tui_survives_command_oom_and_accepts_steering() {
-    run_shell_fixture(tidepool_agent::InteractiveShellTools::Hosted).await;
+    run_shell_fixture(exomonad_agent::InteractiveShellTools::Hosted).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires delegated cgroups, SHOAL_RESOURCE_CODEX_BIN and SHOAL_RESOURCE_HOST_BIN"]
+#[ignore = "requires delegated cgroups, EXOMONAD_RESOURCE_CODEX_BIN and EXOMONAD_RESOURCE_HOST_BIN"]
 async fn full_tui_native_shell_oom_remains_isolated() {
-    run_shell_fixture(tidepool_agent::InteractiveShellTools::Native).await;
+    run_shell_fixture(exomonad_agent::InteractiveShellTools::Native).await;
 }
 
-async fn run_shell_fixture(shell: tidepool_agent::InteractiveShellTools) {
+async fn run_shell_fixture(shell: exomonad_agent::InteractiveShellTools) {
     use std::os::unix::fs::PermissionsExt;
     let native = PathBuf::from(
-        std::env::var_os("SHOAL_RESOURCE_CODEX_BIN").expect("matched native executable"),
+        std::env::var_os("EXOMONAD_RESOURCE_CODEX_BIN").expect("matched native executable"),
     );
     let host_binary = PathBuf::from(
-        std::env::var_os("SHOAL_RESOURCE_HOST_BIN").expect("matched Shoal executable"),
+        std::env::var_os("EXOMONAD_RESOURCE_HOST_BIN").expect("matched Exomonad executable"),
     );
     assert!(native.is_absolute() && host_binary.is_absolute());
     let owner = CommandResources::delegated(CommandResourcePolicy {
@@ -341,17 +341,19 @@ async fn run_shell_fixture(shell: tidepool_agent::InteractiveShellTools) {
         .status()
         .unwrap()
         .success());
-    let skill = work.join(".shoal/skills/shoal-command");
+    let skill = work.join(".exomonad/skills/exomonad-command");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
         skill.join("SKILL.md"),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/skills/shoal-command/SKILL.md"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-command/SKILL.md"
+        ),
     )
     .unwrap();
     std::fs::create_dir_all(work.join(".agents/skills")).unwrap();
     std::os::unix::fs::symlink(
-        "../../.shoal/skills/shoal-command",
-        work.join(".agents/skills/shoal-command"),
+        "../../.exomonad/skills/exomonad-command",
+        work.join(".agents/skills/exomonad-command"),
     )
     .unwrap();
     let plan_dir = work.join("plans/parallel-dogfood");
@@ -390,7 +392,7 @@ the applications and sleep integration. Structured engine introspection remains
 part of that preserved engine work, not an unfinished obligation in this release.
 
 There are no external TPLR consumers. The campaign used a coordinated format
-cutover and required matched extractor/runtime checks against Shoal usage. The
+cutover and required matched extractor/runtime checks against Exomonad usage. The
 only available native platform was x86_64; historical evidence must not be widened
 into an aarch64 acceptance claim.
 
@@ -488,7 +490,7 @@ Astra can plan the graph and check Sol's execution understanding once, then idle
 without routine progress subscriptions. Sol owns implementation, integration and
 ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
 and return directly to the requesting Sol. Haskell handles mechanical collection,
-cursor advancement and routing; use .shoal/plans/coordination.md. Keep routine
+cursor advancement and routing; use .exomonad/plans/coordination.md. Keep routine
 evidence out of Attention and use compact projections at decision boundaries.
 Return compact commits/checks/gates; exact transport and source
 incorporation still matter without a paragraph of acknowledgment history.
@@ -505,14 +507,14 @@ In a future campaign, external supervision can handle build/cache/usage/disk
 monitoring and harness issues. Product workers run checks with the supplied
 toolchain and explicit candidate selection; they do not start environment
 archaeology or hot-patch the running harness.
-Keep ordinary TUIs, one frozen canonical `.shoal`, and fixed running tools during
+Keep ordinary TUIs, one frozen canonical `.exomonad`, and fixed running tools during
 any future campaign. Platform gaps must be reported honestly. There are no external
-TPLR consumers; coordinate format cutovers and validate Shoal usage before changing
+TPLR consumers; coordinate format cutovers and validate Exomonad usage before changing
 the selected main or running package.
 "#;
     let planner = r#"# Initial Astra planner: make this tree effective
 
-You are the Shoal-managed planning root, working with the human in your ordinary
+You are the Exomonad-managed planning root, working with the human in your ordinary
 Codex TUI. The external setup conversation only supervises the harness. Both
 product designs already exist; focus your substantial reasoning on executing them
 well, rather than rewriting them or repeating the product interview.
@@ -547,7 +549,7 @@ Record the compact decisions in `execution-contract.md` here, with deeper branch
 information linked only where needed. Ask the human about consequential direction
 changes; the existing goals and two-lane implementation are already authorized.
 
-## Commission and review inside Shoal
+## Commission and review inside Exomonad
 
 The selected package loads `Project.Types`, `Project.Work`, `Project.Plan`,
 `Project.Actors`, `Project.Routing` and `Project.Observe` unqualified. `Task` is a type, not a
@@ -624,7 +626,7 @@ Sol to fresh selected Astra consultations; routine progress stays with Sol.
     let mut campaign = test_campaign::TestCampaign::start().await;
     let actor = campaign.actor.identity();
     let actor_key = format!("{}-{}", actor.id.0, actor.incarnation.0);
-    let client = tidepool_node::command_resources::CommandResourceClient::local(owner.clone());
+    let client = exomonad_node::command_resources::CommandResourceClient::local(owner.clone());
     let snippets: Vec<_> = include_str!("tui_commands.hs")
         .split("-- fixture-step\n")
         .map(str::to_owned)
@@ -656,7 +658,7 @@ Sol to fresh selected Astra consultations; routine progress stays with Sol.
         home.join("config.toml"),
         format!(
             r#"
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_provider = "fixture"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
@@ -672,7 +674,7 @@ supports_websockets = false
 [projects.{}]
 trust_level = "trusted"
 "#,
-            shell == tidepool_agent::InteractiveShellTools::Native,
+            shell == exomonad_agent::InteractiveShellTools::Native,
             toml::Value::String(work.display().to_string())
         ),
     )
@@ -682,10 +684,10 @@ trust_level = "trusted"
     let binding_path = temp.path().join("binding.json");
     let service = HostDynamicToolService::new(
         match shell {
-            tidepool_agent::InteractiveShellTools::Hosted => {
+            exomonad_agent::InteractiveShellTools::Hosted => {
                 campaign.root_installation.policy.clone()
             }
-            tidepool_agent::InteractiveShellTools::Native => {
+            exomonad_agent::InteractiveShellTools::Native => {
                 crate::host_dynamic_tools::tests::endpoint()
             }
         },
@@ -748,13 +750,13 @@ trust_level = "trusted"
     .unwrap();
     let supervisor_socket = manifest.socket_path();
     let manifest_path = manifest.write_new().unwrap();
-    let session = format!("shoal-resource-test-{}", uuid::Uuid::new_v4().simple());
+    let session = format!("exomonad-resource-test-{}", uuid::Uuid::new_v4().simple());
     let tmux = TmuxSession::new(&session).unwrap();
     let mut fixture = NativeFixture {
         session,
         process: None,
     };
-    let slice = tidepool_node::systemd_slice::SystemdSlice::default();
+    let slice = exomonad_node::systemd_slice::SystemdSlice::default();
     slice.inspect().await.unwrap();
     slice
         .current_membership()
@@ -810,15 +812,15 @@ trust_level = "trusted"
         process.release(Duration::from_secs(10)).unwrap(),
         ProcessSupervisorObservation::Released
     );
-    let native_backend = tidepool_agent::native_interactive_backend(
-        tidepool_agent::native_interactive_agent_from_parts(native, "command acceptance".into())
+    let native_backend = exomonad_agent::native_interactive_backend(
+        exomonad_agent::native_interactive_agent_from_parts(native, "command acceptance".into())
             .unwrap(),
     );
     let backend_task = tokio::spawn(async move {
         while let Some(deployment) = campaign.deployments.recv().await {
             if let LocalResidentDeployment::CommandBackend(request) = deployment {
                 assert_eq!(request.owner, actor);
-                let thread = tidepool_agent::read_interactive_binding(&binding_path)
+                let thread = exomonad_agent::read_interactive_binding(&binding_path)
                     .await
                     .unwrap();
                 request.supply(Ok(Arc::new(commands::NativeCommandBackend::new(
@@ -831,8 +833,8 @@ trust_level = "trusted"
         }
     });
     let phases: &[usize] = match shell {
-        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30, 40, 44],
-        tidepool_agent::InteractiveShellTools::Native => &[2],
+        exomonad_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30, 40, 44],
+        exomonad_agent::InteractiveShellTools::Native => &[2],
     };
     for &expected in phases {
         let reached = tokio::time::timeout(
@@ -888,8 +890,8 @@ trust_level = "trusted"
         match expected {
             2 => {
                 let oom = match shell {
-                    tidepool_agent::InteractiveShellTools::Native => "resource limit",
-                    tidepool_agent::InteractiveShellTools::Hosted => "CommandOutOfMemory",
+                    exomonad_agent::InteractiveShellTools::Native => "resource limit",
+                    exomonad_agent::InteractiveShellTools::Hosted => "CommandOutOfMemory",
                 };
                 assert!(output(1).contains(oom), "{}", output(1));
                 assert!(
@@ -911,8 +913,8 @@ trust_level = "trusted"
                     .as_array()
                     .expect("default tool list");
                 let shell_name = match shell {
-                    tidepool_agent::InteractiveShellTools::Native => "exec_command",
-                    tidepool_agent::InteractiveShellTools::Hosted => "bash",
+                    exomonad_agent::InteractiveShellTools::Native => "exec_command",
+                    exomonad_agent::InteractiveShellTools::Hosted => "bash",
                 };
                 for name in [shell_name, "write_stdin", "haskell", "apply_patch"] {
                     assert_eq!(
@@ -921,7 +923,7 @@ trust_level = "trusted"
                         "{tools}"
                     );
                 }
-                if shell == tidepool_agent::InteractiveShellTools::Hosted {
+                if shell == exomonad_agent::InteractiveShellTools::Hosted {
                     assert!(!flat.iter().any(|tool| tool["name"] == "exec_command"));
                     for name in ["read_output", "cancel_command"] {
                         assert_eq!(
@@ -940,7 +942,7 @@ trust_level = "trusted"
                         "native schema leaked: {exec}"
                     );
                 }
-                assert!(!tools.to_string().contains("tidepool_actor"), "{tools}");
+                assert!(!tools.to_string().contains("exomonad_actor"), "{tools}");
                 assert!(
                     !flat
                         .iter()

@@ -26,19 +26,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -208,8 +209,8 @@ async fn run_fanout_cycle_with(
         Some(fixtures_dir()),
     )
     .expect("answerer engine config");
-    let provider: Arc<dyn tidepool_harness::provider::DynModelProvider> = Arc::new(provider);
-    let writer = tidepool_harness::log::LogWriter::create(
+    let provider: Arc<dyn exomonad_harness::provider::DynModelProvider> = Arc::new(provider);
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "outer-fanout-{}-{}.jsonl",
             std::process::id(),
@@ -308,8 +309,8 @@ async fn outer_fanout_respects_concurrency_cap() {
     // after the cycle — `Harness::new` only needs the erased
     // `Arc<dyn DynModelProvider>` view, coerced from a clone of the same Arc.
     let provider = Arc::new(provider);
-    let dyn_provider: Arc<dyn tidepool_harness::provider::DynModelProvider> = provider.clone();
-    let writer = tidepool_harness::log::LogWriter::create(
+    let dyn_provider: Arc<dyn exomonad_harness::provider::DynModelProvider> = provider.clone();
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("outer-fanout-cap-{}.jsonl", std::process::id())),
         &header("cap"),
     )

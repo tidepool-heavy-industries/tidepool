@@ -1,6 +1,6 @@
 [package]
 autobins = false
-name = "tidepool-web"
+name = "exomonad-web"
 description = "Minimal operator GUI (HTTP+SSE, Datastar) for the self-iterating harness"
 version.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 clap.workspace = true
-tidepool-harness.workspace = true
+exomonad-harness.workspace = true
 tidepool-repr.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true

@@ -6,8 +6,8 @@
     flake = false;
   };
 
-  # Nothing is built from here. `[haskell.flake_sources]` in `.shoal/config.toml`
-  # names the directories inside the input that hold modules, and Shoal captures
+  # Nothing is built from here. `[haskell.flake_sources]` in `.exomonad/config.toml`
+  # names the directories inside the input that hold modules, and Exomonad captures
   # them into the run as ordinary source roots.
   outputs = { ... }: { };
 }

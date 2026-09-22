@@ -2,7 +2,7 @@
 
 Six cells, each kept because it shows a technique rather than a result. They are
 reference to copy from, not modules to import — the programs themselves are in
-`.shoal/Project/`.
+`.exomonad/Project/`.
 
 Every one of them assumes this helper. Declare it once in your session:
 
@@ -75,5 +75,5 @@ are kept exactly as they ran, with their recorded numbers, in
 the same pattern against this repository, written rather than substituted. It has
 not been executed, so its wording is deliberate and its numbers are unmeasured.
 
-Read `.shoal/plans/README.md` for what is specific to working in this repository,
-and load the `shoal-jev` skill for the question-writing rules.
+Read `.exomonad/plans/README.md` for what is specific to working in this repository,
+and load the `exomonad-jev` skill for the question-writing rules.

@@ -68,14 +68,14 @@ pub const D3_JS: &str = include_str!("../assets/d3.v7.9.0.min.js");
 /// a write-only form); `None` renders no dial at all (replay/api-key mode,
 /// the demo binary, tests). The dial's CSS and form wiring ride the already-
 /// embedded [`shell::CSS`]/[`shell::CORE_JS`].
-pub fn tree_page(dial: Option<&tidepool_harness::provider::settings::ModelSettings>) -> Markup {
+pub fn tree_page(dial: Option<&exomonad_harness::provider::settings::ModelSettings>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "tidepool — tree" }
+                title { "exomonad — tree" }
                 style { (PreEscaped(shell::CSS)) (PreEscaped(TREE_CSS)) }
                 script src=(D3_ASSET_PATH) {}
                 script { (PreEscaped(shell::CORE_JS)) }
@@ -84,7 +84,7 @@ pub fn tree_page(dial: Option<&tidepool_harness::provider::settings::ModelSettin
             body {
                 div id="app" {
                     header class="tree-masthead" {
-                        span class="mark" { "tidepool" }
+                        span class="mark" { "exomonad" }
                         a class="legacy-link" href="/legacy" { "outline view" }
                         @if let Some(d) = dial {
                             (shell::model_dial(d))
@@ -183,7 +183,7 @@ html, body { height: 100%; overflow: hidden; }
 /// in place exactly like an outline section does.
 pub const TREE_JS: &str = r#"
 (function () {
-  var SYN_ROOT = '__tidepool_root__';
+  var SYN_ROOT = '__exomonad_root__';
   var NODE_RADIUS = 9;
   var LABEL_OFFSET = 14;
   // Rough advance width for the 600-weight, text-micro (11px) label font —
@@ -606,9 +606,9 @@ mod tests {
     /// no settings, no dial.
     #[test]
     fn tree_page_renders_the_model_dial_only_when_settings_are_wired() {
-        let settings = tidepool_harness::provider::settings::ModelSettings {
-            model: "gpt-5.6-sol".to_string(),
-            effort: tidepool_harness::provider::oauth::ReasoningEffort::Medium,
+        let settings = exomonad_harness::provider::settings::ModelSettings {
+            model: "gpt-6-sol".to_string(),
+            effort: exomonad_harness::provider::oauth::ReasoningEffort::Medium,
         };
         let with = tree_page(Some(&settings)).into_string();
         assert!(
@@ -616,7 +616,7 @@ mod tests {
             "dial form missing: {with}"
         );
         assert!(
-            with.contains(r#"option value="gpt-5.6-sol" selected"#),
+            with.contains(r#"option value="gpt-6-sol" selected"#),
             "current model not selected: {with}"
         );
         // The `.model-dial` CSS rules ride the embedded stylesheet either

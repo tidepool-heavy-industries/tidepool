@@ -21,10 +21,10 @@ tidepool-bridge-effects.workspace = true
 camino.workspace = true
 # PRD 19 lane L4: the RepoEvent handler's production observation source adapts
 # `WorktreeMonitor` — the git reasoning lives THERE, not here.
-tidepool-worktree.workspace = true
+exomonad-worktree.workspace = true
 # PRD 18 lane 1: the Subagent handler drives the coupled-spawn saga — the
 # saga and backend seam live THERE, not here.
-tidepool-agent.workspace = true
+exomonad-agent.workspace = true
 # Jev/System One handler: resolves TYPESAFE_API_KEY via the shared config/secrets
 # path resolver (see `tidepool-toolchain::paths::secrets_dir`).
 tidepool-toolchain.workspace = true

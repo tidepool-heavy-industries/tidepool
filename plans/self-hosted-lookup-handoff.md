@@ -5,7 +5,7 @@ with a structured `Lookup` effect and an editable, precompiled Haskell tool.
 The workspace template adds one Jev scoring batch over compiler-resolved
 references or failed-name alternatives, followed by at most four raw lookups.
 Namespace identity and compile-view fencing survive the whole operation.
-This checkout's active `.shoal` configuration is not part of the change.
+This checkout's active `.exomonad` configuration is not part of the change.
 
 ## Joined engine result
 
@@ -45,8 +45,8 @@ Passed checks on the delivered revision:
   production Haskell policy with a fake Lookup interpreter and deterministic
   selector, including bounded recovery, canonicalization, and failure preservation.
   This does not validate Jev transport.
-- The Shoal binary build, shipped template check, and `shoal new` followed by
-  `shoal check` in a fresh external repository (`/tmp/tidepool-lookup-smoke.AGmouI`).
+- The Exomonad binary build, shipped template check, and `exomonad new` followed by
+  `exomonad check` in a fresh external repository (`/tmp/tidepool-lookup-smoke.AGmouI`).
 - Registered embedded-artifact metadata, Rust formatting, and `git diff --check`.
 
 The template checks used `scripts/dev-shell.sh` with
@@ -54,5 +54,5 @@ The template checks used `scripts/dev-shell.sh` with
 checkout. No full verification battery was run during this worktree batch.
 
 Existing workspaces must adopt the template's lookup tool in their agent spec;
-see `docs/GETTING-STARTED.md`. The advertised argument shape is the `queries`
+see `exomonad/docs/getting-started.md`. The advertised argument shape is the `queries`
 object. Ordinary `Introspection.info` and `typeOf` remain raw.

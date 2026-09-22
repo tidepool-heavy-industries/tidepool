@@ -2,7 +2,7 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Tools for ordinary Haskell checks of resident recipes. Only @shoal check
+-- | Tools for ordinary Haskell checks of resident recipes. Only @exomonad check
 -- --recipes@ installs this effect; checked actors keep their normal capabilities.
 module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)

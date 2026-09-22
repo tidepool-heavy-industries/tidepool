@@ -59,7 +59,7 @@
 -- counts are checked when the request is built.
 --
 -- Actor code does not build a transport. 'ask', 'ask1' and 'askWith' speak to
--- the Shoal host's own @Jev@ effect, so a packet or a question is the only
+-- the Exomonad host's own @Jev@ effect, so a packet or a question is the only
 -- thing the model-visible surface ever passes. 'request' and 'decode' are the
 -- same operation split, for recording and replay.
 module Jev.Operators
@@ -84,7 +84,7 @@ module Jev.Operators
   , Settled (..), Doubt (..), Cause (..), Weighed
     -- * Uniform payloads: the continuation is the payload
   , Carries (mapCarried), Retarget, Uniform, uniform, mapUniform, withUniform, branches
-    -- * Asking the Shoal host
+    -- * Asking the Exomonad host
   , ask, ask1, askWith, jevLatest, answers, usage, Usage (..), resolvedModel, diagnostics
   , JevError (..), PrepError (..), DecodeError (..), Rejection (..), ValidationIssue (..)
     -- * Recording and replay: the same operation split
@@ -315,7 +315,7 @@ instance (Unique t, Schema Value (Packet t)) => ToJSON (Packet t Answers) where
 jevLatest :: Model
 jevLatest = Core.jevLatest
 
--- | The Shoal host's own Jev endpoint. Actor code never builds a transport:
+-- | The Exomonad host's own Jev endpoint. Actor code never builds a transport:
 -- the request crosses the @Jev@ effect as JSON text and comes back the same
 -- way, which is what @Jev.Host@ does at the boundary.
 hostSession :: Member Jev effs => Model -> Core.Session (Eff effs) Value

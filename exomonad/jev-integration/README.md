@@ -21,9 +21,9 @@ automatic matrix run or batching scheduler. One discovery probe names an
 undocumented, account-disabled `bounding_box` discriminator; it is retained as
 evidence but excluded from the current text/glue DSL scope.
 
-The 14 `shoal-*` probes exercise routing, attention, investigation expansion and
+The 14 `exomonad-*` probes exercise routing, attention, investigation expansion and
 folding, evidence selection, question relationships, repair routing, and experiment
-selection. See [expectations and live results](SHOAL-EXPERIMENTS.md).
+selection. See [expectations and live results](EXOMONAD-EXPERIMENTS.md).
 
 Five `world-*` probes explore structured agent graphs, contract-sensitive delegation,
 and joint versus per-piece evidence selection; see [results](WORLD-EXPERIMENTS.md).
@@ -40,7 +40,7 @@ overlapping judgments, and exact pointer traversal. The observed result is a
 sharp distinction between strong semantic width and unreliable deterministic
 depth; see [frontier experiments](FRONTIER-EXPERIMENTS.md).
 Use `--only <case-name-fragment>` for focused repetitions. Later experiments
-showed 640-question fan-out and a seven-answer Shoal microprogram succeeding in
+showed 640-question fan-out and a seven-answer Exomonad microprogram succeeding in
 one call, while also locating shared-state and duplicate-Choice-label limits.
 
 ## Live experiments
@@ -107,7 +107,7 @@ are git history, not a standing doc.
 ## Haskell feasibility sketches
 
 ```sh
-bash scripts/dev-shell.sh bash jev-integration/bridge/haskell/check.sh
+bash scripts/dev-shell.sh bash exomonad/jev-integration/haskell/check.sh
 ```
 
 This compiles and runs a small mode-interpreted record example and verifies four

@@ -1,6 +1,6 @@
 [package]
-name = "tidepool-model"
-description = "Provider-neutral model conversation types for Tidepool"
+name = "exomonad-model"
+description = "Provider-neutral model conversation types for Exomonad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -6,7 +6,7 @@ superseded design record; the current contract lives in
 `exomonad/actor/src/request.rs` and `exomonad/actor/CLAUDE.md`, and the
 current inventory is [implementation status](implementation.md). The older
 process-fork-shaped `forkActors` discussion is refined by
-[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold),
+[cache-preserving context unfold](../../exomonad/README.md#cache-preserving-context-unfold),
 which is canonical for interactive application forks, effect-list narrowing,
 and the model-facing unfold/fold surface.
 
@@ -209,7 +209,7 @@ product observed beside a typed response; and joins are explicit integration
 decisions. Live actor messages still carry richer values, definitions, and
 handles. Context-unfolded actors with managed checkouts, including inspection-
 only researchers, project one readable hierarchical path into their actor
-labels and `shoal/<path>` Git branches by default, while exact IDs remain
+labels and `exomonad/<path>` Git branches by default, while exact IDs remain
 authority keys. Actors deliberately launched without a worktree need not have
 a Git node.
 
@@ -225,7 +225,7 @@ candidate revision.
 The first self-hosting worker has one fresh managed worktree selected by its
 owner. The owner attaches a capability-specific launch recipe to the worker's
 definition. The resident start path carries the recipe without treating it as
-authority. After the exact child installs its policy, Shoal validates the
+authority. After the exact child installs its policy, Exomonad validates the
 recipe and creates an exact-incarnation binding before launching the external
 agent application. Child initialization therefore cannot use the recipe-bound
 resource; initialization that needs resource authority will require a future
@@ -282,7 +282,7 @@ workflow product and acceptance decision.
 
 The exact `ActorRef`, execution principal, and redeemed grants remain the
 authority. Project-specific JSON handles, retry keys, receipts, and
-acknowledgement policy may be built above that boundary, but Shoal does not
+acknowledgement policy may be built above that boundary, but Exomonad does not
 install them as a second generic actor API. V0 does not
 carry this state across `--recreate`.
 
@@ -310,7 +310,7 @@ spellings of an existing operation do not.
 
 The primary execution protocol is a persistent GHCi-style Haskell workbench,
 not a catalog of actor-control verbs. Codex invokes the actor-local custom tool
-`tidepool_actor.haskell`, carrying a raw GHCi-style script without JSON
+`exomonad_actor.haskell`, carrying a raw GHCi-style script without JSON
 argument ceremony. Colon-prefixed lines are reserved commands, other nonblank
 lines are Haskell input units, and `:{` / `:}` delimit one multiline GHC input
 unit. A fenced body uses ordinary Haskell: declaration groups are valid
@@ -447,7 +447,7 @@ to the domain protocol.
 
 Indexed GADT protocols remain the advanced surface for a stable service whose
 request vocabulary is worth declaring. They are not the default interaction
-shape for a long-lived Shoal collaborator. A model-facing caller often learns
+shape for a long-lived Exomonad collaborator. A model-facing caller often learns
 the next useful request only after integrating the previous result, and the
 same actor should accept successive requests with unrelated input and result
 types without replacing its identity, Haskell environment, or model context.
@@ -588,7 +588,7 @@ Lifecycle precedence is decided once by the host. If terminal settlement wins
 the race, later application exit is cleanup and cannot rewrite the actor's
 result. If unexpected application death wins while the actor is live, the
 exact child fails and normal subtree cleanup follows. Loss of the root
-application ends the Shoal run. A post-terminal failure to contain an orphaned
+application ends the Exomonad run. A post-terminal failure to contain an orphaned
 native process may still fail the run as a resource-containment invariant, but
 it cannot revise the already-published child exit.
 
@@ -602,7 +602,7 @@ Interactive application ownership precedes conversation binding. A fresh
 hosted Codex TUI creates its thread and immediately persists the empty rollout
 without a synthetic User submission or inference turn. Only after that
 durability barrier does Codex publish the v2 HTTP-over-UDS `/session` callback.
-Shoal registers the pane, durable inbox, host-tools listener, and cleanup
+Exomonad registers the pane, durable inbox, host-tools listener, and cleanup
 resources immediately and reports the application as awaiting binding; the
 callback records binding v4, whose subsequent read enables native lifecycle
 pushes. Binding discovery has no user-input deadline and remains subordinate
@@ -756,7 +756,7 @@ Starting a definition is not ambient inheritance.
 ### Fork
 
 For interactive agent applications, the canonical public contract is now
-[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold).
+[cache-preserving context unfold](../../exomonad/README.md#cache-preserving-context-unfold).
 It supersedes this section's public process-style continuation wrapper and its
 requirement to preserve the exact effect profile: the parent receives typed
 persistent handles, children begin new request activations, and each child's
@@ -914,7 +914,7 @@ stored JSON and external resources recoverable by their trusted interpreters.
 Live closures, parked continuations, Haskell bindings, and provider contexts do
 not survive. Restart tolerance is not required for the initial actor model.
 
-Shoal's V0 root-recreation contract, whether triggered in-process by abnormal
+Exomonad's V0 root-recreation contract, whether triggered in-process by abnormal
 root termination or explicitly by `--recreate`, is deliberately smaller
 still: it may resume the root Codex conversation, but creates a fresh root
 incarnation and does not restore worker records, actor references, bindings,
@@ -1033,7 +1033,7 @@ ultimate owner of every external resource.
     membership limits expressible operation classes; principals, grants, and
     opaque handles independently authorize resources.
 20. One worktree-backed worker has one owner-selected fresh worktree and one
-    principal-checked binding; Shoal never allocates a competing implicit tree.
+    principal-checked binding; Exomonad never allocates a competing implicit tree.
 21. A candidate receipt distinguishes model-authored claims from one coherent
     Rust-observed repository state and calls its commit `submittedHead`, not
     `finalHead`.

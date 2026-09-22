@@ -1,5 +1,5 @@
 //! Integration tests for the operator listen channel
-//! (`tidepool_harness::listen`) — pure Rust, no GHC, fast tier. Drives the
+//! (`exomonad_harness::listen`) — pure Rust, no GHC, fast tier. Drives the
 //! REAL `ListenServer` (real UDS socket, real background accept/drain
 //! tasks) against a hand-rolled acking client, mirroring how `tidepool
 //! listen` itself behaves.
@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tidepool_harness::listen::{Ack, Frame, ListenPaths, ListenServer};
+use exomonad_harness::listen::{Ack, Frame, ListenPaths, ListenServer};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -106,7 +106,7 @@ async fn cursor_advances_only_after_the_client_acks() {
     // must still be pinned at 0.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mid_cursor =
-        tidepool_harness::listen::FrameQueue::open(frames_path.clone(), cursor_path.clone())
+        exomonad_harness::listen::FrameQueue::open(frames_path.clone(), cursor_path.clone())
             .unwrap()
             .cursor()
             .unwrap();
@@ -125,7 +125,7 @@ async fn cursor_advances_only_after_the_client_acks() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let final_cursor = loop {
         let c =
-            tidepool_harness::listen::FrameQueue::open(frames_path.clone(), cursor_path.clone())
+            exomonad_harness::listen::FrameQueue::open(frames_path.clone(), cursor_path.clone())
                 .unwrap()
                 .cursor()
                 .unwrap();

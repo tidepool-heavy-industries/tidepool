@@ -30,7 +30,7 @@ and for independent parked continuations surviving sibling work.
 ## Running-session boundary
 
 Building a corrected binary does not update an already running host. The
-shoal-repl report records typed requests that remained pending after compilation
+exomonad-repl report records typed requests that remained pending after compilation
 failed; their recovery has not been established. Do not replay assignments or
 effects to manufacture settlement, or claim `:recovery` restored live values.
 Recovery must report which exact requests, bindings, and handles survive or are

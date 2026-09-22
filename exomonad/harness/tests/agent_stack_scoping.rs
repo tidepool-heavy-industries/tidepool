@@ -29,8 +29,8 @@
 
 use crate::support;
 
-use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
-use tidepool_harness::selfharness::typed_request_agent_decls;
+use exomonad_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
+use exomonad_harness::selfharness::typed_request_agent_decls;
 use tidepool_runtime::CompileError;
 
 /// `CompileError::Diagnostics`' own `Display` is only a count ("Haskell
@@ -61,7 +61,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 /// The self-iterating harness's OUTER decl list — mirrors the private
-/// `outer_decls` in `tidepool_harness::selfharness::driver` (kept private
+/// `outer_decls` in `exomonad_harness::selfharness::driver` (kept private
 /// there; duplicated here rather than made `pub` purely for test reach,
 /// since it's a one-line literal: `Eff '[RunLLMTurn]`, no base effects,
 /// 02-runtime.md LOCKED).
@@ -89,8 +89,8 @@ fn compile_against(
         &source,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
 }
 
@@ -121,8 +121,8 @@ fn compile_pinned(
         &source,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
 }
 
@@ -175,7 +175,7 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
 /// whether the eval code actually calls a `RunLLMTurn` verb (this one calls
 /// `askUserRaw`, an ordinary in-row verb).
 #[test]
-fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
+fn exomonad_harness_module_is_importable_in_the_answerer_stack() {
     support::require_extract();
 
     let result = compile_against(

@@ -4,23 +4,23 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
+use exomonad_worktree::create::{WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec};
+use exomonad_worktree::error::{
+    DirtySummary, GitFailureReceipt, WorktreeError as DomainWorktreeError,
+};
+use exomonad_worktree::git::GitCli;
+use exomonad_worktree::id::{BranchName, WorktreeId};
+use exomonad_worktree::merge::{try_merge, MergeOutcome};
+#[cfg(test)]
+use exomonad_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
+use exomonad_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
+use exomonad_worktree::{AgentRef as WorktreePrincipal, BindingTable};
+use exomonad_worktree::{HeadState, SubmissionObservation, WorkingState};
 use tidepool_bridge_effects::{
     WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtHeadState,
     WtMergeOutcome, WtMergeRequest, WtSubmissionObservation, WtWorkingState, WtWorktreeHandle,
     WtWorktreeId, WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec, WtWorktreeSummary,
 };
-use tidepool_worktree::create::{WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec};
-use tidepool_worktree::error::{
-    DirtySummary, GitFailureReceipt, WorktreeError as DomainWorktreeError,
-};
-use tidepool_worktree::git::GitCli;
-use tidepool_worktree::id::{BranchName, WorktreeId};
-use tidepool_worktree::merge::{try_merge, MergeOutcome};
-#[cfg(test)]
-use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
-use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
-use tidepool_worktree::{AgentRef as WorktreePrincipal, BindingTable};
-use tidepool_worktree::{HeadState, SubmissionObservation, WorkingState};
 
 // ============================================================================
 // Tag: Worktree (managed git worktrees, deliberately NOT in the
@@ -194,13 +194,13 @@ pub struct AuthorizedForkWorkspace {
 }
 
 impl AuthorizedForkWorkspace {
-    pub fn source(&self) -> &tidepool_worktree::WorktreeSource {
+    pub fn source(&self) -> &exomonad_worktree::WorktreeSource {
         &self.spec.source
     }
 
     pub fn prepare_source(
         &self,
-    ) -> Result<tidepool_worktree::PreparedSourceWorktree, WorktreeError> {
+    ) -> Result<exomonad_worktree::PreparedSourceWorktree, WorktreeError> {
         self.manager
             .prepare_inherited_source(&self.spec.source, &self.actor_path)
             .map_err(error_to_wire)
@@ -614,7 +614,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
 // Wire <-> domain conversions.
 //
 // `tidepool_bridge_effects::Wt*` are WIRE types, deliberately distinct from
-// `tidepool_worktree`'s domain types of the same shape (the wire side carries
+// `exomonad_worktree`'s domain types of the same shape (the wire side carries
 // `String` where the domain carries `PathBuf`/newtypes). Both the wire structs
 // and the Haskell decls they cross to are GENERATED from one ordered field list
 // in `tidepool-protocol`, so their field order cannot disagree — there is no
@@ -642,7 +642,7 @@ pub(crate) use crate::generated::worktree_adapters::{
 ///
 /// The MECHANICAL half is generated: `WtWorktreeId::new` is the schema's
 /// `Validation::Segment { max_len: 128, extra_allowed: "-_" }`, which is
-/// byte-for-byte `tidepool_worktree::WorktreeId::is_path_safe` expressed as
+/// byte-for-byte `exomonad_worktree::WorktreeId::is_path_safe` expressed as
 /// declared data (`worktree_wire_segment_policy_agrees_with_is_path_safe`
 /// pins that the two agree).
 ///
@@ -1060,7 +1060,7 @@ impl WorktreeHandler {
 
     /// The one narrow, deliberate workflow primitive (see
     /// `exomonad/worktree/src/merge.rs`): merge `branch` into the worktree
-    /// `target_worktree` names, through `tidepool_worktree::merge::try_merge`
+    /// `target_worktree` names, through `exomonad_worktree::merge::try_merge`
     /// — the same typed conflict-vs-failure classification and abort-before-
     /// return discipline every caller gets, instead of each authored harness
     /// re-deriving it over raw `Exec`.
@@ -1074,7 +1074,7 @@ impl WorktreeHandler {
             .lookup(&id)
             .map_err(error_to_wire)?
             .ok_or_else(|| never_registered(&request.target_worktree))?;
-        let source = tidepool_worktree::GitOid::from_raw(request.source_head.raw);
+        let source = exomonad_worktree::GitOid::from_raw(request.source_head.raw);
         let source_branch = request.source_branch.as_ref().map(branch_name_from_wire);
         let advance = request.merge_advance.as_ref().map(branch_name_from_wire);
         let outcome = try_merge(
@@ -1097,10 +1097,10 @@ mod tests {
     // no longer names them — its mechanical conversions are generated — but the
     // tables below still build wire values by hand, which is the point: they
     // assert against literals, not against the conversions under test.
+    use exomonad_worktree::create::DirtyPolicy;
+    use exomonad_worktree::error::InProgressKind;
+    use exomonad_worktree::id::{GitOid, GitRef};
     use tidepool_bridge_effects::{WtDirtyPolicy, WtGitRef, WtInProgressKind, WtWorktreeSource};
-    use tidepool_worktree::create::DirtyPolicy;
-    use tidepool_worktree::error::InProgressKind;
-    use tidepool_worktree::id::{GitOid, GitRef};
 
     #[test]
     fn actor_worktree_authority_is_exact_to_resource_and_incarnation() {
@@ -1135,7 +1135,7 @@ mod tests {
 
     #[test]
     fn fork_admission_allocates_one_exact_named_workspace_without_a_general_grant() {
-        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
             .commit_file("README.md", "seed\n", "seed")
@@ -1172,7 +1172,7 @@ mod tests {
 
         assert_eq!(
             admitted.handle_receipt.branch.raw,
-            "shoal/campaign/group/branches/leaf"
+            "exomonad/campaign/group/branches/leaf"
         );
 
         let worker = tidepool_repr::PrincipalId::new(2, 1);
@@ -1302,7 +1302,7 @@ mod tests {
 
     #[test]
     fn worktree_query_filters_in_the_registry_handler() {
-        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
             .commit_file("README.md", "seed\n", "seed")
@@ -1734,8 +1734,8 @@ mod tests {
     ///
     /// The path-safety policy is expressed TWICE: as schema data generated into
     /// `WtWorktreeId::new` (`Validation::Segment { max_len: 128, extra_allowed:
-    /// "-_" }`), and as `tidepool_worktree::WorktreeId::is_path_safe`. They
-    /// cannot be unified — `tidepool-worktree` is a DOMAIN crate and must not
+    /// "-_" }`), and as `exomonad_worktree::WorktreeId::is_path_safe`. They
+    /// cannot be unified — `exomonad-worktree` is a DOMAIN crate and must not
     /// depend on the bridge layer, and the bridge layer is lower than the
     /// domain — so the crate direction forces the copy and this test is the
     /// mitigation.

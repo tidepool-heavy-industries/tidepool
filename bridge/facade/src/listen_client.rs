@@ -1,5 +1,5 @@
 //! `tidepool listen` — the long-lived client for a resident harness's
-//! listen channel ([`tidepool_harness::listen`]). Its stdout IS the
+//! listen channel ([`exomonad_harness::listen`]). Its stdout IS the
 //! notification surface an operator's terminal/tool watches: each frame it
 //! prints becomes visible the moment it's flushed.
 //!
@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use tidepool_harness::listen::{Ack, Frame, ListenPaths};
+use exomonad_harness::listen::{Ack, Frame, ListenPaths};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 

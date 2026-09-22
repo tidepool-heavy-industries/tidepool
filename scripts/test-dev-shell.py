@@ -37,13 +37,13 @@ class DevShellTests(unittest.TestCase):
         return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.repo, env=self.env, text=True, capture_output=True)
 
     def test_pins_git_and_preserves_cwd_despite_false_shell_marker(self):
-        artifacts = self.repo / ".shoal/build/cargo"
+        artifacts = self.repo / ".exomonad/build/cargo"
         artifacts.mkdir(parents=True)
         (artifacts / "untracked").write_bytes(b"artifact")
-        result = self.run_shell("--shoal", "ghc", "--version")
+        result = self.run_shell("--exomonad", "ghc", "--version")
         self.assertEqual(result.returncode, 0, result.stderr)
         selection = json.loads(result.stdout)
-        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}/.git?rev={self.git('rev-parse', 'HEAD')}#shoal"])
+        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}/.git?rev={self.git('rev-parse', 'HEAD')}#exomonad"])
         self.assertEqual(selection["cwd"], str(self.repo))
 
     def test_dirty_toolchain_requires_explicit_selection(self):

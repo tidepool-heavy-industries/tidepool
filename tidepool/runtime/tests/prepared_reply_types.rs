@@ -1,5 +1,5 @@
 //! Reply-type constructibility audit for the prepared-STG host answer
-//! builder, ahead of Shoal dogfooding the prepared engine (now the default).
+//! builder, ahead of Exomonad dogfooding the prepared engine (now the default).
 //!
 //! `PreparedEngine::lower_answer` (`tidepool/runtime/src/session/prepared.rs`)
 //! refuses `TypeNode::Unconstructible` anywhere in a suspended effect's answer
@@ -16,7 +16,7 @@
 //! - `tidepool_mcp::standard_decls()` -- the ordinary MCP eval/session
 //!   surface (`ResidentSession`'s own Notebook-shaped tests build their
 //!   preamble/effect-stack from this).
-//! - `tidepool_mcp::all_decls()` -- the WIDER surface Shoal's actor host
+//! - `tidepool_mcp::all_decls()` -- the WIDER surface Exomonad's actor host
 //!   actually compiles against (`exomonad/harness/src/engine.rs`'s
 //!   `agent_decls()` is `standard_decls()` plus `Fork`/`Finalize`; `all_decls`
 //!   is that plus every other schema-owned effect --
@@ -535,12 +535,12 @@ fn prepared_reply_types_are_constructible() {
     assert_eq!(
         unconstructible, expected,
         "[standard_decls] the set of unconstructible verbs changed -- update \
-         EXPECTED_UNCONSTRUCTIBLE (and tell Shoal) if this is an intended surface/policy \
+         EXPECTED_UNCONSTRUCTIBLE (and tell Exomonad) if this is an intended surface/policy \
          change; found: {unconstructible:#?}"
     );
 }
 
-/// Same allow-list, on `all_decls()` -- the wider surface Shoal's actor host
+/// Same allow-list, on `all_decls()` -- the wider surface Exomonad's actor host
 /// actually compiles against (see the module doc).
 const EXPECTED_UNCONSTRUCTIBLE_ALL: &[&str] = &[];
 
@@ -554,7 +554,7 @@ fn prepared_reply_types_are_constructible_on_all_decls() {
     assert_eq!(
         unconstructible, expected,
         "[all_decls] the set of unconstructible verbs changed -- update \
-         EXPECTED_UNCONSTRUCTIBLE_ALL (and tell Shoal) if this is an intended surface/policy \
+         EXPECTED_UNCONSTRUCTIBLE_ALL (and tell Exomonad) if this is an intended surface/policy \
          change; found: {unconstructible:#?}"
     );
 }

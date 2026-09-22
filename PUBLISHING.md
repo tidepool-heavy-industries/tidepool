@@ -8,8 +8,8 @@ after adding a crate or changing inter-crate dependencies.
 Crates must be published in dependency order. Wait for each crate to appear on crates.io before publishing the next.
 
 ```
- 1.  tidepool-model-output
- 2.  tidepool-model
+ 1.  exomonad-model-output
+ 2.  exomonad-model
  3.  tidepool-atomic-write
  4.  tidepool-repr
  5.  tidepool-heap
@@ -18,20 +18,20 @@ Crates must be published in dependency order. Wait for each crate to appear on c
  8.  tidepool-bridge-derive
  9.  tidepool-bridge-effects
 10.  tidepool-extract-cmd
-11.  tidepool-tool
-12.  tidepool-node
-13.  tidepool-worktree
-14.  tidepool-agent
+11.  exomonad-tool
+12.  exomonad-node
+13.  exomonad-worktree
+14.  exomonad-agent
 15.  tidepool-effect
 16.  tidepool-codegen
 17.  tidepool-extract-report
 18.  tidepool-toolchain
 19.  tidepool-runtime
-21.  tidepool-actor
+21.  exomonad-actor
 22.  tidepool-mcp
 23.  tidepool-handlers
-24.  tidepool-harness
-25.  tidepool-web (binary)
+24.  exomonad-harness
+25.  exomonad-web (binary)
 26.  tidepool (binary)
 27.  tidepool-protocol
 ```
@@ -56,14 +56,14 @@ above (each depends on library crates that publish earlier).
 
 ## Known blocker: two publishable crates are path-only
 
-`tidepool-atomic-write` and `tidepool-worktree` are declared in
+`tidepool-atomic-write` and `exomonad-worktree` are declared in
 `[workspace.dependencies]` (root `Cargo.toml`) with a `path` but **no
 `version`**, unlike every other workspace-dependency entry (which carry
 `version = "0.1.0"` alongside their `path`). `cargo publish` requires every
 dependency — including path dependencies — to carry a version requirement;
-as declared today, publishing `tidepool-worktree` (depends on
-`tidepool-atomic-write`), `tidepool-agent` (depends on `tidepool-worktree`),
-`tidepool-runtime`/`tidepool-harness`/`tidepool-web` (transitively depend on
+as declared today, publishing `exomonad-worktree` (depends on
+`tidepool-atomic-write`), `exomonad-agent` (depends on `exomonad-worktree`),
+`tidepool-runtime`/`exomonad-harness`/`exomonad-web` (transitively depend on
 both), or `tidepool-handlers`/`tidepool-repl`/`tidepool` will fail until a
 `version = "0.1.0"` is added to both entries in `[workspace.dependencies]`.
 This is a Cargo.toml change, out of scope for a docs-only pass — fix it
@@ -122,17 +122,17 @@ grep -E '^tidepool-[a-z-]+ = \{ path = ' Cargo.toml
 ## Dry Run
 
 ```bash
-cargo publish --dry-run -p tidepool-model-output
-cargo publish --dry-run -p tidepool-model
+cargo publish --dry-run -p exomonad-model-output
+cargo publish --dry-run -p exomonad-model
 # ... etc
 ```
 
 ## Publish
 
 ```bash
-cargo publish -p tidepool-model-output
+cargo publish -p exomonad-model-output
 # wait for it to appear on crates.io
-cargo publish -p tidepool-model
+cargo publish -p exomonad-model
 # ... continue in order
 ```
 

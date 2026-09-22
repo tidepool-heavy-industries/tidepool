@@ -12,7 +12,9 @@ impl PromptId {
             Self::MemoryCurator => PromptArtifact {
                 id: self,
                 role: PromptRole::RepositoryDeveloperPolicy,
-                body: include_str!("../../../../../prompts/selfharness/memory-curator.md"),
+                body: include_str!(
+                    "../../../../../exomonad/prompts/selfharness/memory-curator.md"
+                ),
             },
         }
     }

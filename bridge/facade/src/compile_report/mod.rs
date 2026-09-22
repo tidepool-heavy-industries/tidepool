@@ -33,12 +33,12 @@
 //! actually failing.
 //!
 //! **Placement note** (flagged per this feature's spec): this logic lives in
-//! the facade crate rather than `tidepool-harness` (whose `transcript.jsonl`
+//! the facade crate rather than `exomonad-harness` (whose `transcript.jsonl`
 //! schema is the primary evidence source) because the harness crate was
 //! off-limits to modify for this change (a concurrent fork lane), and rather
 //! than `tidepool-repr` (the crate that owns the durable-JSONL primitive this
 //! reads through) because that crate's charter is IR/wire-format only, not
-//! compile-diagnostics domain. If `tidepool-harness`'s `observer::Event` ever
+//! compile-diagnostics domain. If `exomonad-harness`'s `observer::Event` ever
 //! grows a `Deserialize` impl, `read.rs`'s hand-decoded `serde_json::Value`
 //! parsing should be replaced with that real type directly.
 pub mod classify;

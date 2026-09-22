@@ -1,4 +1,4 @@
-use tidepool_model::Role;
+use exomonad_model::Role;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptId {
@@ -25,7 +25,7 @@ impl PromptId {
 }
 
 pub(crate) const SYSTEM_FRAMING_ASSET: &str =
-    include_str!("../../../prompts/harness/system-framing.md");
+    include_str!("../../prompts/harness/system-framing.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PromptArtifact {

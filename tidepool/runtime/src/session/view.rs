@@ -494,15 +494,15 @@ mod tests {
 
     #[test]
     fn source_imports_extract_and_render_deterministically() {
-        let mut imports = SourceImports::from_specs(["Tidepool.Actors.Shoal"]);
+        let mut imports = SourceImports::from_specs(["Tidepool.Actors.Exomonad"]);
         imports.extend_generated_imports(
-            "import qualified Data.Set as Set\nimport Tidepool.Actors.Shoal\nvalue = Set.empty",
+            "import qualified Data.Set as Set\nimport Tidepool.Actors.Exomonad\nvalue = Set.empty",
         );
 
         assert_eq!(
             imports.source_lines(),
             [
-                "import Tidepool.Actors.Shoal",
+                "import Tidepool.Actors.Exomonad",
                 "import qualified Data.Set as Set"
             ]
         );

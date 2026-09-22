@@ -24,8 +24,8 @@
     codex.url = "./vendor/codex";
     # Haskell this workspace compiles but does not carry: jev-dsl, pinned to
     # the same revision `exomonad/examples/workspace/flake.nix` pins. Nothing is
-    # built from it here; `[haskell.flake_sources]` in `.shoal/config.toml`
-    # names the directory inside it that holds modules, and Shoal captures
+    # built from it here; `[haskell.flake_sources]` in `.exomonad/config.toml`
+    # names the directory inside it that holds modules, and Exomonad captures
     # them into a run as ordinary source roots.
     jev-dsl = {
       url = "github:inanna-malick/jev-dsl/f16f1363b4d389d6e34f9d695fbd254ca0735f2e";
@@ -170,8 +170,8 @@
         # Tidepool consumes only the standalone private wire crate from the
         # matched Codex checkout. Keep the rest of Codex in its independent
         # flake/toolchain graph so implementation-only client edits do not
-        # invalidate the Shoal host derivation.
-        shoalSource = pkgs.lib.cleanSourceWith {
+        # invalidate the Exomonad host derivation.
+        exomonadSource = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
             let
@@ -223,22 +223,22 @@
 
         # The private Codex is selected by absolute path, not added to PATH.
         # Ordinary shells and the operator's CODEX_HOME remain untouched.
-        devShells.shoal = pkgs.mkShell {
+        devShells.exomonad = pkgs.mkShell {
           inputsFrom = [ self.devShells.${system}.default ];
           packages = [
             pkgs.git
             pkgs.tmux
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
-          TIDEPOOL_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
-          TIDEPOOL_SHOAL_CODEX_CLOSURE = "${interactiveCodex}";
-          TIDEPOOL_SHOAL_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
+          EXOMONAD_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
+          EXOMONAD_CODEX_CLOSURE = "${interactiveCodex}";
+          EXOMONAD_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
           # Fetches the project's flake inputs when `[haskell.flake_sources]`
           # pins Haskell source outside the workspace.
-          TIDEPOOL_SHOAL_NIX_BIN = "${pkgs.nix}/bin/nix";
+          EXOMONAD_NIX_BIN = "${pkgs.nix}/bin/nix";
           shellHook = ''
             export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
-            echo "shoal dev shell"
-            echo "  interactive agent: $TIDEPOOL_INTERACTIVE_CODEX_BIN"
+            echo "exomonad dev shell"
+            echo "  interactive agent: $EXOMONAD_INTERACTIVE_CODEX_BIN"
           '';
         };
 
@@ -256,7 +256,7 @@
             # sandbox has no cabal, so point their worker override at the
             # executable this same derivation just produced.
             harness =
-              pkgs.haskell.lib.overrideCabal (hsPkgs.callCabal2nix "tidepool-extract" ./haskell { })
+              pkgs.haskell.lib.overrideCabal (hsPkgs.callCabal2nix "tidepool-extract" ./bridge/haskell { })
                 (old: {
                   preCheck = (old.preCheck or "") + ''
                     export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
@@ -278,7 +278,7 @@
             frontend = pkgs.rustPlatform.buildRustPackage {
               pname = "tidepool-extract-frontend";
               version = "0.1.0";
-              src = ./tidepool-extract-cmd;
+              src = ./tidepool/extract-cmd;
               cargoLock.lockFile = ./tidepool/extract-cmd/Cargo.lock;
               # The daemon integration test needs the separately packaged GHC
               # worker; the final wrapper is exercised by the repository battery.
@@ -290,38 +290,38 @@
             makeWrapper ${frontend}/bin/tidepool-extract "$out/bin/tidepool-extract" \
               --prefix PATH : ${ghcEnv}/bin \
               --set TIDEPOOL_EXTRACT_WORKER ${harness}/bin/tidepool-extract-bin
-            # Shoal locates the pair before retaining the frontend for a run.
+            # Exomonad locates the pair before retaining the frontend for a run.
             ln -s ${harness}/bin/tidepool-extract-bin "$out/bin/tidepool-extract-bin"
           '';
 
-        packages.shoal-unwrapped = tidepoolRustPlatform.buildRustPackage {
-          pname = "shoal-unwrapped";
+        packages.exomonad-unwrapped = tidepoolRustPlatform.buildRustPackage {
+          pname = "exomonad-unwrapped";
           version = "0.1.0";
-          src = shoalSource;
+          src = exomonadSource;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [
             "-p"
             "tidepool"
             "--bin"
-            "shoal"
+            "exomonad"
           ];
           cargoInstallFlags = [
             "-p"
             "tidepool"
             "--bin"
-            "shoal"
+            "exomonad"
           ];
           doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.openssl ];
         };
 
-        packages.shoal = pkgs.symlinkJoin {
-          name = "shoal";
-          paths = [ self.packages.${system}.shoal-unwrapped ];
+        packages.exomonad = pkgs.symlinkJoin {
+          name = "exomonad";
+          paths = [ self.packages.${system}.exomonad-unwrapped ];
           nativeBuildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
-            wrapProgram "$out/bin/shoal" \
+            wrapProgram "$out/bin/exomonad" \
               --prefix PATH : ${
                 pkgs.lib.makeBinPath ([
                   self.packages.${system}.tidepool-extract
@@ -332,15 +332,15 @@
                 ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ])
               } \
               --set TIDEPOOL_EXTRACT "${self.packages.${system}.tidepool-extract}/bin/tidepool-extract" \
-              --set TIDEPOOL_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
-              --set TIDEPOOL_SHOAL_CODEX_CLOSURE "${interactiveCodex}" \
-              --set TIDEPOOL_SHOAL_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
-              --set TIDEPOOL_SHOAL_NIX_BIN "${pkgs.nix}/bin/nix"
+              --set EXOMONAD_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
+              --set EXOMONAD_CODEX_CLOSURE "${interactiveCodex}" \
+              --set EXOMONAD_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
+              --set EXOMONAD_NIX_BIN "${pkgs.nix}/bin/nix"
           '';
         };
 
-        apps.shoal = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.shoal;
+        apps.exomonad = flake-utils.lib.mkApp {
+          drv = self.packages.${system}.exomonad;
         };
 
         packages.default = self.packages.${system}.tidepool-extract;
@@ -443,7 +443,7 @@
             touch "$out"
           '';
 
-          shoal = self.packages.${system}.shoal;
+          exomonad = self.packages.${system}.exomonad;
         };
       }
     );

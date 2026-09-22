@@ -1,7 +1,7 @@
 {
   "worktree_id": "wt-finalized-0003",
-  "cwd": "/var/tidepool/worktrees/wt-finalized-0003",
-  "branch": "tidepool/worktree/sample-wt-finalized-0003",
+  "cwd": "/var/exomonad/worktrees/wt-finalized-0003",
+  "branch": "exomonad/worktree/sample-wt-finalized-0003",
   "source_head": "cccccccccccccccccccccccccccccccccccccccc",
   "snapshot_ref": null,
   "origin": {

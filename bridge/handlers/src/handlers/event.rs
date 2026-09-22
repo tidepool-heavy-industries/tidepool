@@ -26,7 +26,7 @@
 //!
 //! ## No replay — a rule about JOURNAL ROWS, not about repository movement
 //!
-//! [`EventJournal`](tidepool_worktree::EventJournal)'s module docs state the
+//! [`EventJournal`](exomonad_worktree::EventJournal)'s module docs state the
 //! rule this registry exists to keep: a subscription registered now begins at
 //! the journal's current end and never sees a row written before it. A
 //! replaying handler would, in the dev-tree dogfood, poke every child to rebase
@@ -109,17 +109,17 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use exomonad_worktree::storage::now_ms;
 use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
     EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
 };
 use tidepool_repr::MonotonicIdIssuer;
-use tidepool_worktree::storage::now_ms;
 
 // Wall-clock epoch milliseconds for `Tick`'s `firedAtMs` — an observability
 // stamp only; internal deadline SCHEDULING uses the monotonic `Instant` clock
 // instead, immune to a system-clock jump. `now_ms` now PANICS on a pre-epoch
-// clock (`tidepool_worktree::storage::now_ms`'s documented behavior), unlike
+// clock (`exomonad_worktree::storage::now_ms`'s documented behavior), unlike
 // this call site's prior local copy, which silently stamped `0` — see that
 // module's docs for why the panic won.
 
@@ -162,7 +162,7 @@ impl Default for EventConfig {
             // cost + latency budget on that constant's doc), not restated: a
             // second hand-written figure here once disagreed with it by 20x
             // and silently multiplied the git traffic the reasoning budgeted.
-            poll_interval: Duration::from_millis(tidepool_worktree::DEFAULT_POLL_INTERVAL_MS),
+            poll_interval: Duration::from_millis(exomonad_worktree::DEFAULT_POLL_INTERVAL_MS),
         }
     }
 }
@@ -583,7 +583,7 @@ impl SubscriptionRegistry {
 /// Registration and reconciliation for one named worktree source.
 ///
 /// Injectable because the git reasoning belongs to
-/// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor), not here:
+/// [`WorktreeMonitor`](exomonad_worktree::WorktreeMonitor), not here:
 /// this crate must not grow a second, drifting notion of what "HEAD moved"
 /// means. [`MonitorObservations`] is the production implementation and is
 /// deliberately thin.
@@ -615,7 +615,7 @@ pub trait ObservationSource: Send {
     fn observe(&mut self, worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError>;
 }
 
-/// The production source: [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor)
+/// The production source: [`WorktreeMonitor`](exomonad_worktree::WorktreeMonitor)
 /// does the git reading and the honest classification; this adapter only maps
 /// its domain types onto the wire types and mints the per-pass event id.
 ///
@@ -625,7 +625,7 @@ pub trait ObservationSource: Send {
 ///
 /// **This adapter holds NO baseline of its own.** It keeps no last-observed
 /// head, no cursor, and no seen-set: every comparison is
-/// [`WorktreeMonitor::reconcile`](tidepool_worktree::WorktreeMonitor::reconcile)'s,
+/// [`WorktreeMonitor::reconcile`](exomonad_worktree::WorktreeMonitor::reconcile)'s,
 /// and that monitor's own contract is that its restart baseline is its last
 /// JOURNALLED observation rather than an in-memory one. Keeping a second
 /// baseline here would silently override the durable one and lose exactly the
@@ -637,15 +637,15 @@ pub trait ObservationSource: Send {
 /// the one the monitor minted and journalled under, so `Observed.eventId`
 /// correlates with its journal row.
 pub struct MonitorObservations {
-    monitor: tidepool_worktree::WorktreeMonitor,
+    monitor: exomonad_worktree::WorktreeMonitor,
     /// The durable id→path authority a runtime-created worktree was recorded
     /// in. `None` for callers (tests, the acceptance harness) that only ever
     /// watch worktrees they registered by hand.
-    registry: Option<tidepool_worktree::WorktreeRegistry>,
+    registry: Option<exomonad_worktree::WorktreeRegistry>,
 }
 
 impl MonitorObservations {
-    pub fn new(monitor: tidepool_worktree::WorktreeMonitor) -> Self {
+    pub fn new(monitor: exomonad_worktree::WorktreeMonitor) -> Self {
         Self {
             monitor,
             registry: None,
@@ -656,8 +656,8 @@ impl MonitorObservations {
     /// resolve an id's path through the durable `registry` before fixing its
     /// cutoff.
     pub fn with_registry(
-        monitor: tidepool_worktree::WorktreeMonitor,
-        registry: tidepool_worktree::WorktreeRegistry,
+        monitor: exomonad_worktree::WorktreeMonitor,
+        registry: exomonad_worktree::WorktreeRegistry,
     ) -> Self {
         Self {
             monitor,
@@ -667,7 +667,7 @@ impl MonitorObservations {
 
     /// Start watching `worktree` at `path`, and record that `observe` may
     /// reconcile it. Forwards to
-    /// [`WorktreeMonitor::register`](tidepool_worktree::WorktreeMonitor::register),
+    /// [`WorktreeMonitor::register`](exomonad_worktree::WorktreeMonitor::register),
     /// which establishes the starting baseline from the journal when it has one
     /// (so movement during a process gap is still reported) and from a fresh
     /// git read otherwise.
@@ -676,7 +676,7 @@ impl MonitorObservations {
         worktree: WtWorktreeId,
         path: std::path::PathBuf,
     ) -> Result<(), EventError> {
-        let domain_id = tidepool_worktree::WorktreeId::from_raw(worktree.raw.clone());
+        let domain_id = exomonad_worktree::WorktreeId::from_raw(worktree.raw.clone());
         self.monitor
             .register(domain_id, path)
             .map_err(worktree_error_to_event_error)
@@ -685,7 +685,7 @@ impl MonitorObservations {
 
 impl ObservationSource for MonitorObservations {
     fn register(&mut self, wire_id: &WtWorktreeId) -> Result<(), EventError> {
-        let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
+        let domain_id = exomonad_worktree::WorktreeId::from_raw(wire_id.raw.clone());
         if self.monitor.is_registered(&domain_id) {
             return Ok(());
         }
@@ -701,13 +701,13 @@ impl ObservationSource for MonitorObservations {
             }
         }
         Err(worktree_error_to_event_error(
-            tidepool_worktree::WorktreeError::WorktreeNotRegistered(domain_id),
+            exomonad_worktree::WorktreeError::WorktreeNotRegistered(domain_id),
         ))
     }
 
     fn observe(&mut self, wire_id: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let mut out = Vec::new();
-        let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
+        let domain_id = exomonad_worktree::WorktreeId::from_raw(wire_id.raw.clone());
         let facts = self
             .monitor
             .reconcile(&domain_id)
@@ -729,24 +729,24 @@ impl ObservationSource for MonitorObservations {
 
 /// A watched worktree that is gone is a DIFFERENT failure from git misbehaving,
 /// and the authored surface distinguishes them, so the mapping does too.
-fn worktree_error_to_event_error(e: tidepool_worktree::WorktreeError) -> EventError {
+fn worktree_error_to_event_error(e: exomonad_worktree::WorktreeError) -> EventError {
     match e {
-        tidepool_worktree::WorktreeError::WorktreeLost(id) => {
+        exomonad_worktree::WorktreeError::WorktreeLost(id) => {
             EventError::EventSourceLost(id.to_string())
         }
         other => EventError::EventSourceFailed(format!("{other}")),
     }
 }
 
-/// Domain (`tidepool-worktree`) → wire (`tidepool-bridge-effects`). The two are
+/// Domain (`exomonad-worktree`) → wire (`tidepool-bridge-effects`). The two are
 /// deliberately separate types; this is the one explicit conversion between
 /// them, so a change on either side surfaces here rather than silently.
 fn domain_event_to_wire(
     event_id: EvEventId,
-    ev: &tidepool_worktree::RepositoryEvent,
+    ev: &exomonad_worktree::RepositoryEvent,
 ) -> EvRepositoryEvent {
     match ev {
-        tidepool_worktree::RepositoryEvent::Commit(r) => EvRepositoryEvent::ObservedCommit(
+        exomonad_worktree::RepositoryEvent::Commit(r) => EvRepositoryEvent::ObservedCommit(
             event_id,
             EvCommitReceipt {
                 commit_worktree: WtWorktreeId {
@@ -768,7 +768,7 @@ fn domain_event_to_wire(
                 files: r.files.clone(),
             },
         ),
-        tidepool_worktree::RepositoryEvent::HeadChanged(r) => {
+        exomonad_worktree::RepositoryEvent::HeadChanged(r) => {
             EvRepositoryEvent::ObservedHeadChange(
                 event_id,
                 EvHeadChangeReceipt {
@@ -792,23 +792,23 @@ fn domain_event_to_wire(
     }
 }
 
-fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKind {
-    let oid = |o: &tidepool_worktree::GitOid| WtGitOid {
+fn domain_kind_to_wire(k: &exomonad_worktree::HeadChangeKind) -> EvHeadChangeKind {
+    let oid = |o: &exomonad_worktree::GitOid| WtGitOid {
         raw: o.as_str().to_string(),
     };
     match k {
-        tidepool_worktree::HeadChangeKind::Advanced(os) => {
+        exomonad_worktree::HeadChangeKind::Advanced(os) => {
             EvHeadChangeKind::Advanced(os.iter().map(oid).collect())
         }
-        tidepool_worktree::HeadChangeKind::Amended(a, b) => {
+        exomonad_worktree::HeadChangeKind::Amended(a, b) => {
             EvHeadChangeKind::Amended(oid(a), oid(b))
         }
-        tidepool_worktree::HeadChangeKind::Rewritten(ps) => {
+        exomonad_worktree::HeadChangeKind::Rewritten(ps) => {
             EvHeadChangeKind::Rewritten(ps.iter().map(|(a, b)| (oid(a), oid(b))).collect())
         }
-        tidepool_worktree::HeadChangeKind::Rewound => EvHeadChangeKind::Rewound,
-        tidepool_worktree::HeadChangeKind::Switched => EvHeadChangeKind::Switched,
-        tidepool_worktree::HeadChangeKind::UnknownChange => EvHeadChangeKind::UnknownChange,
+        exomonad_worktree::HeadChangeKind::Rewound => EvHeadChangeKind::Rewound,
+        exomonad_worktree::HeadChangeKind::Switched => EvHeadChangeKind::Switched,
+        exomonad_worktree::HeadChangeKind::UnknownChange => EvHeadChangeKind::UnknownChange,
     }
 }
 
@@ -1003,8 +1003,8 @@ struct SourceState {
 
 impl RepoEventHandler {
     /// The production wiring: reconcile through a real
-    /// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor).
-    pub fn new(monitor: tidepool_worktree::WorktreeMonitor, config: EventConfig) -> Self {
+    /// [`WorktreeMonitor`](exomonad_worktree::WorktreeMonitor).
+    pub fn new(monitor: exomonad_worktree::WorktreeMonitor, config: EventConfig) -> Self {
         Self::with_source(Box::new(MonitorObservations::new(monitor)), config)
     }
 
@@ -1012,8 +1012,8 @@ impl RepoEventHandler {
     /// registry a runtime-created worktree was recorded in — see
     /// [`MonitorObservations::with_registry`].
     pub fn with_registry(
-        monitor: tidepool_worktree::WorktreeMonitor,
-        registry: tidepool_worktree::WorktreeRegistry,
+        monitor: exomonad_worktree::WorktreeMonitor,
+        registry: exomonad_worktree::WorktreeRegistry,
         config: EventConfig,
     ) -> Self {
         Self::with_source(
@@ -1231,7 +1231,7 @@ impl RepoEventHandler {
 
     // `pub` (not `fn`, unlike this module's other tagged-verb methods):
     // the driver-side non-blocking parked-await servicing
-    // calls this DIRECTLY, from `tidepool-harness`, as its own poll step —
+    // calls this DIRECTLY, from `exomonad-harness`, as its own poll step —
     // never `repo_event_await`, whose internal sleep loop would stall the
     // whole green-thread scheduler. Identical to the `RepoEventDrain` verb
     // dispatch (same reconcile-then-drain, same bound/poison rule); this is
@@ -2300,18 +2300,18 @@ mod tests {
     // ── lazy registration from the durable worktree registry ──
 
     fn registry_and_monitor_over_temp_dirs() -> (
-        tidepool_worktree::WorktreeRegistry,
-        tidepool_worktree::WorktreeMonitor,
+        exomonad_worktree::WorktreeRegistry,
+        exomonad_worktree::WorktreeMonitor,
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
         let registry_dir = tempfile::tempdir().unwrap();
-        let registry = tidepool_worktree::WorktreeRegistry::open(registry_dir.path()).unwrap();
+        let registry = exomonad_worktree::WorktreeRegistry::open(registry_dir.path()).unwrap();
         let journal_dir = tempfile::tempdir().unwrap();
         let journal =
-            tidepool_worktree::EventJournal::open(journal_dir.path().join("events.jsonl")).unwrap();
+            exomonad_worktree::EventJournal::open(journal_dir.path().join("events.jsonl")).unwrap();
         let monitor =
-            tidepool_worktree::WorktreeMonitor::new(tidepool_worktree::GitCli::new(), journal);
+            exomonad_worktree::WorktreeMonitor::new(exomonad_worktree::GitCli::new(), journal);
         (registry, monitor, registry_dir, journal_dir)
     }
 
@@ -2322,24 +2322,24 @@ mod tests {
         // `MonitorObservations::register` call anywhere in this test — the
         // monitor must resolve the baseline lazily from the registry instead
         // of failing the whole turn with `WorktreeNotRegistered`.
-        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
         repo.writer().commit_file("a.txt", "hello", "init").unwrap();
         let cwd = repo.path().to_path_buf();
 
         let (registry, monitor, _registry_dir, _journal_dir) =
             registry_and_monitor_over_temp_dirs();
-        let worktree_id = tidepool_worktree::WorktreeId::from_raw("wt-lazy");
+        let worktree_id = exomonad_worktree::WorktreeId::from_raw("wt-lazy");
         registry
-            .put(&tidepool_worktree::WorktreeReceipt {
+            .put(&exomonad_worktree::WorktreeReceipt {
                 worktree_id: worktree_id.clone(),
                 cwd: cwd.clone(),
-                branch: tidepool_worktree::BranchName::from_raw("main"),
-                source_head: tidepool_worktree::GitOid::from_raw("deadbeef"),
+                branch: exomonad_worktree::BranchName::from_raw("main"),
+                source_head: exomonad_worktree::GitOid::from_raw("deadbeef"),
                 snapshot_ref: None,
-                origin: tidepool_worktree::WorktreeOrigin::CurrentRepository,
+                origin: exomonad_worktree::WorktreeOrigin::CurrentRepository,
                 source_repository: cwd,
                 created_at_ms: 0,
-                status: tidepool_worktree::WorktreeRecordStatus::Finalized,
+                status: exomonad_worktree::WorktreeRecordStatus::Finalized,
             })
             .unwrap();
 

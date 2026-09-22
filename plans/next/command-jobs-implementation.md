@@ -22,7 +22,7 @@ their existing runtime. This file tracks implementation, not shipped guidance.
   retained job. Grants remain held until all descendants are gone.
 - Cap the existing Nix daemon at 8 GiB memory / 1 GiB swap, one build / one core.
   This contains daemon work in aggregate; it does not attribute it to clients.
-- Remove the JavaScript tool wrapper for Shoal, retain direct tools and
+- Remove the JavaScript tool wrapper for Exomonad, retain direct tools and
   apply_patch. Rewrite prompting/examples and add a focused command skill.
 - No engine refactor, transactional editing, output-stream subscription API,
   or automatic broad dogfood launch is included.
@@ -46,7 +46,7 @@ hosts, argument fidelity and output bounds. No paid inference or full suites.
 
 Initial main: `badb46615322b5f097eee342c4c5b5e88aecd407` in
 `/tmp/tidepool-rsi-main-20260908`. Native continuation:
-`/tmp/codex-command-jobs-20260910`, branch `shoal-command-jobs-20260910`, starting
+`/tmp/codex-command-jobs-20260910`, branch `exomonad-command-jobs-20260910`, starting
 from pinned `fe15831c8a22c0d1b8d78d5ce55b7aa5fc3fa666`.
 Matched native continuation is committed and pushed at
 `7259e93777a0c3a323ce8ad6911b836eb1b73d37`; main's flake pins that revision.
@@ -81,7 +81,7 @@ Matched native continuation is committed and pushed at
   `6e533fb44aafff3f94bbd51cb12c7dec46abbd31c3517e65028c11c5441db052`.
   Selection and file hashes are retained at
   `target/command-release-20260910/selection.json`; launch is explicitly held.
-- Actual `shoal command-resources` under a delegated systemd service passed policy,
+- Actual `exomonad command-resources` under a delegated systemd service passed policy,
   two-host weighted queue, protected native admission, exact memory limits and
   cancelled grant cleanup. Evidence is in
   `target/command-release-20260910/service-check/evidence.json`; the test service

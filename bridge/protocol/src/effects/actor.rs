@@ -8,7 +8,7 @@
 //! managed Haskell cell carried by the corresponding `ActorRef`.
 //!
 //! There is no `tidepool-handlers` handler.  The request is decoded and
-//! serviced by `tidepool-actor`, whose registry owns exact-incarnation wait
+//! serviced by `exomonad-actor`, whose registry owns exact-incarnation wait
 //! semantics.
 
 use crate::hs::HsType;

@@ -1052,7 +1052,7 @@ mod tests {
                 ]),
                 CborValue::Array(vec![
                     CborValue::Text("Browse".into()),
-                    CborValue::Text("Tidepool.Actors.Shoal".into()),
+                    CborValue::Text("Tidepool.Actors.Exomonad".into()),
                     CborValue::Bool(true),
                     CborValue::Array(vec![]),
                 ]),

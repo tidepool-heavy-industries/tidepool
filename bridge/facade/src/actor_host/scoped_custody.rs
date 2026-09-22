@@ -8,12 +8,12 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 #[cfg(test)]
 use std::fs::File;
 
-use tidepool_actor::{ActorRef, ActorTerminal};
+use exomonad_actor::{ActorRef, ActorTerminal};
 #[cfg(test)]
-use tidepool_node::{
+use exomonad_node::{
     LaunchReservation, ScopeCapability, ServiceEnvironment, ServiceScopeCleanup, ServiceScopeError,
 };
-use tidepool_node::{
+use exomonad_node::{
     ProcessSupervisorClient, ProcessSupervisorError, ProcessSupervisorObservation,
     ProcessSupervisorRecovery,
 };
@@ -149,7 +149,7 @@ fn remaining(deadline: Instant) -> Result<std::time::Duration, ScopedProcessErro
 pub(super) struct ScopedHostRetention {
     // Keep the exact installed lease owner alive without requiring production
     // callers to reconstruct its concrete Arc from the erased kernel handle.
-    _custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
+    _custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     #[cfg(test)]
     state: Arc<parking_lot::Mutex<CustodyState>>,
     pub(super) slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
@@ -167,7 +167,7 @@ pub(super) fn reserve_source_checkout() -> ScopedHostRetention {
 }
 
 pub(super) fn reserve(
-    custody: Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+    custody: Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
     actor: ActorRef,
 ) -> Result<ScopedHostRetention, ScopedClaimError> {
     let _state = {
@@ -288,7 +288,7 @@ pub(super) fn pin_supervisor_slot(
 pub(super) fn supervisor_workspace(
     slot: &parking_lot::Mutex<ScopedProcessSlot>,
     deadline: Instant,
-) -> Result<tidepool_node::MountNamespace, ScopedProcessError> {
+) -> Result<exomonad_node::MountNamespace, ScopedProcessError> {
     match &mut *slot.lock() {
         ScopedProcessSlot::Supervisor { client, .. } => {
             Ok(client.workspace_view(remaining(deadline)?)?)
@@ -326,14 +326,14 @@ pub(super) fn observe_slot(
         ScopedProcessSlot::NotSpawned(_) => Ok(ScopedProcessObservation::ProcessStopped),
         #[cfg(test)]
         ScopedProcessSlot::Owned(scope) => Ok(match scope.observation()? {
-            tidepool_node::ScopeObservation::Blocked => ScopedProcessObservation::Blocked,
-            tidepool_node::ScopeObservation::Pinned => ScopedProcessObservation::Pinned,
-            tidepool_node::ScopeObservation::Released => ScopedProcessObservation::Released,
-            tidepool_node::ScopeObservation::ReleaseUnconfirmed => {
+            exomonad_node::ScopeObservation::Blocked => ScopedProcessObservation::Blocked,
+            exomonad_node::ScopeObservation::Pinned => ScopedProcessObservation::Pinned,
+            exomonad_node::ScopeObservation::Released => ScopedProcessObservation::Released,
+            exomonad_node::ScopeObservation::ReleaseUnconfirmed => {
                 ScopedProcessObservation::ReleaseUnconfirmed
             }
-            tidepool_node::ScopeObservation::Stopping => ScopedProcessObservation::Stopping,
-            tidepool_node::ScopeObservation::ProcessStopped(_) => {
+            exomonad_node::ScopeObservation::Stopping => ScopedProcessObservation::Stopping,
+            exomonad_node::ScopeObservation::ProcessStopped(_) => {
                 ScopedProcessObservation::ProcessStopped
             }
         }),

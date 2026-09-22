@@ -158,7 +158,7 @@ data ForkGroupPath = ForkGroupPath Bool Text
   deriving (Show, Eq)
 
 actorGitBranchPrefix :: ActorPath -> GitBranchPrefix
-actorGitBranchPrefix (ActorPath path) = GitBranchPrefix ("shoal/" <> path)
+actorGitBranchPrefix (ActorPath path) = GitBranchPrefix ("exomonad/" <> path)
 
 instance IsString CampaignLabel where
   fromString = validatedLiteral campaignLabel
@@ -418,7 +418,7 @@ forkGroupHandle response = do
 
 forkGroupGitBranchPrefix :: ForkGroupHandle -> GitBranchPrefix
 forkGroupGitBranchPrefix (ForkGroupHandle _ (ActorPath path)) =
-  GitBranchPrefix ("shoal/" <> path <> "/")
+  GitBranchPrefix ("exomonad/" <> path <> "/")
 
 planCleanup
   :: Member AgentInspection effs

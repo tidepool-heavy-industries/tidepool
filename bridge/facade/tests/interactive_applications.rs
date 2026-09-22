@@ -11,18 +11,18 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde_json::{json, Value};
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-use tidepool_agent::{
+use exomonad_agent::{
     accept_interactive_session_binding, native_interactive_backend, read_interactive_binding,
     resolve_native_interactive_agent, BackendThreadId, InputAdmission, InputOperationId,
     InputProducerControlOutcome, InputProducerId, InputPurpose, InteractiveInputEnvelope,
     InteractiveInputMode, InteractiveInputTarget, InteractiveSessionBinding,
     HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+};
+use serde_json::{json, Value};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::net::{TcpListener, UnixListener};
 
@@ -127,10 +127,10 @@ fn live_fixture_prerequisites(
     tmux_available: bool,
 ) -> Result<PathBuf, &'static str> {
     let executable = configured
-        .ok_or("TIDEPOOL_INTERACTIVE_CODEX_BIN must explicitly select the pinned executable")?;
+        .ok_or("EXOMONAD_INTERACTIVE_CODEX_BIN must explicitly select the pinned executable")?;
     let executable = PathBuf::from(executable);
     if !executable.is_absolute() {
-        return Err("TIDEPOOL_INTERACTIVE_CODEX_BIN must be absolute");
+        return Err("EXOMONAD_INTERACTIVE_CODEX_BIN must be absolute");
     }
     if !tmux_available {
         return Err("tmux is required to exercise the full TUI under a real PTY");
@@ -142,11 +142,11 @@ fn live_fixture_prerequisites(
 fn live_fixture_refuses_unpinned_or_ambiguous_launch() {
     assert_eq!(
         live_fixture_prerequisites(None, true),
-        Err("TIDEPOOL_INTERACTIVE_CODEX_BIN must explicitly select the pinned executable")
+        Err("EXOMONAD_INTERACTIVE_CODEX_BIN must explicitly select the pinned executable")
     );
     assert_eq!(
         live_fixture_prerequisites(Some("codex".into()), true),
-        Err("TIDEPOOL_INTERACTIVE_CODEX_BIN must be absolute")
+        Err("EXOMONAD_INTERACTIVE_CODEX_BIN must be absolute")
     );
     assert_eq!(
         live_fixture_prerequisites(Some("/nix/store/pinned/bin/codex".into()), false),
@@ -249,10 +249,10 @@ impl Drop for EnvironmentVariable {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires TIDEPOOL_INTERACTIVE_CODEX_BIN (pinned Codex) and tmux"]
+#[ignore = "requires EXOMONAD_INTERACTIVE_CODEX_BIN (pinned Codex) and tmux"]
 async fn pinned_full_tui_binds_and_accepts_exactly_one_owned_input() {
     let selected = live_fixture_prerequisites(
-        std::env::var_os("TIDEPOOL_INTERACTIVE_CODEX_BIN"),
+        std::env::var_os("EXOMONAD_INTERACTIVE_CODEX_BIN"),
         command_exists("tmux"),
     )
     .unwrap_or_else(|error| panic!("real PTY fixture preflight failed: {error}"));
@@ -273,7 +273,7 @@ async fn pinned_full_tui_binds_and_accepts_exactly_one_owned_input() {
         .package_root()
         .expect("pinned executable must belong to a package");
     let selection_path = package.join("selection.json");
-    let configured_closure = std::env::var_os("TIDEPOOL_SHOAL_CODEX_CLOSURE").map(PathBuf::from);
+    let configured_closure = std::env::var_os("EXOMONAD_CODEX_CLOSURE").map(PathBuf::from);
     if selection_path.exists() {
         let selection: Value = serde_json::from_slice(
             &std::fs::read(&selection_path)

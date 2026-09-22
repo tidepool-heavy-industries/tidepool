@@ -14,11 +14,11 @@ use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
     ConsoleHandler, EventConfig, EventError, ObservationSource, RepoEventHandler,
 };
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::DynModelProvider;
-use tidepool_harness::replay::ReplayProvider;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::DynModelProvider;
+use exomonad_harness::replay::ReplayProvider;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
@@ -35,7 +35,8 @@ impl ObservationSource for NoOpSource {
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -62,7 +63,7 @@ async fn minimal_watch_list_round_trips() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("minimal-watch-list-{}.jsonl", std::process::id())),
         &LogHeader {
             prelude_hash: "minimal-watch-list".into(),

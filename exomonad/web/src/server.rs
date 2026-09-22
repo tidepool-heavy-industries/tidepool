@@ -67,11 +67,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value as Jv};
-use tidepool_harness::provider::oauth::ReasoningEffort;
-use tidepool_harness::provider::settings::{
+use exomonad_harness::provider::oauth::ReasoningEffort;
+use exomonad_harness::provider::settings::{
     is_allowed_model, ModelSettings, SharedModelSettings, MODEL_ALLOWLIST,
 };
-use tidepool_harness::selfharness::operator::{
+use exomonad_harness::selfharness::operator::{
     child_path, DelegationPhase, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
@@ -1213,10 +1213,10 @@ async fn submit(
 /// `POST /settings` — the operator's model/reasoning-effort dial: ordinary
 /// operator-initiated web UI (never the `Ask`/`AskUser` form machinery).
 /// Mutates the shared live-settings handle a wired
-/// `tidepool_harness::provider::oauth::OauthProvider` reads at every
+/// `exomonad_harness::provider::oauth::OauthProvider` reads at every
 /// request-build time,
 /// and persists the change so it survives a restart — see
-/// [`tidepool_harness::provider::oauth::OauthConfig`]'s `tuning` doc for the
+/// [`exomonad_harness::provider::oauth::OauthConfig`]'s `tuning` doc for the
 /// full contract. `model` is checked against the fixed [`MODEL_ALLOWLIST`];
 /// `effort` is decoded against the real [`ReasoningEffort`] enum — neither
 /// is ever accepted as free text, and an unrecognized value for either is
@@ -1296,7 +1296,7 @@ async fn not_found() -> Response {
 /// Whether every variant of a sum is nullary — an enum, whose answer is the
 /// chosen constructor as a bare string (matching the generic decode's
 /// all-nullary rule). A mixed sum answers as a tagged object instead.
-fn all_nullary(variants: &[tidepool_harness::selfharness::operator::VariantShape]) -> bool {
+fn all_nullary(variants: &[exomonad_harness::selfharness::operator::VariantShape]) -> bool {
     variants
         .iter()
         .all(|v| matches!(&v.shape, FormShape::Product { fields, .. } if fields.is_empty()))
@@ -1420,7 +1420,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_harness::selfharness::operator::FieldShape;
+    use exomonad_harness::selfharness::operator::FieldShape;
 
     fn spec() -> FormShape {
         FormShape::Product {
@@ -1614,7 +1614,7 @@ mod tests {
 
     // ---- collect_form_json ---------------------------------------------------
 
-    use tidepool_harness::selfharness::operator::VariantShape;
+    use exomonad_harness::selfharness::operator::VariantShape;
 
     fn ssh_shape() -> FormShape {
         FormShape::Product {

@@ -8,7 +8,7 @@
 //!
 //! **Why here and not in `tidepool-bridge-effects`.** The conversion needs both
 //! the wire type and the DOMAIN type, and `tidepool-bridge-effects` is a LOW
-//! crate that must not gain a dependency on `tidepool-worktree` — that is the
+//! crate that must not gain a dependency on `exomonad-worktree` — that is the
 //! property letting test mocks in low crates keep importing the wire types. The
 //! schema carries a domain Rust PATH and the path resolves at the consuming
 //! crate, exactly as `RustBinding::Path` already does.

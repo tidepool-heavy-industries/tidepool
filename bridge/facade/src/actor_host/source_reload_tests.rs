@@ -3,7 +3,7 @@
 //!
 //! The reload mechanism's own transaction — identity, the rebuilt
 //! reverse-dependency closure, and what a rejected candidate leaves behind —
-//! is checked in `crate::shoal::source`. What is checked HERE is what only a
+//! is checked in `crate::exomonad::source`. What is checked HERE is what only a
 //! live session can answer: a later cell compiles against the published
 //! revision while a value bound before the reload keeps the code it was built
 //! from, and an actor's reload reaches its own layer and no other.
@@ -15,7 +15,7 @@ use super::tests::dispatch_haskell_script;
 use super::*;
 
 async fn committed(
-    policy: &dyn tidepool_actor::ResidentToolEndpoint,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
     source: &str,
 ) -> serde_json::Value {
     let result = dispatch_haskell_script(policy, source).await;
@@ -30,11 +30,11 @@ fn work_module(answer: u32) -> String {
 /// The authored package a source-reload campaign starts from: one configured
 /// module, answering `1`.
 fn write_workspace(workspace: &Path, answer: u32) {
-    let authored = workspace.join(".shoal");
+    let authored = workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(
         authored.join("config.toml"),
-        "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+        "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
     )
     .unwrap();
     std::fs::write(authored.join("Project/Work.hs"), work_module(answer)).unwrap();
@@ -69,11 +69,11 @@ fn commit_workspace(workspace: &Path) {
 }
 
 /// Keep the authored package out of the repository entirely, so a checkout cut
-/// from the project's head has no `.shoal` and therefore no source of its own.
+/// from the project's head has no `.exomonad` and therefore no source of its own.
 /// The run still reads the package from the working tree, and the tree stays
 /// clean enough to cut a checkout from.
 fn ignore_workspace(workspace: &Path) {
-    std::fs::write(workspace.join(".gitignore"), ".shoal/\n").unwrap();
+    std::fs::write(workspace.join(".gitignore"), ".exomonad/\n").unwrap();
     commit(workspace, "keep the authored package out of the repository");
 }
 
@@ -85,7 +85,7 @@ fn run_layer_target(campaign: &TestCampaign) -> std::path::PathBuf {
 }
 
 /// Admit the next child, grant it its worktree, and let it run.
-async fn next_child(campaign: &mut TestCampaign) -> tidepool_actor::LocalResidentInstallation {
+async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResidentInstallation {
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
@@ -120,14 +120,17 @@ const CODING_CHILD: &str = "let campaign = \"source-reload\" :: CampaignLabel\n\
 #[tokio::test]
 async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
             commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -146,12 +149,12 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     // child compiles against.
     let checkout = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &child.launch_worktrees[0],
         ))
         .unwrap()
         .unwrap();
-    let module = checkout.cwd().join(".shoal/Project/Work.hs");
+    let module = checkout.cwd().join(".exomonad/Project/Work.hs");
     assert!(module.exists(), "the checkout carries the authored package");
 
     // Both actors start on the same answer, from their separate layers.
@@ -205,16 +208,19 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
 #[tokio::test]
 async fn a_child_without_its_own_source_cannot_republish_the_run() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             // Authored but never committed: the run reads it from the working
-            // tree, and a checkout cut from the project's head has no `.shoal`.
+            // tree, and a checkout cut from the project's head has no `.exomonad`.
             ignore_workspace(&config.workspace);
             write_workspace(&config.workspace, 1);
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -231,13 +237,13 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
 
     let checkout = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &child.launch_worktrees[0],
         ))
         .unwrap()
         .unwrap();
     assert!(
-        !checkout.cwd().join(".shoal").exists(),
+        !checkout.cwd().join(".exomonad").exists(),
         "this checkout carries no authored source"
     );
 
@@ -252,7 +258,10 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     // …and cannot publish into it. The edit the root made is still waiting for
     // the root, not for this child.
     std::fs::write(
-        campaign._repository.path().join(".shoal/Project/Work.hs"),
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Work.hs"),
         work_module(41),
     )
     .unwrap();
@@ -275,19 +284,19 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
 #[tokio::test]
 async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            let authored = config.workspace.join(".shoal");
+            let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
             std::fs::write(
                 authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
             )
             .unwrap();
             std::fs::write(authored.join("Project/Work.hs"), work_module(1)).unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
             );
         },
@@ -310,7 +319,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     assert_eq!(status["items"][1]["output"], "True", "{status}");
 
     // Edit the module with ordinary file tools, then reload from a cell.
-    std::fs::write(workspace.join(".shoal/Project/Work.hs"), work_module(41)).unwrap();
+    std::fs::write(workspace.join(".exomonad/Project/Work.hs"), work_module(41)).unwrap();
     let reloaded = committed(
         policy,
         "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ changed -> changed; _ -> [\"not published\"] })",
@@ -350,19 +359,19 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
 #[tokio::test]
 async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            let authored = config.workspace.join(".shoal");
+            let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
             std::fs::write(
                 authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
             )
             .unwrap();
             std::fs::write(authored.join("Project/Work.hs"), work_module(1)).unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
             );
         },
@@ -374,7 +383,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
 
     let broken =
         "module Project.Work (answer) where\n\nanswer :: Int\nanswer = undefinedByThisReload\n";
-    std::fs::write(workspace.join(".shoal/Project/Work.hs"), broken).unwrap();
+    std::fs::write(workspace.join(".exomonad/Project/Work.hs"), broken).unwrap();
     let rejected = committed(
         policy,
         "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False })\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False })",
@@ -395,7 +404,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
 
     // The edited source stays exactly as it was written.
     assert_eq!(
-        std::fs::read_to_string(workspace.join(".shoal/Project/Work.hs")).unwrap(),
+        std::fs::read_to_string(workspace.join(".exomonad/Project/Work.hs")).unwrap(),
         broken
     );
 

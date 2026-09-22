@@ -17,13 +17,13 @@ use crate::support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tidepool_harness::engine;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeState;
-use tidepool_harness::{Harness, TurnOutcome};
+use exomonad_harness::engine;
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::tree::NodeState;
+use exomonad_harness::{Harness, TurnOutcome};
 
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -201,7 +201,7 @@ async fn multi_block_reply_runs_in_order_and_fails_with_resume_point() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),
@@ -436,7 +436,7 @@ async fn multi_item_block_error_in_first_item_stops_and_corrects() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),
@@ -504,7 +504,7 @@ async fn multi_item_block_ending_in_decl_retries_and_survives() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),
@@ -574,7 +574,7 @@ async fn multi_item_block_decl_before_failing_item_is_named_kept() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),
@@ -644,7 +644,7 @@ async fn multi_item_block_salvages_decl_after_earlier_item_fails() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),
@@ -716,7 +716,7 @@ async fn multi_item_block_decl_then_failing_typed_use_persists_decl() {
     let corrective = events
         .filter_map(|e| match e.expect("readable log record").event {
             Event::TurnDelta {
-                role: tidepool_harness::provider::Role::User,
+                role: exomonad_harness::provider::Role::User,
                 content,
                 ..
             } => Some(content),

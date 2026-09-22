@@ -1,8 +1,8 @@
 use super::*;
+use exomonad_actor::ResidentToolFuture;
+use exomonad_tool::CustomToolDeclaration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tidepool_actor::ResidentToolFuture;
-use tidepool_tool::CustomToolDeclaration;
 use tokio::sync::Semaphore;
 
 const THREAD: &str = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
@@ -260,7 +260,7 @@ impl ResidentToolEndpoint for FailingSealEndpoint {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<tidepool_actor::HostedWorkSeal, ResidentToolError>,
+                    Output = Result<exomonad_actor::HostedWorkSeal, ResidentToolError>,
                 > + Send
                 + 'static,
         >,
@@ -313,7 +313,7 @@ async fn http_seal_unsupported_quiesces_before_poll_without_draining() {
     let c = client(&socket);
     attach(&c).await;
     let seal =
-        control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(41)));
+        control.quiesce_and_seal(exomonad_actor::ActorRef::first(exomonad_actor::ActorId(41)));
     assert_quiesced_but_completion_available(&c).await; // Future not polled yet.
     assert!(matches!(
         seal.await,
@@ -355,7 +355,7 @@ async fn http_seal_timeout_retains_single_future_and_failure_keeps_completion() 
     let c = client(&socket);
     attach(&c).await;
     let mut seal =
-        control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(42)));
+        control.quiesce_and_seal(exomonad_actor::ActorRef::first(exomonad_actor::ActorId(42)));
     assert_eq!(endpoint.seals.load(Ordering::SeqCst), 0);
     assert_quiesced_but_completion_available(&c).await;
     for _ in 0..2 {
@@ -417,7 +417,7 @@ async fn http_seal_already_draining_never_invokes_endpoint() {
             tokio::spawn(service.serve(listener))
         };
         let seal =
-            control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(43)));
+            control.quiesce_and_seal(exomonad_actor::ActorRef::first(exomonad_actor::ActorId(43)));
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(5), seal)
                 .await
@@ -447,7 +447,7 @@ mod actual_seal {
             .unwrap()
     }
     use super::*;
-    use tidepool_actor::{
+    use exomonad_actor::{
         ActorWorkbenchSource, Incarnation, LocalResidentDeployment, ResidentForest,
     };
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -524,7 +524,7 @@ mod actual_seal {
             Box<
                 dyn std::future::Future<
                         Output = Result<
-                            tidepool_actor::WorkbenchBoundaryReconciliation,
+                            exomonad_actor::WorkbenchBoundaryReconciliation,
                             ResidentToolError,
                         >,
                     > + Send,
@@ -537,7 +537,7 @@ mod actual_seal {
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
-                        Output = Result<tidepool_actor::HostedWorkSeal, ResidentToolError>,
+                        Output = Result<exomonad_actor::HostedWorkSeal, ResidentToolError>,
                     > + Send
                     + 'static,
             >,
@@ -561,10 +561,10 @@ mod actual_seal {
         let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
-        include.push(crate::haskell_sources::ensure_shoal_haskell().unwrap());
+        include.push(crate::haskell_sources::ensure_exomonad_haskell().unwrap());
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
-            "Tidepool.Actors.Internal.ShoalDriver",
+            "Tidepool.Actors.Internal.ExomonadDriver",
         );
         let templates = resident_workbench_templates(&preamble, "RootEffects", "");
         let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
@@ -614,7 +614,7 @@ mod actual_seal {
             launch_forest
                 .new_program_root(
                     "http-seal".into(),
-                    tidepool_actor::EffectiveRole::root(),
+                    exomonad_actor::EffectiveRole::root(),
                     program,
                 )
                 .await
@@ -738,11 +738,11 @@ mod actual_seal {
             StatusCode::OK
         );
         for expected in [
-            tidepool_actor::ActorRef {
-                id: tidepool_actor::ActorId(actor.identity().id.0 + 1),
+            exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(actor.identity().id.0 + 1),
                 ..actor.identity()
             },
-            tidepool_actor::ActorRef {
+            exomonad_actor::ActorRef {
                 incarnation: Incarnation(actor.identity().incarnation.0 + 1),
                 ..actor.identity()
             },

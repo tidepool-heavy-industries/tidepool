@@ -1,5 +1,5 @@
 [package]
-name = "tidepool-node"
+name = "exomonad-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Durable delivery and process substrate for interactive Tidepool actors"
+description = "Durable delivery and process substrate for interactive Exomonad actors"
 
 [dependencies]
 serde.workspace = true

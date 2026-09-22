@@ -2,7 +2,7 @@
 
 Use this when the owning plan calls for independent review and a retained reviewer
 is available. The owning Sol chooses work, repairs defects and checks integration.
-Load `shoal-define-actors` for the record syntax.
+Load `exomonad-define-actors` for the record syntax.
 
 The [executable composition](../checks/review-continuation.hs) defines one
 `ReviewFlow` record with private state, typed message endpoints and a fixed

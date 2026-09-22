@@ -1,7 +1,7 @@
 //! The `Subagent` suspension — decode-only.
 //!
 //! Six verbs, one saga (`tidepool-handlers`'s `SubagentHandler`). Routed by
-//! CONSTRUCTOR NAME only — `tidepool-harness::engine::classify_hole` never
+//! CONSTRUCTOR NAME only — `exomonad-harness::engine::classify_hole` never
 //! decodes a Subagent verb's payload; the args here exist ONLY so this
 //! effect's request enum matches the real wire ARITY (a `FromHaskell` decode
 //! matches a `Con` by name+arity, so a wrong arity here would make a

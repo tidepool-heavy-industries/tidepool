@@ -210,14 +210,14 @@ fn truncation_marker_frame(dropped: u64) -> RecordedFrame {
     }
 }
 
-/// `$TIDEPOOL_CODEX_BIN` — an explicit override of which `codex` binary
+/// `$EXOMONAD_CODEX_BIN` — an explicit override of which `codex` binary
 /// [`Session::connect`] spawns.
-pub const ENV_CODEX_BIN: &str = "TIDEPOOL_CODEX_BIN";
+pub const ENV_CODEX_BIN: &str = "EXOMONAD_CODEX_BIN";
 
 /// Escape hatch: a comma-separated list of additional env var NAMES (not
 /// values) an operator wants passed through to the app-server child verbatim,
 /// for a local setup [`CHILD_ENV_ALLOWLIST`] does not anticipate.
-pub const ENV_AGENT_ENV_PASSTHROUGH: &str = "TIDEPOOL_AGENT_ENV_PASSTHROUGH";
+pub const ENV_AGENT_ENV_PASSTHROUGH: &str = "EXOMONAD_AGENT_ENV_PASSTHROUGH";
 
 /// Env vars passed to the app-server child verbatim from this process's own
 /// environment. Everything else in this process's environment — including
@@ -299,7 +299,7 @@ fn child_env_vars() -> Vec<(OsString, OsString)> {
     )
 }
 
-/// `$TIDEPOOL_CODEX_BIN`, STRICTLY — the same pinning precedent
+/// `$EXOMONAD_CODEX_BIN`, STRICTLY — the same pinning precedent
 /// `tidepool-runtime`'s toolchain-locator module doc lays out for its own
 /// strict binary override: a SET-but-unreadable/non-executable override is a
 /// hard error, never a silent fall-through to `$PATH` — falling through
@@ -387,7 +387,7 @@ impl<T: Transport> Session<T> {
     ) -> Result<(), SessionError> {
         let init_params = InitializeParams {
             client_info: ClientInfo {
-                name: "tidepool-agent".to_string(),
+                name: "exomonad-agent".to_string(),
                 title: None,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -755,7 +755,7 @@ impl<T: Transport> Session<T> {
                         || req.method == codex_codes::methods::FILE_CHANGE_APPROVAL =>
                 {
                     eprintln!(
-                        "[tidepool-agent] approval request {} arrived under \
+                        "[exomonad-agent] approval request {} arrived under \
                          approval_policy=never — declining",
                         req.method
                     );
@@ -783,7 +783,7 @@ impl<T: Transport> Session<T> {
                         error: codex_codes::JsonRpcErrorData {
                             code: -32601,
                             message: format!(
-                                "tidepool-agent does not handle {}",
+                                "exomonad-agent does not handle {}",
                                 unexpected.method
                             ),
                             data: None,
@@ -1079,7 +1079,7 @@ mod tests {
         );
     }
 
-    /// `$TIDEPOOL_CODEX_BIN`/`$TIDEPOOL_AGENT_ENV_PASSTHROUGH` mutation is safe
+    /// `$EXOMONAD_CODEX_BIN`/`$EXOMONAD_AGENT_ENV_PASSTHROUGH` mutation is safe
     /// here because nextest runs every test in its own OS process (see the
     /// same pattern in `isolation.rs`'s tests) — never two tests sharing one.
     fn with_env_var<R>(name: &str, value: Option<&OsStr>, f: impl FnOnce() -> R) -> R {
@@ -1132,7 +1132,7 @@ mod tests {
     /// [`tokio::process::Command`] `Session::connect` would spawn carries
     /// exactly the allowlist plus passthrough, once `env_clear` + `envs` are
     /// applied — not merely that the pure helper computes the right list.
-    /// `$TIDEPOOL_CODEX_BIN` is pointed at this TEST BINARY'S OWN path (the
+    /// `$EXOMONAD_CODEX_BIN` is pointed at this TEST BINARY'S OWN path (the
     /// same stand-in `codex-codes`' own `test_build_command_sync_applies_process_configuration`
     /// uses) so `build_command` never needs a real `codex` on `$PATH`.
     #[test]
@@ -1347,7 +1347,7 @@ mod tests {
     /// installation, not something the fast default tier should run
     /// unattended. Run explicitly:
     ///
-    ///     cargo test -p tidepool-agent --lib backend::codex::process::tests::handshake -- --ignored --nocapture
+    ///     cargo test -p exomonad-agent --lib backend::codex::process::tests::handshake -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "spawns a real app-server process against the operator's live ~/.codex; run explicitly"]
     async fn handshake_and_model_list_leave_config_untouched() {
@@ -1453,13 +1453,13 @@ mod tests {
     }
 
     /// The one live turn that spends the operator's ChatGPT tokens, pinned
-    /// to `gpt-5.6-terra`. ONE attempt once `turn/start` is actually sent —
+    /// to `gpt-6-sol`. ONE attempt once `turn/start` is actually sent —
     /// do not loop this on failure; capture the frame log and report back
     /// instead.
     ///
     /// Ignored by default; run explicitly exactly once:
     ///
-    ///     cargo test -p tidepool-agent --lib backend::codex::process::tests::phase4 -- --ignored --nocapture
+    ///     cargo test -p exomonad-agent --lib backend::codex::process::tests::phase4 -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "spends the operator's real ChatGPT tokens; run exactly once per go, never in a retry loop"]
     async fn phase4_live_vertical_ask_parent_round_trip() {
@@ -1500,7 +1500,7 @@ mod tests {
         let turn_start = codex_codes::TurnStartParams {
             thread_id: thread_id.clone(),
             cwd: Some(workdir_path.clone()),
-            model: Some("gpt-5.6-terra".to_string()),
+            model: Some("gpt-6-sol".to_string()),
             sandbox_policy: Some(codex_codes::SandboxPolicy::WorkspaceWrite {
                 exclude_slash_tmp: Some(false),
                 exclude_tmpdir_env_var: Some(false),

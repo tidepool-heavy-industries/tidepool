@@ -27,13 +27,13 @@ examples and prompt-resource selection; leave runtime and Haskell implementation
 changes as precise follow-ups. checkpointContext remains a proposal until implemented.
 Work directly without creating an RSI management tree.
 
-Check candidate source with shoal check and its relevant model-free recipes. Prose
+Check candidate source with exomonad check and its relevant model-free recipes. Prose
 review and successful recipe execution do not prove fresh models will follow it.
 Report changed prompt footprint and actual evidence without claiming savings from
 word count or requested-model labels alone. Retain raw logs privately.
 
 Return the actual assigned result, ordinarily Produced (Candidate head checks gates),
 with activation and live-use gates. Incorporate changes with the authoring owner;
-next-run preparation supplies that selection to the target's original-root .shoal.
+next-run preparation supplies that selection to the target's original-root .exomonad.
 Activate only at an explicitly authorized swarm boundary. Current
 operator holds and useful pending obligations remain intact.

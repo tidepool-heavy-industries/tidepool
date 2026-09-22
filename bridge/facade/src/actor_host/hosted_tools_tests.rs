@@ -1,24 +1,27 @@
 use super::test_campaign::TestCampaign;
 use super::tests::dispatch_haskell_script;
-use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
+use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 
 #[tokio::test]
 async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(), |admission| admission,
+        exomonad_actor::ResearchPolicy::default(), |admission| admission,
         |config| {
-            let directory = config.workspace.join(".shoal");
+            let directory = config.workspace.join(".exomonad");
             std::fs::create_dir_all(directory.join("Project")).unwrap();
             std::fs::write(directory.join("Project/Tools.hs"), include_str!("hosted_tools_fixture.hs")).unwrap();
             std::fs::write(directory.join("config.toml"),
-                "[defaults]\nmodel='gpt-5.6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\ntools='Project.Tools.tools'\n").unwrap();
-            config.workspace_inputs = Some(crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\ntools='Project.Tools.tools'\n").unwrap();
+            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
         },
     ).await;
     let policy = campaign.root_installation.policy.clone();
     // The running dispatcher uses captured source, even if authored files change.
     std::fs::write(
-        campaign._repository.path().join(".shoal/Project/Tools.hs"),
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Tools.hs"),
         "invalid replacement",
     )
     .unwrap();

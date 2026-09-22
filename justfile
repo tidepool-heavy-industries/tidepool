@@ -1,6 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 nix := "bash scripts/dev-shell.sh"
-shoal_nix := "bash scripts/dev-shell.sh --shoal"
+exomonad_nix := "bash scripts/dev-shell.sh --exomonad"
 
 # Show the supported development workflow.
 default:
@@ -63,9 +63,9 @@ suite-check:
     {{ nix }} scripts/test-suite-check.sh
 
 # Exercise command admission, OOM, cancellation, and descendant cleanup in an
-# isolated delegated user service. This does not touch active Shoal services.
+# isolated delegated user service. This does not touch active Exomonad services.
 test-command-resources-delegated:
-    {{ nix }} scripts/test-command-resources-delegated.sh
+    {{ nix }} exomonad/scripts/test-command-resources-delegated.sh
 
 # Run an inner-loop test selection derived from files changed since BASE.
 [positional-arguments]
@@ -96,33 +96,33 @@ probe-opacity-check:
 doctor:
     {{ nix }} scripts/toolchain-doctor.sh
 
-# Build a matched local extractor/worker/Shoal set and start a fresh actor run.
-# Pass Shoal init flags after `--`, for example:
-#   just shoal-init -- --session shoal-tidepool-fresh --no-attach
+# Build a matched local extractor/worker/Exomonad set and start a fresh actor run.
+# Pass Exomonad init flags after `--`, for example:
+#   just exomonad-init -- --session exomonad-tidepool-fresh --no-attach
 [positional-arguments]
-shoal-init *args:
-    {{ shoal_nix }} scripts/shoal-init.sh "$@"
+exomonad-init *args:
+    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"
 
 # Start the alpha smoke run: one Sol root agent in this repository's own
 # workspace, handed plans/jev-lab/alpha-smoke-prompt.md. Needs a TypeSafe key
 # in TYPESAFE_API_KEY or ~/.config/typesafe/api-key. Extra arguments are
-# forwarded to `shoal init`, for example `just shoal-smoke -- --recreate`.
+# forwarded to `exomonad init`, for example `just exomonad-smoke -- --recreate`.
 [positional-arguments]
-shoal-smoke *args:
-    {{ shoal_nix }} scripts/shoal-smoke.sh "$@"
+exomonad-smoke *args:
+    {{ exomonad_nix }} exomonad/scripts/exomonad-smoke.sh "$@"
 
-# Build Shoal from this checkout and run it against the independent console
-# repository. Extra arguments are forwarded to `shoal init`.
+# Build Exomonad from this checkout and run it against the independent console
+# repository. Extra arguments are forwarded to `exomonad init`.
 [positional-arguments]
-shoal-console *args:
-    test -d "$HOME/dev/shoal-console/.git" || { echo "missing $HOME/dev/shoal-console; initialize it first" >&2; exit 1; }
-    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
+exomonad-console *args:
+    test -d "$HOME/dev/exomonad-console/.git" || { echo "missing $HOME/dev/exomonad-console; initialize it first" >&2; exit 1; }
+    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-console"
 
-# Build this Shoal checkout and launch development in the fresh shoal-repl project.
+# Build this Exomonad checkout and launch development in the fresh exomonad-repl project.
 [positional-arguments]
-shoal-repl *args:
-    test -e "$HOME/dev/shoal-repl/.git" || { echo "missing $HOME/dev/shoal-repl; run shoal new ~/dev/shoal-repl first" >&2; exit 1; }
-    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-repl" --model gpt-6-astra --effort medium
+exomonad-repl *args:
+    test -e "$HOME/dev/exomonad-repl/.git" || { echo "missing $HOME/dev/exomonad-repl; run exomonad new ~/dev/exomonad-repl first" >&2; exit 1; }
+    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-repl" --model gpt-6-astra --effort medium
 
 # Pre-review gate: check, suite registration, fixtures; all run, all failures reported.
 verify:

@@ -1,7 +1,7 @@
 {
   "worktree_id": "wt-provisional-0001",
-  "cwd": "/var/tidepool/worktrees/wt-provisional-0001",
-  "branch": "tidepool/worktree/sample-wt-provisional-0001",
+  "cwd": "/var/exomonad/worktrees/wt-provisional-0001",
+  "branch": "exomonad/worktree/sample-wt-provisional-0001",
   "source_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "snapshot_ref": null,
   "origin": "CurrentRepository",

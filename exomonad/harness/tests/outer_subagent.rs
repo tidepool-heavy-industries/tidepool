@@ -21,26 +21,27 @@ use std::time::Duration;
 use crate::support;
 
 use serde_json::json;
-use tidepool_agent::backend::mock::MockBackend;
-use tidepool_agent::backend::{AgentBackend, AgentBackendFactory};
-use tidepool_agent::seam::{
+use exomonad_agent::backend::mock::MockBackend;
+use exomonad_agent::backend::{AgentBackend, AgentBackendFactory};
+use exomonad_agent::seam::{
     AgentBackendError, BackendThreadId, CycleResultPayload, CycleSpec, ThreadSpec, ToolReply,
     TurnEvent,
 };
 use tidepool_handlers::SubagentHandler;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::DynModelProvider;
-use tidepool_harness::replay::ReplayProvider;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::DynModelProvider;
+use exomonad_harness::replay::ReplayProvider;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
-use tidepool_worktree::testing::TestRepo;
+use exomonad_worktree::testing::TestRepo;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -89,7 +90,7 @@ async fn outer_loop_spawn_agent_round_trips_through_the_driver() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         support::unique_temp_log_path("outer-subagent"),
         &header(),
     )
@@ -158,7 +159,7 @@ async fn outer_spawn_without_handler_errors_legibly() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         support::unique_temp_log_path("outer-subagent-nh"),
         &header(),
     )
@@ -284,7 +285,7 @@ async fn outer_loop_two_concurrent_spawn_agent_calls_overlap_in_wall_time() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         support::unique_temp_log_path("outer-subagent-concurrent"),
         &concurrent_header(),
     )
@@ -393,7 +394,7 @@ async fn hylo_concurrent_m_two_leaf_subagent_spawns_overlap_in_wall_time() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         support::unique_temp_log_path("outer-subagent-hylo-concurrent"),
         &hylo_concurrent_header(),
     )

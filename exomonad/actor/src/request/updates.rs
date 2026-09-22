@@ -305,7 +305,7 @@ impl RequestRegistry {
         });
         let delivery = RequestUpdateDelivery {
             registry: Arc::clone(self), owner, target: request.target, id: update,
-            key: format!("shoal-update-{}", uuid::Uuid::new_v4()),
+            key: format!("exomonad-update-{}", uuid::Uuid::new_v4()),
             message: format!("Update {} for your existing request {}. The original assignment and sessionReply remain pending.\n\n{}", update.sequence, id.0, message),
         };
         Ok((update, delivery))

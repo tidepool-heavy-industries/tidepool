@@ -456,13 +456,13 @@ mod tests {
             .unwrap()
             .with_read_only_overlay(&source, workspace.join(".git"))
             .unwrap()
-            .with_read_only_overlay(&source, workspace.join(".shoal"))
+            .with_read_only_overlay(&source, workspace.join(".exomonad"))
             .unwrap()
-            .with_read_only_overlay(&source, workspace.join(".shoal/build/cargo"))
+            .with_read_only_overlay(&source, workspace.join(".exomonad/build/cargo"))
             .unwrap();
         assert_eq!(
             boundary.preserved_mounts_under(&workspace),
-            vec![workspace.join(".git"), workspace.join(".shoal")]
+            vec![workspace.join(".git"), workspace.join(".exomonad")]
         );
     }
 
@@ -579,7 +579,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         let project = root.path().join("project");
         let resource = root.path().join("resource");
-        let target = project.join(".shoal/build/cargo");
+        let target = project.join(".exomonad/build/cargo");
         for path in [&workspace, &project, &resource, &target] {
             std::fs::create_dir_all(path).unwrap();
         }

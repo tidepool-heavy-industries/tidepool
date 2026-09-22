@@ -49,5 +49,5 @@ handlers, and observability UIs stay in their owning crates.
   checkout does not imply an allocated bound worktree: root `projectHead` and
   child `boundHead` have different prerequisites.
 - Inspect focused tests beside the owning request, workbench, or lifecycle
-  module. Use `just test-lib tidepool-actor 'test(<name>)'`; compile changed
+  module. Use `just test-lib exomonad-actor 'test(<name>)'`; compile changed
   consumers and test failure/cleanup paths, not only successful replies.

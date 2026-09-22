@@ -1,6 +1,6 @@
 # Small agents as typed, programmable components
 
-Implementation entry: [current next-run priority](../NEXT.md). The Shoal
+Implementation entry: [current next-run priority](../NEXT.md). The Exomonad
 pilot vision it describes supersedes the older default-full-prefix and
 numeric-first sequencing in this document. This document retains broader
 typed-worker and authority requirements; the numeric
@@ -22,7 +22,7 @@ shared modules/prompts, and project Haskell composes their behavior.
 
 ## Intent
 
-Extend Shoal with lightweight agents whose context, tools and result contract are
+Extend Exomonad with lightweight agents whose context, tools and result contract are
 constructed by the parent in Haskell. They should feel as convenient as native
 subagents, but participate in Tidepool's typed requests, authority, cancellation,
 retained evidence and orchestration rather than forming a second agent system.
@@ -47,7 +47,7 @@ Inspect current owners before deciding what actually needs to be added.
   `.hs` files, so agents can improve them instead of retyping them each run.
 - Construct initial context from typed input using a formatting function or a
   fmt-like template. Context selection should be authored, explicit and small.
-- Keep native Codex goals disabled. The parent/Shoal owns continuation.
+- Keep native Codex goals disabled. The parent/Exomonad owns continuation.
 
 ## Two complementary context modes
 
@@ -119,7 +119,7 @@ Support the path from experimental live definition to reusable source:
 - Compile/typecheck definitions against their real production consumer. A mock
   implementation must not advertise unavailable runtime behavior as working.
 - Capture the module/source revision and compiled definition used for a worker.
-  The swarm's shared `.shoal` modules and prompts are fixed at startup, including
+  The swarm's shared `.exomonad` modules and prompts are fixed at startup, including
   for later workers and fresh task contexts. Edit and check the source normally;
   activate revisions only at an explicit swarm teardown/restart boundary.
 - Provide legible compile diagnostics and candidate checks without installing
@@ -198,6 +198,6 @@ the worker interface through real numeric work.
 - Shared-worktree write arbitration and parent-pane presentation implementation.
 
 Owners to inspect: `bridge/facade/src/actor_host.rs`, `bridge/facade/src/host_dynamic_tools`,
-`tidepool-actor`, `tidepool-agent`, `tidepool-runtime`, `tidepool-node`,
-`tidepool-worktree`, and the Haskell library. Root and nested `AGENTS.md` govern
+`exomonad-actor`, `exomonad-agent`, `tidepool-runtime`, `exomonad-node`,
+`exomonad-worktree`, and the Haskell library. Root and nested `AGENTS.md` govern
 implementation. Reuse those owners instead of creating another agent framework.

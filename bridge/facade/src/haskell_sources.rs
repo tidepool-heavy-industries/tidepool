@@ -2,12 +2,12 @@
 //!
 //! The build script walks each complete source tree. This module owns the one
 //! content-addressed materializer used by both the public Tidepool library and
-//! Shoal's public surface and private interactive driver.
+//! Exomonad's public surface and private interactive driver.
 
 use std::path::PathBuf;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
-include!(concat!(env!("OUT_DIR"), "/embedded_shoal_haskell.rs"));
+include!(concat!(env!("OUT_DIR"), "/embedded_exomonad_haskell.rs"));
 
 fn content_hash(entries: &[(&str, &str)]) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -28,7 +28,7 @@ pub(crate) fn source_identity() -> String {
     format!(
         "{}:{}",
         content_hash(EMBEDDED_STDLIB),
-        content_hash(EMBEDDED_SHOAL_HASKELL)
+        content_hash(EMBEDDED_EXOMONAD_HASKELL)
     )
 }
 
@@ -68,20 +68,20 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
-/// Shoal's frozen library must match `source_identity`, independent of launch
+/// Exomonad's frozen library must match `source_identity`, independent of launch
 /// cwd or development overrides used by the general Tidepool tools.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = content_hash(EMBEDDED_STDLIB);
     materialize(EMBEDDED_STDLIB, tidepool_runtime::paths::stdlib_dir(&hash))
 }
 
-/// Resolve the Haskell modules used by Shoal's interactive workbench.
-pub fn ensure_shoal_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let hash = content_hash(EMBEDDED_SHOAL_HASKELL);
+/// Resolve the Haskell modules used by Exomonad's interactive workbench.
+pub fn ensure_exomonad_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let hash = content_hash(EMBEDDED_EXOMONAD_HASKELL);
     materialize(
-        EMBEDDED_SHOAL_HASKELL,
+        EMBEDDED_EXOMONAD_HASKELL,
         tidepool_runtime::paths::cache_dir()
-            .join("shoal-haskell")
+            .join("exomonad-haskell")
             .join(hash),
     )
 }

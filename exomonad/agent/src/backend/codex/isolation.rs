@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn identical_snapshot_passes() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
         write(dir.path(), "auth.json", "{\"token\":\"redacted\"}");
         write(dir.path(), "installation_id", "abc-123\n");
 
@@ -249,13 +249,13 @@ mod tests {
     #[test]
     fn config_toml_mutation_is_detected() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
 
         let before = ConfigSnapshot::capture(dir.path()).unwrap();
         write(
             dir.path(),
             "config.toml",
-            "model = \"gpt-5.6-terra\"\n[projects.\"/tmp/worker\"]\ntrusted = true\n",
+            "model = \"gpt-6-sol\"\n[projects.\"/tmp/worker\"]\ntrusted = true\n",
         );
         let after = ConfigSnapshot::capture(dir.path()).unwrap();
         let report = before.compare(&after);
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn new_top_level_file_is_detected() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
 
         let before = ConfigSnapshot::capture(dir.path()).unwrap();
         write(dir.path(), "unexpected.lock", "");
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn live_database_churn_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
         write(dir.path(), "logs_2.sqlite", "initial-bytes");
         write(dir.path(), "logs_2.sqlite-wal", "wal-bytes-1");
 
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn wal_sidecar_appearing_for_a_preexisting_database_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
         write(dir.path(), "goals_1.sqlite", "pre-existing-bytes");
 
         let before = ConfigSnapshot::capture(dir.path()).unwrap();
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn wal_sidecar_for_a_brand_new_database_is_still_flagged() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "model = \"gpt-5.6-terra\"\n");
+        write(dir.path(), "config.toml", "model = \"gpt-6-sol\"\n");
 
         let before = ConfigSnapshot::capture(dir.path()).unwrap();
         write(dir.path(), "new_store.sqlite", "");

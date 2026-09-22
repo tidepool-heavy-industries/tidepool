@@ -58,13 +58,13 @@ pub fn native_interactive_backend(
     std::sync::Arc::new(backend::codex::CodexInteractiveBackend::new(installation))
 }
 
-/// Resolve and behaviorally verify the interactive agent installed for Shoal.
+/// Resolve and behaviorally verify the interactive agent installed for Exomonad.
 pub async fn resolve_native_interactive_agent(
 ) -> Result<InteractiveAgentInstallation, AgentBackendError> {
     backend::codex::node::resolve_installation().await
 }
 
-/// Restore the exact installation passed through Shoal's private host launch.
+/// Restore the exact installation passed through Exomonad's private host launch.
 pub fn native_interactive_agent_from_parts(
     executable: std::path::PathBuf,
     version: String,
@@ -107,7 +107,7 @@ pub async fn copy_interactive_binding(
     backend::codex::node::copy_binding(path, thread).await
 }
 
-pub use tidepool_model::{
+pub use exomonad_model::{
     ProviderFailure, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
     ProviderUsageObservation, ProviderUsageSnapshot,
 };

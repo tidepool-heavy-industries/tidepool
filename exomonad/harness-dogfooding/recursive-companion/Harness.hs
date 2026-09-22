@@ -23,7 +23,7 @@
 -- @Console@, @Worktree@, @RepoEvent@, @Exec@, @Subagent@, and @Journal@ —
 -- exactly the driver's widened outer session,
 -- @selfharness::driver::outer_decls@, the same row @dev-tree@ compiles
--- against); this file declares no new effect. @tidepool-harness
+-- against); this file declares no new effect. @exomonad-harness
 -- \/tests\/dogfood_harness_typecheck.rs@ pins it against that row.
 module Harness
   ( -- * The locked entry points

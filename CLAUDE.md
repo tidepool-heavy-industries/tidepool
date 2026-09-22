@@ -26,7 +26,7 @@ and where to start. This file is the short form, with the mechanism index.
   the parent's view, a worktree the parent can execute in, timestamps as
   data, types that default. The model writes its own `collectArtifacts` in
   three lines if it wants one. We do not ship `collectArtifacts`. Helpers
-  belong in a project's `.shoal`, written by the model, or in skills as
+  belong in a project's `.exomonad`, written by the model, or in skills as
   worked examples.
 
 ## Workspace map
@@ -42,8 +42,8 @@ and where to start. This file is the short form, with the mechanism index.
 | `tidepool-protocol` | Source schema for effect and error definitions |
 | `tidepool-mcp` | MCP server library and generated Haskell effect surface |
 | `tidepool-handlers` | Concrete effect handlers |
-| `tidepool-agent` | Typed coding-agent backend boundary |
-| `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |
+| `exomonad-agent` | Typed coding-agent backend boundary |
+| `exomonad-worktree` | Managed coding checkouts, repository observation, and journal |
 | `tidepool` | Public facade and composition-root binaries |
 | `exomonad/harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
 
@@ -56,18 +56,18 @@ Small support crates have short local charters describing their exact scope.
 
 | Mechanism | Home |
 |---|---|
-| git subprocess invocation | `tidepool-worktree::git::GitCli` |
-| interactive actor process mount boundary | `tidepool-node::process_boundary` |
+| git subprocess invocation | `exomonad-worktree::git::GitCli` |
+| interactive actor process mount boundary | `exomonad-node::process_boundary` |
 | durable JSONL append/read | shared primitive in `tidepool-repr` |
-| durable single-consumer delivery queue and ack cursor | `tidepool-node::DurableInbox` |
+| durable single-consumer delivery queue and ack cursor | `exomonad-node::DurableInbox` |
 | config, cache, and project paths | `tidepool-toolchain::paths` |
 | extractor CLI, typed requests, daemon, and worker invocation | `tidepool-extract-cmd` |
 | compiled-artifact cache | `tidepool-toolchain::cache` |
 | toolchain fingerprint and deploy handshake | `tidepool-toolchain::toolchain` |
 | monotonic process-local identifiers | issuer in `tidepool-repr` |
-| provider-neutral conversation values and call seam | `tidepool-model` |
-| model-authored fenced-output parsing | `tidepool-model-output` |
-| actor identity, lifecycle, turns, and events | `tidepool-actor` |
+| provider-neutral conversation values and call seam | `exomonad-model` |
+| model-authored fenced-output parsing | `exomonad-model-output` |
+| actor identity, lifecycle, turns, and events | `exomonad-actor` |
 | Haskell turn-module templates | `tidepool-runtime::session::turn` |
 | resident Haskell workbench sequencing and source classification | `tidepool-runtime::session::workbench` |
 | durable-format migration ladders | `tidepool_repr::version_ladder` |
@@ -79,9 +79,9 @@ Small support crates have short local charters describing their exact scope.
 | field/laziness triviality policy | `tidepool-repr` |
 | authored Haskell concurrency | `Tidepool.Async` |
 | operator forms, gates, and steering | `OperatorGate::present_form` and `Tidepool.Form` |
-| agent spec discovery, reload, and the after-tool slot | `tidepool-actor::{agent_spec, reload_spec_tool, after_tool}` |
-| declared tool surface comparison | `tidepool-tool::surface` |
-| source layers: capture, typecheck, publication, drift | `tidepool::shoal::source` |
+| agent spec discovery, reload, and the after-tool slot | `exomonad-actor::{agent_spec, reload_spec_tool, after_tool}` |
+| declared tool surface comparison | `exomonad-tool::surface` |
+| source layers: capture, typecheck, publication, drift | `tidepool::exomonad::source` |
 | Jev operators | pinned `jev-dsl` flake input; never vendored |
 | effect and error definitions | `tidepool-protocol` and unmigrated definitions in `bridge/mcp/src/effect_defs.rs` |
 

@@ -7,7 +7,7 @@ module Project.Plan
   ) where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (GitOid)
 import Project.Types
 import Project.Work (projectPrompt, solTaskFrom)
@@ -25,7 +25,7 @@ component campaign part source = do
   group <- forkGroupLabel (componentName part)
   pure $ Task
     { taskGroup = batch campaign group
-    , planPath = ".shoal/plans/graph/" <> componentName part <> "/README.md"
+    , planPath = ".exomonad/plans/graph/" <> componentName part <> "/README.md"
     , taskSource = source
     , obligation = case part of
       RelationContract -> "Land the shared graph relation contract and incorporate the tagged design decision."
@@ -36,7 +36,7 @@ component campaign part source = do
       RelationProjection -> "Display edges must not fabricate authority or lose actors. One deterministic projection should serve all relation views."
       RelationControls -> "The operator needs to understand relationships while retaining the existing editor, selection and submission guarantees."
     , ownedPaths = case part of
-      RelationContract -> ["src/graph_wire.rs", "src/agents.rs: shared types and parent selection", "fixture constructors", ".shoal/plans/graph/contract"]
+      RelationContract -> ["src/graph_wire.rs", "src/agents.rs: shared types and parent selection", "fixture constructors", ".exomonad/plans/graph/contract"]
       RelationProjection -> ["src/agents.rs: graph projection and traversal", "focused pure graph tests"]
       RelationControls -> ["src/ui/agents.rs", "view state, inspector and canvas consumers", "UI and interaction tests", "README controls"]
     , acceptance = case part of
@@ -57,7 +57,7 @@ componentLeadFrom label source task = withEffort Medium $ withInstructions (proj
 
 relationDesign :: CampaignLabel -> DesignSlot
 relationDesign campaign = DesignSlot
-  { specialistPlan = ".shoal/plans/graph/contract/design.md"
+  { specialistPlan = ".exomonad/plans/graph/contract/design.md"
   , specialistGroup = batch campaign "relation-design"
   , specialistLabel = "forest-semantics"
   , specialistWatch = "relation-design-ready"

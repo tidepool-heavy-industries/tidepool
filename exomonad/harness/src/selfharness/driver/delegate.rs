@@ -72,14 +72,14 @@ impl SelfHarnessDriver {
     /// **This still serializes on [`Self::subagent`]'s ONE lock for the
     /// duration of whichever `SubagentReq` variant the caller issued** — a
     /// `SubagentSpawn`/`SubagentAwait` call holds `&mut SubagentHandler` (and
-    /// therefore this lock) for as long as `tidepool_agent::spawn::CoupledSpawner`
+    /// therefore this lock) for as long as `exomonad_agent::spawn::CoupledSpawner`
     /// takes to reach a terminal, because `CoupledSpawner::spawn_one_cycle`'s
     /// signature requires `&mut self` end to end even though its BODY only
     /// touches `&self.substrate` (an `Arc<Mutex<SpawnSubstrate>>` already
     /// documented as safe for N concurrent cycles — `exomonad/agent/CLAUDE.md`'s
     /// "Concurrency: a shared substrate, N detachable sagas"). Narrowing that
     /// signature to `&self` would let two `SubagentSpawn` calls genuinely run
-    /// concurrently through one handler instance, but `tidepool-agent`/
+    /// concurrently through one handler instance, but `exomonad-agent`/
     /// `tidepool-handlers` are outside this crate's ALLOWED PATHS, so this
     /// dispatch cannot do that itself — see the findings addendum this spec
     /// asked for. **Real overlap is still achieved for `spawnAgent`'s actual
@@ -124,7 +124,7 @@ impl SelfHarnessDriver {
             let reason =
                 "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
                  subagent handler is configured — wire one with \
-                 SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
+                 SelfHarnessDriver::set_subagent_handler (the exomonad-selfharness binary \
                  does this when TIDEPOOL_MEMORY_REPO is set)"
                     .to_string();
             gate.delegation_progress(&DelegationPhase::Failed {

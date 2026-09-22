@@ -180,7 +180,7 @@ Known continuations execute in typed actor handlers. The
 [review continuation](continuation.md) submits to an available retained reviewer,
 retains exact handles before admission, and receives the verdict in its mailbox.
 No model turn forwards the known next action; a candidate is still not acceptance.
-Load `shoal-define-actors` when defining a custom join or continuation.
+Load `exomonad-define-actors` when defining a custom join or continuation.
 
 ## Retire a wave deliberately
 

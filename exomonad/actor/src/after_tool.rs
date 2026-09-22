@@ -31,7 +31,7 @@ pub(crate) const AFTER_TOOL_WAIT: Duration = Duration::from_secs(300);
 /// The one thing that shortens the wait, and the only reason it exists: the
 /// timeout path has to be exercisable without a five-minute test. Nothing in a
 /// run sets it.
-pub const AFTER_TOOL_WAIT_ENV: &str = "TIDEPOOL_AFTER_TOOL_WAIT_MS";
+pub const AFTER_TOOL_WAIT_ENV: &str = "EXOMONAD_AFTER_TOOL_WAIT_MS";
 
 /// How long this result waits.
 pub(crate) fn wait() -> Duration {

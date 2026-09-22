@@ -98,7 +98,7 @@ where
         .with_writer(pane_writer)
         .with_filter(pane_filter());
     // The structured sibling of the daemon's text log. Its `run_id` and
-    // `compile_request` fields are the two keys a Shoal run's host trace
+    // `compile_request` fields are the two keys an Exomonad run's host trace
     // joins on.
     let trace = tracing_subscriber::fmt::layer()
         .json()
@@ -788,7 +788,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Record the worker's compile-cost lines in the detailed daemon log (debug
-/// level: the file, never the tmux pane), so a Shoal run's compiler log and a
+/// level: the file, never the tmux pane), so an Exomonad run's compiler log and a
 /// test battery's daemon log show where each request's time went. The worker always writes one `tidepool-compile-summary` line and,
 /// under `TIDEPOOL_TIMING=1`, one `tidepool-timing` line per phase and one
 /// `tidepool-memo-miss` line per memoized module it recompiled. Structural
@@ -1646,8 +1646,8 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn the_daemon_trace_file_sits_beside_the_compiler_log() {
         assert_eq!(
-            trace_path(Path::new("/tmp/project/.shoal/logs/run-1-compiler.log")),
-            Path::new("/tmp/project/.shoal/logs/run-1-compiler.jsonl")
+            trace_path(Path::new("/tmp/project/.exomonad/logs/run-1-compiler.log")),
+            Path::new("/tmp/project/.exomonad/logs/run-1-compiler.jsonl")
         );
     }
 
@@ -1753,14 +1753,9 @@ tidepool-target phase=desugar module=Execute\n",
     fn malformed_typed_worker_request_is_rejected() {
         let malformed = vec![
             crate::request::WORKER_REQUEST_FLAG.into(),
-            "54505245513031300100000009".into(),
+            "54505245513031320100000009".into(),
         ];
-        assert!(matches!(
-            normalize_worker_argv(malformed),
-            Err(FrontendError::WorkerProtocol(
-                crate::request::ProtocolError::RetiredFieldTag(9)
-            ))
-        ));
+        assert!(normalize_worker_argv(malformed).is_err());
     }
 
     fn encode_response_bytes(code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {

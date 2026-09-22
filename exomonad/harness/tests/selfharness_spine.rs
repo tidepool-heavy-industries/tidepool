@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
@@ -22,7 +22,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -31,7 +32,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {
@@ -84,7 +85,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
          confidence = Medium }) :: M ())\n```",
     )];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         support::unique_temp_log_path("selfharness-spine"),
         &header(),
     )

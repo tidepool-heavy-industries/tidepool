@@ -105,7 +105,7 @@ impl GitRef {
 }
 
 /// A branch name inside Tidepool's owned namespace (see
-/// [`crate::create::TIDEPOOL_BRANCH_PREFIX`]) or, for `from_ref`, whatever the
+/// [`crate::create::EXOMONAD_BRANCH_PREFIX`]) or, for `from_ref`, whatever the
 /// caller named. Stored without the `refs/heads/` prefix.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BranchName(String);

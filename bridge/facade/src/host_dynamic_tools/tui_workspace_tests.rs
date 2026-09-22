@@ -1,4 +1,4 @@
-//! Production Shoal/TUI/fork composition with a local scripted provider.
+//! Production Exomonad/TUI/fork composition with a local scripted provider.
 use super::*;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path, sync::Mutex as StdMutex, time::Duration};
@@ -8,22 +8,22 @@ struct Provider(Arc<StdMutex<BTreeMap<String, Vec<Value>>>>);
 
 fn workspace_config() -> String {
     let resources =
-        toml::to_string(&tidepool_node::command_resources::CommandResourcePolicy::default())
+        toml::to_string(&exomonad_node::command_resources::CommandResourcePolicy::default())
             .unwrap();
-    format!("[defaults]\nmodel=\"gpt-5.6-sol\"\neffort=\"low\"\n[resources]\n{resources}")
+    format!("[defaults]\nmodel=\"gpt-6-sol\"\neffort=\"low\"\n[resources]\n{resources}")
 }
 fn oom_allocation_bytes() -> u64 {
-    let policy = tidepool_node::command_resources::CommandResourcePolicy::default();
-    policy.swap_max_bytes + tidepool_node::command_resources::GIB
+    let policy = exomonad_node::command_resources::CommandResourcePolicy::default();
+    policy.swap_max_bytes + exomonad_node::command_resources::GIB
 }
 
 #[test]
-fn workspace_fixture_config_matches_shoal_schema() {
-    toml::from_str::<crate::shoal::ShoalConfig>(&workspace_config()).unwrap();
-    let policy = tidepool_node::command_resources::CommandResourcePolicy::default();
+fn workspace_fixture_config_matches_exomonad_schema() {
+    toml::from_str::<crate::exomonad::ExomonadConfig>(&workspace_config()).unwrap();
+    let policy = exomonad_node::command_resources::CommandResourcePolicy::default();
     assert!(
         oom_allocation_bytes()
-            > tidepool_node::command_resources::NATIVE_COMMAND_BYTES + policy.swap_max_bytes
+            > exomonad_node::command_resources::NATIVE_COMMAND_BYTES + policy.swap_max_bytes
     );
 }
 
@@ -122,7 +122,7 @@ async fn scripted(
             })
         }));
     }
-    let inherited = "test -r .shoal/config.toml; test ! -w .shoal/config.toml; test \"$(cat untracked)\" = untracked; test \"$(stat -c %y tracked)\" = \"$(cat source-mtime)\"; CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --offline --message-format=json > build-result; rg '\"fresh\":true' build-result";
+    let inherited = "test -r .exomonad/config.toml; test ! -w .exomonad/config.toml; test \"$(cat untracked)\" = untracked; test \"$(stat -c %y tracked)\" = \"$(cat source-mtime)\"; CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --offline --message-format=json > build-result; rg '\"fresh\":true' build-result";
     let mut item = if title {
         json!({"type":"message","role":"assistant","id":"title","content":[{"type":"output_text","text":"{\"title\":\"Workspace acceptance\"}"}]})
     } else {
@@ -221,7 +221,7 @@ impl Drop for Run {
             ) else {
                 continue;
             };
-            if let Ok((mut owner, _)) = tidepool_node::ProcessSupervisorRecovery::recover(
+            if let Ok((mut owner, _)) = exomonad_node::ProcessSupervisorRecovery::recover(
                 path.with_file_name("scope.sock"),
                 launch.into(),
                 secret.into(),
@@ -238,9 +238,9 @@ impl Drop for Run {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires packaged SHOAL_RESOURCE_HOST_BIN and matched native; local provider only"]
+#[ignore = "requires packaged EXOMONAD_RESOURCE_HOST_BIN and matched native; local provider only"]
 async fn production_tuis_fork_live_workspaces_recursively() {
-    let host = std::env::var_os("SHOAL_RESOURCE_HOST_BIN").expect("packaged test runner");
+    let host = std::env::var_os("EXOMONAD_RESOURCE_HOST_BIN").expect("packaged test runner");
     let temp = tempfile::tempdir().unwrap();
     let temp_root = temp.path().to_path_buf();
     eprintln!("workspace fixture: {}", temp_root.as_path().display());
@@ -249,7 +249,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
     let scratch = temp_root.as_path().join("tmp");
     for dir in [
         root.join("src"),
-        root.join(".shoal"),
+        root.join(".exomonad"),
         home.clone(),
         scratch.clone(),
     ] {
@@ -262,8 +262,12 @@ async fn production_tuis_fork_live_workspaces_recursively() {
     .unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(root.join("tracked"), "base").unwrap();
-    std::fs::write(root.join(".gitignore"), ".shoal/\ntarget/\nbuild-result\n").unwrap();
-    std::fs::write(root.join(".shoal/config.toml"), workspace_config()).unwrap();
+    std::fs::write(
+        root.join(".gitignore"),
+        ".exomonad/\ntarget/\nbuild-result\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".exomonad/config.toml"), workspace_config()).unwrap();
     for args in [
         vec!["init"],
         vec!["config", "user.email", "fixture@example.invalid"],
@@ -288,7 +292,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
         .with_state(provider.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     std::fs::write(home.join("config.toml"),format!("model_provider=\"fixture\"\napproval_policy=\"never\"\nsandbox_mode=\"danger-full-access\"\n[model_providers.fixture]\nname=\"Fixture\"\nbase_url=\"http://{address}/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nsupports_websockets=false\n")).unwrap();
-    let session = format!("shoal-workspace-test-{}", uuid::Uuid::new_v4().simple());
+    let session = format!("exomonad-workspace-test-{}", uuid::Uuid::new_v4().simple());
     let run = Run {
         temp: Some(temp),
         session: session.clone(),
@@ -304,7 +308,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
             &session,
             "--no-attach",
             "--model",
-            "gpt-5.6-sol",
+            "gpt-6-sol",
             "--effort",
             "low",
         ])
@@ -339,7 +343,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                 .unwrap();
             if let Some(pane) = String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .find(|line| line.contains("shoal-root"))
+                .find(|line| line.contains("exomonad-root"))
                 .and_then(|line| line.split_whitespace().next())
                 .map(str::to_owned)
             {
@@ -357,8 +361,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                 .output()
                 .await
                 .unwrap();
-            if String::from_utf8_lossy(&output.stdout)
-                .contains("gpt-5.6-sol low   /model to change")
+            if String::from_utf8_lossy(&output.stdout).contains("gpt-6-sol low   /model to change")
             {
                 break;
             }

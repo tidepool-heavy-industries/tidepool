@@ -27,7 +27,7 @@
 //!
 //! ## Rollback: settling, not deleting
 //!
-//! `tidepool-worktree` is retain-first (locked) — rollback here never undoes
+//! `exomonad-worktree` is retain-first (locked) — rollback here never undoes
 //! creation, only settles the binding:
 //!
 //! - failure after `Bound`, or [`CycleSaga::abandon`] (cancellation): settle
@@ -40,11 +40,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use tidepool_repr::MonotonicIdIssuer;
-use tidepool_worktree::{
+use exomonad_worktree::{
     sanitize_agent_label, ActiveBinding, AgentRef, BindingTable, BindingTerminal, WorktreeError,
     WorktreeHandle, WorktreeId, WorktreeManager, WorktreeSpec,
 };
+use tidepool_repr::MonotonicIdIssuer;
 
 use crate::backend::AgentBackend;
 use crate::seam::{
@@ -497,7 +497,7 @@ impl SpawnSubstrate {
             .bind(
                 worktree,
                 &AgentRef::from_raw(binding_ref.to_string()),
-                tidepool_worktree::storage::now_ms(),
+                exomonad_worktree::storage::now_ms(),
             )
             .map_err(|error| SpawnError::Binding {
                 stage: SpawnStage::Bound,

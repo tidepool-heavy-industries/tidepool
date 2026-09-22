@@ -34,16 +34,16 @@ use crate::support;
 use tidepool_handlers::{
     compose_journal_seq, load_journal, ConsoleHandler, JournalEntry, JournalLoadError,
 };
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, Role, StreamSink, TurnRequest, TurnResponse,
     Usage,
 };
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::FormShape;
-use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::operator::FormShape;
+use exomonad_harness::selfharness::persistence;
+use exomonad_harness::{
     acquire_lease, load_harness_source, retire_lease, typed_request_agent_decls, DriverError,
     Event, Harness, HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease,
     SelfHarnessDriver,
@@ -53,7 +53,8 @@ fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -62,7 +63,7 @@ fn prelude_dir() -> PathBuf {
 }
 
 fn examples_harness_dir() -> PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -130,7 +131,7 @@ fn fresh_driver_with_observer(
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-{log_tag}-{}.jsonl",
             std::process::id()
@@ -240,7 +241,7 @@ async fn restart_with_a_prior_checkpoint_gates_before_any_turn_work() {
         inner: inner_provider,
         order: order.clone(),
     });
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-gate-park-2-{}.jsonl",
             std::process::id()
@@ -419,7 +420,7 @@ async fn operator_steering_text_reaches_the_next_cycles_framing() {
         system_messages: Mutex::new(Vec::new()),
     });
     let provider: Arc<dyn DynModelProvider> = capture.clone();
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-operator-input-{}.jsonl",
             std::process::id()
@@ -488,7 +489,7 @@ async fn operator_steering_text_reaches_the_next_cycles_framing() {
 
 /// A gate that answers any `askUser @Decision` form immediately with a fixed
 /// decision — no note, no re-prompt, no `chooseMany` — so each cycle here
-/// mints exactly one [`AskId`](tidepool_harness::selfharness::observer::AskId).
+/// mints exactly one [`AskId`](exomonad_harness::selfharness::observer::AskId).
 struct AutoAnswerDecisionGate;
 
 impl OperatorGate for AutoAnswerDecisionGate {
@@ -821,7 +822,7 @@ fn compaction_driver(checkpoint_path: PathBuf) -> (SelfHarnessDriver, HarnessSou
     .expect("answerer engine config");
     agent_cfg.context_window_tokens = Some(1000);
     let log_id = NEXT_LOG_ID.fetch_add(1, Ordering::Relaxed);
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-compaction-{}-{log_id}.jsonl",
             std::process::id()
@@ -969,7 +970,7 @@ fn default_checkpoint_path_is_under_the_cache_dir() {
     let agent_cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![]));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-default-path-{}.jsonl",
             std::process::id()
@@ -1214,7 +1215,7 @@ fn fixture_driver(log_tag: &str) -> SelfHarnessDriver {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-persistence-{log_tag}-{}.jsonl",
             std::process::id()
@@ -1251,7 +1252,7 @@ fn keys(entries: &[JournalEntry]) -> Vec<&str> {
 /// wants "the whole run's journal", now that no single file holds it.
 fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry> {
     let mut entries = Vec::new();
-    for segment in tidepool_harness::list_segments(log_dir, run_id).expect("list segments") {
+    for segment in exomonad_harness::list_segments(log_dir, run_id).expect("list segments") {
         entries.extend(load_journal(&segment).expect("segment loads"));
     }
     entries
@@ -1454,7 +1455,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     assert_eq!(committed.generation().get(), 1);
 
     // --- normal completion retires; the boot after that MINTS ---------------
-    // What `tidepool-selfharness`'s `run_loop` return path does, and the other
+    // What `exomonad-selfharness`'s `run_loop` return path does, and the other
     // direction of the same mechanism: a crash skips this call, which is
     // precisely how the boot above knew to resume.
     let retired = retire_lease(&log_dir)

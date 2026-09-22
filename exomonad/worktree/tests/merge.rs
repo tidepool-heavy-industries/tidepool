@@ -2,10 +2,10 @@
 //! worktree-coordination merge primitive. Real temporary repositories, real
 //! `git worktree add`, no mock of git.
 
-use tidepool_worktree::git::inspect;
-use tidepool_worktree::merge::{try_merge, MergeOutcome};
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{BranchName, GitOid, WorktreeError};
+use exomonad_worktree::git::inspect;
+use exomonad_worktree::merge::{try_merge, MergeOutcome};
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{BranchName, GitOid, WorktreeError};
 
 /// Add a real linked worktree at `label`, on a fresh branch off `base`.
 fn add_worktree(repo: &TestRepo, branch: &str, base: &str) -> std::path::PathBuf {

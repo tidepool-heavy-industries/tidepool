@@ -43,10 +43,10 @@ real types, minimum usable semantics and early consumer wiring. Resolve what mus
 agree across the branches. Leave independent choices to their owners. Fork after
 that common ground is useful and before unrelated debugging fills its context.
 There is no need to create an empty scaffold commit when the source already fits.
-For a live-source fork, Shoal first checkpoints eligible source changes on that
+For a live-source fork, Exomonad first checkpoints eligible source changes on that
 checkout's current branch, including root `main`. It stages the same source set
 the child will inherit: tracked edits/deletions and eligible nonignored new files,
-excluding runtime `.shoal/`, configured source exclusions and recognized caches
+excluding runtime `.exomonad/`, configured source exclusions and recognized caches
 even when staged. The checkpoint skips hooks, builds and tests; a Git failure
 stops the fork with working files intact. An unchanged sibling reuses `HEAD`.
 Use authored commits with meaningful messages for useful plans, failing tests and

@@ -32,7 +32,7 @@ mkdir -p "$work_root/m3" "$work_root/freer-resume" "$work_root/freer-retention"
 
 # M3 is a projection contract, so its checked producer is the complete
 # projection test rather than a direct target extraction.
-( cd haskell && cabal test execution-schema-projection \
+( cd bridge/haskell && cabal test execution-schema-projection \
     --test-options="$work_root/m3/m3-vertical.cbor" \
     --test-show-details=direct )
 cp -- "$work_root/m3/m3-vertical.cbor" "$fixture_root/m3-vertical.cbor"
@@ -55,7 +55,7 @@ cp -- "$work_root/freer-retention/freerRequest.prepared.cbor" \
 cargo test --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd \
   --test import_fixtures -- --ignored --nocapture
 
-( cd haskell && cabal test execution-schema-encode \
+( cd bridge/haskell && cabal test execution-schema-encode \
     --test-option=--write-schema6-fixture \
     --test-option="$work_root/schema6-intrinsic.cbor" \
     --test-show-details=direct )

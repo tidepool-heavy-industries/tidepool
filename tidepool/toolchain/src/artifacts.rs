@@ -990,7 +990,8 @@ mod constructor_identity_tests {
     /// checked-in fixture is the only way to exercise `assemble` against a
     /// real prepared program without shelling out to GHC.
     fn prepared_fixture_bytes() -> Vec<u8> {
-        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor").to_vec()
+        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
+            .to_vec()
     }
 
     /// A table entry that agrees with `decl` on every fact this crate checks

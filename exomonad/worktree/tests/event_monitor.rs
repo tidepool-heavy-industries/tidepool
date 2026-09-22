@@ -13,8 +13,8 @@
 
 use std::path::PathBuf;
 
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{
     EventJournal, GitCli, HeadChangeKind, Observed, RepositoryEvent, WorktreeError, WorktreeId,
     WorktreeMonitor,
 };
@@ -37,7 +37,7 @@ fn wt(raw: &str) -> WorktreeId {
 
 fn head_changed(
     events: &[Observed<RepositoryEvent>],
-) -> Vec<&tidepool_worktree::HeadChangeReceipt> {
+) -> Vec<&exomonad_worktree::HeadChangeReceipt> {
     events
         .iter()
         .filter_map(|e| match &e.value {
@@ -47,7 +47,7 @@ fn head_changed(
         .collect()
 }
 
-fn commits(events: &[Observed<RepositoryEvent>]) -> Vec<&tidepool_worktree::CommitReceipt> {
+fn commits(events: &[Observed<RepositoryEvent>]) -> Vec<&exomonad_worktree::CommitReceipt> {
     events
         .iter()
         .filter_map(|e| match &e.value {

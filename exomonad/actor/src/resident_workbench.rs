@@ -384,7 +384,7 @@ impl ActorWorkbenchSource {
 /// One installed spec: the surface it declares, the retained value every call
 /// and every slot is an application of, and the identity of this install.
 pub(crate) struct ResidentWorkbenchTools {
-    pub(crate) declarations: Vec<tidepool_tool::HostedTool>,
+    pub(crate) declarations: Vec<exomonad_tool::HostedTool>,
     pub(crate) dispatch: Arc<RootCustody>,
     /// Which slots the installed record fills, by name, as the same compile
     /// declared them.
@@ -409,7 +409,7 @@ pub(crate) struct ResidentWorkbenchTools {
 /// What one `installSpec` publishes: the declared surface, and which slots the
 /// same compile filled.
 pub(crate) struct SpecInstallation {
-    pub(crate) tools: Vec<tidepool_tool::ToolDeclaration>,
+    pub(crate) tools: Vec<exomonad_tool::ToolDeclaration>,
     pub(crate) slots: Vec<String>,
 }
 
@@ -422,7 +422,7 @@ pub(crate) fn decode_installation(
     installation: serde_json::Value,
 ) -> Result<SpecInstallation, ResidentActorWorkbenchError> {
     let declarations = |value| {
-        serde_json::from_value::<Vec<tidepool_tool::ToolDeclaration>>(value).map_err(|error| {
+        serde_json::from_value::<Vec<exomonad_tool::ToolDeclaration>>(value).map_err(|error| {
             ResidentActorWorkbenchError::ActorProtocol(format!("tool declarations: {error}"))
         })
     };
@@ -1233,9 +1233,9 @@ fn visit_usage_observation(
 fn visit_usage_summary(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
-    summary: Option<&tidepool_model::ProviderUsageSummary>,
+    summary: Option<&exomonad_model::ProviderUsageSummary>,
 ) -> Result<(), BridgeError> {
-    use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope};
+    use exomonad_model::{ProviderUsageCompleteness, ProviderUsageScope};
     match summary {
         None => Option::<i64>::None.visit(table, visitor),
         Some(summary) => {
@@ -1374,24 +1374,24 @@ impl ToHaskell for AgentRosterProjection {
             }
             match self.runtime.provider_turn.as_ref().map(|t| &t.state) {
                 None => visit_core(table, visitor, "ProviderUnknown", |_| Ok(()))?,
-                Some(tidepool_model::ProviderTurnState::Active) => {
+                Some(exomonad_model::ProviderTurnState::Active) => {
                     visit_core(table, visitor, "ProviderActive", |_| Ok(()))?
                 }
-                Some(tidepool_model::ProviderTurnState::Succeeded) => {
+                Some(exomonad_model::ProviderTurnState::Succeeded) => {
                     visit_core(table, visitor, "ProviderSucceeded", |_| Ok(()))?
                 }
-                Some(tidepool_model::ProviderTurnState::Interrupted) => {
+                Some(exomonad_model::ProviderTurnState::Interrupted) => {
                     visit_core(table, visitor, "ProviderInterrupted", |_| Ok(()))?
                 }
-                Some(tidepool_model::ProviderTurnState::Failed(f)) => {
+                Some(exomonad_model::ProviderTurnState::Failed(f)) => {
                     visit_core(table, visitor, "ProviderFailed", |v| match f {
-                        tidepool_model::ProviderFailure::RequestRejected => {
+                        exomonad_model::ProviderFailure::RequestRejected => {
                             visit_core(table, v, "RequestRejected", |_| Ok(()))
                         }
-                        tidepool_model::ProviderFailure::TransportFailed => {
+                        exomonad_model::ProviderFailure::TransportFailed => {
                             visit_core(table, v, "TransportFailed", |_| Ok(()))
                         }
-                        tidepool_model::ProviderFailure::Other(d) => {
+                        exomonad_model::ProviderFailure::Other(d) => {
                             visit_core(table, v, "OtherProviderFailure", |v| d.visit(table, v))
                         }
                     })?
@@ -7493,9 +7493,9 @@ mod request_tests {
         include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
-            "qualified Tidepool.Actors.Shoal as Shoal",
+            "qualified Tidepool.Actors.Exomonad as Exomonad",
         );
-        let effects_alias = "'[Shoal.Notifications]";
+        let effects_alias = "'[Exomonad.Notifications]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
         let session_root = tempfile::tempdir().expect("session root");
         let lib = SessionLib::open(
@@ -7775,11 +7775,11 @@ mod request_tests {
             }
         }
 
-        let summary = tidepool_model::ProviderUsageSummary {
-            scope: tidepool_model::ProviderUsageScope::Thread("thread".into()),
-            completeness: tidepool_model::ProviderUsageCompleteness::Complete,
+        let summary = exomonad_model::ProviderUsageSummary {
+            scope: exomonad_model::ProviderUsageScope::Thread("thread".into()),
+            completeness: exomonad_model::ProviderUsageCompleteness::Complete,
             observations: 1,
-            usage: tidepool_model::TokenUsage {
+            usage: exomonad_model::TokenUsage {
                 input_tokens: 2,
                 cached_input_tokens: 3,
                 output_tokens: 0,
@@ -7800,7 +7800,7 @@ mod request_tests {
     fn usage_projection_emits_every_summary_field() {
         use tidepool_repr::{DataCon, DataConId};
 
-        struct UsageSummary(Option<tidepool_model::ProviderUsageSummary>);
+        struct UsageSummary(Option<exomonad_model::ProviderUsageSummary>);
         impl tidepool_bridge::sealed::ToHaskellSealed for UsageSummary {}
         impl ToHaskell for UsageSummary {
             fn visit(
@@ -7828,11 +7828,11 @@ mod request_tests {
                 type_name: String::new(),
             });
         }
-        let summary = tidepool_model::ProviderUsageSummary {
-            scope: tidepool_model::ProviderUsageScope::Thread("thread".into()),
-            completeness: tidepool_model::ProviderUsageCompleteness::Complete,
+        let summary = exomonad_model::ProviderUsageSummary {
+            scope: exomonad_model::ProviderUsageScope::Thread("thread".into()),
+            completeness: exomonad_model::ProviderUsageCompleteness::Complete,
             observations: 2,
-            usage: tidepool_model::TokenUsage {
+            usage: exomonad_model::TokenUsage {
                 input_tokens: 13,
                 cached_input_tokens: 5,
                 output_tokens: 3,
@@ -8016,7 +8016,7 @@ mod request_tests {
             }
         }
     }
-    /// The same-cell shape from a live Shoal session (2026-09-17): one cell
+    /// The same-cell shape from a live Exomonad session (2026-09-17): one cell
     /// that both RE-DECLARES a name and USES it from a bind statement in
     /// that SAME cell. `notebook_cells_on`'s per-statement `run` closure
     /// drives each text through `begin_fragment` as its own independent
@@ -8040,9 +8040,9 @@ mod request_tests {
         include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
-            "qualified Tidepool.Actors.Shoal as Shoal",
+            "qualified Tidepool.Actors.Exomonad as Exomonad",
         );
-        let effects_alias = "'[Shoal.Notifications]";
+        let effects_alias = "'[Exomonad.Notifications]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_243);
         let session_root = tempfile::tempdir().expect("session root");
         let lib = SessionLib::open(

@@ -1,4 +1,4 @@
-use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
+use exomonad_harness::selfharness::operator::{FormShape, OperatorGate};
 
 struct MinimalGate;
 

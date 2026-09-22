@@ -10,4 +10,4 @@ exact candidate revisions, permitted holes, and check evidence.
 As reviewer, inspect the exact candidate and drive authorized repairs with its
 implementer. As implementer, return a revised candidate or a precise decision
 need; never queue work back to a reviewer waiting for your reply. Load
-`shoal-review` for the project repair recipe.
+`exomonad-review` for the project repair recipe.

@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
+use exomonad_worktree::{AgentRef, BindingTable, WorktreeError, WorktreeId};
 use std::{fs, path::PathBuf, process::Command};
-use tidepool_worktree::{AgentRef, BindingTable, WorktreeError, WorktreeId};
 
 #[test]
 fn binding_fault_child() {

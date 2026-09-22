@@ -13,7 +13,7 @@ pub fn agent_launch() -> Effect {
         handler_module: "agent_launch",
         req_enum: "AgentLaunchReq",
         decl_fn: "agent_launch_decl",
-        description: &["Private fresh-agent launch substrate used by the Shoal facade."],
+        description: &["Private fresh-agent launch substrate used by the Exomonad facade."],
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],

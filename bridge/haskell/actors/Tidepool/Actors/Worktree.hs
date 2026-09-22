@@ -5,7 +5,7 @@
 --
 -- Rust delegates every request to the canonical Worktree handler; these
 -- constructors only make the intended authority boundary legible to GHC and
--- to the actor using the Shoal facade.
+-- to the actor using the Exomonad facade.
 module Tidepool.Actors.Worktree
   ( createWorktree
   , lookupWorktree

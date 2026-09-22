@@ -1,4 +1,4 @@
-//! Model-free checks of authored Shoal recipes. Installed only by `shoal check`.
+//! Model-free checks of authored Exomonad recipes. Installed only by `exomonad check`.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};

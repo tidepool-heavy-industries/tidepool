@@ -5,7 +5,7 @@
 pub fn worktree_integration_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "WorktreeIntegration",
-        description: "Granular Shoal capability delegated to the canonical Worktree handler.",
+        description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,
         constructors: &[
             "WorktreeIntegrationTryMerge :: MergeRequest -> WorktreeIntegration (Either WorktreeError MergeOutcome)",

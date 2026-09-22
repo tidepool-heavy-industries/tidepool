@@ -9,7 +9,7 @@ surface.
 
 The accepted next surface, cache-preserving context unfold, is implemented;
 its stable user contract is documented in
-[SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold). It supersedes
+[the Exomonad guide](../../exomonad/README.md#cache-preserving-context-unfold). It supersedes
 older interactive `forkActors` sketches while preserving the landed
 reply/watch contract described here.
 
@@ -80,7 +80,7 @@ decision.
 
 ## Active verification
 
-- `tidepool-actor` component tests cover exactly-once settlement, fan-in wake,
+- `exomonad-actor` component tests cover exactly-once settlement, fan-in wake,
   ready-before-registration, incarnation fencing, target/requester shutdown,
   and owner authorization.
 - The Haskell surface fixture proves persistent agents, `Replies`-only request
@@ -106,7 +106,7 @@ decision.
 - Replace the coarse public `Actor`/`Worktree` row with role-meaningful effects
   and one typed effective-policy projection.
 - Give new forked actors one validated hierarchical path projected into actor
-  labels, `shoal/<path>` Git branches, status, requests, watches, and receipts;
+  labels, `exomonad/<path>` Git branches, status, requests, watches, and receipts;
   opaque IDs remain authority keys rather than the swarm's visual vocabulary.
 - Attach authoritative per-request worktree changes to requester-side results,
   then land one persistent context-forked child before the heterogeneous
@@ -114,7 +114,7 @@ decision.
 - Implement atomic `Unfold`, distinct leaf-coding and recursive-scaffolding
   roles, shared descendant budgets, prompt-role projection, and provider cache
   observability in the gate order the context-unfold plan specified and which
-  landed; see [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold) for
+  landed; see [the Exomonad guide](../../exomonad/README.md#cache-preserving-context-unfold) for
   the shipped UX and contract.
 
 ### Supervisor policy
@@ -139,7 +139,7 @@ decision.
 
 ### Live dogfood
 
-- Run the two-request, one-persistent-worker canary in `shoal-console` using
+- Run the two-request, one-persistent-worker canary in `exomonad-console` using
   two result types and one applicative watch.
 - Verify ordinary response termination leaves root and child applications
   attached, request scopes survive a response without settlement, and queued

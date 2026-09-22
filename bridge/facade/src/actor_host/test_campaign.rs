@@ -9,7 +9,7 @@ use super::*;
 /// worktree admission refuses a dirty source repository. An installed workspace
 /// package therefore gets committed, not merely written.
 pub(super) fn commit_workspace(workspace: &std::path::Path) {
-    let git = tidepool_worktree::GitCli::new();
+    let git = exomonad_worktree::GitCli::new();
     git.try_run(workspace, &["add", "--all", "--", "."])
         .unwrap();
     git.try_run(
@@ -27,18 +27,18 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
 }
 
 pub(super) struct TestCampaign {
-    pub _repository: tidepool_worktree::testing::TestRepo,
+    pub _repository: exomonad_worktree::testing::TestRepo,
     pub _runtime: tempfile::TempDir,
     pub session_root: tempfile::TempDir,
     pub worktrees: WorktreeManager,
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
-    pub actor: tidepool_actor::LocalActorRef,
-    pub forest: Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
+    pub actor: exomonad_actor::LocalActorRef,
+    pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub hosted: tokio::task::JoinHandle<()>,
     pub deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
-    pub root_installation: tidepool_actor::LocalResidentInstallation,
+    pub root_installation: exomonad_actor::LocalResidentInstallation,
 }
 
 impl TestCampaign {
@@ -49,7 +49,7 @@ impl TestCampaign {
                     Some(LocalResidentDeployment::WatchChanged { notification })
                         if notification.owner == self.actor.identity()
                             && notification.transition
-                                == tidepool_actor::WatchTransition::Ready =>
+                                == exomonad_actor::WatchTransition::Ready =>
                     {
                         return;
                     }
@@ -63,24 +63,24 @@ impl TestCampaign {
     }
 
     pub async fn start() -> Self {
-        Self::start_with_research_policy(tidepool_actor::ResearchPolicy::default()).await
+        Self::start_with_research_policy(exomonad_actor::ResearchPolicy::default()).await
     }
 
     pub async fn start_with_research_policy(
-        research_policy: tidepool_actor::ResearchPolicy,
+        research_policy: exomonad_actor::ResearchPolicy,
     ) -> Self {
         Self::start_with_admission(research_policy, |admission| admission).await
     }
 
     pub async fn start_with_admission(
-        research_policy: tidepool_actor::ResearchPolicy,
+        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
     ) -> Self {
         Self::start_with_config(research_policy, transform, |_| {}).await
     }
 
     pub async fn start_with_config(
-        research_policy: tidepool_actor::ResearchPolicy,
+        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
@@ -90,14 +90,14 @@ impl TestCampaign {
     /// A campaign whose root can read its own conversation, so `reflect`
     /// returns the supplied turns instead of reporting the context unbound.
     pub async fn start_with_conversation(
-        research_policy: tidepool_actor::ResearchPolicy,
+        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
-        conversation: Option<tidepool_actor::ConversationReader>,
+        conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         install_trace_file();
-        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
             .commit_file("README.md", "source\n", "seed")
@@ -107,13 +107,13 @@ impl TestCampaign {
             systemd_slice: None,
             source_exclude: Vec::new(),
             command_resources: None,
-            shoal_executable: std::env::current_exe().unwrap(),
+            exomonad_executable: std::env::current_exe().unwrap(),
             workspace_inputs: None,
-            haskell_root: crate::haskell_sources::ensure_shoal_haskell().unwrap(),
+            haskell_root: crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
-            interactive_agent: tidepool_agent::native_interactive_agent_from_parts(
+            interactive_agent: exomonad_agent::native_interactive_agent_from_parts(
                 std::env::current_exe().unwrap(),
                 "test installation".into(),
             )
@@ -124,7 +124,7 @@ impl TestCampaign {
             research_policy,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
-            jev: Some(tidepool_actor::unconfigured_jev()),
+            jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
         let super::model_free::ModelFreeSession {
@@ -176,7 +176,7 @@ fn install_trace_file() {
         .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
     let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
-            "warn,tidepool=debug,tidepool_actor=debug,tidepool_runtime=debug",
+            "warn,tidepool=debug,exomonad_actor=debug,tidepool_runtime=debug",
         )
     });
     // A second campaign in the same process keeps the first subscriber.

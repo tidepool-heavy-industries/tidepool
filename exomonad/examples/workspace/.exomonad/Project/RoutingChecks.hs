@@ -120,7 +120,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = \"repair-produced-candidate\" :: Label"
   if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
   if failAfterAdmission then do
-    source <- readFile owner ".shoal/checks/review-continuation.hs"
+    source <- readFile owner ".exomonad/checks/review-continuation.hs"
     let withoutStart = fst (Text.breakOn "reviewBox <-" source)
         definition = "let reviewBoxDefinition" <> snd (Text.breakOn " = coordinationActor" withoutStart)
         faulty = Text.replace "let reviewBoxDefinition" "let failingDefinition"

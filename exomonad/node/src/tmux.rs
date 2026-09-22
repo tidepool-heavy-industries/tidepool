@@ -631,10 +631,10 @@ mod tests {
         let launch = TmuxLaunch {
             window_name: "🤖 actor.1".into(),
             cwd: PathBuf::from("/tmp/work tree"),
-            program: "/tmp/tidepool node".into(),
+            program: "/tmp/exomonad node".into(),
             args: vec!["host".into(), "apostrophe's".into()],
             environment: BTreeMap::from([
-                ("TIDEPOOL_ACTOR".into(), "1:2 with spaces".into()),
+                ("EXOMONAD_ACTOR".into(), "1:2 with spaces".into()),
                 ("TOKEN".into(), "not shell-expanded: $HOME".into()),
             ]),
             unset_environment: BTreeSet::from(["STALE_TOOL".into()]),
@@ -650,13 +650,13 @@ mod tests {
         assert_eq!(&args[..2], ["-L", "sock"]);
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["-e", "TIDEPOOL_ACTOR=1:2 with spaces"]));
+            .any(|pair| pair == ["-e", "EXOMONAD_ACTOR=1:2 with spaces"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-e", "TOKEN=not shell-expanded: $HOME"]));
         assert_eq!(
             args.last().unwrap(),
-            "'env' '-u' 'STALE_TOOL' '--' '/tmp/tidepool node' 'host' 'apostrophe'\\''s'"
+            "'env' '-u' 'STALE_TOOL' '--' '/tmp/exomonad node' 'host' 'apostrophe'\\''s'"
         );
     }
 
@@ -712,8 +712,10 @@ mod tests {
     #[test]
     fn session_names_are_exact_validated_targets() {
         assert_eq!(
-            TmuxSessionName::parse("shoal-tidepool_2").unwrap().as_str(),
-            "shoal-tidepool_2"
+            TmuxSessionName::parse("exomonad-tidepool_2")
+                .unwrap()
+                .as_str(),
+            "exomonad-tidepool_2"
         );
         for invalid in ["", "has:target", "has.dot", "has space", "🐟"] {
             assert!(TmuxSessionName::parse(invalid).is_err(), "{invalid:?}");
@@ -724,13 +726,13 @@ mod tests {
     async fn dedicated_socket_session_has_exact_create_and_kill_lifecycle() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let session = TmuxSession::with_socket(
-            format!("shoal_test_{}", &suffix[..8]),
-            format!("shoal-test-{}", &suffix[..8]),
+            format!("exomonad_test_{}", &suffix[..8]),
+            format!("exomonad-test-{}", &suffix[..8]),
         )
         .unwrap();
         let neighbor = TmuxSession::with_socket(
-            format!("shoal_neighbor_{}", &suffix[..8]),
-            format!("shoal-test-{}", &suffix[..8]),
+            format!("exomonad_neighbor_{}", &suffix[..8]),
+            format!("exomonad-test-{}", &suffix[..8]),
         )
         .unwrap();
         let launch = TmuxLaunch {

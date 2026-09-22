@@ -2,7 +2,7 @@ use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
 use super::{command_jobs_tests::backend_request, command_jobs_tests::TestCommands};
-use tidepool_actor::{JevBackend, JevCallFailure};
+use exomonad_actor::{JevBackend, JevCallFailure};
 
 /// Answers every request with one choice answer and records the requests.
 struct FakeJev {
@@ -146,10 +146,10 @@ impl JevBackend for LookupScoreJev {
 
 fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/shoal-workspace")
+        .join("../../exomonad/examples/workspace")
         .canonicalize()
         .unwrap();
-    let authored = config.workspace.join(".shoal");
+    let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("LookupFixture.hs"),
@@ -158,14 +158,14 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
     .unwrap();
     std::fs::write(authored.join("config.toml"), format!(
         "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['.', '{}']\nmodules = ['LookupFixture', 'Project.Lookup']\nspec = 'AgentSpec.agentSpec'\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
-        package.join(".shoal").display()
+        package.join(".exomonad").display()
     )).unwrap();
     for name in ["flake.nix", "flake.lock"] {
         std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
     }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
             .expect("resolve lookup template and fixture"),
     );
 }
@@ -173,7 +173,7 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
 #[test]
 fn lookup_tool_policy_matches_native_ghc_oracle() {
     let library = crate::haskell_sources::ensure_embedded_stdlib().unwrap();
-    let effects = tidepool_mcp::ensure_effects_module(&shoal_effect_declarations()).unwrap();
+    let effects = tidepool_mcp::ensure_effects_module(&exomonad_effect_declarations()).unwrap();
     let mut command = std::process::Command::new("runghc");
     for path in effects.include_paths() {
         command.arg(format!("-i{}", path.display()));
@@ -204,10 +204,10 @@ async fn lookup_campaign() -> (TestCampaign, Arc<LookupScoreJev>) {
         score: Mutex::new(3),
     });
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
             lookup_enrichment_workspace(config);
         },
     )
@@ -360,16 +360,16 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
 /// what a project gets — including the pin.
 pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/shoal-workspace")
+        .join("../../exomonad/examples/workspace")
         .canonicalize()
-        .expect("the Shoal workspace package this repository ships");
-    let authored = config.workspace.join(".shoal");
+        .expect("the Exomonad workspace package this repository ships");
+    let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("config.toml"),
         format!(
             "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['{}']\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".shoal").display()
+            package.join(".exomonad").display()
         ),
     )
     .unwrap();
@@ -378,14 +378,14 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
     }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
             .expect("resolve the pinned Haskell source"),
     );
 }
 
 async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(backend);
@@ -397,10 +397,10 @@ async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
 
 fn selected_shell_workspace(config: &mut ActorHostConfig) {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/shoal-workspace")
+        .join("../../exomonad/examples/workspace")
         .canonicalize()
         .expect("the shipped workspace template");
-    let authored = config.workspace.join(".shoal");
+    let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("config.toml"),
@@ -410,7 +410,7 @@ fn selected_shell_workspace(config: &mut ActorHostConfig) {
              modules = ['Project.Shell']\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".shoal").display()
+            package.join(".exomonad").display()
         ),
     )
     .unwrap();
@@ -419,7 +419,7 @@ fn selected_shell_workspace(config: &mut ActorHostConfig) {
     }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
             .expect("resolve the selected-shell template"),
     );
 }
@@ -430,10 +430,10 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
             selected_shell_workspace(config);
         },
     )
@@ -700,7 +700,7 @@ async fn live_jev_from_a_haskell_cell() {
         "TYPESAFE_API_KEY is not set"
     );
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = None;
@@ -843,7 +843,7 @@ noted call result
 
 /// A workspace that combines `pinned_jev_workspace`'s pinned Jev facade with
 /// an authored `Project/Tools.hs` + `AgentSpec.hs`: two source roots at once
-/// (this workspace's own `.shoal`, and the pinned package's), so a module
+/// (this workspace's own `.exomonad`, and the pinned package's), so a module
 /// under either root can `import qualified Jev.Operators as J` itself.
 fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     // Everything `pinned_jev_workspace` does, inlined rather than called: that
@@ -852,10 +852,10 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     // a SECOND call here the stale pre-authored selection instead of
     // re-reading the config and files written below. One workspace, one load.
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/shoal-workspace")
+        .join("../../exomonad/examples/workspace")
         .canonicalize()
-        .expect("the Shoal workspace package this repository ships");
-    let authored = config.workspace.join(".shoal");
+        .expect("the Exomonad workspace package this repository ships");
+    let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(
         authored.join("config.toml"),
@@ -866,7 +866,7 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
              tools = 'Project.Tools.tools'\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".shoal").display()
+            package.join(".exomonad").display()
         ),
     )
     .unwrap();
@@ -883,18 +883,18 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
             .expect("resolve the combined pinned + authored Haskell source"),
     );
 }
 
-async fn probe_topic(policy: &dyn tidepool_actor::ResidentToolEndpoint, topic: &str) -> String {
+async fn probe_topic(policy: &dyn exomonad_actor::ResidentToolEndpoint, topic: &str) -> String {
     dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": topic}))
         .await
         .to_string()
 }
 
-async fn detailed_status(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
+async fn detailed_status(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
     dispatch_structured_tool(policy, "status", serde_json::json!({"view": "detailed"}))
         .await
         .to_string()
@@ -927,10 +927,10 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
     let campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-            tidepool_actor::ResearchPolicy::default(),
+            exomonad_actor::ResearchPolicy::default(),
             |admission| admission,
             |config| {
-                config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+                config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_jev_agent_spec_workspace(config);
             },
         ),
@@ -987,7 +987,7 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
 
 // ---------------------------------------------------------------------------
 // A parent's watchdog: `Project.Watchdog` (the shipped worked example, read
-// verbatim from this repository's own `exomonad/examples/workspace/.shoal`,
+// verbatim from this repository's own `exomonad/examples/workspace/.exomonad`,
 // exactly as `Jev.Operators` is) asks one packet of heuristics about a
 // child's finished tool call. A tripped `Nudge` writes advice straight onto
 // the child's own result and sends nothing; a tripped `Escalate` sends the
@@ -1094,16 +1094,16 @@ monitorsFor path
   | otherwise = []
 "#;
 
-/// The shipped package's own `.shoal` (which carries `Jev/Operators.hs` AND
+/// The shipped package's own `.exomonad` (which carries `Jev/Operators.hs` AND
 /// `Project/Watchdog.hs`, the worked example this test exercises verbatim) as
 /// a second source root, beside a per-test `AgentSpec.hs` and `Project/Tools.hs`
 /// that install `Watchdog.watchBy` as the after-tool slot.
 fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/shoal-workspace")
+        .join("../../exomonad/examples/workspace")
         .canonicalize()
-        .expect("the Shoal workspace package this repository ships");
-    let authored = config.workspace.join(".shoal");
+        .expect("the Exomonad workspace package this repository ships");
+    let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(
         authored.join("config.toml"),
@@ -1114,7 +1114,7 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
              tools = 'Project.Tools.tools'\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".shoal").display()
+            package.join(".exomonad").display()
         ),
     )
     .unwrap();
@@ -1127,7 +1127,7 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
             .expect("resolve the combined pinned + authored Haskell source"),
     );
 }
@@ -1145,7 +1145,7 @@ fn watchdog_child_script(label: &str) -> String {
 /// module. Same wait-for-admission loop.
 async fn next_watchdog_child(
     campaign: &mut TestCampaign,
-) -> tidepool_actor::LocalResidentInstallation {
+) -> exomonad_actor::LocalResidentInstallation {
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
@@ -1168,7 +1168,7 @@ async fn next_watchdog_child(
     .expect("child admission")
 }
 
-async fn watchdog_probe(policy: &dyn tidepool_actor::ResidentToolEndpoint, topic: &str) -> String {
+async fn watchdog_probe(policy: &dyn exomonad_actor::ResidentToolEndpoint, topic: &str) -> String {
     dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": topic}))
         .await
         .to_string()
@@ -1184,7 +1184,7 @@ async fn watchdog_probe(policy: &dyn tidepool_actor::ResidentToolEndpoint, topic
 async fn next_notification_send(
     campaign: &mut TestCampaign,
     budget: Duration,
-) -> Result<Arc<tidepool_actor::NotificationSend>, String> {
+) -> Result<Arc<exomonad_actor::NotificationSend>, String> {
     let deadline = tokio::time::Instant::now() + budget;
     let mut last_other = None;
     loop {
@@ -1261,10 +1261,10 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     let mut campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-            tidepool_actor::ResearchPolicy::default(),
+            exomonad_actor::ResearchPolicy::default(),
             |admission| admission,
             |config| {
-                config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+                config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_watchdog_workspace(config);
             },
         ),

@@ -3378,7 +3378,9 @@ mod tests {
             },
         };
         let prepared = parse_program(
-            include_bytes!("../../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor"),
+            include_bytes!(
+                "../../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor"
+            ),
             &requirements,
             DecodeLimits::default(),
         )

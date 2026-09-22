@@ -1,11 +1,11 @@
-# tidepool-agent — coding-agent backend boundary
+# exomonad-agent — coding-agent backend boundary
 
 **Charter.** Belongs: typed headless subagent spawning, long-lived interactive
 agent process integration, backend adapters, the cycle saga, and model-policy
 allowlists. The ONLY crate that knows a coding backend exists. Does NOT belong:
 actor lifecycle, durable actor inboxes, resident tool policy, the `Subagent` effect
 handler wiring (`tidepool-handlers`), or worktree creation itself
-(`tidepool-worktree`).
+(`exomonad-worktree`).
 
 The ONLY crate in the workspace that knows a coding backend exists. See the
 repo-root `CLAUDE.md` for the project map and `bridge/handlers/CLAUDE.md`
@@ -192,13 +192,14 @@ otherwise, naming what was available.
 
 | policy | allowlist |
 |---|---|
-| `CheapPlumbing` | `gpt-5.4-mini`, then `gpt-5.6-luna` |
-| `CheapestGpt56` | `gpt-5.6-luna` — and nothing else |
+| `CheapPlumbing` | `gpt-6-luna` |
+| `CheapestLuna` | `gpt-6-luna` — and nothing else |
+| `StrongestWorker` | `gpt-6-sol`, then `gpt-6-luna` |
 
 A banned model is unreachable **by construction**, not by a skip-branch a
-future slug could slip past. `CheapestGpt56` exists because a budget grant
-named that exact tier: `CheapPlumbing` would have resolved to the cheaper
-`gpt-5.4-mini`, and **cheaper is not the same as granted**.
+future slug could slip past. `CheapestLuna` remains a distinct policy because
+its exact-model budget grant is a separate contract from the general plumbing
+role, even while both currently resolve to Luna.
 
 `ReasoningEffort` is a separate axis (which engine vs. how much of it) and is
 a CLOSED enum on the seam even though the wire type is an open string newtype —
@@ -222,7 +223,7 @@ belongs in is not a matter of taste:
   `turn/completed` projection, usage capture. Fast tier, no process, no tokens.
   A recording is evidence; a hand-written imitation is drift waiting to happen.
 - **Live** — never in a suite. `bridge/handlers/examples/live_tool_loop.rs`,
-  double-gated on a credential and `TIDEPOOL_AGENT_LIVE=1`, run by hand.
+  double-gated on a credential and `EXOMONAD_AGENT_LIVE=1`, run by hand.
 
 The three `#[ignore]`d live tests in `backend::codex::process` keep their
 attributes forever.

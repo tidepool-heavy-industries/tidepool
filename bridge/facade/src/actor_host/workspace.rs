@@ -3,12 +3,12 @@
 use super::overlay_resource::{source_inventory, source_manifest, SourceManifest, SourceStamp};
 use super::workspace_publication::WorkspacePublication;
 use super::*;
+use exomonad_node::MountNamespace;
+use exomonad_worktree::{PreparedSourceWorktree, WorktreeSource};
 use std::ffi::OsString;
 use std::io;
 use tidepool_bridge_effects::WtWorktreeHandle;
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
-use tidepool_node::MountNamespace;
-use tidepool_worktree::{PreparedSourceWorktree, WorktreeSource};
 use workspace_publication::Admission;
 
 pub(super) struct AdmittedWorkspace {
@@ -69,7 +69,7 @@ pub(super) struct PreparedWorkspace {
     activation: Mutex<Activation>,
     pub(super) host_path: PathBuf,
     pub(super) worktree: Option<WorktreeId>,
-    pub(super) view: tidepool_node::MountNamespace,
+    pub(super) view: exomonad_node::MountNamespace,
     pub(super) source: Option<SharedOverlayResource>,
     pub(super) build: Option<SharedOverlayResource>,
     source_preserved_mounts: Vec<PathBuf>,
@@ -79,7 +79,7 @@ pub(super) struct PreparedWorkspace {
 
 pub(super) struct ActiveWorkspace {
     prepared: Arc<PreparedWorkspace>,
-    pub(super) view: tidepool_node::MountNamespace,
+    pub(super) view: exomonad_node::MountNamespace,
 }
 
 impl std::ops::Deref for ActiveWorkspace {
@@ -131,7 +131,7 @@ impl PreparedWorkspace {
     pub(super) fn activate(
         self: Arc<Self>,
         worktrees: &WorktreeManager,
-        view: tidepool_node::MountNamespace,
+        view: exomonad_node::MountNamespace,
     ) -> io::Result<Arc<ActiveWorkspace>> {
         let mut activation = self.activation.lock();
         if !matches!(*activation, Activation::Prepared) {
@@ -146,12 +146,12 @@ impl PreparedWorkspace {
                 .map_err(io::Error::other)?;
         } else {
             let git = worktrees.git();
-            let expected = tidepool_worktree::git::inspect::git_dir(
+            let expected = exomonad_worktree::git::inspect::git_dir(
                 &git.with_mount_namespace(self.view.clone()),
                 Path::new(ACTOR_PROJECT_ROOT),
             )
             .map_err(io::Error::other)?;
-            let observed = tidepool_worktree::git::inspect::git_dir(
+            let observed = exomonad_worktree::git::inspect::git_dir(
                 &git.with_mount_namespace(view.clone()),
                 Path::new(ACTOR_PROJECT_ROOT),
             )
@@ -212,7 +212,10 @@ impl WorkspaceLayout {
         let (base, snapshot) = source.imported_base()?;
         let copied = match source_manifest(
             base,
-            &[std::ffi::OsStr::new(".git"), std::ffi::OsStr::new(".shoal")],
+            &[
+                std::ffi::OsStr::new(".git"),
+                std::ffi::OsStr::new(".exomonad"),
+            ],
         ) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -243,10 +246,10 @@ impl WorkspaceLayout {
         source: &Path,
         files: &Path,
     ) -> io::Result<Vec<std::ffi::OsString>> {
-        let mut excluded = vec![".git".into(), ".shoal".into()];
+        let mut excluded = vec![".git".into(), ".exomonad".into()];
         let git = self.worktrees.git();
         for name in &self.source_exclude {
-            if crate::shoal::source_directory_has_tracked(git, source, name)? {
+            if crate::exomonad::source_directory_has_tracked(git, source, name)? {
                 return Err(io::Error::other(format!(
                     "configured source exclusion {name:?} contains tracked files"
                 )));
@@ -268,7 +271,7 @@ impl WorkspaceLayout {
             let Some(name_text) = name.to_str() else {
                 continue;
             };
-            if !crate::shoal::source_directory_has_tracked(git, source, name_text)? {
+            if !crate::exomonad::source_directory_has_tracked(git, source, name_text)? {
                 excluded.push(name);
             }
         }
@@ -292,17 +295,17 @@ impl WorkspaceLayout {
         worktree: Option<WorktreeId>,
         key: &str,
         root: bool,
-        policy: tidepool_actor::ForkWorkspacePolicy,
+        policy: exomonad_actor::ForkWorkspacePolicy,
         mut source: Option<OverlayResourceLease>,
         inherited_build: Option<OverlaySnapshot>,
     ) -> io::Result<Arc<PreparedWorkspace>> {
         let visible = PathBuf::from(ACTOR_PROJECT_ROOT);
         self.worktrees
             .git()
-            .ensure_shoal_local_exclude(&host_path)
+            .ensure_exomonad_local_exclude(&host_path)
             .map_err(io::Error::other)?;
         let common =
-            tidepool_worktree::git::inspect::git_common_dir(self.worktrees.git(), &host_path)
+            exomonad_worktree::git::inspect::git_common_dir(self.worktrees.git(), &host_path)
                 .map_err(io::Error::other)?;
         // Distinct from the managed root below, which stays read-only: only the
         // worktrees the ROOT allocated for itself are writable to it.
@@ -343,12 +346,12 @@ impl WorkspaceLayout {
                 .with_read_only_overlay(host_path.join(".git"), visible.join(".git"))
                 .map_err(io::Error::other)?;
         }
-        let canonical = self.source_root.join(".shoal");
+        let canonical = self.source_root.join(".exomonad");
         if canonical.is_dir() {
             boundary = if root {
-                boundary.with_writable_overlay(&canonical, visible.join(".shoal"))
+                boundary.with_writable_overlay(&canonical, visible.join(".exomonad"))
             } else {
-                boundary.with_read_only_overlay(&canonical, visible.join(".shoal"))
+                boundary.with_read_only_overlay(&canonical, visible.join(".exomonad"))
             }
             .map_err(io::Error::other)?;
         }
@@ -370,7 +373,7 @@ impl WorkspaceLayout {
                 .map_err(io::Error::other)?;
             Some(build)
         };
-        if !root && policy.workspace != tidepool_actor::WorkspaceAccess::WritableBound {
+        if !root && policy.workspace != exomonad_actor::WorkspaceAccess::WritableBound {
             boundary = boundary.with_read_only_project();
         }
         // The short bootstrap may acquire mounts even if its receipt is lost.
@@ -401,7 +404,7 @@ impl WorkspaceLayout {
             source: source.map(SharedOverlayResource::new),
             build: build.map(SharedOverlayResource::new),
             source_preserved_mounts,
-            owns_source: root || policy.workspace == tidepool_actor::WorkspaceAccess::WritableBound,
+            owns_source: root || policy.workspace == exomonad_actor::WorkspaceAccess::WritableBound,
             publication: Arc::new(tokio::sync::Mutex::new(WorkspacePublication::default())),
         }))
     }
@@ -412,7 +415,7 @@ impl NativeForkAdmission {
         &self,
         creator: ActorRef,
         authorized: AuthorizedForkWorkspace,
-        policy: tidepool_actor::ForkWorkspacePolicy,
+        policy: exomonad_actor::ForkWorkspacePolicy,
     ) -> io::Result<AdmittedWorkspace> {
         let layout = self
             .layout
@@ -590,7 +593,7 @@ impl NativeForkAdmission {
                 .await?;
             let captured = captured??;
             let build = if source_owner == creator
-                && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly
+                && policy.native_tools != exomonad_actor::NativeToolClass::InspectionOnly
             {
                 parent
                     .workspace
@@ -665,7 +668,7 @@ impl WorkspaceLayout {
     fn capture(
         &self,
         authorized: &AuthorizedForkWorkspace,
-        namespace: &tidepool_node::MountNamespace,
+        namespace: &exomonad_node::MountNamespace,
         source_path: &Path,
         preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
@@ -696,15 +699,15 @@ impl WorkspaceLayout {
                     Path::new(ACTOR_PROJECT_ROOT),
                     preserved,
                 )? {
-                    tidepool_node::OverlayRotationOutcome::Rotated => {
+                    exomonad_node::OverlayRotationOutcome::Rotated => {
                         Ok(parent_source.latest_snapshot().ok_or_else(|| {
                             io::Error::other("source rotation published no generation")
                         })?)
                     }
-                    tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) => {
+                    exomonad_node::OverlayRotationOutcome::Unconfirmed(detail) => {
                         return Err(io::Error::other(detail))
                     }
-                    tidepool_node::OverlayRotationOutcome::Busy => Err(SourceFallback::Busy),
+                    exomonad_node::OverlayRotationOutcome::Busy => Err(SourceFallback::Busy),
                     outcome => Err(SourceFallback::Unavailable(format!("{outcome:?}"))),
                 },
             };
@@ -766,7 +769,7 @@ impl WorkspaceLayout {
                     &[],
                 )?;
                 tracing::info!(?outcome, "workspace build snapshot publication");
-                if let tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
+                if let exomonad_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
                     return Err(io::Error::other(detail));
                 }
             }
@@ -781,7 +784,7 @@ impl WorkspaceLayout {
     fn prepare_captured(
         &self,
         captured: CapturedSource,
-        policy: tidepool_actor::ForkWorkspacePolicy,
+        policy: exomonad_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
         donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
@@ -837,7 +840,7 @@ impl WorkspaceLayout {
     fn prepare_committed(
         &self,
         authorized: AuthorizedForkWorkspace,
-        policy: tidepool_actor::ForkWorkspacePolicy,
+        policy: exomonad_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
         fallback: Option<SourceFallback>,
         donor: Option<MountNamespace>,
@@ -875,7 +878,7 @@ impl WorkspaceLayout {
 
     fn restore_fallback_mtimes(
         &self,
-        handle: &tidepool_worktree::WorktreeHandle,
+        handle: &exomonad_worktree::WorktreeHandle,
         donor: Option<&MountNamespace>,
     ) {
         if let Some(donor) = donor {

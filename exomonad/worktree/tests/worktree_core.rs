@@ -2,20 +2,20 @@
 //! restart lookup, and the one-worktree-one-agent binding state machine.
 //!
 //! Every test drives a REAL temporary git repository via
-//! [`tidepool_worktree::testing::TestRepo`] and [`ScriptedWriter`]. There is
+//! [`exomonad_worktree::testing::TestRepo`] and [`ScriptedWriter`]. There is
 //! no mock of git anywhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tidepool_repr::ActorPath;
-use tidepool_worktree::git::inspect;
-use tidepool_worktree::testing::{fingerprint, TestRepo};
-use tidepool_worktree::{
+use exomonad_worktree::git::inspect;
+use exomonad_worktree::testing::{fingerprint, TestRepo};
+use exomonad_worktree::{
     AgentRef, BindingTable, BranchName, DirtySummary, GitCli, GitOid, GitRef, InProgressKind,
     WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
     WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
+use tidepool_repr::ActorPath;
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
     let registry = WorktreeRegistry::open(base.join("registry")).expect("open registry");
@@ -82,7 +82,7 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
 
     assert_untouched(&before, &after);
 
-    assert!(handle.branch().as_str().starts_with("tidepool/worktree/"));
+    assert!(handle.branch().as_str().starts_with("exomonad/worktree/"));
     assert_eq!(handle.source_head().as_str(), before.head);
     assert!(handle.cwd().exists());
     assert!(!handle.cwd().starts_with(repo.path()));
@@ -173,11 +173,11 @@ fn actor_and_descendant_branches_coexist_in_git_namespace() {
 
     assert_eq!(
         parent.branch().as_str(),
-        "shoal/campaign/runtime/branches/scaffold"
+        "exomonad/campaign/runtime/branches/scaffold"
     );
     assert_eq!(
         child.branch().as_str(),
-        "shoal/campaign/runtime/scaffold/leaves/branches/parser"
+        "exomonad/campaign/runtime/scaffold/leaves/branches/parser"
     );
 }
 
@@ -474,7 +474,7 @@ fn provisional_row_with_no_directory_is_visible_not_recreated() {
     let receipt = WorktreeReceipt {
         worktree_id: id.clone(),
         cwd: cwd.clone(),
-        branch: BranchName::from_raw(format!("tidepool/worktree/provisional-{}", id.as_str())),
+        branch: BranchName::from_raw(format!("exomonad/worktree/provisional-{}", id.as_str())),
         source_head: GitOid::from_raw("f".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -724,7 +724,7 @@ fn registry_open_refuses_a_root_inside_a_working_tree() {
 /// owner frees the root.
 #[test]
 fn binding_table_refuses_a_second_live_owner_over_one_root() {
-    use tidepool_worktree::BindingTable;
+    use exomonad_worktree::BindingTable;
     let base = tempfile::TempDir::new().expect("tempdir");
     let root = base.path().join("bindings");
 
@@ -741,8 +741,8 @@ fn binding_table_refuses_a_second_live_owner_over_one_root() {
 
 #[test]
 fn binding_table_waits_for_release_without_stealing_live_ownership() {
+    use exomonad_worktree::BindingTable;
     use std::time::Duration;
-    use tidepool_worktree::BindingTable;
     let base = tempfile::TempDir::new().unwrap();
     let root = base.path().join("bindings");
     let first = BindingTable::open(&root).unwrap();

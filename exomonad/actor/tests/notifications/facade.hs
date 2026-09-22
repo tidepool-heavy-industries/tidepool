@@ -1,5 +1,5 @@
-let sendOne :: Shoal.AgentRef -> Eff '[Shoal.Notifications] (Either Shoal.NotificationError Shoal.NotificationReceipt)
-    sendOne target = Shoal.sendMessage target "notice"
-    observeOne :: Shoal.NotificationReceipt -> Eff '[Shoal.Notifications] (Either Shoal.NotificationError Shoal.NotificationState)
-    observeOne = Shoal.pollNotification
+let sendOne :: Exomonad.AgentRef -> Eff '[Exomonad.Notifications] (Either Exomonad.NotificationError Exomonad.NotificationReceipt)
+    sendOne target = Exomonad.sendMessage target "notice"
+    observeOne :: Exomonad.NotificationReceipt -> Eff '[Exomonad.Notifications] (Either Exomonad.NotificationError Exomonad.NotificationState)
+    observeOne = Exomonad.pollNotification
 in pure (sendOne, observeOne)

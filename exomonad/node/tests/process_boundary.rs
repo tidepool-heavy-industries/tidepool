@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use tidepool_node::{ProcessInvocation, ProcessMountBoundary};
+use exomonad_node::{ProcessInvocation, ProcessMountBoundary};
 
 #[test]
 fn linked_actor_worktree_commits_into_shared_git_namespace() {
@@ -104,7 +104,7 @@ fn writable_overlay_keeps_build_artifacts_outside_the_checkout() {
     let workspace = root.path().join("workspace");
     let project_root = root.path().join("actor-project");
     let resource = root.path().join("build-resource");
-    let relative_target = std::path::Path::new(".shoal/build/cargo");
+    let relative_target = std::path::Path::new(".exomonad/build/cargo");
     for path in [
         workspace.join(relative_target),
         project_root.join(relative_target),
@@ -125,7 +125,7 @@ fn writable_overlay_keeps_build_artifacts_outside_the_checkout() {
             program: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                "printf artifact > .shoal/build/cargo/probe".into(),
+                "printf artifact > .exomonad/build/cargo/probe".into(),
             ],
         },
     );
@@ -241,7 +241,7 @@ fn build_overlay_rejects_escape_and_overlapping_backing_directories() {
                 root.path().join("work"),
                 target,
             ),
-            Err(tidepool_node::ProcessBoundaryError::OverlayOutsideProjectRoot { .. })
+            Err(exomonad_node::ProcessBoundaryError::OverlayOutsideProjectRoot { .. })
         ));
     }
     assert!(matches!(
@@ -251,6 +251,6 @@ fn build_overlay_rejects_escape_and_overlapping_backing_directories() {
             root.path().join("upper"),
             workspace.join("target"),
         ),
-        Err(tidepool_node::ProcessBoundaryError::InvalidOverlayView)
+        Err(exomonad_node::ProcessBoundaryError::InvalidOverlayView)
     ));
 }

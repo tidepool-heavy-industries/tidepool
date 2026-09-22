@@ -24,7 +24,7 @@ import qualified Tidepool.Actor.Record as R
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
 import Project.Types

@@ -16,11 +16,11 @@ use serde_json::{json, Map, Value as Jv};
 
 use crate::server::{parse_json_body, resolve_error_json, AppState};
 
-const TEST_ONLY_NOTE: &str = "tidepool-web form-api: testing convenience only, not a browser \
-     surface — gated on TIDEPOOL_FORM_API=1, loopback bind only";
+const TEST_ONLY_NOTE: &str = "exomonad-web form-api: testing convenience only, not a browser \
+     surface — gated on EXOMONAD_FORM_API=1, loopback bind only";
 
 /// Mount `GET`/`POST /node/{node}/api/form` onto `router` iff `enabled`
-/// (sourced from `TIDEPOOL_FORM_API=1` in the boot path — anything else,
+/// (sourced from `EXOMONAD_FORM_API=1` in the boot path — anything else,
 /// unset/empty/`"true"`/`"0"`, is disabled); returns `router` unchanged when
 /// disabled — the route table itself differs, not just its runtime behavior.
 pub fn merge(router: Router<AppState>, enabled: bool) -> Router<AppState> {

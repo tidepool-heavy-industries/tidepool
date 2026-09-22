@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
-use std::{fs, path::Path, process::Command};
-use tidepool_worktree::{
+use exomonad_worktree::{
     testing::TestRepo, EventId, EventJournal, GitCli, WorktreeId, WorktreeMonitor,
 };
+use std::{fs, path::Path, process::Command};
 
 #[test]
 fn journal_fault_child() {

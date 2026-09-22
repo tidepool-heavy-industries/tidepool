@@ -108,7 +108,7 @@ pub struct OauthConfig {
     /// [`OauthProvider::with_live_settings`] instead reads `model` and
     /// `tuning.effort` AMBIENTLY, at EVERY request-build time, from the
     /// shared [`crate::provider::settings::SharedModelSettings`] handle — the
-    /// operator's model/effort dial (`tidepool-web`'s settings route is the
+    /// operator's model/effort dial (`exomonad-web`'s settings route is the
     /// only writer) — so a dial change takes effect on the very next model
     /// round with no restart. `tuning.summary` and every other field on this
     /// struct (auth, token path, `chat_base_url`) are never live-dialed and
@@ -153,7 +153,7 @@ impl ReasoningEffort {
     /// explicit mapping (rather than reading `ValueEnum::to_possible_value`)
     /// so the wire form is never coupled to clap's own rendering. `pub`:
     /// also the canonical display/option-value string the operator's model
-    /// dial (`tidepool-web`'s masthead) renders — one mapping, not two.
+    /// dial (`exomonad-web`'s masthead) renders — one mapping, not two.
     pub fn wire(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
@@ -1135,7 +1135,7 @@ mod tests {
     #[test]
     fn login_status_reflects_token_presence() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = OauthConfig::new("gpt-4o-mini");
+        let mut cfg = OauthConfig::new("gpt-6-luna");
         cfg.token_path = dir.path().join("token.json");
         assert_eq!(login_status(&cfg), LoginStatus::SignedOut);
         save_token(&cfg.token_path, &sample_token(now_secs() + 3600)).unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
     #[tokio::test]
     async fn complete_without_token_is_typed_auth_error() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = OauthConfig::new("gpt-4o-mini");
+        let mut cfg = OauthConfig::new("gpt-6-luna");
         cfg.token_path = dir.path().join("token.json");
         let provider = OauthProvider::new(cfg);
         let req = TurnRequest {

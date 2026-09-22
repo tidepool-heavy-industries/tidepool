@@ -1,18 +1,18 @@
 //! `tidepool-selfharness` — boots the self-iterating harness driver: the
 //! outer `render`/`loop` alternation over a nested
-//! [`tidepool_harness::Harness`].
+//! [`exomonad_harness::Harness`].
 //!
 //! Provider select (OAuth default, `--replay <log>` for deterministic
 //! replay, `--api-key <ENV_VAR>` for a non-interactive API-key provider),
 //! engine config, a fresh run log, then `.await`s
-//! [`tidepool_harness::SelfHarnessDriver::run_loop`]. Multi-thread tokio
+//! [`exomonad_harness::SelfHarnessDriver::run_loop`]. Multi-thread tokio
 //! runtime required: the driver's turn loop is `async fn`, but the one place
 //! it still blocks a worker thread is the sync-blocking `OperatorGate` park
 //! (`tokio::task::block_in_place`, see `driver.rs`'s module doc) — that
 //! requires the multi-thread runtime flavor.
 //!
-//! Boots the operator GUI ([`tidepool_web::spawn_operator_server_multi`]) and
-//! wires its [`tidepool_web::WebGate`] into the driver before `run_loop` — UNLESS
+//! Boots the operator GUI ([`exomonad_web::spawn_operator_server_multi`]) and
+//! wires its [`exomonad_web::WebGate`] into the driver before `run_loop` — UNLESS
 //! `--yes`/`--auto`/`--replay` is set, in which case the driver keeps its
 //! default headless `StdinGate` (no browser needed for CI/replay/unattended
 //! runs).
@@ -25,18 +25,18 @@ use clap::Parser;
 use tidepool_handlers::{
     ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
 };
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
-use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider, ReasoningTuningArgs};
-use tidepool_harness::provider::DynModelProvider;
-use tidepool_harness::replay::ReplayProvider;
-use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{LogHeader, LogWriter};
+use exomonad_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
+use exomonad_harness::provider::oauth::{OauthConfig, OauthProvider, ReasoningTuningArgs};
+use exomonad_harness::provider::DynModelProvider;
+use exomonad_harness::replay::ReplayProvider;
+use exomonad_harness::selfharness::persistence;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, typed_request_agent_decls_with_delegate, Event,
     Harness, JsonlObserver, LogObserver, Observer, SelfHarnessDriver,
 };
-use tidepool_worktree::{EventJournal, GitCli, WorktreeMonitor, WorktreeRegistry};
+use exomonad_worktree::{EventJournal, GitCli, WorktreeMonitor, WorktreeRegistry};
 
 #[path = "tidepool-selfharness/prompt_catalog.rs"]
 mod prompt_catalog;
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auto = args.yes || args.auto || replay_log.is_some();
 
     tracing::info!(
-        target: "tidepool_web",
+        target: "exomonad_web",
         path = %harness_source_path.display(),
         "loading harness source"
     );
@@ -140,27 +140,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exists, further down. `None` in replay/api-key mode: the masthead
     // renders no dial and `/settings` 404s, matching those modes' existing
     // behavior.
-    let mut live_settings: Option<tidepool_harness::provider::settings::SharedModelSettings> = None;
+    let mut live_settings: Option<exomonad_harness::provider::settings::SharedModelSettings> = None;
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
         (Some(log), _) => {
-            tracing::info!(target: "tidepool_web", path = %log.display(), "replay mode");
+            tracing::info!(target: "exomonad_web", path = %log.display(), "replay mode");
             Arc::new(ReplayProvider::from_log(log)?)
         }
         (None, Some(env_var)) => {
             let model =
-                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-            tracing::info!(target: "tidepool_web", env_var, model, "API-key mode");
+                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-6-luna".to_string());
+            tracing::info!(target: "exomonad_web", env_var, model, "API-key mode");
             Arc::new(ApiKeyProvider::new(ApiKeyConfig::new(
                 env_var.clone(),
                 model,
             )))
         }
         (None, None) => {
-            // OAuth (ChatGPT/Codex account) rejects standard-API model names like
-            // gpt-4o-mini; default to a Codex-supported model.
+            // OAuth (ChatGPT/Codex account) uses the same active model family as
+            // Exomonad's coding-agent launches.
             let model =
-                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.6-terra".to_string());
-            let tuning: tidepool_harness::provider::oauth::ReasoningTuning =
+                std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-6-sol".to_string());
+            let tuning: exomonad_harness::provider::oauth::ReasoningTuning =
                 args.reasoning.clone().into();
             let mut oauth_cfg = OauthConfig::new(model.clone());
             oauth_cfg.tuning = tuning;
@@ -169,8 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // choice outranks env/clap on restart, env/clap seed only the
             // very first boot (see `SharedModelSettings::load_or`'s doc).
             let default_settings =
-                tidepool_harness::provider::settings::ModelSettings::new(model, tuning.effort);
-            let live = tidepool_harness::provider::settings::SharedModelSettings::load_or(
+                exomonad_harness::provider::settings::ModelSettings::new(model, tuning.effort);
+            let live = exomonad_harness::provider::settings::SharedModelSettings::load_or(
                 persistence::default_settings_path(),
                 default_settings,
             );
@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         harness_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     let writer = LogWriter::create(&log_path, &header)?;
-    tracing::info!(target: "tidepool_web", path = %log_path.display(), "run log");
+    tracing::info!(target: "exomonad_web", path = %log_path.display(), "run log");
 
     // The nested Harness: an ordinary node-tree orchestrator, used ONLY to
     // answer `runLLMTurn` holes by driving an Agent turn loop to `finalize`
@@ -209,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let transcript_path = persistence::default_transcript_path();
     let jsonl = JsonlObserver::create(&transcript_path)?;
-    tracing::info!(target: "tidepool_web", path = %transcript_path.display(), "transcript");
+    tracing::info!(target: "exomonad_web", path = %transcript_path.display(), "transcript");
     let observer: Arc<dyn Observer> = Arc::new(FanoutObserver {
         observers: vec![Arc::new(LogObserver), Arc::new(jsonl)],
     });
@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Held past the `if !auto` block so the run id (known only once the
     // lease below is acquired) can still reach the masthead.
-    let mut web_state: Option<tidepool_web::AppState> = None;
+    let mut web_state: Option<exomonad_web::AppState> = None;
     if !auto {
         let port: u16 = args.port;
         // ONE registered node (the default the driver's gate is bound to) —
@@ -236,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // second node in front of the live operator (dogfood finding,
         // 2026-08-19). Re-add registrations only together with the routing
         // that feeds them.
-        let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
+        let (state, gate) = exomonad_web::spawn_operator_server_multi(port).await?;
         if let Some(live) = &live_settings {
             state.set_model_settings(live.clone());
         }
@@ -263,7 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // from this process. `acquire_lease` resumes the run a prior process left
     // behind (a crash leaves the lease on disk) or mints a fresh one — either
     // way this process is handed its OWN, freshly allocated journal SEGMENT
-    // (never one a prior process wrote to; see `tidepool_harness::selfharness::resume`'s
+    // (never one a prior process wrote to; see `exomonad_harness::selfharness::resume`'s
     // module doc), so a crash mid-append can never poison a later boot.
     //
     // `open_run_journal` is the ONE boundary: it loads and folds every segment the
@@ -275,7 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // operator-facing remedy (pid + `TIDEPOOL_SELFHARNESS_TAKEOVER=1`)
     // actually lives — echo it to stderr before propagating so it's visible
     // regardless of how the failure is ultimately reported.
-    let acquired = tidepool_harness::acquire_lease(&log_dir).map_err(|e| {
+    let acquired = exomonad_harness::acquire_lease(&log_dir).map_err(|e| {
         eprintln!("[boot] {e}");
         e
     })?;
@@ -285,7 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let folded = driver.open_run_journal(&log_dir, &acquired)?;
     tracing::info!(
-        target: "tidepool_web",
+        target: "exomonad_web",
         repo = %source_repo.display(),
         segment = %acquired.segment.display(),
         run_id = %acquired.lease.run_id,
@@ -300,16 +300,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAME channel across a crash/restart of this process. Boot frame names
     // the pid + socket path so an operator watching the raw socket can
     // correlate it to this process.
-    let listen_paths = tidepool_harness::ListenPaths::for_run(&acquired.lease.run_id);
+    let listen_paths = exomonad_harness::ListenPaths::for_run(&acquired.lease.run_id);
     let listen_sock = listen_paths.sock.clone();
-    let listen_server = Arc::new(tidepool_harness::ListenServer::start(listen_paths)?);
+    let listen_server = Arc::new(exomonad_harness::ListenServer::start(listen_paths)?);
     listen_server.publish(&format!(
         "listen channel up (pid {}, socket {})",
         std::process::id(),
         listen_sock.display()
     ))?;
     tracing::info!(
-        target: "tidepool_web",
+        target: "exomonad_web",
         run_id = %acquired.lease.run_id,
         socket = %listen_sock.display(),
         "listen channel wired"
@@ -354,7 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let turn_timeout = if source_repo_mode {
         std::time::Duration::from_secs(900)
     } else {
-        tidepool_agent::backend::codex::DEFAULT_TURN_TIMEOUT
+        exomonad_agent::backend::codex::DEFAULT_TURN_TIMEOUT
     };
     let mut handler = build_subagent_handler(&subagent_repo, turn_timeout)?;
     let subagent_mode = if source_repo_mode {
@@ -364,21 +364,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if source_repo_mode {
         // The default `ModelPolicy::CheapPlumbing` + `ReasoningEffort::Low`
-        // ("prefer gpt-5.4-mini") is not a plausible tier for a coding
-        // worker; `CheapestGpt56` is the strongest allowlisted tier that
-        // exists today (pinned to `gpt-5.6-luna`, never the cheaper
-        // `gpt-5.4-mini` `CheapPlumbing` would resolve to).
+        // uses Luna. Source-repository coding instead prefers Sol, with Luna
+        // as its explicit fallback.
         // Sol at LOW effort (operator, 2026-08-25): the tier buys the
         // quality; high reasoning effort on top is overkill for
         // worker-cycle-sized tasks.
         handler = handler.with_model_policy(
-            tidepool_agent::ModelPolicy::StrongestGpt56,
-            tidepool_agent::ReasoningEffort::Low,
+            exomonad_agent::ModelPolicy::StrongestWorker,
+            exomonad_agent::ReasoningEffort::Low,
         );
     }
     driver.set_subagent_handler(handler);
     tracing::info!(
-        target: "tidepool_web",
+        target: "exomonad_web",
         repo = %subagent_repo.display(),
         mode = subagent_mode,
         "subagent boundary wired ({}: Codex backend, operator credentials)",
@@ -391,9 +389,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // beside the journal, never deleted — so the next boot mints a fresh run
     // instead of resuming a finished one. A crash skips this by construction,
     // which is precisely how the next boot knows to resume.
-    if let Some(retired) = tidepool_harness::retire_lease(&log_dir)? {
+    if let Some(retired) = exomonad_harness::retire_lease(&log_dir)? {
         tracing::info!(
-            target: "tidepool_web",
+            target: "exomonad_web",
             lease = %retired.display(),
             "run completed; lease retired"
         );
@@ -440,7 +438,7 @@ fn ensure_memory_store(store: &std::path::Path) -> Result<(), Box<dyn std::error
     )
     .map_err(|e| format!("memory store seed commit: {e:?}"))?;
     tracing::info!(
-        target: "tidepool_web",
+        target: "exomonad_web",
         store = %store.display(),
         "memory store seeded fresh"
     );
@@ -518,7 +516,7 @@ fn build_outer_handlers(
 /// operates on); registry/worktree/binding roots under the durable data dir
 /// (NOT the regenerable cache — worktree state must survive cache clears —
 /// and outside any git work tree, which the registry refuses).
-/// Backend: [`tidepool_agent::backend::codex::CodexBackendFactory`] mints a
+/// Backend: [`exomonad_agent::backend::codex::CodexBackendFactory`] mints a
 /// fresh live Codex adapter (operator's own `~/.codex` credentials) PER
 /// CYCLE, at the default cheap-plumbing model policy unless the caller
 /// overrides it via `with_model_policy` — `with_backends`, not `new`, so a
@@ -544,7 +542,7 @@ fn build_subagent_handler(
     let (registry_root, worktree_root) = shared_worktree_roots()?;
     let binding_root = xdg_data_root()?.join("tidepool/subagent/bindings");
     let backends =
-        tidepool_agent::backend::codex::CodexBackendFactory::new().with_turn_timeout(turn_timeout);
+        exomonad_agent::backend::codex::CodexBackendFactory::new().with_turn_timeout(turn_timeout);
     let handler = tidepool_handlers::SubagentHandler::with_backends(
         registry_root,
         worktree_root,
@@ -573,8 +571,8 @@ fn default_harness_source_path() -> PathBuf {
     manifest
         .parent()
         .and_then(std::path::Path::parent)
-        .map(|r| r.join("examples/harness/Harness.hs"))
-        .unwrap_or_else(|| PathBuf::from("examples/harness/Harness.hs"))
+        .map(|r| r.join("exomonad/examples/harness/Harness.hs"))
+        .unwrap_or_else(|| PathBuf::from("exomonad/examples/harness/Harness.hs"))
 }
 
 /// The stdlib include dir, via the ONE locator
@@ -590,7 +588,7 @@ fn prelude_dir() -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError>
         bundle: None,
         build_tree: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .map(|r| r.join("bridge/haskell/lib")),
+            .map(|r| r.join("haskell/lib")),
     };
     Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }

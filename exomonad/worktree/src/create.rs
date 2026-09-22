@@ -19,13 +19,13 @@ use tidepool_repr::ActorPath;
 /// Tidepool's owned branch namespace. Every managed branch lives under this
 /// prefix so a managed branch can never collide with, or be mistaken for, a
 /// branch the operator made.
-pub const TIDEPOOL_BRANCH_PREFIX: &str = "tidepool/worktree";
+pub const EXOMONAD_BRANCH_PREFIX: &str = "exomonad/worktree";
 
 /// Tidepool's owned ref namespace for synthetic snapshot commits. Deliberately
 /// NOT under `refs/heads/`: a snapshot is a reproducible base, not a branch the
 /// operator is invited to check out, and keeping it out of the branch namespace
 /// keeps it out of every `git branch` listing the operator reads.
-pub const TIDEPOOL_SNAPSHOT_REF_PREFIX: &str = "refs/tidepool/snapshots";
+pub const EXOMONAD_SNAPSHOT_REF_PREFIX: &str = "refs/exomonad/snapshots";
 
 /// What to seed a managed worktree from, and under what dirty-source policy.
 ///
@@ -162,7 +162,7 @@ impl WorktreeManager {
     pub fn restore_matching_mtimes_from_view(
         &self,
         handle: &WorktreeHandle,
-        donor: &tidepool_node::MountNamespace,
+        donor: &exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<usize, WorktreeError> {
         use std::io::Read;
@@ -272,7 +272,7 @@ impl WorktreeManager {
     pub fn materialize_retired_view(
         &self,
         id: &WorktreeId,
-        namespace: &tidepool_node::MountNamespace,
+        namespace: &exomonad_node::MountNamespace,
         visible: &Path,
     ) -> Result<(), WorktreeError> {
         let failure = |error: std::io::Error| WorktreeError::StorageFailure {
@@ -321,7 +321,7 @@ impl WorktreeManager {
                 "--xattrs",
                 "--sparse",
                 "--exclude=./.git",
-                "--exclude=./.shoal",
+                "--exclude=./.exomonad",
                 "-cf",
                 "-",
                 ".",
@@ -372,7 +372,7 @@ impl WorktreeManager {
         // transition succeed. Failure retains them for a retry.
         for entry in std::fs::read_dir(&receipt.cwd).map_err(failure)? {
             let entry = entry.map_err(failure)?;
-            if entry.file_name() == ".git" || entry.file_name() == ".shoal" {
+            if entry.file_name() == ".git" || entry.file_name() == ".exomonad" {
                 continue;
             }
             if entry.file_type().map_err(failure)?.is_dir() {
@@ -724,7 +724,7 @@ impl WorktreeManager {
     pub fn finish_inherited_source(
         &self,
         prepared: PreparedSourceWorktree,
-        namespace: tidepool_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let receipt = prepared.receipt;
@@ -747,7 +747,7 @@ impl WorktreeManager {
     pub fn mount_worktree(
         &self,
         id: &WorktreeId,
-        namespace: tidepool_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let receipt = self
@@ -770,8 +770,8 @@ impl WorktreeManager {
     pub fn activate_worktree(
         &self,
         id: &WorktreeId,
-        expected: &tidepool_node::MountNamespace,
-        namespace: tidepool_node::MountNamespace,
+        expected: &exomonad_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let receipt = self
@@ -814,7 +814,7 @@ impl WorktreeManager {
         let cwd = self.worktree_root.join(id.as_str());
         let branch = named_branch.unwrap_or_else(|| {
             BranchName::from_raw(format!(
-                "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
+                "{EXOMONAD_BRANCH_PREFIX}/{}-{}",
                 sanitize_branch_label(label),
                 id.as_str()
             ))

@@ -96,7 +96,7 @@ A branch awaiting its second scaffold need not stop a sibling's third wave.
 The live-source admission checkpoints eligible source edits on the checkout's
 current branch before the child is captured. It includes tracked changes and
 eligible nonignored new files under the source-import exclusions, but skips
-runtime `.shoal/`, configured exclusions, and caches even if staged. It runs no
+runtime `.exomonad/`, configured exclusions, and caches even if staged. It runs no
 hooks or checks. Give important authored units their own meaningful commits,
 including red tests and incomplete plans. The automatic checkpoint only aligns
 the child's source with Git; acceptance is a separate judgment.

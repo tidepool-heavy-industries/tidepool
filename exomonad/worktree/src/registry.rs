@@ -176,7 +176,7 @@ impl WorktreeRegistry {
     pub(crate) fn install_view(
         &self,
         receipt: &WorktreeReceipt,
-        namespace: tidepool_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeReceipt, WorktreeError> {
         self.install_view_checked(receipt, namespace, visible_root, None)
@@ -185,8 +185,8 @@ impl WorktreeRegistry {
     pub(crate) fn activate_view(
         &self,
         receipt: &WorktreeReceipt,
-        expected: &tidepool_node::MountNamespace,
-        namespace: tidepool_node::MountNamespace,
+        expected: &exomonad_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeReceipt, WorktreeError> {
         self.install_view_checked(receipt, namespace, visible_root, Some(expected))
@@ -195,9 +195,9 @@ impl WorktreeRegistry {
     fn install_view_checked(
         &self,
         receipt: &WorktreeReceipt,
-        namespace: tidepool_node::MountNamespace,
+        namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
-        expected: Option<&tidepool_node::MountNamespace>,
+        expected: Option<&exomonad_node::MountNamespace>,
     ) -> Result<WorktreeReceipt, WorktreeError> {
         if !visible_root.is_absolute()
             || visible_root

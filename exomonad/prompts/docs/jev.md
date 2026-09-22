@@ -136,7 +136,7 @@ addresses. A display budget must not silently delete the fact a judgment needs.
 Use Cmd.quiet and small output projections to keep large retained values out of
 the conversation.
 
-See shoal-jev for worked patterns. Historical lab results apply to their fixtures;
+See exomonad-jev for worked patterns. Historical lab results apply to their fixtures;
 they are not universal rules about question wording, thresholds, or candidate count.
 
 ## A worked cell
@@ -247,4 +247,4 @@ question-rich packet over several thin ones when the evidence for all of
 them is already at hand — see Cost, above, for the loop-level version of
 this rule.
 
-skill: shoal-jev
+skill: exomonad-jev

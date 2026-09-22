@@ -95,8 +95,8 @@ pub enum ActorWorkbenchTransfer {
 ///
 /// Part of the what-is-live status view's source-drift rows
 /// (`resident_actor::live_status_text`). The data lives in
-/// `tidepool::shoal::source`, which this crate cannot depend on (`tidepool`
-/// depends on `tidepool-actor`, never the reverse); `tidepool`'s composition
+/// `tidepool::exomonad::source`, which this crate cannot depend on (`tidepool`
+/// depends on `exomonad-actor`, never the reverse); `tidepool`'s composition
 /// root publishes this into the observation channel instead. Absence of a
 /// value for this field (`ActorSourceDriftObservation::layer` is `None`)
 /// means the layer has not been observed yet — never means it was checked
@@ -172,8 +172,8 @@ pub struct ActorRuntimeObservation {
     pub confirmed_model: Option<String>,
     pub confirmed_effort: Option<String>,
     pub provider_observation_stale: bool,
-    pub provider_turn: Option<tidepool_model::ProviderTurnObservation>,
-    pub provider_failures: Vec<tidepool_model::ProviderTurnObservation>,
+    pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
+    pub provider_failures: Vec<exomonad_model::ProviderTurnObservation>,
     pub provider_thread: Option<String>,
     pub provider_parent_thread: Option<String>,
     pub current_activation_sequence: Option<u64>,
@@ -189,8 +189,8 @@ pub struct ActorRuntimeObservation {
     /// Legacy-to-durable transitions may change source identity; counts alone
     /// cannot establish membership for subtraction.
     pub first_usage_in_summary: bool,
-    pub provider_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
-    pub latest_turn_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
+    pub provider_usage_summary: Option<exomonad_model::ProviderUsageSummary>,
+    pub latest_turn_usage_summary: Option<exomonad_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
     pub workspace: Option<ActorWorkspaceObservation>,
     pub launch_role: Option<crate::EffectiveRole>,
@@ -253,7 +253,7 @@ impl ActorRuntimeObservation {
     }
 
     pub(crate) fn disposition(&self, has_requests: bool) -> AgentDisposition {
-        use tidepool_model::ProviderTurnState;
+        use exomonad_model::ProviderTurnState;
         use AgentDisposition::*;
         if self.provider_observation_stale || self.provider_turn.is_none() {
             return NeedsAttention;
@@ -272,7 +272,7 @@ impl ActorRuntimeObservation {
     }
 
     pub(crate) fn usage_summary_display(&self) -> String {
-        use tidepool_model::ProviderUsageCompleteness;
+        use exomonad_model::ProviderUsageCompleteness;
         let first_completeness = self
             .provider_usage_summary
             .as_ref()
@@ -309,7 +309,7 @@ impl ActorRuntimeObservation {
 
     fn subsequent_input_usage(
         &self,
-    ) -> Option<(tidepool_model::ProviderUsageCompleteness, i64, i64, i64)> {
+    ) -> Option<(exomonad_model::ProviderUsageCompleteness, i64, i64, i64)> {
         if !self.first_usage_in_summary {
             return None;
         }
@@ -350,7 +350,7 @@ impl ActorRuntimeObservationHandle {
         self.inner.write().workspace = Some(workspace);
     }
 
-    pub fn publish_provider_observation(&self, observation: tidepool_model::ProviderObservation) {
+    pub fn publish_provider_observation(&self, observation: exomonad_model::ProviderObservation) {
         {
             let mut state = self.inner.write();
             if observation
@@ -478,13 +478,13 @@ impl ActorRuntimeObservationHandle {
         self.inner.write().source_drift.frozen = Some(drift);
     }
 
-    pub fn publish_cache_usage(&self, usage: tidepool_model::ProviderUsageSnapshot) {
+    pub fn publish_cache_usage(&self, usage: exomonad_model::ProviderUsageSnapshot) {
         let mut observation = self.inner.write();
         // Replace authoritative aggregates even when the latest response is
         // unchanged: a later durable completion event can settle its scope.
         observation.provider_usage_summary = usage.thread_summary;
         observation.latest_turn_usage_summary = usage.latest_turn_summary;
-        let make_sample = |source: tidepool_model::ProviderUsageObservation| ProviderUsageSample {
+        let make_sample = |source: exomonad_model::ProviderUsageObservation| ProviderUsageSample {
             observation_id: source.id,
             source_timestamp: source.timestamp,
             observed_at_unix_ms: unix_time_ms(),
@@ -524,7 +524,7 @@ impl ActorRuntimeObservationHandle {
 #[cfg(test)]
 mod provider_health_tests {
     use super::*;
-    use tidepool_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
+    use exomonad_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
 
     #[test]
     fn retirement_candidate_requires_positive_idle_and_no_request() {
@@ -548,7 +548,7 @@ mod provider_health_tests {
         assert_eq!(runtime.disposition(false), AgentDisposition::NeedsAttention);
         runtime.provider_observation_stale = false;
         runtime.provider_turn.as_mut().unwrap().state =
-            ProviderTurnState::Failed(tidepool_model::ProviderFailure::RequestRejected);
+            ProviderTurnState::Failed(exomonad_model::ProviderFailure::RequestRejected);
         assert_eq!(runtime.disposition(true), AgentDisposition::NeedsAttention);
     }
 
@@ -619,11 +619,11 @@ mod tests {
         );
     }
 
-    fn usage(id: &str, cached: i64, uncached: i64) -> tidepool_model::ProviderUsageSnapshot {
-        let observation = tidepool_model::ProviderUsageObservation {
+    fn usage(id: &str, cached: i64, uncached: i64) -> exomonad_model::ProviderUsageSnapshot {
+        let observation = exomonad_model::ProviderUsageObservation {
             id: id.into(),
             timestamp: Some("2026-09-05T00:00:00Z".into()),
-            usage: tidepool_model::TokenUsage {
+            usage: exomonad_model::TokenUsage {
                 input_tokens: cached + uncached,
                 cached_input_tokens: cached,
                 output_tokens: 0,
@@ -631,7 +631,7 @@ mod tests {
                 total_tokens: cached + uncached,
             },
         };
-        tidepool_model::ProviderUsageSnapshot {
+        exomonad_model::ProviderUsageSnapshot {
             first: observation.clone(),
             latest: observation,
             thread_summary: None,
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn aggregate_usage_replacement_survives_eviction_and_completion_without_new_response() {
-        use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope, ProviderUsageSummary};
+        use exomonad_model::{ProviderUsageCompleteness, ProviderUsageScope, ProviderUsageSummary};
         let observation = ActorRuntimeObservationHandle::default();
         let mut last = usage("last", 80, 20);
         for i in 0..40 {
@@ -687,7 +687,7 @@ mod tests {
             scope: ProviderUsageScope::Thread("thread".into()),
             completeness: ProviderUsageCompleteness::Partial,
             observations: 100,
-            usage: tidepool_model::TokenUsage {
+            usage: exomonad_model::TokenUsage {
                 input_tokens: 10000,
                 cached_input_tokens: 8000,
                 ..Default::default()
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn subsequent_usage_subtracts_only_the_same_identified_first_response() {
-        use tidepool_model::{
+        use exomonad_model::{
             ProviderUsageCompleteness::*, ProviderUsageScope, ProviderUsageSummary,
         };
         let observation = ActorRuntimeObservationHandle::default();

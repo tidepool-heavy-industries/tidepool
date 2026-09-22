@@ -1,6 +1,6 @@
 //! Explicit canary consumer; never used by existing tmux launches.
+use exomonad_node::{ProcessInvocation, ProcessMountBoundary, ServiceEnvironment, ServiceScope};
 use std::time::{Duration, Instant};
-use tidepool_node::{ProcessInvocation, ProcessMountBoundary, ServiceEnvironment, ServiceScope};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);

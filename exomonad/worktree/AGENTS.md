@@ -38,6 +38,6 @@ and administrative metadata share the source repository's namespace.
   or that another actor incorporated and checked the integrated revision.
 - Preserve user changes and report conflicts/dirty state explicitly. Do not
   infer a clean worktree from a commit hash or a successful earlier command.
-- For focused verification use `just test-lib tidepool-worktree 'test(<name>)'`.
+- For focused verification use `just test-lib exomonad-worktree 'test(<name>)'`.
   Exercise retained checkout, dirty/conflicting merge, and cleanup failures
   when those owning paths change; avoid broad batteries across worktrees.

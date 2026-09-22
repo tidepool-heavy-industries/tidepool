@@ -10,7 +10,7 @@ pub fn sanitize_agent_label(raw: &str) -> String {
 }
 
 /// Sanitized into the tail of a managed branch name
-/// (`tidepool/worktree/<label>-<id>`). `[A-Za-z0-9._-/]` survives; everything
+/// (`exomonad/worktree/<label>-<id>`). `[A-Za-z0-9._-/]` survives; everything
 /// else becomes `-`, runs of `-`/`/` collapse together, and the ends are
 /// trimmed of `-`/`/`/`.`. An all-punctuation label falls back to
 /// `"worktree"` rather than a branch name ending in the bare prefix.

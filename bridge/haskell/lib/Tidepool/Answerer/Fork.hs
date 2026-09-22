@@ -3,7 +3,7 @@
 
 -- | Blocking recursion-scheme combinators for the noninteractive answerer
 -- harness. These park one authored program on the legacy 'Fork' effect until
--- its sub-answerers return. Persistent Shoal actors instead use the
+-- its sub-answerers return. Persistent Exomonad actors instead use the
 -- applicative @Tidepool.Actors.Unfold@ surface; keeping this module under the
 -- @Answerer@ namespace makes the two lifecycle contracts explicit.
 --

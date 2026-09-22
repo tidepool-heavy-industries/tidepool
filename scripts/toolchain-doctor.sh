@@ -60,14 +60,14 @@ echo
 echo "== compiler worker =="
 worker="${TIDEPOOL_EXTRACT_WORKER:-}"
 worker_source="\$TIDEPOOL_EXTRACT_WORKER"
-if [ -z "$worker" ] && worker="$(cd haskell && cabal list-bin tidepool-extract-bin 2>/dev/null)" && [ -x "$worker" ]; then
+if [ -z "$worker" ] && worker="$(cd bridge/haskell && cabal list-bin tidepool-extract-bin 2>/dev/null)" && [ -x "$worker" ]; then
   worker_source="cabal worktree build"
 fi
 
 if [ "$frontend_source" = "PATH" ] && [ -z "${TIDEPOOL_EXTRACT_WORKER:-}" ]; then
   note "provided by installed frontend wrapper"
 elif [ -z "$worker" ]; then
-  fail "no worker found (set TIDEPOOL_EXTRACT_WORKER or run: cd haskell && cabal build tidepool-extract-bin)"
+  fail "no worker found (set TIDEPOOL_EXTRACT_WORKER or run: cd bridge/haskell && cabal build tidepool-extract-bin)"
 elif [ ! -x "$worker" ]; then
   fail "worker is not executable: $worker"
 else

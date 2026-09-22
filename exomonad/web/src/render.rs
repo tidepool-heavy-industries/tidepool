@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use maud::{html, Markup};
 use serde_json::{Map, Value as Jv};
-use tidepool_harness::selfharness::operator::{
+use exomonad_harness::selfharness::operator::{
     child_path, humanize_key, DelegationPhase, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 

@@ -10,5 +10,5 @@ state before deciding whether to issue new work.
 
 Provider failure does not settle an actor request or imply process death. The
 detailed status view reports provider health and requested versus confirmed
-settings. Do not blindly steer a provider-rejected conversation; use typed Shoal
+settings. Do not blindly steer a provider-rejected conversation; use typed Exomonad
 communication and explicit retirement after inspection.

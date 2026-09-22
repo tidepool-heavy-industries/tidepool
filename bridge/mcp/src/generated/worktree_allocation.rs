@@ -5,7 +5,7 @@
 pub fn worktree_allocation_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "WorktreeAllocation",
-        description: "Granular Shoal capability delegated to the canonical Worktree handler.",
+        description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,
         constructors: &[
             "WorktreeAllocationCreate :: WorktreeSpec -> WorktreeAllocation (Either WorktreeError WorktreeHandle)",

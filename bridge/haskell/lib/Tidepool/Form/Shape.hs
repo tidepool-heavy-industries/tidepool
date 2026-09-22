@@ -10,7 +10,7 @@
 -- This module is the frozen contract three consumers agree on: the generic
 -- interpreter that produces shapes ("Tidepool.Form.GForm"), the @askUser@
 -- surface that ships them across the @AskUser@ effect ("Tidepool.Form"), and
--- the Rust operator seam that renders them (@tidepool-harness@'s
+-- the Rust operator seam that renders them (@exomonad-harness@'s
 -- @selfharness::operator@). Change the algebra and all three move together.
 --
 -- The algebra is deliberately small. Everything an agent can ask a human for

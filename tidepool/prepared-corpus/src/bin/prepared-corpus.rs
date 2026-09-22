@@ -1121,7 +1121,9 @@ mod tests {
         let invalid = parent.join(&invalid_name);
         fs::write(
             &artifact,
-            include_bytes!("../../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"),
+            include_bytes!(
+                "../../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
+            ),
         )
         .unwrap();
         fs::write(&invalid, b"not cbor").unwrap();

@@ -1,4 +1,4 @@
-# tidepool-worktree — managed worktrees, durable registry, typed repository events
+# exomonad-worktree — managed worktrees, durable registry, typed repository events
 
 **Charter.** Belongs: creating/retaining worktrees, the durable registry,
 dirty-source snapshotting, HEAD-movement observation, the event journal, and
@@ -63,8 +63,8 @@ this boundary through the shared `Tidepool.Worktree.gitIn` helper.
 
 **Never dirty the source working tree.** The registry root, managed worktree root,
 journal, and any temporary index all live OUTSIDE the source working tree.
-Managed branches use `TIDEPOOL_BRANCH_PREFIX` in the shared repository;
-snapshot commits use `TIDEPOOL_SNAPSHOT_REF_PREFIX` in the source, deliberately
+Managed branches use `EXOMONAD_BRANCH_PREFIX` in the shared repository;
+snapshot commits use `EXOMONAD_SNAPSHOT_REF_PREFIX` in the source, deliberately
 outside `refs/heads/` so they never appear in an operator's `git branch`.
 
 **Retain first.** No deletion, no GC, no retention policy. A worktree a human
@@ -96,7 +96,7 @@ standing in for a coding agent). Never a mock of git. A mock proves the mock
 agrees with your model of git, which is exactly the thing in doubt.
 
 ```bash
-cargo nextest run -p tidepool-worktree      # pure Rust, no GHC — the fast tier
+cargo nextest run -p exomonad-worktree      # pure Rust, no GHC — the fast tier
 ```
 
 This crate is GHC-free by construction, so it stays in the fast default tier

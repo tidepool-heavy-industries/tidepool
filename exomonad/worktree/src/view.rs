@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use tidepool_node::MountNamespace;
+use exomonad_node::MountNamespace;
 
 #[derive(Clone, Debug)]
 pub(crate) struct MountedView {

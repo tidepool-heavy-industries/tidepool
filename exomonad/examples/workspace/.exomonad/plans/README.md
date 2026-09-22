@@ -64,7 +64,7 @@ its example constructors do not restrict which project can use the workbench.
 Use the actual task/result contracts and callable signatures. Importing a module
 or binding a composition starts no worker.
 
-There is one original-root runtime .shoal and one frozen selection per swarm.
+There is one original-root runtime .exomonad and one frozen selection per swarm.
 Follow the assigned authoring owner for customization; current package development
 lives in Tidepool and is copied during next-run preparation. A changed prompt,
 completed check or watch notification does not release an explicit operator hold.

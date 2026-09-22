@@ -54,25 +54,24 @@ use crate::seam::{
 /// actually offers and fails otherwise, so no model outside this list is
 /// reachable — including a banned one a replay fixture happens to have been
 /// recorded on.
-pub const CHEAP_PLUMBING_PREFERENCE: [&str; 2] = ["gpt-5.4-mini", "gpt-5.6-luna"];
+pub const CHEAP_PLUMBING_PREFERENCE: [&str; 1] = ["gpt-6-luna"];
 
-/// The cheapest gpt-5.6 tier, pinned to exactly one slug.
+/// The Luna tier, pinned to exactly one slug.
 ///
 /// A one-entry allowlist is still an allowlist, and that is the point: a
-/// specific budget grant names `gpt-5.6-luna` exactly, so resolving to
-/// anything else — including the CHEAPER `gpt-5.4-mini` — would spend a
-/// budget on a model nobody authorized. Cheaper is not the same as granted.
-pub const CHEAPEST_GPT56_PREFERENCE: [&str; 1] = ["gpt-5.6-luna"];
+/// specific budget grant names `gpt-6-luna` exactly, so resolving to
+/// anything else would spend a budget on a model nobody authorized.
+pub const LUNA_PREFERENCE: [&str; 1] = ["gpt-6-luna"];
 
-/// [`ModelPolicy::StrongestGpt56`]'s allowlist, strongest first.
-pub const STRONGEST_GPT56_PREFERENCE: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+/// [`ModelPolicy::StrongestWorker`]'s allowlist, strongest first.
+pub const STRONGEST_WORKER_PREFERENCE: [&str; 2] = ["gpt-6-sol", "gpt-6-luna"];
 
 /// The allowlist a policy resolves against, in preference order.
 pub(crate) fn preference_for(policy: ModelPolicy) -> &'static [&'static str] {
     match policy {
         ModelPolicy::CheapPlumbing => &CHEAP_PLUMBING_PREFERENCE,
-        ModelPolicy::CheapestGpt56 => &CHEAPEST_GPT56_PREFERENCE,
-        ModelPolicy::StrongestGpt56 => &STRONGEST_GPT56_PREFERENCE,
+        ModelPolicy::CheapestLuna => &LUNA_PREFERENCE,
+        ModelPolicy::StrongestWorker => &STRONGEST_WORKER_PREFERENCE,
     }
 }
 
@@ -296,7 +295,7 @@ impl AgentBackend for CodexAgentBackend {
         if let Some(tool) = spec
             .dynamic_tools
             .iter()
-            .find(|tool| tool.kind == tidepool_tool::ToolKind::Raw)
+            .find(|tool| tool.kind == exomonad_tool::ToolKind::Raw)
         {
             return Err(AgentBackendError::ProtocolRejected {
                 detail: format!("raw tool {:?} requires the interactive native tool host; this headless protocol accepts structured tools", tool.name),
@@ -874,7 +873,7 @@ mod tests {
                     description: "raw text".into(),
                     input_schema: serde_json::json!({"type":"string"}),
                     output_schema: None,
-                    kind: tidepool_tool::ToolKind::Raw,
+                    kind: exomonad_tool::ToolKind::Raw,
                 }],
             })
             .unwrap_err();
@@ -911,20 +910,11 @@ mod tests {
     // --- model resolution ---------------------------------------------------
 
     #[test]
-    fn mini_wins_when_present() {
-        let available = slugs(&["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.4"]);
+    fn luna_is_selected_for_cheap_plumbing() {
+        let available = slugs(&["gpt-6-sol", "gpt-6-luna", "unsupported-model"]);
         assert_eq!(
             choose_model(ModelPolicy::CheapPlumbing, &available).unwrap(),
-            "gpt-5.4-mini"
-        );
-    }
-
-    #[test]
-    fn luna_is_the_fallback_when_mini_is_absent() {
-        let available = slugs(&["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"]);
-        assert_eq!(
-            choose_model(ModelPolicy::CheapPlumbing, &available).unwrap(),
-            "gpt-5.6-luna"
+            "gpt-6-luna"
         );
     }
 
@@ -934,7 +924,7 @@ mod tests {
     /// slug that is not explicitly sanctioned.
     #[test]
     fn a_catalogue_without_a_sanctioned_model_is_refused() {
-        let available = slugs(&["gpt-5.6-terra"]);
+        let available = slugs(&["unsupported-model"]);
         let error = choose_model(ModelPolicy::CheapPlumbing, &available).unwrap_err();
         assert!(
             matches!(error, AgentBackendError::ProtocolRejected { .. }),
@@ -942,11 +932,11 @@ mod tests {
         );
         let detail = error.to_string();
         assert!(
-            detail.contains("gpt-5.6-terra"),
+            detail.contains("unsupported-model"),
             "the failure must name what WAS available: {detail}"
         );
         assert!(
-            detail.contains("gpt-5.4-mini") && detail.contains("gpt-5.6-luna"),
+            detail.contains("gpt-6-luna"),
             "the failure must name what was wanted: {detail}"
         );
     }
@@ -959,23 +949,20 @@ mod tests {
 
     #[test]
     fn slugs_come_from_the_model_field_in_wire_order() {
-        let response = model_list_from_json(&["gpt-5.6-sol", "gpt-5.4-mini"]);
-        assert_eq!(
-            model_slugs(&response),
-            slugs(&["gpt-5.6-sol", "gpt-5.4-mini"])
-        );
+        let response = model_list_from_json(&["gpt-6-sol", "gpt-6-luna"]);
+        assert_eq!(model_slugs(&response), slugs(&["gpt-6-sol", "gpt-6-luna"]));
     }
 
     #[test]
     fn slugs_fall_back_to_id_when_model_is_empty() {
         let response: ModelListResponse = serde_json::from_value(serde_json::json!({
-            "data": [{"id": "gpt-5.4-mini", "defaultReasoningEffort": "medium"}]
+            "data": [{"id": "gpt-6-luna", "defaultReasoningEffort": "medium"}]
         }))
         .unwrap();
-        assert_eq!(model_slugs(&response), slugs(&["gpt-5.4-mini"]));
+        assert_eq!(model_slugs(&response), slugs(&["gpt-6-luna"]));
         assert_eq!(
             choose_model(ModelPolicy::CheapPlumbing, &model_slugs(&response)).unwrap(),
-            "gpt-5.4-mini"
+            "gpt-6-luna"
         );
     }
 
@@ -1008,7 +995,7 @@ mod tests {
                 description: "Ask the parent.".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
                 output_schema: None,
-                kind: tidepool_tool::ToolKind::Call,
+                kind: exomonad_tool::ToolKind::Call,
             }],
         });
         let value = serde_json::to_value(&params).unwrap();
@@ -1038,12 +1025,12 @@ mod tests {
         let params = turn_start_params(
             &BackendThreadId("thread-1".to_string()),
             &spec,
-            "gpt-5.4-mini",
+            "gpt-6-luna",
         );
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(value["threadId"], serde_json::json!("thread-1"));
         assert_eq!(value["cwd"], serde_json::json!("/tmp/worker-tree"));
-        assert_eq!(value["model"], serde_json::json!("gpt-5.4-mini"));
+        assert_eq!(value["model"], serde_json::json!("gpt-6-luna"));
         assert_eq!(
             value["input"][0],
             serde_json::json!({"type": "text", "text": "write the word cobalt"})

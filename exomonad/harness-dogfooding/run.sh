@@ -4,5 +4,5 @@
 set -euo pipefail
 
 echo "exomonad/harness-dogfooding/run.sh is retired: tidepool-selfharness is not a supported binary" >&2
-echo "Use the supported Shoal entrypoints from docs/GETTING-STARTED.md." >&2
+echo "Use the supported Exomonad entrypoints from exomonad/docs/getting-started.md." >&2
 exit 2

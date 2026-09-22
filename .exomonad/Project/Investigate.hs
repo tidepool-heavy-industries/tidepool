@@ -71,7 +71,7 @@ import qualified Data.Text as Text
 import qualified Jev.Operators as J
 import Jev.Operators (Packet ((:=), (:&)))
 import qualified Tidepool.Command as Cmd
-import Tidepool.Actors.Shoal (Eff, Member)
+import Tidepool.Actors.Exomonad (Eff, Member)
 import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (Commands, Jev)
 

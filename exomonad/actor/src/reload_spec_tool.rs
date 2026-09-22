@@ -4,8 +4,8 @@
 //! with ordinary file tools and then asks for it. The ask is scoped to the
 //! actor that made it and never upgrades a child.
 
+use exomonad_tool::{HostedTool, ToolDeclaration, ToolKind};
 use serde::Deserialize;
-use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
 
 pub(crate) const RELOAD_SPEC_TOOL: &str = "reload_agent_spec";
 

@@ -1,6 +1,6 @@
 # Optional graph feature walkthrough
 
-This is the shoal-repl example, not the current assignment. Read only if its
+This is the exomonad-repl example, not the current assignment. Read only if its
 concrete allocation or requested RSI recipe helps. The [general run guide](../run.md)
 owns watches, review/repair and steering. Between the steps below, use its result
 handling and perform the owning integration/checks; returned handles are not joins.
@@ -129,7 +129,7 @@ only for the decision at hand. shareObservation can grant this ordinary RSI work
 read-only scope over a selected component without transferring stop authority.
 
 RSI returns Outcome Candidate for a checked next-wave customization. Incorporate
-it in the original root .shoal and activate explicitly after unfinished work ends
+it in the original root .exomonad and activate explicitly after unfinished work ends
 or is deliberately handed off. Confirm the next selected identity/preview consumes
 the edit while the old wave remains frozen. Live usability and savings are evidence
 from the subsequent application run, not from deterministic recipe checks.

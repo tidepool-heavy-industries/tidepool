@@ -193,7 +193,7 @@ replaceActor previous@(ActorRef previousId previousIncarnation _) definition@Act
 
 -- | Trusted context-fork launch. The runtime snapshots the caller's lexical
 -- environment and the host forks its provider conversation at the active
--- tool call. Normal authored Shoal code reaches this through `unfold`.
+-- tool call. Normal authored Exomonad code reaches this through `unfold`.
 {-# NOINLINE startActorFork #-}
 beginActorForkGroup
   :: Member Actor effs

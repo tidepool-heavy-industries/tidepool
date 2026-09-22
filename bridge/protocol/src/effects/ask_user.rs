@@ -4,7 +4,7 @@
 //! routed to the human operator) and `NoteWith text` (a non-blocking display
 //! line on the same GADT, sibling constructor). `spec`'s `Value` is a JSON
 //! payload deserialized into a `FormShape` by
-//! `tidepool-harness::selfharness::operator` — this schema only recognizes
+//! `exomonad-harness::selfharness::operator` — this schema only recognizes
 //! the constructor and hands back the raw payload, same as every other
 //! suspending effect.
 //!

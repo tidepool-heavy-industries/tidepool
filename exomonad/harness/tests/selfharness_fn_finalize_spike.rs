@@ -54,18 +54,19 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -74,11 +75,11 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn spike_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness/fn-finalize-spike")
+    repo_root().join("exomonad/examples/harness/fn-finalize-spike")
 }
 
 fn record_spike_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness/fn-record-spike")
+    repo_root().join("exomonad/examples/harness/fn-record-spike")
 }
 
 /// A reply finalizing an `Edits` RECORD OF FUNCTIONS — closures NESTED in a
@@ -205,7 +206,7 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
         edit_reply("cycle 3"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("fn-finalize-spike-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -303,7 +304,7 @@ async fn turn_record_delivers_directive_list_beside_closure() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let turn_dir = repo_root().join("examples/harness/turn-spike");
+    let turn_dir = repo_root().join("exomonad/examples/harness/turn-spike");
     let agent_cfg = EngineConfig::from_decls(
         typed_request_agent_decls(),
         prelude_dir(),
@@ -324,7 +325,7 @@ async fn turn_record_delivers_directive_list_beside_closure() {
         },
     };
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![reply]));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("turn-spike-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -384,7 +385,7 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
     .expect("answerer engine config");
     let replies = vec![record_edit_reply("cycle 1"), record_edit_reply("cycle 2")];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("fn-record-spike-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -488,7 +489,7 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
         helper_edit_reply("bumpBy 7"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("living-helper-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -538,7 +539,7 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
 // crossing full driver cycles.
 
 fn ooda_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness/ooda-spike")
+    repo_root().join("exomonad/examples/harness/ooda-spike")
 }
 
 /// A reply finalizing a typed DATA answer (an `Orientation` or `Move`) — the
@@ -611,7 +612,7 @@ async fn ooda_pipeline_conditional_phases() {
         ),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("ooda-spike-{}.jsonl", std::process::id())),
         &header(),
     )

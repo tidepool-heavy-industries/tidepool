@@ -70,8 +70,8 @@ prepared_runner="$run_root/prepared-corpus"
 cp --reflink=auto -- "$built_runner" "$prepared_runner"
 
 echo "==> building prepared corpus projection probe"
-( cd haskell && cabal build execution-corpus-projection )
-built_probe="$(cd haskell && cabal list-bin execution-corpus-projection)"
+( cd bridge/haskell && cabal build execution-corpus-projection )
+built_probe="$(cd bridge/haskell && cabal list-bin execution-corpus-projection)"
 projection_probe="$run_root/execution-corpus-projection"
 cp --reflink=auto -- "$built_probe" "$projection_probe"
 chmod a-w -- "$prepared_runner" "$projection_probe"

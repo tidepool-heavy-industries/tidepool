@@ -1086,6 +1086,127 @@ dependencies = [
 ]
 
 [[package]]
+name = "exomonad-actor"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "exomonad-model",
+ "exomonad-tool",
+ "frunk",
+ "futures-util",
+ "parking_lot",
+ "ractor",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-bridge-effects",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-mcp",
+ "tidepool-repr",
+ "tidepool-runtime",
+ "tidepool-test-data",
+ "tidepool-testing",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "exomonad-agent"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "codex-codes",
+ "codex-shoal-protocol",
+ "exomonad-model",
+ "exomonad-tool",
+ "exomonad-worktree",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-bridge-effects",
+ "tidepool-extract-cmd",
+ "tidepool-repr",
+ "tokio",
+ "toml_edit",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "exomonad-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "exomonad-model-output"
+version = "0.1.0"
+
+[[package]]
+name = "exomonad-node"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-repr",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "exomonad-tool"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "exomonad-worktree"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "exomonad-node",
+ "parking_lot",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-repr",
+ "uuid",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3234,6 +3355,11 @@ dependencies = [
  "blake3",
  "clap",
  "codex-shoal-protocol",
+ "exomonad-actor",
+ "exomonad-agent",
+ "exomonad-node",
+ "exomonad-tool",
+ "exomonad-worktree",
  "frunk",
  "futures-util",
  "glob",
@@ -3244,8 +3370,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tidepool-actor",
- "tidepool-agent",
  "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
@@ -3256,81 +3380,14 @@ dependencies = [
  "tidepool-handlers",
  "tidepool-heap",
  "tidepool-mcp",
- "tidepool-node",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
- "tidepool-tool",
- "tidepool-worktree",
  "tokio",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "tidepool-actor"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "frunk",
- "futures-util",
- "parking_lot",
- "ractor",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tidepool-atomic-write",
- "tidepool-bridge",
- "tidepool-bridge-derive",
- "tidepool-bridge-effects",
- "tidepool-codegen",
- "tidepool-effect",
- "tidepool-mcp",
- "tidepool-model",
- "tidepool-repr",
- "tidepool-runtime",
- "tidepool-test-data",
- "tidepool-testing",
- "tidepool-tool",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "tidepool-agent"
-version = "0.1.0"
-dependencies = [
- "camino",
- "chrono",
- "codex-codes",
- "codex-shoal-protocol",
- "http-body-util",
- "hyper",
- "hyper-util",
- "parking_lot",
- "reqwest",
- "rustix",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror",
- "tidepool-atomic-write",
- "tidepool-bridge-effects",
- "tidepool-extract-cmd",
- "tidepool-model",
- "tidepool-repr",
- "tidepool-tool",
- "tidepool-worktree",
- "tokio",
- "toml_edit",
- "tracing",
  "uuid",
 ]
 
@@ -3452,6 +3509,8 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "camino",
+ "exomonad-agent",
+ "exomonad-worktree",
  "frunk",
  "genai",
  "glob",
@@ -3463,7 +3522,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tidepool-agent",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
@@ -3474,7 +3532,6 @@ dependencies = [
  "tidepool-test-data",
  "tidepool-testing",
  "tidepool-toolchain",
- "tidepool-worktree",
  "tokio",
  "tracing",
  "ureq",
@@ -3504,38 +3561,6 @@ dependencies = [
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
-]
-
-[[package]]
-name = "tidepool-model"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "tidepool-model-output"
-version = "0.1.0"
-
-[[package]]
-name = "tidepool-node"
-version = "0.1.0"
-dependencies = [
- "libc",
- "parking_lot",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tidepool-atomic-write",
- "tidepool-repr",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3626,14 +3651,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tidepool-tool"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tidepool-toolchain"
 version = "0.1.0"
 dependencies = [
@@ -3651,23 +3668,6 @@ dependencies = [
  "tidepool-repr",
  "tracing",
  "which",
-]
-
-[[package]]
-name = "tidepool-worktree"
-version = "0.1.0"
-dependencies = [
- "camino",
- "parking_lot",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tidepool-atomic-write",
- "tidepool-node",
- "tidepool-repr",
- "uuid",
 ]
 
 [[package]]

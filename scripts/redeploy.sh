@@ -102,7 +102,7 @@ if [ "$NO_SERVERS" -eq 0 ]; then
   # a fresh resolution can fail on yanked-but-locked deps (seen live:
   # arrayref 0.3.x) and would silently deploy different dep versions than the
   # tree that passed the test suite.
-  step "Step 3: cargo install tidepool (Shoal + embedded Haskell)"
+  step "Step 3: cargo install tidepool (Exomonad + embedded Haskell)"
   run cargo install --locked --path tidepool
 else
   echo; echo "(skipped: --no-servers)"
@@ -120,10 +120,10 @@ fi
 #   `.meta`/`.prepared` variants, `<key>.asks.json`, `<key>.a<N>`).
 #
 #   Deliberately NOT a wholesale `rm -rf ~/.cache/tidepool/`: that root also
-#   holds `actor-builds/`, `shoal/` (Shoal actor-worktree state), and
+#   holds `actor-builds/`, `exomonad/` (Exomonad actor-worktree state), and
 #   `toolchain-stamp.json` itself
 #   — none of which a redeploy invalidates, and on a shared box the worktree
-#   state under `shoal/actor-worktrees/**` belongs to OTHER agents' live
+#   state under `exomonad/actor-worktrees/**` belongs to OTHER agents' live
 #   work. `toolchain-stamp.json` is left alone here too: Step 6 overwrites it
 #   atomically regardless of its prior content, so there is nothing to clear
 #   pre-emptively, and the old MUST-run-after-Step-5 ordering concern

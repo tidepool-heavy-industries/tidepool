@@ -30,7 +30,7 @@ Four motives, in the order they carry weight:
 
 ## Shape
 
-    the actor's checkout                .shoal/AgentSpec.hs
+    the actor's checkout                .exomonad/AgentSpec.hs
       → explicit reload                 (never on file save)
       → one compile                     declarations + retained handlers
       → invoked at supported events     tool calls, and later triggers
@@ -46,14 +46,14 @@ one, truthfully, and says so.
 
 ## The spec is one module among the ones the agent curates
 
-It is not a special location. `.shoal/AgentSpec.hs` sits beside `.shoal/Project/`,
+It is not a special location. `.exomonad/AgentSpec.hs` sits beside `.exomonad/Project/`,
 in the same declared source roots a notebook cell imports, and a reload publishes
 all of them in one revision. The notebook and the spec are two consumers of that
 one revision, activating on their own schedule: the next cell compiles against it
 when it runs, and the actor re-derives its record when it asks.
 
 That is what makes the promotion path cheap. A helper written in a cell moves to
-`.shoal/discoveries/` while it is experimental, to `.shoal/Project/` when a second
+`.exomonad/discoveries/` while it is experimental, to `.exomonad/Project/` when a second
 consumer genuinely shares it, and becomes a tool or a slot by being *named in the
 spec* — no copy, no move, no second library location. The same module can back a
 cell today and a tool tomorrow, compiled once from one revision, so the two can
@@ -95,7 +95,7 @@ the type of.
 ## How the spec is found
 
 By convention, because configuration cannot express it. `[haskell] tools`
-(`bridge/facade/src/shoal/workspace.rs:24`, wired at
+(`bridge/facade/src/exomonad/workspace.rs:24`, wired at
 `bridge/facade/src/actor_host.rs:2046-2051`) is one workspace-global key resolved once
 at composition-root construction and threaded identically into every actor. It
 names one entry point for the whole run, which is exactly what a spec per
@@ -109,8 +109,8 @@ An actor resolves its spec in this order, and stops at the first that exists:
 3. the existing `[haskell] tools` entry point;
 4. the built-in default.
 
-In the shipped example workspace `[haskell] source_roots = ["."]` under `.shoal`,
-so `.shoal/AgentSpec.hs` is module `AgentSpec` with no new path resolution and no
+In the shipped example workspace `[haskell] source_roots = ["."]` under `.exomonad`,
+so `.exomonad/AgentSpec.hs` is module `AgentSpec` with no new path resolution and no
 new source root. A checkout without the file behaves exactly as today, so
 adopting a spec is adding one file.
 
@@ -123,7 +123,7 @@ Two obligations follow from discovery being implicit:
   falling through to the default.
 - **The discovered module joins the checked closure.** The reload's typecheck
   covers everything reachable from the configured module list plus the driver
-  (`bridge/facade/src/shoal/source.rs`). A spec found by convention is not in
+  (`bridge/facade/src/exomonad/source.rs`). A spec found by convention is not in
   that list, so the reload adds it, and a spec that fails to compile fails its
   own reload instead of surfacing later at an unrelated call.
 
@@ -141,7 +141,7 @@ so a schema can never advertise a handler from another revision. A call clones
 that `Arc` (`exomonad/actor/src/resident_actor.rs:4555-4592`), so a call already
 accepted keeps its implementation with no further mechanism.
 
-`SourceLayer` (`bridge/facade/src/shoal/source.rs`) captures source by content
+`SourceLayer` (`bridge/facade/src/exomonad/source.rs`) captures source by content
 identity, typechecks a candidate, publishes by one `rename(2)` of a symlink, and
 returns a rejection as a value.
 

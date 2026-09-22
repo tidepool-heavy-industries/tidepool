@@ -1,7 +1,7 @@
 # JSON optics in the resident workbench
 
 Status: future direction, recorded from operator discussion. This is not a
-prerequisite for the shoal-repl build or an implementation commitment.
+prerequisite for the exomonad-repl build or an implementation commitment.
 
 ## Intent
 
@@ -17,13 +17,13 @@ Optimize expressions for agent utility and legibility; the operator is also
 comfortable reading lens code. Do not simplify away useful composition merely
 to make all agent-authored code introductory Haskell.
 
-This supports the shared human/agent workbench envisioned for shoal-repl:
+This supports the shared human/agent workbench envisioned for exomonad-repl:
 useful investigations leave executable functions and values behind, and those
 become material for later scaffold/fork/fold cycles.
 
 ## Existing foothold and discovery
 
-The live Shoal default scope was checked during this discussion: `(^.)`, `lens`,
+The live Exomonad default scope was checked during this discussion: `(^.)`, `lens`,
 `traverseOf`, `_Just`, `preview`, `key`, and `_String` were available. Evaluating
 `(1 :: Int, "hello" :: Text) ^. _2` returned `hello`. This establishes availability
 and one simple execution, not comprehensive compiler support for arbitrary optic
@@ -59,7 +59,7 @@ explicitly when current external state matters.
 Preserve a useful query and apply it to fresh snapshots later: for example, find
 requests whose provider failed while their responses remain pending. Start with
 task-local definitions. Repeatedly useful vocabulary may eventually justify
-committed helpers such as `.shoal/Helpers.hs`; automatic helper loading is a
+committed helpers such as `.exomonad/Helpers.hs`; automatic helper loading is a
 separate, deferred decision.
 
 ### Derive a recursive frontier from evidence
@@ -68,7 +68,7 @@ Group structured failures by owning subsystem and construct child assignments
 from those groups. Children receive relevant diagnostics, data, and reusable
 transformations through supported live-value/context mechanisms. Fold typed
 outcomes, refresh the remaining failures, and repeat. JSON queries express the
-task-specific decomposition; existing Shoal actor operations own scheduling,
+task-specific decomposition; existing Exomonad actor operations own scheduling,
 authority, and settlement. There is no new JSON scheduler or task registry.
 
 ### Derive fixtures from real interactions
@@ -76,7 +76,7 @@ authority, and settlement. There is no new JSON scheduler or task registry.
 Capture a backend response, redact sensitive fields, reduce it to the interesting
 case, and derive variants: missing optional fields, unknown event kinds,
 duplicates, empty batches. Use the results in mocks and integration tests.
-For shoal-repl, event traces could supply realistic replay and recovery cases.
+For exomonad-repl, event traces could supply realistic replay and recovery cases.
 Keep deliberately invalid fixtures distinct from valid protocol examples.
 
 ### Carry executable acceptance with an assignment
@@ -91,7 +91,7 @@ product requirement. Do not serialize live Haskell closures into JSON.
 ### Invent operator views during work
 
 Compose queries for actors needing attention or candidates ready for review with
-their evidence. A future shoal-repl structured renderer could present those
+their evidence. A future exomonad-repl structured renderer could present those
 projections. Useful views can emerge from workbench expressions before becoming
 dedicated UI. Runtime state remains owned by the backend; views are snapshots.
 
@@ -114,7 +114,7 @@ dedicated UI. Runtime state remains owned by the backend; views are snapshots.
 
 ## A useful first slice, when this work is selected
 
-Use a real shoal-repl event trace to connect retention, optic queries, fixture
+Use a real exomonad-repl event trace to connect retention, optic queries, fixture
 generation, and executable acceptance. Inspect the existing JSON/schema/optic
 owners and select one production consumer before designing helpers. Commit a
 small interface and example scaffold; split independent mock, implementation,

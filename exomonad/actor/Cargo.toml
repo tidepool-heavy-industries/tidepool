@@ -1,6 +1,6 @@
 [package]
-name = "tidepool-actor"
-description = "Actor identity, lifecycle, and observability kernel for Tidepool"
+name = "exomonad-actor"
+description = "Actor identity, lifecycle, and observability kernel for Exomonad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tidepool-model.workspace = true
+exomonad-model.workspace = true
 blake3.workspace = true
 futures-util.workspace = true
 parking_lot.workspace = true
@@ -27,7 +27,7 @@ tidepool-codegen.workspace = true
 tidepool-effect.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
-tidepool-tool.workspace = true
+exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true
 uuid.workspace = true
 

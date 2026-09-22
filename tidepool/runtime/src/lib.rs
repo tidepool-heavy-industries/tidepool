@@ -38,8 +38,8 @@ pub use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
 pub mod failclass;
 /// Generated suspension-decode request types (`tidepool-protocol`'s
 /// `runtime_generated_files`) — currently just `Ask`, shared with
-/// `tidepool-harness`'s `RosterRequest::Ask`. `pub` (unlike
-/// `tidepool-harness`'s own crate-private `generated` module) because the
+/// `exomonad-harness`'s `RosterRequest::Ask`. `pub` (unlike
+/// `exomonad-harness`'s own crate-private `generated` module) because the
 /// harness is a genuine second consumer across a crate boundary, not an
 /// internal implementation detail.
 pub mod generated;

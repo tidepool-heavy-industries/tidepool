@@ -11,8 +11,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use exomonad_model::{ConversationTurn, Role, TurnItem};
 use tidepool_bridge_effects::{RfConversationTurn, RfError, RfRole, RfTurnItem};
-use tidepool_model::{ConversationTurn, Role, TurnItem};
 
 /// Why an actor's own conversation could not be returned.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,6 +10,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use exomonad_actor::{
+    ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
+};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,15 +20,12 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tidepool_actor::{
-    ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
-};
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
 use tokio::{net::UnixListener, sync::Mutex};
 use wire::*;
 
 type InspectGraph =
-    dyn Fn(tidepool_actor::ActorRef) -> Option<Vec<tidepool_actor::ActorGraphNode>> + Send + Sync;
+    dyn Fn(exomonad_actor::ActorRef) -> Option<Vec<exomonad_actor::ActorGraphNode>> + Send + Sync;
 
 type Provision = dyn Fn() -> BoxFuture<'static, Result<LocalActorRef, String>> + Send + Sync;
 #[derive(Clone)]

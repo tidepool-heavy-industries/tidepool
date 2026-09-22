@@ -35,7 +35,7 @@ should compute exact structure; Jev should decide what the structure means.
   receipt versus handling, and whether a local contract resolves an issue.
 - Speculative fan-out from 8 through 1,024 independent Noul questions over one
   shared state.
-- A seven-answer Shoal microprogram combining mechanism diagnosis, next LSP
+- A seven-answer Exomonad microprogram combining mechanism diagnosis, next LSP
   action, focused verification, wake policy, evidence sufficiency, and semantic
   completeness in one request.
 - Equivalent continuations under different Choice identifiers, plus a stable
@@ -149,7 +149,7 @@ The practical frontier is therefore not “simple versus complex.” It is:
   frontier, ask which continuation is relevant, whether evidence is sufficient,
   whether interpretations agree, or whether to escalate.
 
-A strong Shoal microprogram can still compress four or five conventional turns:
+A strong Exomonad microprogram can still compress four or five conventional turns:
 run Bash/LSP queries, normalize and join their outputs deterministically, expose
 the resulting semantic frontier as one rich Choice plus independent Nouls, then
 execute the selected continuation. What should not be compressed into the Jev

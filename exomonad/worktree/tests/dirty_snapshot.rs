@@ -1,7 +1,7 @@
 //! Dirty-snapshot tests, including the untouched-source invariant.
 //!
 //! Every test here runs against a REAL temporary repository built by
-//! [`tidepool_worktree::testing::TestRepo`] and driven by its scripted writer;
+//! [`exomonad_worktree::testing::TestRepo`] and driven by its scripted writer;
 //! there is no mock of git.
 //!
 //! `snapshot_source` calls `git::inspect::dirty_summary` (`pre_status`
@@ -10,10 +10,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tidepool_worktree::snapshot::snapshot_source;
-use tidepool_worktree::testing::{fingerprint, TestRepo};
-use tidepool_worktree::{
-    GitCli, InProgressKind, WorktreeError, WorktreeId, TIDEPOOL_SNAPSHOT_REF_PREFIX,
+use exomonad_worktree::snapshot::snapshot_source;
+use exomonad_worktree::testing::{fingerprint, TestRepo};
+use exomonad_worktree::{
+    GitCli, InProgressKind, WorktreeError, WorktreeId, EXOMONAD_SNAPSHOT_REF_PREFIX,
 };
 
 /// Everything about the source that `allowDirtySnapshot` must leave alone,
@@ -337,8 +337,8 @@ fn snapshot_ref_lives_outside_refs_heads_and_never_in_branch_list() {
         receipt
             .snapshot_ref
             .as_str()
-            .starts_with(TIDEPOOL_SNAPSHOT_REF_PREFIX),
-        "snapshot ref must live under {TIDEPOOL_SNAPSHOT_REF_PREFIX}: {}",
+            .starts_with(EXOMONAD_SNAPSHOT_REF_PREFIX),
+        "snapshot ref must live under {EXOMONAD_SNAPSHOT_REF_PREFIX}: {}",
         receipt.snapshot_ref.as_str()
     );
     assert!(
@@ -514,7 +514,7 @@ fn refuses_non_utf8_temp_index_dir_and_leaves_source_untouched() {
 /// exists (git creates the index FILE, never its parent directories).
 #[test]
 fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
-    use tidepool_worktree::{
+    use exomonad_worktree::{
         DirtyPolicy, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec,
     };
 
@@ -546,7 +546,7 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
         "a dirty source must yield a snapshot ref"
     );
     // NOT `assert_source_untouched`: the manager path legitimately adds a
-    // managed `tidepool/worktree/…` branch to the source repo (that branch IS
+    // managed `exomonad/worktree/…` branch to the source repo (that branch IS
     // the mechanism). What must be untouched: bytes, HEAD, checked-out
     // branch, index, and the dirty state itself.
     let after = capture_source_state(repo.git(), repo.path());
@@ -581,7 +581,7 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
 /// above.
 #[test]
 fn ref_source_ignores_dirty_policy_and_never_snapshots() {
-    use tidepool_worktree::{
+    use exomonad_worktree::{
         DirtyPolicy, GitRef, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec,
     };
 

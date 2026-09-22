@@ -114,10 +114,10 @@ impl ActorPath {
         let leaf = self.0.last().map_or("", ActorPathSegment::as_str);
         let parent_count = self.0.len().saturating_sub(1);
         if parent_count == 0 {
-            format!("shoal/branches/{leaf}")
+            format!("exomonad/branches/{leaf}")
         } else {
             format!(
-                "shoal/{}/branches/{leaf}",
+                "exomonad/{}/branches/{leaf}",
                 self.0
                     .iter()
                     .take(parent_count)
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(path.to_string(), "context-unfold/runtime/binding-snapshot");
         assert_eq!(
             path.git_branch(),
-            "shoal/context-unfold/runtime/branches/binding-snapshot"
+            "exomonad/context-unfold/runtime/branches/binding-snapshot"
         );
     }
 
@@ -183,11 +183,11 @@ mod tests {
         let child = ActorPath::parse("context-unfold/runtime/scaffold/leaves/parser").unwrap();
         assert_eq!(
             parent.git_branch(),
-            "shoal/context-unfold/runtime/branches/scaffold"
+            "exomonad/context-unfold/runtime/branches/scaffold"
         );
         assert_eq!(
             child.git_branch(),
-            "shoal/context-unfold/runtime/scaffold/leaves/branches/parser"
+            "exomonad/context-unfold/runtime/scaffold/leaves/branches/parser"
         );
         assert!(!child
             .git_branch()

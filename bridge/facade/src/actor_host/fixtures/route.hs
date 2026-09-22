@@ -8,4 +8,4 @@ forwarding <- route (awaitSettled producer) (\settlement -> case settlement of {
 broken <- route (awaitSettled producer) (\_ -> error "deliberate route failure")
 let reviewWave = "independent-review" :: ForkGroupLabel
 let reviewLabel = "review" :: Label
-reviewLaunch <- route (awaitSettled producer) (\settlement -> case settlement of { ReplyAvailable answer -> do { _ <- unfold (batch campaign reviewWave) (child (withContext (selected id) (withModel (Literal "gpt-5.6-sol") (coding @Text projectHead (assignment reviewLabel (responseValue answer)))))); pure () }; ReplyUnavailable _ -> pure () })
+reviewLaunch <- route (awaitSettled producer) (\settlement -> case settlement of { ReplyAvailable answer -> do { _ <- unfold (batch campaign reviewWave) (child (withContext (selected id) (withModel (Literal "gpt-6-sol") (coding @Text projectHead (assignment reviewLabel (responseValue answer)))))); pure () }; ReplyUnavailable _ -> pure () })

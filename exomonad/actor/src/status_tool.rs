@@ -1,7 +1,7 @@
 //! Model-facing contract for the actor-local `status` tool.
 
+use exomonad_tool::{HostedTool, ToolDeclaration, ToolKind};
 use serde::Deserialize;
-use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
 
 pub(crate) const STATUS_TOOL: &str = "status";
 

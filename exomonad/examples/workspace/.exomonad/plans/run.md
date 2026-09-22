@@ -17,7 +17,7 @@ a new swarm or validating a package change.
 an allocated checkout. Component leads, solTask/implement and reviews explicitly select Medium;
 keep Sol effort stable across inherited forks. Original-root callers use `solTaskFrom label projectHead`
 or `componentLeadFrom label projectHead`. A Task's source hash records its accepted
-baseline; it does not override live checkout selection. Shoal checkpoints eligible
+baseline; it does not override live checkout selection. Exomonad checkpoints eligible
 source changes on the current branch before a live-source fork. Commit authored
 units with meaningful messages for Git integration and restart recovery.
 

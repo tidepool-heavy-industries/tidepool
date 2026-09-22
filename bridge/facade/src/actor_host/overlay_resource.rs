@@ -4,11 +4,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use tidepool_node::{
+use exomonad_node::{
     MountNamespace, OverlayRecovery, OverlayRotation, OverlayRotationOutcome, ProcessBoundaryError,
     ProcessMountBoundary,
 };
+use parking_lot::Mutex;
 
 #[derive(Debug)]
 pub(super) struct OverlayResourceLease {
@@ -307,8 +307,8 @@ impl OverlayResourceLease {
         // Mount targets live in the immutable base so Bubblewrap does not
         // create them in the writable upper during view setup.
         std::fs::File::create_new(self.layers[0].path.join(".git"))?;
-        std::fs::create_dir(self.layers[0].path.join(".shoal"))?;
-        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
+        std::fs::create_dir(self.layers[0].path.join(".exomonad"))?;
+        exomonad_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
         *self.latest.lock() = Some(OverlaySnapshot {
             layers: self.layers.clone().into(),
         });
@@ -320,7 +320,7 @@ impl OverlayResourceLease {
             .layers
             .last()
             .ok_or_else(|| io::Error::other("source has no base"))?;
-        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)?;
+        exomonad_node::copy_overlay_root_metadata(&inherited.path, &self.upper)?;
         self.empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?));
         Ok(())
     }
@@ -485,7 +485,7 @@ impl OverlayResourceLease {
             .map_err(io::Error::other)?
             .with_read_only_project();
         let namespace = boundary.prepare_view(
-            tidepool_node::BUBBLEWRAP_PROGRAM,
+            exomonad_node::BUBBLEWRAP_PROGRAM,
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         )?;
         let visible = namespace.retained_view_path(&view)?;
@@ -882,9 +882,9 @@ impl Drop for OverlayStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exomonad_node::ProcessInvocation;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Child, ChildStdout, Command, Stdio};
-    use tidepool_node::ProcessInvocation;
 
     #[tokio::test]
     async fn retired_parent_layers_survive_children_then_are_reclaimed() {

@@ -14,12 +14,12 @@ use parking_lot::Mutex;
 use crate::support;
 
 use serde_json::Value as Json;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::persistence;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, JsonlObserver, LogObserver,
     Observer, SelfHarnessDriver,
 };
@@ -27,7 +27,8 @@ use tidepool_harness::{
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -36,7 +37,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {
@@ -129,7 +130,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
     let _ = tracing_subscriber::fmt()
         .with_writer(CapturedWriter(buf.clone()))
         .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "warn,tidepool_harness=debug",
+            "warn,exomonad_harness=debug",
         ))
         .with_ansi(false)
         .try_init();
@@ -150,7 +151,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
     std::fs::create_dir_all(log_path.parent().expect("log path has a parent"))
         .expect("create selfharness cache dir");
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let jsonl =

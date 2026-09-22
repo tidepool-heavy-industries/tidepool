@@ -1727,8 +1727,8 @@ impl SelfHarnessDriver {
     ///
     /// Base path: the parent's own registered GUI label (`node_labels` —
     /// the parent is itself a labeled branch/fork child), else the fixed
-    /// root id `"root"` (mirrors `tidepool_web::DEFAULT_NODE_ID` as a
-    /// literal — this crate cannot depend on `tidepool-web`).
+    /// root id `"root"` (mirrors `exomonad_web::DEFAULT_NODE_ID` as a
+    /// literal — this crate cannot depend on `exomonad-web`).
     ///
     /// Child segment: `f<idx>-<ascii-slug-of-brief-prefix>`, mirroring a
     /// structurally-labeled branch's own `root/1-child` convention so a

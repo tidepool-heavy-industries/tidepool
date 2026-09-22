@@ -55,17 +55,17 @@ poll. Actor-to-actor payloads are typed values or compact deltas, not narrated
 snapshots; query only what the next engineering decision needs.
 
 `coordinationActor` above is not shipped: it is a one-line wrapper that
-`examples/shoal-workspace` wrote in its own `.shoal/Project/Actors.hs`, as
+`exomonad/examples/workspace` wrote in its own `.exomonad/Project/Actors.hs`, as
 `R.definition name (Actor.Selected knownEffects)` over
 `LocalEffects api '[Replies, Actor, Notifications]`. `Outcome` and `Candidate`
 are that workspace's types too. In a fresh project, write the same wrapper into
-your own `.shoal/Project`, or call `R.definition` directly and pin the row with
+your own `.exomonad/Project`, or call `R.definition` directly and pin the row with
 `:: ActorSpec MyActor MyEffects` — `knownEffects` is polymorphic in the row and
 ambiguous without it. `Jev` and `Commands` are effect types from
 `Tidepool.Effects.Core` and need an import before a row can name them.
 
 When the record is carrying a whole implement → review → repair → merge loop,
-load `shoal-orchestrate`: the record, the seven conditions worth waking the
+load `exomonad-orchestrate`: the record, the seven conditions worth waking the
 owner for, and the decisions kept in its state that the owner reads with one call.
 
-skill: shoal-define-actors
+skill: exomonad-define-actors

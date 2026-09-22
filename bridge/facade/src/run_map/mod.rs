@@ -1,4 +1,4 @@
-//! Read-only, bounded derivation of Shoal run artifacts.
+//! Read-only, bounded derivation of Exomonad run artifacts.
 //! Missing evidence is not a negative observation or an acceptance verdict.
 mod metadata;
 use metadata::{binding_thread, read_root, recorded_link};
@@ -41,7 +41,7 @@ pub struct ActorNode {
     pub incarnation: u64,
     pub provider_thread: Evidence<String>,
     pub events: Vec<RecordedEvent>,
-    pub parent: Evidence<tidepool_actor::ActorRef>,
+    pub parent: Evidence<exomonad_actor::ActorRef>,
     pub source_seed: Evidence<String>,
 }
 #[derive(Debug, Serialize)]

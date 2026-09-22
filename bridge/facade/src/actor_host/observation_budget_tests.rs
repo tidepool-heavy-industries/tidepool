@@ -36,17 +36,17 @@ const OVERSIZED_BYTES: usize = 400_000;
 
 /// One turn's worth of transcript. Three of these is ~600 KB, the shape
 /// `reflect 3` actually sees in a session that has been reading files.
-fn bulky_turn(index: usize) -> tidepool_actor::ConversationTurn {
-    tidepool_actor::ConversationTurn {
+fn bulky_turn(index: usize) -> exomonad_actor::ConversationTurn {
+    exomonad_actor::ConversationTurn {
         turn: format!("turn-{index}"),
         started_at: None,
         completed_at: None,
         items: vec![
-            tidepool_actor::TurnItem::Message {
-                role: tidepool_actor::ConversationRole::Assistant,
+            exomonad_actor::TurnItem::Message {
+                role: exomonad_actor::ConversationRole::Assistant,
                 text: format!("turn {index} reasoning"),
             },
-            tidepool_actor::TurnItem::ToolResult {
+            exomonad_actor::TurnItem::ToolResult {
                 call: format!("call-{index}"),
                 output: "e".repeat(OVERSIZED_BYTES / 2),
             },
@@ -181,12 +181,12 @@ async fn an_oversized_bare_expression_is_bound_and_shown_as_a_selection() {
 #[tokio::test]
 async fn reflect_binds_history_larger_than_the_observation_budget() {
     let turns: Vec<_> = (0..3).map(bulky_turn).collect();
-    let reader: tidepool_actor::ConversationReader = Arc::new(move |_actor, count| {
+    let reader: exomonad_actor::ConversationReader = Arc::new(move |_actor, count| {
         let turns = turns.clone();
         Box::pin(async move { Ok(turns.into_iter().take(count).collect()) })
     });
     let campaign = TestCampaign::start_with_conversation(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |_| {},
         Some(reader),

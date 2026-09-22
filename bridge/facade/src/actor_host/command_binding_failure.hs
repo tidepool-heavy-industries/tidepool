@@ -1,2 +1,2 @@
-import qualified Data.Text.Lazy as ShoalCommandText
+import qualified Data.Text.Lazy as ExomonadCommandText
 Cmd.await retainedBeforeFailure

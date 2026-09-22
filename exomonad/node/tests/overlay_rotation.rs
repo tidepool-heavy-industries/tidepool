@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use tidepool_node::{
+use exomonad_node::{
     MountNamespace, OverlayRotation, OverlayRotationOutcome, ProcessInvocation,
     ProcessMountBoundary,
 };
@@ -79,7 +79,7 @@ fn spawn_worker(invocation: ProcessInvocation) -> (Worker, MountNamespace) {
 #[tokio::test]
 #[ignore = "requires a fresh delegated systemd cgroup scope"]
 async fn command_oom_releases_writers_for_cow_publication() {
-    use tidepool_node::command_resources::{
+    use exomonad_node::command_resources::{
         CommandResourcePolicy, CommandResourceStatus, CommandResources,
     };
     let owner = CommandResources::delegated(CommandResourcePolicy {
@@ -329,7 +329,7 @@ fn source_rotation_preserves_live_build_mount_config_and_root_metadata() {
         .unwrap()
         .with_read_only_overlay(root, root)
         .unwrap()
-        .with_read_only_overlay(root.join("config"), project.join(".shoal"))
+        .with_read_only_overlay(root.join("config"), project.join(".exomonad"))
         .unwrap()
         .with_overlay_view(
             [root.join("build-base")],
@@ -376,7 +376,7 @@ fn source_rotation_preserves_live_build_mount_config_and_root_metadata() {
     );
     assert_eq!(worker.exchange("hold_build"), "held");
     let before = std::fs::metadata(root.join("u0")).unwrap();
-    // Omitting the current upper omits the .shoal mountpoint that bwrap
+    // Omitting the current upper omits the .exomonad mountpoint that bwrap
     // created there. Failure while assembling nested mounts must roll back.
     let incomplete = OverlayRotation::prepare(
         &project,
@@ -385,7 +385,7 @@ fn source_rotation_preserves_live_build_mount_config_and_root_metadata() {
         &root.join("w1"),
     )
     .unwrap()
-    .preserving_mounts(&[project.join("target"), project.join(".shoal")])
+    .preserving_mounts(&[project.join("target"), project.join(".exomonad")])
     .unwrap();
     let failed = namespace.rotate_overlay(incomplete);
     assert!(
@@ -401,7 +401,7 @@ fn source_rotation_preserves_live_build_mount_config_and_root_metadata() {
         &root.join("w1"),
     )
     .unwrap()
-    .preserving_mounts(&[project.join("target"), project.join(".shoal")])
+    .preserving_mounts(&[project.join("target"), project.join(".exomonad")])
     .unwrap();
     let outcome = namespace.rotate_overlay(rotation);
     assert!(
@@ -431,7 +431,7 @@ fn source_rotation_preserves_live_build_mount_config_and_root_metadata() {
         .unwrap()
         .args([
             "-c",
-            "cat \"$1/target/artifact\" \"$1/.shoal/prompt\"; printf new >\"$1/target/new\"",
+            "cat \"$1/target/artifact\" \"$1/.exomonad/prompt\"; printf new >\"$1/target/new\"",
             "probe",
         ])
         .arg(&project)

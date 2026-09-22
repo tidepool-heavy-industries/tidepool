@@ -176,7 +176,7 @@ scaling is not the binding constraint; test-isolation blast radius is.
 
 | Crate | GHC-heavy binaries | GHC-heavy `#[test]` fns | Standalone-flagged (grep signal)* |
 |---|---|---|---|
-| tidepool-harness | 41 | 162 | 3 `#[ignore]`, 2 compile_fail-named |
+| exomonad-harness | 41 | 162 | 3 `#[ignore]`, 2 compile_fail-named |
 | tidepool-runtime | 61 | 714 | 6 `#[ignore]`, 2 proptest!, 5 compile_fail-named, 1 sigill-named |
 | tidepool-repl | 27 | 141 | 0 |
 | tidepool-handlers | 5 | 27 | 0 |

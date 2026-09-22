@@ -41,7 +41,7 @@ toolsWith select = toolFor (executeWith select)
 toolFor :: (LookupArguments -> Eff effects Text) -> LookupTools (AsServerT (Eff effects))
 toolFor action = LookupTools
   { lookup = tool
-      "Look up names, Haskell types, or Shoal documentation. Batch with queries, e.g. [\"Cmd.run\", \":: Int -> Int\", \"doc workbench\"]. Prefix type searches with ::; use _ for unknown parts. Qualified names are resolved before module exports. Each query reports independently. Relevant alternatives and one-degree related declarations may be attached; explicit lookup retrieves their full details."
+      "Look up names, Haskell types, or Exomonad documentation. Batch with queries, e.g. [\"Cmd.run\", \":: Int -> Int\", \"doc workbench\"]. Prefix type searches with ::; use _ for unknown parts. Qualified names are resolved before module exports. Each query reports independently. Relevant alternatives and one-degree related declarations may be attached; explicit lookup retrieves their full details."
       action
   }
 

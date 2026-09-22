@@ -1,6 +1,6 @@
 [package]
-name = "tidepool-tool"
-description = "Transport-neutral model tool contracts for Tidepool"
+name = "exomonad-tool"
+description = "Transport-neutral model tool contracts for Exomonad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

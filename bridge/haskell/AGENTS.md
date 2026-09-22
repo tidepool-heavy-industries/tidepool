@@ -17,7 +17,7 @@ discovery, cache policy, and artifact decoding.
 - Do not preserve persisted values by inventing syntactic bans. Let GHC check
   whether a value can be used in the receiving effect row.
 - For conditional typed adapters, ask GHC to solve the actual constraint in
-  scope; see [compiler constraint queries](../docs/compiler-constraint-queries.md).
+  scope; see [compiler constraint queries](../../docs/compiler-constraint-queries.md).
   Do not infer capability from a matching instance head or diagnostic text.
 - After translation or serialization changes, run the canonical fixture check;
   never hand-edit or selectively omit generated CBOR artifacts.
@@ -32,7 +32,7 @@ discovery, cache policy, and artifact decoding.
 - Keep pure observations distinct from effects: `inspectFull` constructs a
   presentation value. Bind an effect result before inspecting it, or use
   `inspectFull <$> action`; do not disguise inspection as an effect.
-- Actor orchestration surface is also generated/composed by `tidepool-actor`.
+- Actor orchestration surface is also generated/composed by `exomonad-actor`.
   Search its production consumers before adding a public Haskell helper.
 - Preserve the distinction between actor `Watch result` and event `EventWatch`.
   Do not resolve public-name collisions with import hiding or duplicate aliases.

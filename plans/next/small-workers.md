@@ -35,8 +35,8 @@ selection when the obligation requires it.
 
 ## Implementation and acceptance
 
-The single implementing Astra uses existing owners in `tidepool-actor`,
-`tidepool-agent`, `tidepool-runtime`, and the host/compiler boundaries. Read the
+The single implementing Astra uses existing owners in `exomonad-actor`,
+`exomonad-agent`, `tidepool-runtime`, and the host/compiler boundaries. Read the
 nearest contributor guidance and actual consumers. No independent service
 controller or observer is required.
 

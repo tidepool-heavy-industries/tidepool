@@ -1,6 +1,6 @@
 # Graph relationships: worked execution plan
 
-This is a concrete application example for `shoal-repl`, using a fixed Shoal build.
+This is a concrete application example for `exomonad-repl`, using a fixed Exomonad build.
 Confirm the current human-approved product plan before launching it; installing
 this package is not launch approval. The [working pattern](../operating.md) describes
 human interviewing, Sol readbacks and recursive local waves. For another project
@@ -55,10 +55,10 @@ obligation across this checkpoint and subsequent local waves.
    coherent navigation and checked integration. A contract alone is preparation;
    carry remaining obligations into later waves when needed.
 5. On the human's “RSI time”, provide the outcome/snapshot packet to an ordinary
-   Astra engagement. It edits and checks .shoal source for the next explicit
+   Astra engagement. It edits and checks .exomonad source for the next explicit
    swarm restart. See [the example run and improvement guide](run.md).
 
-The initial source is the app checkout after this .shoal package is committed.
+The initial source is the app checkout after this .exomonad package is committed.
 Resolve and record the exact commit before launch. `component campaign part
 exactCommit` constructs a Task with source, scope, rationale and acceptance.
 Attach relevant checked decisions with withDecision before selecting fresh workers.

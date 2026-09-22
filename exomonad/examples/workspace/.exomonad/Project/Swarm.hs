@@ -5,7 +5,7 @@
 -- supplies obligations; workers never need to author the orchestration code.
 --
 -- This is an executable policy specification. The driver connects requests to
--- Shoal's existing fork, command, review and worktree owners. It must persist
+-- Exomonad's existing fork, command, review and worktree owners. It must persist
 -- the state and outstanding requests before dispatch, correlate replies, and
 -- reconcile uncertain external operations rather than replaying them.
 module Project.Swarm

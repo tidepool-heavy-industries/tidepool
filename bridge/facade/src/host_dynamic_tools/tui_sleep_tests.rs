@@ -6,6 +6,16 @@
 use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;
 use axum::{extract::State, routing::post, Json, Router};
+use exomonad_actor::{
+    HostedWorkSeal, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+    WorkbenchCancellationOutcome,
+};
+use exomonad_agent::{
+    native_interactive_agent_from_parts, native_interactive_backend, read_interactive_binding,
+    InputAdmission, InputOperationId, InputProducerId, InputPurpose, InteractiveInputEnvelope,
+    InteractiveInputMode, InteractiveInputTarget,
+};
+use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -15,19 +25,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tidepool_actor::{
-    HostedWorkSeal, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
-    WorkbenchCancellationOutcome,
-};
-use tidepool_agent::{
-    native_interactive_agent_from_parts, native_interactive_backend, read_interactive_binding,
-    InputAdmission, InputOperationId, InputProducerId, InputPurpose, InteractiveInputEnvelope,
-    InteractiveInputMode, InteractiveInputTarget,
-};
-use tidepool_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tokio::{net::UnixListener, sync::Notify};
 
-const NATIVE_ENV: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
+const NATIVE_ENV: &str = "EXOMONAD_INTERACTIVE_CODEX_BIN";
 
 #[derive(Clone, Copy, Debug)]
 enum ShortIngress {
@@ -237,7 +237,7 @@ impl ResidentToolEndpoint for ObservedEndpoint {
         Box<
             dyn std::future::Future<
                     Output = Result<
-                        tidepool_actor::WorkbenchBoundaryReconciliation,
+                        exomonad_actor::WorkbenchBoundaryReconciliation,
                         ResidentToolError,
                     >,
                 > + Send,
@@ -258,7 +258,7 @@ struct TmuxSession(String);
 
 impl TmuxSession {
     fn launch(native: &Path, home: &Path, work: &Path, socket: &Path) -> Self {
-        let session = format!("shoal-sleep-test-{}", uuid::Uuid::new_v4().simple());
+        let session = format!("exomonad-sleep-test-{}", uuid::Uuid::new_v4().simple());
         assert!(std::process::Command::new("tmux")
             .args(["new-session", "-d", "-s", &session, "-x", "100", "-y", "30"])
             .status()
@@ -406,7 +406,7 @@ trust_level = "trusted"
         }
     }
 
-    async fn thread(&self) -> tidepool_agent::QueueReadyThread {
+    async fn thread(&self) -> exomonad_agent::QueueReadyThread {
         let end = Instant::now() + Duration::from_secs(30);
         while (!self.binding.exists() || self.control.challenged_binding().is_none())
             && Instant::now() < end
@@ -473,7 +473,7 @@ fn output_for(request: &Value, call_id: &str) -> String {
 
 async fn submit_host_input(
     fixture: &Fixture,
-    thread: &tidepool_agent::QueueReadyThread,
+    thread: &exomonad_agent::QueueReadyThread,
     ingress: ShortIngress,
 ) {
     if matches!(ingress, ShortIngress::Human) {

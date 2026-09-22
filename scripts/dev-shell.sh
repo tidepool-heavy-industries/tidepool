@@ -3,8 +3,8 @@
 set -euo pipefail
 
 shell=default
-if [[ ${1:-} == --shoal ]]; then
-  shell=shoal
+if [[ ${1:-} == --exomonad ]]; then
+  shell=exomonad
   shift
 fi
 if [[ -n ${TIDEPOOL_DEV_FLAKE:-} ]]; then

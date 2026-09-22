@@ -281,6 +281,7 @@ fn generated_module_imports_freer_internal_for_the_pump() {
 fn authored_worktree_module() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("tidepool-mcp lives one level under the workspace root")
         .join("bridge/haskell/lib/Tidepool/Worktree.hs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
@@ -292,6 +293,7 @@ fn authored_worktree_module() -> String {
 fn authored_event_module() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("tidepool-mcp lives one level under the workspace root")
         .join("bridge/haskell/lib/Tidepool/Event.hs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))

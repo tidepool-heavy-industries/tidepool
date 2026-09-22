@@ -1,14 +1,14 @@
 # Workbench lab: what one cell can do with cheap typed judgments
 
-Driven live through `shoal proxy lab <cell.hs>` on 2026-09-17 against the toy
-repo `~/dev/shoal-evals/tui-test-app` at two real failed builds:
+Driven live through `exomonad proxy lab <cell.hs>` on 2026-09-17 against the toy
+repo `~/dev/exomonad-evals/tui-test-app` at two real failed builds:
 `f726882` (five non-exhaustive match errors) and `4610b5e` (one clippy lint
 promoted to an error by `-D warnings`, inside a test).
 
 The cells that produced this ran here, in order, and have since been
 promoted: the investigation function (`look` below) lives on as `investigate`
-in `.shoal/Project/Investigate.hs`, and `routeFindings`, which turns its
-answers into prepared next steps, lives on in `.shoal/Project/Review.hs`.
+in `.exomonad/Project/Investigate.hs`, and `routeFindings`, which turns its
+answers into prepared next steps, lives on in `.exomonad/Project/Review.hs`.
 
 ## The result
 

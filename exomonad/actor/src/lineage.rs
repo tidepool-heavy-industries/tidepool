@@ -20,7 +20,7 @@ struct LineageState {
     occupied: BTreeSet<ActorPath>,
 }
 
-/// One allocator for actor labels and their exact `shoal/<path>` Git projection.
+/// One allocator for actor labels and their exact `exomonad/<path>` Git projection.
 #[derive(Clone, Default)]
 pub struct ActorLineageRegistry {
     state: Arc<Mutex<LineageState>>,

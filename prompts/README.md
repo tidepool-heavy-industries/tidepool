@@ -2,11 +2,11 @@
 
 This tree contains stable, Tidepool-authored model instructions that are compiled into their owning Rust targets with `include_str!`. It is not a runtime configuration directory: there is no prompt loader, template syntax, environment override, or fallback copy.
 
-Files under `shoal/` define the hosted base and focused instruction layers:
+Files under `exomonad/` define the hosted base and focused instruction layers:
 
 | Artifact | Owner | Consuming role |
 |---|---|---|
-| `base.md` | `tidepool::actor_host` | Shared Shoal base instructions, replacing the backend default |
+| `base.md` | `tidepool::actor_host` | Shared Exomonad base instructions, replacing the backend default |
 | `api-guide.md` | `tidepool::actor_host` | One shared core API guide, appended to the base for every role |
 | `scaffolding-agent.md` | `tidepool::actor_host` | Scaffold-focused coding actor instructions |
 | `integration-agent.md` | `tidepool::actor_host` | Integration actor instructions |
@@ -14,8 +14,8 @@ Files under `shoal/` define the hosted base and focused instruction layers:
 | `recreated-root.md` | `tidepool::actor_host` | Developer-instruction suffix for a retained conversation on a new actor incarnation |
 | `worktree-agent.md` | `tidepool::actor_host` | Developer instructions for a worktree-backed child actor |
 | `readonly-agent.md` | `tidepool::actor_host` | Developer instructions for a child actor without a coding worktree |
-| `haskell-tool-description.md` | `tidepool-actor::resident_interactive` | Hosted-tool description |
-| `haskell-tool-instructions.md` | `tidepool-actor::resident_interactive` | Hosted-tool usage instructions |
+| `haskell-tool-description.md` | `exomonad-actor::resident_interactive` | Hosted-tool description |
+| `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
 
 `harness/system-framing.md` is the System message for ordinary resident typed-yield harness nodes. `selfharness/memory-curator.md` is seeded as the memory repository's `AGENTS.md`; Codex consumes that file as repository-scoped Developer policy. User tasks, Haskell-authored startup values, and operator input never belong in this tree.
 
@@ -31,12 +31,12 @@ declarations when available. Authority and assigned workspace appear once in
 per-incarnation launch instructions; detailed state remains in `status`. Stable
 prompts teach composition and conditional discovery; they do not duplicate
 those runtime facts. Hosted requests settle through `respond`; roots outside
-a request have no reply binding. Files in `shoal/docs/` supply on-demand `:doc`
+a request have no reply binding. Files in `exomonad/docs/` supply on-demand `:doc`
 examples, including executable examples covered by the actor-host tests.
 
-## Shoal base selection
+## Exomonad base selection
 
-The host compiles `shoal/base.md` followed by `shoal/api-guide.md` into one
+The host compiles `exomonad/base.md` followed by `exomonad/api-guide.md` into one
 base artifact in its prompt catalog. The API guide is the same superset for
 every role: it contains no per-actor inventory or role-dependent substitutions.
 Runtime authority still governs which operations an actor may use. At startup it
@@ -53,9 +53,9 @@ and the hosted-tool fingerprint. Source edits take effect after rebuilding and
 starting a new host; they do not change the base used by descendants of the
 current host. Reattaching an old conversation under a newly built host selects
 the new base explicitly and can change its provider prefix. Fingerprints record
-what Shoal selected; they do not certify provider application or cache reuse.
+what Exomonad selected; they do not certify provider application or cache reuse.
 
 The base adapts the bundled Astra prompt's autonomy, collaboration, and engineering
-guidance to Shoal's scaffold/fork/fold mode. Core signatures and compact compositions stay in the shared API guide; detailed
+guidance to Exomonad's scaffold/fork/fold mode. Core signatures and compact compositions stay in the shared API guide; detailed
 reference and longer executable examples live in on-demand documents and skills. Base-prompt wording is a design choice
 to exercise through real project work, not a validated efficacy result.

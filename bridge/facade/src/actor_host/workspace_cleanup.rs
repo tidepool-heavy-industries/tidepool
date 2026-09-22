@@ -155,7 +155,7 @@ fn bytes(path: &Path) -> io::Result<u64> {
 }
 
 fn source_finalized(repository: &Path, resource: &Path) -> bool {
-    use tidepool_worktree::{WorktreeId, WorktreeRecordStatus, WorktreeRegistry};
+    use exomonad_worktree::{WorktreeId, WorktreeRecordStatus, WorktreeRegistry};
 
     let Some(id) = resource.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -197,13 +197,15 @@ pub fn cleanup(
         .parent()
         .ok_or_else(|| io::Error::other("missing runs directory"))?;
     if runs.file_name().is_none_or(|name| name != "runs") {
-        return Err(io::Error::other("expected a recorded Shoal runs directory"));
+        return Err(io::Error::other(
+            "expected a recorded Exomonad runs directory",
+        ));
     }
     // The same lifetime lock excludes host restart throughout inspection/removal.
     let _lock = super::host_incarnation::HostRunLock::existing(&run_root)?;
     let repositories = runs
         .parent()
-        .ok_or_else(|| io::Error::other("missing Shoal state directory"))?
+        .ok_or_else(|| io::Error::other("missing Exomonad state directory"))?
         .join("actor-worktrees");
     let mut report = Vec::new();
     for repository in fs::read_dir(repositories)? {
@@ -343,7 +345,7 @@ mod tests {
 
     #[test]
     fn finalized_source_passes_checkout_gate_before_mount_proof() {
-        use tidepool_worktree::{
+        use exomonad_worktree::{
             BranchName, GitOid, WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
             WorktreeRegistry,
         };

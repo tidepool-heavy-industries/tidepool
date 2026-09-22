@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead};
 
+use exomonad_model::{ConversationTurn, Role, TurnItem};
 use serde_json::Value;
-use tidepool_model::{ConversationTurn, Role, TurnItem};
 
 #[derive(Default)]
 struct Turn {

@@ -391,7 +391,7 @@ fn scope_omitted_sync_hold_mutation_releases_payload_on_writer_close() {
 
 #[test]
 fn scope_inherited_terminal_job_control_survives_interrupt_and_restores_terminal() {
-    const CHILD: &str = "TIDEPOOL_SCOPE_PTY_CHILD";
+    const CHILD: &str = "EXOMONAD_SCOPE_PTY_CHILD";
     if std::env::var_os(CHILD).is_some() {
         inherited_terminal_child();
         return;

@@ -644,7 +644,7 @@ pub trait KernelBehavior: Send + 'static {
     fn tool<'a>(
         &'a mut self,
         context: &'a KernelContext,
-        invocation: tidepool_tool::ToolInvocation,
+        invocation: exomonad_tool::ToolInvocation,
     ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>>;
 
     fn workbench<'a>(
@@ -657,7 +657,7 @@ pub trait KernelBehavior: Send + 'static {
     fn reconcile_workbench_cancellation(
         &self,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
-        _invocation: Option<tidepool_tool::ToolInvocationContext>,
+        _invocation: Option<exomonad_tool::ToolInvocationContext>,
     ) -> crate::WorkbenchCancellationOutcome {
         crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution }
     }
@@ -1832,10 +1832,10 @@ mod tests {
     use crate::ActorLifecycle;
     use std::sync::Arc;
 
+    use exomonad_tool::{ToolArguments, ToolInvocation};
     use parking_lot::Mutex;
     use tidepool_repr::SessionId;
     use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
-    use tidepool_tool::{ToolArguments, ToolInvocation};
     use tokio::sync::{oneshot, Notify};
 
     use super::*;

@@ -39,7 +39,7 @@ settling one reply.
 | hylo boundary | say what crosses: the Haskell-expand / Rust-collapse split |
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
 | session (bare, for runtime state) | **machine session** (`ResidentSession` — the resident JIT machine + heap + bindings) |
-| context fork / self-fork (Shoal actor surface) | **context unfold** for the applicative expansion |
+| context fork / self-fork (Exomonad actor surface) | **context unfold** for the applicative expansion |
 
 ## Reserved words (industry meaning only)
 

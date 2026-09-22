@@ -5,10 +5,10 @@
 //! credential chain with a refresh-token exchange — no inference call.
 //!
 //! ```text
-//! cargo run -p tidepool-harness --example login [model]
+//! cargo run -p exomonad-harness --example login [model]
 //! ```
 
-use tidepool_harness::provider::oauth::{
+use exomonad_harness::provider::oauth::{
     complete_login, login_status, start_login, verify_login, LoginStatus, OauthConfig,
 };
 
@@ -16,7 +16,7 @@ use tidepool_harness::provider::oauth::{
 async fn main() {
     let model = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "gpt-5.2".to_string());
+        .unwrap_or_else(|| "gpt-6-sol".to_string());
     let cfg = OauthConfig::new(model);
 
     if login_status(&cfg) == LoginStatus::SignedIn {

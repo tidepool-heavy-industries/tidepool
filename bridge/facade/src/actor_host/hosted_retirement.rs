@@ -1,11 +1,11 @@
 //! Exact resident cleanup and HTTP drain remain separate from native/external work.
 use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;
-use futures_util::future::BoxFuture;
-use tidepool_actor::{HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown};
-use tidepool_agent::{
+use exomonad_actor::{HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown};
+use exomonad_agent::{
     InputProducerControlOutcome, InputProducerId, InteractiveAgentBackend, QueueReadyThread,
 };
+use futures_util::future::BoxFuture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionBoundary {
@@ -84,9 +84,9 @@ pub(crate) enum HostedObservation {
 }
 
 enum EndpointSource {
-    Canonical(Vec<tidepool_tool::HostedTool>),
+    Canonical(Vec<exomonad_tool::HostedTool>),
     #[cfg(test)]
-    Untrusted(Arc<dyn tidepool_actor::ResidentToolEndpoint>),
+    Untrusted(Arc<dyn exomonad_actor::ResidentToolEndpoint>),
 }
 
 pub(super) struct HostedRetirement {
@@ -139,7 +139,7 @@ pub(super) fn start(
 fn start_untrusted(
     slot: &HostedSlot,
     actor: LocalActorRef,
-    endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint>,
+    endpoint: Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     binding_path: PathBuf,
     listener: tokio::net::UnixListener,
 ) -> Result<HostedOwner, String> {
@@ -165,14 +165,14 @@ fn start_endpoint(
     listener: tokio::net::UnixListener,
     endpoint_source: EndpointSource,
     resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResourceClient>,
+        Arc<exomonad_node::command_resources::CommandResourceClient>,
         String,
     )>,
     operation_journal: Option<PathBuf>,
 ) -> Result<HostedOwner, String> {
-    let endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint> = match &endpoint_source {
+    let endpoint: Arc<dyn exomonad_actor::ResidentToolEndpoint> = match &endpoint_source {
         EndpointSource::Canonical(tools) => {
-            Arc::new(tidepool_actor::ResidentInteractivePolicy::local_with_tools(
+            Arc::new(exomonad_actor::ResidentInteractivePolicy::local_with_tools(
                 actor.clone(),
                 tools.clone(),
             ))
@@ -486,12 +486,12 @@ mod tests;
 pub(super) fn start_with_resources(
     slot: &HostedSlot,
     actor: LocalActorRef,
-    tools: Vec<tidepool_tool::HostedTool>,
+    tools: Vec<exomonad_tool::HostedTool>,
     binding_path: PathBuf,
     expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
     resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResourceClient>,
+        Arc<exomonad_node::command_resources::CommandResourceClient>,
         String,
     )>,
     operation_journal: PathBuf,

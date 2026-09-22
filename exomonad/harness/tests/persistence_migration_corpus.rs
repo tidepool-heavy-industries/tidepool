@@ -35,7 +35,7 @@ fn fixtures(kind: &str) -> Vec<PathBuf> {
 /// counters — see `selfharness::persistence::{ENVELOPE_CURRENT,STATE_CURRENT}`).
 #[test]
 fn checkpoint_corpus_migrates_to_current() {
-    use tidepool_harness::selfharness::persistence::{
+    use exomonad_harness::selfharness::persistence::{
         load_checkpoint, ENVELOPE_CURRENT, STATE_CURRENT,
     };
     for path in fixtures("checkpoint") {
@@ -87,11 +87,11 @@ fn handlers_journal_corpus_migrates_to_current() {
 /// Kind 6: the selfharness transcript — the lowest-risk of the four JSONL
 /// consumers (`persistence-versioning-design.md` §2): no first-party reader
 /// exists yet, so there is nothing to GATE, only a version to detect. This
-/// pins that [`tidepool_harness::selfharness::persistence::read_transcript_header`]
+/// pins that [`exomonad_harness::selfharness::persistence::read_transcript_header`]
 /// correctly reads the legacy (unstamped) fixture as version `0`.
 #[test]
 fn selfharness_transcript_corpus_reads_as_unstamped() {
-    use tidepool_harness::selfharness::persistence::read_transcript_header;
+    use exomonad_harness::selfharness::persistence::read_transcript_header;
     for path in fixtures("selfharness-transcript") {
         let version = read_transcript_header(&path)
             .unwrap_or_else(|e| panic!("{path:?}: must read header, got {e}"));

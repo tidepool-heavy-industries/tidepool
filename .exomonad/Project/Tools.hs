@@ -39,14 +39,14 @@ tools =
     { shell = Shell.tools
     , triageSearch =
         tool
-          "Search the repository, including dotfiles and dotdirectories such as .shoal/ (but never .git/), for a regular expression and answer with matching files. `pattern` is a ripgrep pattern; `looking_for` is one sentence saying what you hope to find, which the body may use to narrow the answer to the files that matter."
+          "Search the repository, including dotfiles and dotdirectories such as .exomonad/ (but never .git/), for a regular expression and answer with matching files. `pattern` is a ripgrep pattern; `looking_for` is one sentence saying what you hope to find, which the body may use to narrow the answer to the files that matter."
           triageSearchBody
     }
 
 -- | The starting body: every file that matches, with a count, and no judgment
 -- about which of them matter. `looking_for` is not used yet, and the answer says
 -- so, because the description already promises the judgment a better body makes.
--- `--hidden` so a dotdirectory such as `.shoal/` (holding this very tool and
+-- `--hidden` so a dotdirectory such as `.exomonad/` (holding this very tool and
 -- the rest of the agent spec) is searched too; ripgrep's `--hidden` searches
 -- `.git/` right along with it, so `-g '!.git'` excludes that one explicitly.
 triageSearchBody :: Member Cmd.Commands effects => TriageSearch -> Eff effects Text

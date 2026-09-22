@@ -1,4 +1,4 @@
-# tidepool-web
+# exomonad-web
 
 The operator GUI for the self-iterating harness, served over HTTP + Datastar
 SSE. The model is minimal and harness-agnostic: **a tree of nodes**, where
@@ -30,24 +30,24 @@ sync-blocking.
 Loopback bind only (`127.0.0.1`) — reachability is the authorization
 boundary. There is no auth token on the HTTP surface itself; if you're not
 on the box, you get in via SSH port-forward / tailnet, not a password.
-(`TIDEPOOL_WEB_BIND_HOST` is the one documented, opt-in exception — see
+(`EXOMONAD_WEB_BIND_HOST` is the one documented, opt-in exception — see
 `CLAUDE.md`.)
 
 ## Boot
 
-The server binary is `tidepool-selfharness-web`:
+The server binary is `exomonad-selfharness-web`:
 
 ```bash
-cargo run --bin tidepool-selfharness-web -- --port 4601
+cargo run --bin exomonad-selfharness-web -- --port 4601
 ```
 
 By itself this only serves the page — nothing drives it without a harness
-wired to a `WebGate` (see `bridge/facade/src/bin/tidepool-selfharness.rs`, the
+wired to a `WebGate` (see `bridge/facade/src/bin/exomonad-selfharness.rs`, the
 harness driver binary, for how the pieces compose). To see the page working
 with no harness, no model, and no API calls:
 
 ```bash
-cargo run --bin tidepool-selfharness-web -- --demo --port 4601
+cargo run --bin exomonad-selfharness-web -- --demo --port 4601
 ```
 
 `--demo` runs a mock node tree: the default loop node (note → form →
@@ -114,7 +114,7 @@ page read-only; re-POSTing their id is rejected as stale.
 ## Testing
 
 ```bash
-cargo nextest run -p tidepool-web
+cargo nextest run -p exomonad-web
 ```
 
 `tests/operator_gate.rs` boots the real router with `axum::serve` on an
@@ -142,7 +142,7 @@ answer a node's pending forms as plain JSON — no browser needed. Off unless
 you set:
 
 ```bash
-TIDEPOOL_FORM_API=1 cargo run --bin tidepool-selfharness-web -- --demo --port 4601
+EXOMONAD_FORM_API=1 cargo run --bin exomonad-selfharness-web -- --demo --port 4601
 ```
 
 ```bash

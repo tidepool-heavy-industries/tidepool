@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, DriverError, Harness, HarnessSource,
     LogObserver, NodeState, SelfHarnessDriver, SelfHarnessState,
 };
@@ -30,7 +30,8 @@ use tidepool_harness::{
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -39,7 +40,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {
@@ -106,7 +107,7 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
     )
     .expect("answerer engine config");
     let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-lifecycle-{log_tag}-{}.jsonl",
             std::process::id()
@@ -165,7 +166,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         reply: decision_block("observe", "Medium"),
     };
     let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-lifecycle-recover-{}.jsonl",
             std::process::id()

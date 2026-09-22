@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptId {
-    ShoalBase,
-    ShoalRoot,
+    ExomonadBase,
+    ExomonadRoot,
     RecreatedRoot,
     WorktreeAgent,
     ReadonlyAgent,
@@ -14,8 +14,8 @@ impl PromptId {
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
-        Self::ShoalBase,
-        Self::ShoalRoot,
+        Self::ExomonadBase,
+        Self::ExomonadRoot,
         Self::RecreatedRoot,
         Self::WorktreeAgent,
         Self::ReadonlyAgent,
@@ -25,12 +25,12 @@ impl PromptId {
 
     pub(super) fn artifact(self) -> PromptArtifact {
         let body = match self {
-            Self::ShoalBase => concat!(
+            Self::ExomonadBase => concat!(
                 include_str!("../../../../exomonad/prompts/base.md"),
                 "\n\n",
                 include_str!("../../../../exomonad/prompts/api-guide.md")
             ),
-            Self::ShoalRoot => include_str!("../../../../exomonad/prompts/root.md"),
+            Self::ExomonadRoot => include_str!("../../../../exomonad/prompts/root.md"),
             Self::RecreatedRoot => include_str!("../../../../exomonad/prompts/recreated-root.md"),
             Self::WorktreeAgent => include_str!("../../../../exomonad/prompts/worktree-agent.md"),
             Self::ReadonlyAgent => include_str!("../../../../exomonad/prompts/readonly-agent.md"),
@@ -43,7 +43,7 @@ impl PromptId {
         };
         PromptArtifact {
             id: self,
-            role: if self == Self::ShoalBase {
+            role: if self == Self::ExomonadBase {
                 PromptRole::BaseInstructions
             } else {
                 PromptRole::Developer
@@ -94,7 +94,7 @@ const JEV_ABSENT: &str = "\n\n\
 This workspace supplies no `Jev.Operators`, so `J` is absent from your workbench \
 and the Jev guidance above does not apply here. Installing it is two lines: the \
 `jev-dsl` input in the project's `flake.nix`, and `jev-dsl = [\"core\"]` under \
-`[haskell.flake_sources]` in `.shoal/config.toml`. `shoal new` writes both; a \
+`[haskell.flake_sources]` in `.exomonad/config.toml`. `exomonad new` writes both; a \
 project that has them already needs `nix flake lock` and a new run.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +136,7 @@ impl FrozenBasePrompt {
             Ok(_) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "saved Shoal base prompt does not match its content identity",
+                    "saved Exomonad base prompt does not match its content identity",
                 ))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -157,7 +157,7 @@ impl FrozenBasePrompt {
                 "{core}\n\n{}",
                 include_str!("../../../../exomonad/prompts/api-guide.md")
             ),
-            None => PromptId::ShoalBase.body().to_owned(),
+            None => PromptId::ExomonadBase.body().to_owned(),
         };
         if jev == JevSurface::Absent {
             body.push_str(JEV_ABSENT);
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn shared_prompt_stays_within_word_budget() {
-        let words = PromptId::ShoalBase.body().split_whitespace().count();
+        let words = PromptId::ExomonadBase.body().split_whitespace().count();
         assert!(
             words <= 2000,
             "shared base/API has {words} words; budget is 2000"
@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(first.file(), second.file());
         assert_eq!(
             std::fs::read_to_string(first.file()).unwrap(),
-            PromptId::ShoalBase.body()
+            PromptId::ExomonadBase.body()
         );
         std::fs::write(first.file(), "unexpected instructions").unwrap();
         assert!(
@@ -215,14 +215,14 @@ mod tests {
     fn a_workspace_without_jev_says_so_in_the_instructions() {
         let installed = FrozenBasePrompt::selected_body(None, JevSurface::Installed);
         let absent = FrozenBasePrompt::selected_body(None, JevSurface::Absent);
-        assert_eq!(installed, PromptId::ShoalBase.body());
+        assert_eq!(installed, PromptId::ExomonadBase.body());
         assert!(absent.starts_with(&installed));
         assert!(
             absent.contains("Jev is not installed in this workspace"),
             "{absent}"
         );
         assert!(absent.contains("[haskell.flake_sources]"), "{absent}");
-        assert!(absent.contains("shoal new"), "{absent}");
+        assert!(absent.contains("exomonad new"), "{absent}");
         let selected = FrozenBasePrompt::selected_body(Some("project core"), JevSurface::Absent);
         assert!(selected.starts_with("project core"));
         assert!(selected.contains("Jev is not installed in this workspace"));
@@ -255,7 +255,7 @@ mod tests {
             .iter()
             .all(|artifact| !artifact.body.trim().is_empty()));
         assert!(artifacts.iter().all(|artifact| artifact.role
-            == if artifact.id == PromptId::ShoalBase {
+            == if artifact.id == PromptId::ExomonadBase {
                 PromptRole::BaseInstructions
             } else {
                 PromptRole::Developer
@@ -265,8 +265,8 @@ mod tests {
             .all(|artifact| artifact.catalog_version == PromptId::CATALOG_VERSION));
         assert_eq!(
             PromptId::composed_fingerprint(
-                PromptId::ShoalBase.body(),
-                PromptId::ShoalRoot.body(),
+                PromptId::ExomonadBase.body(),
+                PromptId::ExomonadRoot.body(),
                 "hosted-tool-fingerprint"
             )
             .len(),
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn shared_api_guide_is_part_of_the_frozen_base_not_role_instructions() {
         let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
-        let base = PromptId::ShoalBase.body();
+        let base = PromptId::ExomonadBase.body();
         assert_eq!(
             base,
             format!(
@@ -286,7 +286,7 @@ mod tests {
             )
         );
         for id in PromptId::ALL {
-            if id != PromptId::ShoalBase {
+            if id != PromptId::ExomonadBase {
                 assert!(!id.body().contains(guide));
             }
         }

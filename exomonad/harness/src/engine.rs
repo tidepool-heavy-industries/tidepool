@@ -39,9 +39,9 @@
 //! [`compile_turns`] are thin wrappers mapping a
 //! [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn/node
 //! vocabulary ([`CompiledTurn`]) and attributing timing to a (node, round)
-//! pair. Provider-neutral calls live in `tidepool-model`; concrete adapters
+//! pair. Provider-neutral calls live in `exomonad-model`; concrete adapters
 //! are re-exported from [`crate::provider`]. The web protocol / SSE is
-//! `tidepool-web`. This
+//! `exomonad-web`. This
 //! module is the glue that sequences them into a turn loop.
 
 use std::collections::HashMap;
@@ -1250,7 +1250,7 @@ pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
 
 // Compatibility re-export while the provider/session driver migrates out of
 // this crate. The fenced-Haskell protocol has one implementation.
-pub use tidepool_model_output::extract_haskell_blocks;
+pub use exomonad_model_output::extract_haskell_blocks;
 
 // ---------------------------------------------------------------------------
 // Multi-block sequences

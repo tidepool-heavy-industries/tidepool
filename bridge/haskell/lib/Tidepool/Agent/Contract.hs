@@ -212,14 +212,14 @@ finishTool = FinishTool
 -- ---------------------------------------------------------------------------
 
 -- | Wire-visible tool identity. Plain 'Text', matching
--- @tidepool_node::ToolDeclaration@'s @name@ on the Rust side.
+-- @exomonad_node::ToolDeclaration@'s @name@ on the Rust side.
 type ToolName = Text
 
 -- | The JSON value shuttled across dispatch.
 type StructuralValue = Value
 
 -- | One dynamic tool as declared to a backend at agent creation. Field order
--- and names line up with @tidepool_tool::ToolDeclaration@
+-- and names line up with @exomonad_tool::ToolDeclaration@
 -- (@{name, description, input_schema, output_schema, kind}@); this type does
 -- not depend on that
 -- crate, it just doesn't invent a gratuitously different shape.

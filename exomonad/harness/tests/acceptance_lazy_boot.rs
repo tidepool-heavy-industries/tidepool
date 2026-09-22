@@ -26,12 +26,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::harness::Session;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::harness::Session;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
     SelfHarnessState, TurnOutcome,
 };
@@ -43,7 +43,7 @@ use crate::support;
 /// the transient mid-turn gap while its session runs on the blocking pool.
 fn heap_stats(
     harness: &Harness,
-    node: tidepool_harness::tree::NodeId,
+    node: exomonad_harness::tree::NodeId,
 ) -> Option<tidepool_codegen::machine::HeapStats> {
     let sid = harness.tree().session_of(node)?;
     harness.tree().registry().peek(sid, Session::heap_stats)?
@@ -130,7 +130,7 @@ async fn no_machine_after_force_a_machine_after_the_first_turn() {
 fn examples_harness_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .expect("exomonad-harness has a parent (the repo root)")
         .join("examples/harness")
 }
 
@@ -142,18 +142,18 @@ fn decision_block(action: &str, confidence: &str) -> String {
     )
 }
 
-/// A [`tidepool_harness::provider::ModelProvider`] that always succeeds with
+/// A [`exomonad_harness::provider::ModelProvider`] that always succeeds with
 /// a scripted `finalize` reply.
 struct AlwaysReply(String);
 
-impl tidepool_harness::provider::ModelProvider for AlwaysReply {
+impl exomonad_harness::provider::ModelProvider for AlwaysReply {
     async fn complete(
         &self,
-        _req: tidepool_harness::provider::TurnRequest,
-        _sink: Option<tidepool_harness::provider::StreamSink>,
-    ) -> Result<tidepool_harness::provider::TurnResponse, tidepool_harness::provider::ProviderError>
+        _req: exomonad_harness::provider::TurnRequest,
+        _sink: Option<exomonad_harness::provider::StreamSink>,
+    ) -> Result<exomonad_harness::provider::TurnResponse, exomonad_harness::provider::ProviderError>
     {
-        Ok(tidepool_harness::provider::TurnResponse {
+        Ok(exomonad_harness::provider::TurnResponse {
             text: self.0.clone(),
             usage: Usage {
                 input_tokens: 50,

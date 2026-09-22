@@ -57,7 +57,7 @@ import GHC.Generics (Generic)
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (BranchName (..), Commands, WorktreeHandle (..), WorktreeReceipt (..))
 
 import Project.Evidence (CheckResult (..), CheckSource (..), HistoryEntry (..))
@@ -133,9 +133,9 @@ type MergeEffects = R.LocalEffects Merge
 -- | Start with the id of a worktree the parent created and did not bind, and
 -- the command that decides a merged head is green:
 --
--- > Right tree <- createWorktree (fromRef "shoal/integration" "integration")
--- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration")
--- >                     ["just", "test-lib", "tidepool-actor", "test(request::updates)"])
+-- > Right tree <- createWorktree (fromRef "exomonad/integration" "integration")
+-- > merge <- R.start (mergeInto (worktreeId tree) (Just "exomonad/integration")
+-- >                     ["just", "test-lib", "exomonad-actor", "test(request::updates)"])
 --
 -- The check is an argument because only the caller knows what green means for
 -- the change in hand. Name the narrowest command that would actually catch a

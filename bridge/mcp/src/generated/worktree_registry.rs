@@ -5,7 +5,7 @@
 pub fn worktree_registry_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "WorktreeRegistry",
-        description: "Granular Shoal capability delegated to the canonical Worktree handler.",
+        description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,
         constructors: &[
             "WorktreeRegistryLookup :: WorktreeId -> WorktreeRegistry (Either WorktreeError WorktreeHandle)",

@@ -4,15 +4,15 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use tidepool_node::{
+use exomonad_node::{
     MountNamespace, OverlayRotation, OverlayRotationOutcome, ProcessInvocation,
     ProcessMountBoundary,
 };
-use tidepool_repr::ActorPath;
-use tidepool_worktree::{
+use exomonad_worktree::{
     git::inspect, testing::TestRepo, WorktreeManager, WorktreeRecordStatus, WorktreeRegistry,
     WorktreeSource,
 };
+use tidepool_repr::ActorPath;
 
 struct Owner(Child);
 
@@ -267,7 +267,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     let wrong_id = wrong_view.receipt().worktree_id.clone();
     assert!(matches!(
         manager.finish_inherited_source(wrong_view, parent.clone(), &view),
-        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+        Err(exomonad_worktree::WorktreeError::WorktreeAuthorityDenied(_))
     ));
     assert_eq!(
         manager.registry().get(&wrong_id).unwrap().unwrap().status,
@@ -276,7 +276,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     assert_eq!(prepared.receipt().status, WorktreeRecordStatus::Provisional);
     assert!(matches!(
         manager.lookup(&prepared.receipt().worktree_id),
-        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+        Err(exomonad_worktree::WorktreeError::WorktreeAuthorityDenied(_))
     ));
     assert_eq!(
         manager
@@ -308,7 +308,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     .unwrap();
     assert!(child.require_live_owner().is_err());
     let host_manager = WorktreeManager::new(
-        tidepool_worktree::GitCli::new(),
+        exomonad_worktree::GitCli::new(),
         manager.registry().clone(),
         root.join("managed"),
         repository.path(),
@@ -325,7 +325,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         .iter()
         .any(|row| row.receipt.worktree_id == *handle.id() && row.present));
     let reopened = WorktreeManager::new(
-        tidepool_worktree::GitCli::new(),
+        exomonad_worktree::GitCli::new(),
         WorktreeRegistry::open(root.join("registry")).unwrap(),
         root.join("managed"),
         repository.path(),
@@ -337,7 +337,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     assert!(
         matches!(
             reopened.lookup(handle.id()),
-            Err(tidepool_worktree::WorktreeError::StorageFailure { .. })
+            Err(exomonad_worktree::WorktreeError::StorageFailure { .. })
         ),
         "lost view descriptors cannot expose the Git-only host directory"
     );
@@ -459,7 +459,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     assert_eq!(grandchild.receipt().source_repository, handle.cwd());
     assert_eq!(
         grandchild.receipt().origin,
-        tidepool_worktree::WorktreeOrigin::Worktree(handle.id().clone())
+        exomonad_worktree::WorktreeOrigin::Worktree(handle.id().clone())
     );
     let grandchild_admin = inspect::git_dir(git, &grandchild.receipt().cwd).unwrap();
     assert_ne!(grandchild_admin, child_admin);
@@ -479,7 +479,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     );
     assert!(matches!(
         reopened.mount_worktree(handle.id(), parent.clone(), &view),
-        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+        Err(exomonad_worktree::WorktreeError::WorktreeAuthorityDenied(_))
     ));
     assert!(reopened.lookup(handle.id()).is_err());
     let recaptured = MountNamespace::capture(child_pid).unwrap();

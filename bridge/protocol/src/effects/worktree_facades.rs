@@ -1,4 +1,4 @@
-//! Granular Shoal capabilities delegated to the canonical Worktree handler.
+//! Granular Exomonad capabilities delegated to the canonical Worktree handler.
 //!
 //! These effects split the model-facing row along authority decisions. Their
 //! Rust handlers translate directly into the existing `WorktreeReq` enum, so
@@ -226,7 +226,7 @@ fn effect(
         handler_module: "worktree",
         req_enum,
         decl_fn,
-        description: &["Granular Shoal capability delegated to the canonical Worktree handler."],
+        description: &["Granular Exomonad capability delegated to the canonical Worktree handler."],
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],

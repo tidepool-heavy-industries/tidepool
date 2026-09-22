@@ -48,7 +48,7 @@ fn generated_decls_match_expected_exactly() {
 
 fn bridged_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bridge/haskell/lib/Tidepool/Records/Bridged.hs")
+        .join("../haskell/lib/Tidepool/Records/Bridged.hs")
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn bridged_records_module_matches_committed_file() {
 
 fn stable_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bridge/haskell/lib/Tidepool/Records/Stable.hs")
+        .join("../haskell/lib/Tidepool/Records/Stable.hs")
 }
 
 #[test]

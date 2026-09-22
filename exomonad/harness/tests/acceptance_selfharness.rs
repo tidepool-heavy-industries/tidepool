@@ -2,7 +2,7 @@
 //! run of the reference generic-assistant harness
 //! (`examples/harness/Harness.hs`) through the production entry point
 //! (`SelfHarnessDriver::run_one_loop_iteration`, called repeatedly — the same
-//! per-cycle building block [`run_loop`](tidepool_harness::SelfHarnessDriver::run_loop)
+//! per-cycle building block [`run_loop`](exomonad_harness::SelfHarnessDriver::run_loop)
 //! uses forever), threading each cycle's `LoopIterationOutcome::state_json` into the
 //! next as `prior_state` exactly like `run_loop` does. Asserts `State`
 //! (`mode`/`notes`/`lastDecision`) accumulates ACROSS repeated loop
@@ -18,11 +18,11 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
@@ -30,7 +30,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -39,7 +40,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {
@@ -96,7 +97,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
         decision_reply("decide", "second loop", "High"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "acceptance-selfharness-{}.jsonl",
             std::process::id()
@@ -194,11 +195,11 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
 /// A capturing observer for event-stream assertions (rotation).
 #[derive(Default)]
 struct CapturingObserver {
-    events: Mutex<Vec<tidepool_harness::Event>>,
+    events: Mutex<Vec<exomonad_harness::Event>>,
 }
 
-impl tidepool_harness::Observer for CapturingObserver {
-    fn on_event(&self, event: &tidepool_harness::Event) {
+impl exomonad_harness::Observer for CapturingObserver {
+    fn on_event(&self, event: &exomonad_harness::Event) {
         self.events.lock().push(event.clone());
     }
 }
@@ -231,7 +232,7 @@ async fn machine_rotation_between_cycles_preserves_durable_state() {
         decision_reply("decide", "second loop", "High"),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "acceptance-selfharness-rotation-{}.jsonl",
             std::process::id()
@@ -267,13 +268,13 @@ async fn machine_rotation_between_cycles_preserves_durable_state() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, tidepool_harness::Event::MachineStats { .. })),
+            .any(|e| matches!(e, exomonad_harness::Event::MachineStats { .. })),
         "loop-boundary maintenance must emit MachineStats"
     );
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, tidepool_harness::Event::MachineRotated { .. })),
+            .any(|e| matches!(e, exomonad_harness::Event::MachineRotated { .. })),
         "the ceiling-of-1 run must record a MachineRotated event"
     );
 }

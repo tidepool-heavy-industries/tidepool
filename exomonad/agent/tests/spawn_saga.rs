@@ -3,7 +3,7 @@
 //! Two disciplines, both load-bearing:
 //!
 //! 1. **Git is never mocked.** Every worktree here is a real `git worktree add`
-//!    against a real temporary repository (`tidepool_worktree::testing`), for
+//!    against a real temporary repository (`exomonad_worktree::testing`), for
 //!    the same reason that crate gives: a git mock proves the mock agrees with
 //!    the author's model of git, which is the thing in doubt.
 //! 2. **The model IS mocked, always.** [`MockBackend`] is the only backend any
@@ -17,18 +17,18 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_agent::backend::mock::{MockBackend, MockFailure, MockStep};
-use tidepool_agent::backend::AgentBackend;
-use tidepool_agent::seam::{
+use exomonad_agent::backend::mock::{MockBackend, MockFailure, MockStep};
+use exomonad_agent::backend::AgentBackend;
+use exomonad_agent::seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec, ModelPolicy,
     ReasoningEffort, ThreadSpec, ToolCall, ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
-use tidepool_agent::spawn::{
+use exomonad_agent::spawn::{
     CoupledSpawner, CycleProgress, CycleSaga, SpawnError, SpawnRequest, SpawnStage, SpawnStep,
     SpawnWorkspace, MAX_TOOL_ROUNDS,
 };
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{
     AgentRef, Binding, BindingState, BindingTable, GitCli, WorktreeError, WorktreeId,
     WorktreeManager, WorktreeRegistry, WorktreeSpec,
 };

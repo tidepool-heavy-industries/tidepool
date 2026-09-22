@@ -22,13 +22,13 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, Role, StreamSink, TurnRequest, TurnResponse,
     Usage,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, HarnessSource, LogObserver,
     NodeId, Observer, SelfHarnessDriver,
 };
@@ -36,6 +36,7 @@ use tidepool_harness::{
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(|path| path.parent())
         .expect("repo root")
         .to_path_buf()
 }
@@ -184,7 +185,7 @@ fn make_driver(
         log_id
     ));
     std::fs::create_dir_all(&log_dir).expect("log dir");
-    let writer = tidepool_harness::log::LogWriter::create(log_dir.join("log.jsonl"), &header())
+    let writer = exomonad_harness::log::LogWriter::create(log_dir.join("log.jsonl"), &header())
         .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     let mut driver = SelfHarnessDriver::new(agent, observer);

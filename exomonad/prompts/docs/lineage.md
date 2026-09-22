@@ -1,4 +1,4 @@
-Shoal tracks distinct supervisor, context-parent, provider-parent, fork-group,
+Exomonad tracks distinct supervisor, context-parent, provider-parent, fork-group,
 and Git branch relationships. Use the `status` tool's `lineage` view for those
 relationships, `summary` for current work, `detailed` for terminal history, and
 `trace` for provider usage samples, prompt fingerprints, and exact identities.

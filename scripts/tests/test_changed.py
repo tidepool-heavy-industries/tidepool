@@ -25,12 +25,13 @@ class Selection(unittest.TestCase):
         self.package("c", ["b"])
         self.package("unrelated")
 
-    def package(self, name, dependencies=()):
+    def package(self, name, dependencies=(), path=None):
+        package_root = self.root / (path or name)
         self.packages.append(dict(
-            name=name, id=name, manifest_path=str(self.root / name / "Cargo.toml"),
+            name=name, id=name, manifest_path=str(package_root / "Cargo.toml"),
             dependencies=[dict(name=d, kind=None) for d in dependencies],
-            targets=[dict(name=name, kind=["lib"], src_path=str(self.root / name / "src/lib.rs")),
-                     dict(name="suite", kind=["test"], src_path=str(self.root / name / "tests/suite.rs"))]))
+            targets=[dict(name=name, kind=["lib"], src_path=str(package_root / "src/lib.rs")),
+                     dict(name="suite", kind=["test"], src_path=str(package_root / "tests/suite.rs"))]))
 
     def select(self, *paths):
         return changed.select(dict(packages=self.packages, workspace_members=[p["id"] for p in self.packages]), paths, self.root)
@@ -95,7 +96,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(reasons, {"Cargo.lock", "scripts/battery.sh"})
 
     def test_retired_source_has_no_supported_build_obligation(self):
-        self.package("tidepool")
+        self.package("tidepool", path="bridge/facade")
         retired = (
             "exomonad/harness/Cargo.toml", "exomonad/harness/src/engine.rs",
             "exomonad/web/src/lib.rs", "bridge/facade/src/bin/tidepool-selfharness.rs",
@@ -103,7 +104,7 @@ class Selection(unittest.TestCase):
         )
         self.assertEqual(self.select(*retired), ({}, {}, set(), set()))
         selection, checks, _, reasons = self.select(
-            *retired, "bridge/facade/src/bin/shoal.rs", "Cargo.toml")
+            *retired, "bridge/facade/src/bin/exomonad.rs", "Cargo.toml")
         self.assertIn("tidepool", selection)
         self.assertIn("tidepool", checks)
         self.assertEqual(reasons, {"Cargo.toml"})
@@ -121,7 +122,7 @@ class Selection(unittest.TestCase):
 
     def test_cabal_components_come_from_manifest_source_roots(self):
         manifest = self.root / "bridge/haskell/tidepool-extract.cabal"
-        manifest.parent.mkdir()
+        manifest.parent.mkdir(parents=True)
         manifest.write_text("library compiler\n  hs-source-dirs: src\nexecutable worker\n  hs-source-dirs: app\ntest-suite parser\n  hs-source-dirs: test-parser\n")
         self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/src/A.hs"]), ["compiler"])
         self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/test-parser/A.hs"]), ["parser"])
@@ -129,7 +130,7 @@ class Selection(unittest.TestCase):
 
     def test_cabal_extra_sources_select_all_components(self):
         manifest = self.root / "bridge/haskell/tidepool-extract.cabal"
-        manifest.parent.mkdir()
+        manifest.parent.mkdir(parents=True)
         manifest.write_text(
             "extra-source-files:\n"
             "  lib/Tidepool/Aeson/Value.hs\n"

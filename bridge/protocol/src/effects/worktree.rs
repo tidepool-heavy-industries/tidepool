@@ -124,7 +124,7 @@ fn type_defs() -> Vec<TypeDef> {
         identity(
             "WorktreeId",
             "WtWorktreeId",
-            // Exactly `tidepool_worktree::WorktreeId::is_path_safe`, hoisted out
+            // Exactly `exomonad_worktree::WorktreeId::is_path_safe`, hoisted out
             // of the handler's hand-written `worktree_id_from_wire` into
             // declared data. Ids are joined into registry/binding file paths as
             // a SINGLE component, so a wire value carrying a separator is a path
@@ -138,7 +138,7 @@ fn type_defs() -> Vec<TypeDef> {
                 "19 requires that a `GitOid` can never be passed where a worktree id is",
                 "wanted.",
             ],
-            "tidepool_worktree::WorktreeId",
+            "exomonad_worktree::WorktreeId",
             // The handler keeps the SEMANTIC half: a rejected id is spelled
             // `WorktreeNotRegistered`, because no id outside the minted alphabet
             // was ever registered and the caller learns nothing about the
@@ -153,7 +153,7 @@ fn type_defs() -> Vec<TypeDef> {
             "WtGitOid",
             Validation::NonEmpty,
             &["Haskell `GitOid` — domain data, distinct from `EvEventId`'s runtime identity."],
-            "tidepool_worktree::GitOid",
+            "exomonad_worktree::GitOid",
             // No verb accepts a GitOid FROM Haskell, so no wire→domain
             // conversion exists to generate or hand-write.
             None,
@@ -163,7 +163,7 @@ fn type_defs() -> Vec<TypeDef> {
             "WtGitRef",
             Validation::NonEmpty,
             &["Haskell `GitRef` — a branch, tag, remote ref, or raw OID, resolved by git."],
-            "tidepool_worktree::GitRef",
+            "exomonad_worktree::GitRef",
             Some(AdapterKind::IdentityRaw {
                 as_str: "as_str",
                 from_raw: "from_raw",
@@ -174,7 +174,7 @@ fn type_defs() -> Vec<TypeDef> {
             "WtBranchName",
             Validation::NonEmpty,
             &["Haskell `BranchName` — stored without the `refs/heads/` prefix."],
-            "tidepool_worktree::BranchName",
+            "exomonad_worktree::BranchName",
             // `WorktreeTryMerge` can carry a `BranchName` as readable
             // provenance, so this direction is exercised — infallible, same
             // as `GitRef`'s.
@@ -209,7 +209,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorktreeSource",
+                domain_path: "exomonad_worktree::WorktreeSource",
                 into_wire: None,
                 from_wire: Some(AdapterKind::HandWritten(
                     "composes a FALLIBLE conversion (`worktree_id_from_wire`); the error \
@@ -239,7 +239,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE_COPY,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::DirtyPolicy",
+                domain_path: "exomonad_worktree::DirtyPolicy",
                 into_wire: None,
                 from_wire: Some(AdapterKind::VariantMap(&[
                     ("RequireClean", "RequireClean"),
@@ -280,7 +280,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorktreeSpec",
+                domain_path: "exomonad_worktree::WorktreeSpec",
                 into_wire: None,
                 from_wire: Some(AdapterKind::HandWritten(
                     "composes a FALLIBLE conversion; the error path is semantic",
@@ -324,7 +324,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::ShownString { binder: "k" },
             derives: WIRE_COPY,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::InProgressKind",
+                domain_path: "exomonad_worktree::InProgressKind",
                 // Renames EVERY variant. This is the mechanical-but-error-prone
                 // case the generator earns its keep on.
                 into_wire: Some(AdapterKind::VariantMap(&[
@@ -387,7 +387,7 @@ fn type_defs() -> Vec<TypeDef> {
             },
             derives: WIRE_DEFAULT,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::DirtySummary",
+                domain_path: "exomonad_worktree::DirtySummary",
                 into_wire: Some(AdapterKind::HandWritten(
                     "`usize` → `i64` widening on `ignoredExcluded`, and the three lists are \
                      cloned out of a borrow",
@@ -439,7 +439,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::HeadState",
+                domain_path: "exomonad_worktree::HeadState",
                 into_wire: Some(AdapterKind::HandWritten(
                     "both variants wrap domain identity values into generated wire identities",
                 )),
@@ -470,7 +470,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorkingState",
+                domain_path: "exomonad_worktree::WorkingState",
                 into_wire: Some(AdapterKind::HandWritten(
                     "composes DirtySummary and optional InProgressKind conversions",
                 )),
@@ -519,7 +519,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::SubmissionObservation",
+                domain_path: "exomonad_worktree::SubmissionObservation",
                 into_wire: Some(AdapterKind::HandWritten(
                     "composes the generated identity, head-state, and working-state conversions",
                 )),
@@ -584,7 +584,7 @@ fn type_defs() -> Vec<TypeDef> {
             },
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::GitFailureReceipt",
+                domain_path: "exomonad_worktree::GitFailureReceipt",
                 into_wire: Some(AdapterKind::HandWritten(
                     "`PathBuf` → lossy `String`, `Option<i32>` → `Option<i64>`",
                 )),
@@ -646,7 +646,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorktreeReceipt",
+                domain_path: "exomonad_worktree::WorktreeReceipt",
                 into_wire: Some(AdapterKind::HandWritten(
                     "field renames (`worktree_id`→`tree_id`, `created_at_ms`→`created_at`) \
                      plus a `PathBuf` → lossy `String`",
@@ -675,7 +675,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorktreeHandle",
+                domain_path: "exomonad_worktree::WorktreeHandle",
                 into_wire: Some(AdapterKind::HandWritten(
                     "delegates to the hand-written receipt conversion through `h.receipt()`",
                 )),
@@ -709,7 +709,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::WorktreeSummary",
+                domain_path: "exomonad_worktree::WorktreeSummary",
                 into_wire: Some(AdapterKind::HandWritten(
                     "delegates to the hand-written receipt conversion",
                 )),
@@ -804,7 +804,7 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None,
             derives: WIRE,
             domain: Some(DomainMap {
-                domain_path: "tidepool_worktree::merge::MergeOutcome",
+                domain_path: "exomonad_worktree::merge::MergeOutcome",
                 into_wire: Some(AdapterKind::HandWritten(
                     "each outcome wraps domain Git OIDs and the manual handoff also clones its path Vec",
                 )),

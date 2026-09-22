@@ -1,7 +1,7 @@
 # Live values and authority
 
 The canonical interactive context-fork surface is now
-[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold).
+[cache-preserving context unfold](../../exomonad/README.md#cache-preserving-context-unfold).
 It shares an immutable declaration/binding snapshot into new persistent actor
 activations; it does not clone the parent's public control continuation. The
 value/authority rules below remain the substrate for that design.
@@ -180,7 +180,7 @@ the Worktree registry and exact actor binding confer authority.
 The first concrete recipe binds one owner-selected managed worktree to a fresh
 actor. The owner creates the worktree, retains its handle, closes the same
 value into the actor definition, and decorates the definition through
-`withWorktree`. After the child installs its tool policy, Shoal validates
+`withWorktree`. After the child installs its tool policy, Exomonad validates
 exactly one recipe, binds it to that exact actor incarnation, and uses the
 registered checkout as the external application cwd. Failure before launch
 releases the active binding and fails the child; the retain-first worktree
@@ -189,7 +189,7 @@ remains.
 The handle names the workflow resource, while its current physical checkout is
 a native linked Git worktree. Working files, index, and HEAD belong to that
 checkout; objects, refs, configuration, and administrative metadata share the
-source repository's ordinary namespace. Shoal projects the active working tree
+source repository's ordinary namespace. Exomonad projects the active working tree
 and Git common directory writable while source plus sibling working files are
 read-only. This is collaboration topology, not a Git-metadata security boundary.
 

@@ -46,7 +46,7 @@ driver. Its only three call sites — `fork.rs:471`, `fork.rs:1083`
 ## What it does NOT support: `Subagent`
 
 `Subagent` (`spawnAgent`/`spawnAgentRaw`) is a suspension in this driver (not
-a JIT-handled effect here — see `tidepool-agent`'s own row for the
+a JIT-handled effect here — see `exomonad-agent`'s own row for the
 standalone-test shape where it IS a handled effect); the resident harness
 services it externally via `SelfHarnessDriver::service_outer_subagent`
 (`exomonad/harness/src/selfharness/driver/delegate.rs:81-133`):
@@ -57,7 +57,7 @@ let dispatched =
 ```
 
 `block_in_place` runs the dispatch to completion — a real
-`tidepool_agent::spawn::CoupledSpawner` cycle (spawn a subprocess agent,
+`exomonad_agent::spawn::CoupledSpawner` cycle (spawn a subprocess agent,
 drive it, await its terminal state) — SYNCHRONOUSLY, before returning
 `Ok(Value)`/`Err`. It is called from exactly two places, and both call it
 **one ready item at a time, with no batching shell around it**:
@@ -143,13 +143,13 @@ composability fix part 3 asked for) and `mod.rs` (`Self::subagent` is now
 
 **The Sync/Send story, checked honestly (this doc's own ask).** `SubagentHandler`'s
 `SubagentSpawn`/`SubagentAwait` methods take `&mut self` for their FULL
-synchronous duration (`tidepool_agent::spawn::CoupledSpawner::spawn_one_cycle`'s
+synchronous duration (`exomonad_agent::spawn::CoupledSpawner::spawn_one_cycle`'s
 own signature is `&mut self` end to end, even though its BODY only touches
 `&self.substrate` — an `Arc<Mutex<SpawnSubstrate>>` `exomonad/agent/CLAUDE.md`
 already documents as safe for N concurrent cycles). Since the driver holds
 exactly ONE `SubagentHandler` instance behind ONE lock, two dispatches that
 BOTH need the full `SubagentSpawn`/`SubagentAwait` call cannot literally
-overlap at the Rust type level — narrowing that requires a `tidepool-agent`/
+overlap at the Rust type level — narrowing that requires a `exomonad-agent`/
 `tidepool-handlers` signature change, out of this lane's ALLOWED PATHS. This
 is NOT papered over: it is the literal reason `service_outer_subagent`'s own
 doc comment states plainly that dispatch "still serializes on ONE lock."

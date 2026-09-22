@@ -12,7 +12,7 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH (run inside
 //! `nix develop`; see `bridge/haskell/CLAUDE.md`).
 
-use tidepool_harness::engine::{self, EngineConfig};
+use exomonad_harness::engine::{self, EngineConfig};
 use tidepool_runtime::CompileError;
 
 fn prelude_dir() -> std::path::PathBuf {
@@ -63,8 +63,8 @@ fn multi_target_retains_checked_prepared_artifacts() {
         source,
         &["targetA", "targetB"],
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
     .expect("both prepared targets must compile and pass the exact reader contract");
 
@@ -95,8 +95,8 @@ fn multi_target_fails_on_any_bad_target() {
         &source,
         &["targetA"],
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     // `CompiledTurn` does not implement `Debug`; match on the error side,
     // which does.
@@ -109,8 +109,8 @@ fn multi_target_fails_on_any_bad_target() {
         &source,
         &["targetA", "nonexistentTarget"],
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     match result {
         // A bogus `--targets` name is a GHC "not in scope" error, read
@@ -148,8 +148,8 @@ fn multi_target_asks_stay_distinct() {
         &source,
         &["targetA", "targetB"],
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
     .expect("two genuinely-valid targets should compile together");
 

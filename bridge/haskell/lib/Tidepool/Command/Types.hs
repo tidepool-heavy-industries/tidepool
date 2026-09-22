@@ -19,7 +19,7 @@ describe :: Command -> CommandSpec
 describe (Command spec) = spec
 
 bashCommand :: Text -> Command
-bashCommand script = argv ["bash", "--noprofile", "--norc", "-c", script, "shoal-bash"]
+bashCommand script = argv ["bash", "--noprofile", "--norc", "-c", script, "exomonad-bash"]
 
 withMemory :: Memory -> Command -> Command
 withMemory size (Command spec) = Command spec { commandMemory = bytes size }

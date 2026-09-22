@@ -1,6 +1,6 @@
 //! Interactive Codex installation, launch, and lifecycle operations.
 //!
-//! Shoal resolves and behaviorally probes one absolute executable before it
+//! Exomonad resolves and behaviorally probes one absolute executable before it
 //! mutates tmux state. The resulting value is the sole program used for TUI
 //! launch, queue delivery, and archival. Actor tools are supplied through the
 //! fork's HTTP/1.1-over-UDS host dynamic-tool boundary.
@@ -23,7 +23,7 @@ use crate::{
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
     QueueReadyThread, ReasoningEffort,
 };
-use tidepool_model::{ConversationTurn, ProviderObservation};
+use exomonad_model::{ConversationTurn, ProviderObservation};
 
 #[allow(dead_code)]
 #[path = "input_control.rs"]
@@ -39,11 +39,11 @@ pub use rollout_usage::{
     UsageSourceState,
 };
 
-const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
+const ENV_INTERACTIVE_CODEX_BIN: &str = "EXOMONAD_INTERACTIVE_CODEX_BIN";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const CLI_DEADLINE: Duration = Duration::from_secs(30);
 const CAPTURE_LIMIT: usize = 64 * 1024;
-const INSPECTION_POLICY_FILE: &str = "tidepool-inspection.rules";
+const INSPECTION_POLICY_FILE: &str = "exomonad-inspection.rules";
 const INSPECTION_POLICY: &str = r#"
 prefix_rule(
     pattern = [["cargo", "rustc", "rustdoc", "rustfmt", "cabal", "stack", "ghc", "ghci", "hpack", "make", "gmake", "ninja", "cmake", "meson", "just", "gradle", "mvn", "ant"]],
@@ -88,13 +88,13 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
     let manifest_output = probe(
         &executable,
         &["--shoal-protocol-manifest"],
-        "read Shoal protocol manifest",
+        "read Codex Shoal protocol manifest",
     )
     .await?;
     let manifest: codex_shoal_protocol::Manifest = serde_json::from_str(manifest_output.trim())
         .map_err(|error| AgentBackendError::ProtocolRejected {
             detail: format!(
-                "interactive Codex returned an invalid Shoal protocol manifest: {error}"
+                "interactive Codex returned an invalid Codex Shoal protocol manifest: {error}"
             ),
         })?;
     let expected = codex_shoal_protocol::Manifest::default();
@@ -113,7 +113,7 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
     installation(executable, version)
 }
 
-/// Reconstitute an installation already verified by Shoal's parent process.
+/// Reconstitute an installation already verified by Exomonad's parent process.
 pub fn installation_from_parts(
     executable: PathBuf,
     version: String,
@@ -693,7 +693,7 @@ pub async fn read_binding(path: &Path) -> Result<QueueReadyThread, AgentBackendE
 fn binding_version_error(path: &Path, error: LadderError) -> AgentBackendError {
     let detail = match error {
         LadderError::BelowFloor { found, floor } => format!(
-            "rollout binding {} uses version {found}, below the queue-readiness floor {floor}, and cannot prove durable queue readiness; start a fresh Shoal root instead of resuming this conversation",
+            "rollout binding {} uses version {found}, below the queue-readiness floor {floor}, and cannot prove durable queue readiness; start a fresh Exomonad root instead of resuming this conversation",
             path.display()
         ),
         LadderError::UnsupportedVersion { found, current } => format!(
@@ -940,11 +940,11 @@ mod tests {
             goal_policy: crate::InteractiveGoalPolicy::Configured,
             model: Some("gpt-test".to_string()),
             effort: Some(ReasoningEffort::Medium),
-            base_instructions_file: "/tmp/tidepool/prompts/shared base.md".into(),
+            base_instructions_file: "/tmp/exomonad/prompts/shared base.md".into(),
             developer_instructions: "actor charter".to_string(),
             initial_prompt: Some("initialize through typed tools".to_string()),
             native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
-            host_tools_socket: "/tmp/tidepool/host-tools.sock".into(),
+            host_tools_socket: "/tmp/exomonad/host-tools.sock".into(),
         }
     }
 
@@ -1005,7 +1005,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot prove durable queue readiness"));
-        assert!(error.to_string().contains("start a fresh Shoal root"));
+        assert!(error.to_string().contains("start a fresh Exomonad root"));
 
         tokio::fs::write(&path, format!(r#"{{"version": 6, "thread": "{THREAD}"}}"#))
             .await
@@ -1045,7 +1045,7 @@ mod tests {
         assert!(command.args.windows(2).any(|args| {
             args == [
                 "--host-dynamic-tools-socket",
-                "/tmp/tidepool/host-tools.sock",
+                "/tmp/exomonad/host-tools.sock",
             ]
         }));
         assert!(command
@@ -1069,7 +1069,7 @@ mod tests {
         assert!(command.args.windows(2).any(|args| {
             args == [
                 "--host-dynamic-tools-socket",
-                "/tmp/tidepool/host-tools.sock",
+                "/tmp/exomonad/host-tools.sock",
             ]
         }));
     }
@@ -1177,7 +1177,7 @@ mod tests {
             },
         ] {
             let mut requested = spec(mode);
-            requested.model = Some("gpt-5.6-sol".into());
+            requested.model = Some("gpt-6-sol".into());
             requested.effort = Some(ReasoningEffort::Low);
             let command = command_for(&installation(), &requested).unwrap();
             for feature in ["multi_agent", "multi_agent_v2"] {
@@ -1189,7 +1189,7 @@ mod tests {
             assert!(command
                 .args
                 .windows(2)
-                .any(|args| args == ["--model", "gpt-5.6-sol"]));
+                .any(|args| args == ["--model", "gpt-6-sol"]));
             assert!(command
                 .args
                 .iter()

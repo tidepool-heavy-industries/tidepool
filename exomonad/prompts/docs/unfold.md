@@ -53,7 +53,7 @@ observations when checking the effective selection or cache reuse. The consumer
 branch above inherits the same committed context while explicitly selecting
 Medium, as the example workspace requires for Sol execution forks.
 `withEffort` applies at context-fork construction; it is not an API for steering
-an already active Shoal assignment. The Codex backend's configuration-update
+an already active Exomonad assignment. The Codex backend's configuration-update
 mechanism is a separate control layer, not a missing model capability.
 
 Define your `Report` type and `domainPlan`/`consumerPlan` values first. Commit the
@@ -63,9 +63,9 @@ names owned paths, the contract revision, acceptance, and allowed holes. Return
 exact candidates, check evidence, discoveries, and unresolved decisions. Keep
 shared wiring with the coordinator. Review an implementation candidate after it
 exists; the parallel consumer branch tests the contract from the common scaffold.
-Before live-source capture, Shoal checkpoints eligible source changes on the
+Before live-source capture, Exomonad checkpoints eligible source changes on the
 source checkout's current branch. The child inherits that commit. Runtime
-`.shoal/`, configured source exclusions and recognized caches stay out even when
+`.exomonad/`, configured source exclusions and recognized caches stay out even when
 staged. The checkpoint runs no hooks, builds or tests. If Git cannot commit, the
 fork fails with its source files preserved; it does not silently use an older
 `HEAD`. An unchanged source needs no commit. An explicit committed-ref launch
@@ -80,7 +80,7 @@ capabilities. Use a coding reviewer when review includes running checks.
 `researching` admits inspection-only researchers with bounded delegation;
 `researchingLeaf` omits `Forks` and actor control. Research cannot escalate into
 coding, integration, or build/test execution. Host `[research]` configuration in
-`.shoal/config.toml` defaults to `default_depth = 1`, `maximum_depth = 8`, and
+`.exomonad/config.toml` defaults to `default_depth = 1`, `maximum_depth = 8`, and
 no concurrency ceiling. Set `maximum_active_children` only for an explicit finite
 research limit. The first researcher defaults to one generation;
 research descendants inherit remaining depth. Every child consumes a generation.
@@ -126,4 +126,4 @@ Width counts active or reserved descendants across the subtree; all ancestor
 ceilings also apply. Setting `maximum_depth = 0` disables research recursion.
 Configuration is loaded at host startup and does not change existing actors.
 
-skill: shoal-unfold
+skill: exomonad-unfold

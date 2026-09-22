@@ -4,8 +4,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use exomonad_actor::MailboxValue;
 use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef, RpcReplyPort, SupervisionEvent};
-use tidepool_actor::MailboxValue;
 use tidepool_runtime::session::RootCustody;
 use tokio::sync::{mpsc, oneshot};
 

@@ -22,10 +22,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{
+use exomonad_harness::selfharness::operator::{
     DelegationPhase, FieldShape, FormShape, OperatorGate,
 };
-use tidepool_web::{router, AppState};
+use exomonad_web::{router, AppState};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormShape {
@@ -516,7 +516,7 @@ async fn submit_with_malformed_json_is_rejected() {
 /// pending ask is untouched afterward.
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_bare_key_missing_bind_prefix_names_the_expected_path() {
-    use tidepool_harness::selfharness::operator::FormShape as Fs;
+    use exomonad_harness::selfharness::operator::FormShape as Fs;
 
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");

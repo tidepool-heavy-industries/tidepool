@@ -68,7 +68,7 @@ __result = __tidepoolInEffectRow $ do {
   (`:1817`) is the precedent for an internal row request. Do not add a new
   union member.
 
-### 2.2 Execution (owners: `tidepool-actor::resident_workbench`, `tidepool-runtime::session::resident`)
+### 2.2 Execution (owners: `exomonad-actor::resident_workbench`, `tidepool-runtime::session::resident`)
 
 - `begin_ready_block` (`:2450`) runs the item with a new
   `ResidentSession::run_displayed_observation_with_sites`. It is the sibling of
@@ -176,7 +176,7 @@ Paging (`cellDisplay.more`) stays at 1 check + 1 item.
   `observationCaptured` and `presentPage` requests. Regenerate the Haskell
   surface. `bridge/haskell/lib/Tidepool/Inspection.hs` gains the two verbs; the strict
   summary lives next to `pageHasMore`/`pageUnavailable`.
-- `tidepool-actor::resident_workbench`: `compile_block_in_view` templates and
+- `exomonad-actor::resident_workbench`: `compile_block_in_view` templates and
   verdict, `prepare_cell_in_session` staged-name filter, `begin_ready_block`,
   `settle_fragment` internal-request arm; delete `render_cell_observation`.
   The `presented` and budget state already lives on `ResidentWorkbenchFragment`.

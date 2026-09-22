@@ -3,7 +3,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_lookup, dispatch_status};
 use super::*;
-use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 fn example(document: &str) -> &str {
     examples(document).next().unwrap()
@@ -32,7 +32,7 @@ fn selection_page<'a>(output: &'a str, context: &str) -> &'a str {
 }
 
 async fn committed(
-    policy: &dyn tidepool_actor::ResidentToolEndpoint,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
     source: &str,
 ) -> serde_json::Value {
     let result = dispatch_haskell_script(policy, source).await;
@@ -627,8 +627,8 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
 
 fn open_test_fork(
     campaign: &TestCampaign,
-    child: &tidepool_actor::LocalResidentInstallation,
-) -> Arc<dyn tidepool_actor::ForkWorkspaceCustody> {
+    child: &exomonad_actor::LocalResidentInstallation,
+) -> Arc<dyn exomonad_actor::ForkWorkspaceCustody> {
     campaign.authority.install_grant(
         child.actor.identity().into(),
         worktree_grant(child.effective_role.role()),
@@ -638,7 +638,7 @@ fn open_test_fork(
     };
     let worktree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree_id))
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree_id))
         .unwrap()
         .unwrap();
     let principal = WorktreePrincipal::exact_actor(
@@ -795,7 +795,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // The guide's command/judgment example reads `J`, which a run gets from the
     // Jev library its workspace pins, so this campaign selects that workspace.
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         super::jev_tests::pinned_jev_workspace,
     )
@@ -839,17 +839,17 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let command_examples = [
         "judgeChanges \"inspect changed documentation\"",
         examples(include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/skills/shoal-workbench/SKILL.md"
+            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(2)
         .unwrap(),
         examples(include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/skills/shoal-workbench/SKILL.md"
+            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(4)
         .unwrap(),
         example(include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/skills/shoal-jev/SKILL.md"
+            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-jev/SKILL.md"
         )),
     ];
     for (index, source) in command_examples.into_iter().enumerate() {
@@ -873,7 +873,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
 
     committed(
         root.as_ref(),
-        example(include_str!("../../../../exomonad/examples/workspace/.shoal/skills/shoal-jev/references/recent-changes.md")),
+        example(include_str!("../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-jev/references/recent-changes.md")),
     )
     .await;
     let layout =
@@ -1232,7 +1232,7 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
                 call_id: "minimal-inner-call".into(),
                 namespace: Some("haskell".into()),
             }),
-            name: tidepool_actor::HASKELL_TOOL.into(),
+            name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(
                 example(include_str!("../../../../exomonad/prompts/docs/unfold.md")).into(),
             ),
@@ -1251,7 +1251,7 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
         root.reconcile_workbench_boxed(boundary.clone())
             .await
             .unwrap(),
-        tidepool_actor::WorkbenchBoundaryReconciliation::Recovered { .. }
+        exomonad_actor::WorkbenchBoundaryReconciliation::Recovered { .. }
     ));
     root.complete_boxed(boundary.clone()).await.unwrap();
     root.complete_boxed(boundary.clone()).await.unwrap();
@@ -1322,7 +1322,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
                 call_id: call_id.clone(),
                 namespace: Some("haskell".into()),
             }),
-            name: tidepool_actor::HASKELL_TOOL.into(),
+            name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
                 example(include_str!("../../../../exomonad/prompts/docs/unfold.md")),
@@ -1376,7 +1376,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
                 let expected_effort = child
                     .label
                     .ends_with("/consumer-tests")
-                    .then_some(tidepool_actor::ForkEffort::Medium);
+                    .then_some(exomonad_actor::ForkEffort::Medium);
                 assert_eq!(
                     child.fork_effort, expected_effort,
                     "the consumer explicitly requests Medium; the domain leaves selection to the host default"
@@ -1650,7 +1650,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
     .await
     .unwrap();
     for child in &children {
-        assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
         if child.label.ends_with("/exact") {
             assert_eq!(child.context_parent, Some(campaign.actor.identity()));
@@ -1658,7 +1658,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
             assert_eq!(inherited["items"][0]["output"], "41");
         } else {
             assert_eq!(child.context_parent, None);
-            assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
+            assert_eq!(child.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
             let missing = dispatch_lookup(child.policy.as_ref(), &["parentOnly"]).await;
             assert!(missing.to_string().contains("no match"), "{missing}");
         }
@@ -1710,7 +1710,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             match campaign.deployments.recv().await.unwrap() {
                 LocalResidentDeployment::PolicyInstalled(child) => {
                     assert_eq!(child.context_parent, None);
-                    assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+                    assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
                     bindings.push(open_test_fork(&campaign, &child));
                     reviewer = Some(child);
                 }
@@ -1724,7 +1724,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 LocalResidentDeployment::WatchChanged { notification }
                     if notification.owner == campaign.actor.identity() =>
                 {
-                    let tidepool_actor::WatchTransition::RouteFailed { detail } =
+                    let exomonad_actor::WatchTransition::RouteFailed { detail } =
                         notification.transition
                     else {
                         panic!("successful route woke a model: {notification:?}");
@@ -1800,13 +1800,13 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(), |admission| admission, |config| {
-            let authored = config.workspace.join(".shoal");
+        exomonad_actor::ResearchPolicy::default(), |admission| admission, |config| {
+            let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
-            std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Types', 'Project.Work']\n").unwrap();
+            std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Types', 'Project.Work']\n").unwrap();
             std::fs::write(authored.join("Project/Types.hs"), include_str!("fixtures/project/Types.hs")).unwrap();
             std::fs::write(authored.join("Project/Work.hs"), include_str!("fixtures/project/Work.hs")).unwrap();
-            config.workspace_inputs = Some(crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
             std::fs::write(authored.join("Project/Work.hs"), "invalid edited source").unwrap();
         },
     ).await;
@@ -1822,7 +1822,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
 #[tokio::test]
 async fn work_actor_consumes_later_progress_without_rearming() {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     campaign
         ._repository
         .writer()
@@ -1831,18 +1831,22 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/progress-route-producer.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/progress-route-producer.hs"
+        ),
     )
     .await;
     let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/progress-route.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/progress-route.hs"),
     )
     .await;
     committed(
         producer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/progress-route-questions.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/progress-route-questions.hs"
+        ),
     )
     .await;
     for (questions, expected, effects) in [
@@ -1881,20 +1885,23 @@ async fn workspace_campaign() -> TestCampaign {
 
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            let authored = config.workspace.join(".shoal");
-            crate::shoal::workspace::copy_authored(
-                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shoal-workspace"),
+            let authored = config.workspace.join(".exomonad");
+            crate::exomonad::workspace::copy_authored(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
                 &config.workspace,
             )
             .unwrap();
             configure(&authored);
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -1953,8 +1960,8 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
 async fn next_project_worker(
     campaign: &mut TestCampaign,
 ) -> (
-    tidepool_actor::LocalResidentInstallation,
-    Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+    exomonad_actor::LocalResidentInstallation,
+    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
 ) {
     let (installation, custody, _) = next_project_activation(campaign).await;
     (installation, custody)
@@ -1963,9 +1970,9 @@ async fn next_project_worker(
 async fn next_project_activation(
     campaign: &mut TestCampaign,
 ) -> (
-    tidepool_actor::LocalResidentInstallation,
-    Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
-    tidepool_actor::ResidentActivation,
+    exomonad_actor::LocalResidentInstallation,
+    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    exomonad_actor::ResidentActivation,
 ) {
     tokio::time::timeout(Duration::from_secs(120), async {
         let mut worker = None;
@@ -1984,7 +1991,7 @@ async fn next_project_activation(
                     return (*installation, custody, activation);
                 }
                 LocalResidentDeployment::WatchChanged { notification } => {
-                    if let tidepool_actor::WatchTransition::RouteFailed { detail } =
+                    if let exomonad_actor::WatchTransition::RouteFailed { detail } =
                         notification.transition
                     {
                         panic!("route failed while awaiting worker admission: {detail}");
@@ -2004,7 +2011,7 @@ async fn next_project_activation(
 #[tokio::test]
 async fn independent_admission_rejects_inheritance_and_supervised_escape() {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     campaign
         ._repository
         .writer()
@@ -2055,7 +2062,7 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
 #[tokio::test]
 async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     campaign
         ._repository
         .writer()
@@ -2215,7 +2222,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .forest
         .new_workbench(
             "after-swarm-stop".into(),
-            tidepool_actor::EffectiveRole::root()
+            exomonad_actor::EffectiveRole::root()
         )
         .await
         .is_err());
@@ -2224,7 +2231,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 #[tokio::test]
 async fn project_review_retains_evidence_and_owns_direct_repair() {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     let source = campaign
         ._repository
         .writer()
@@ -2238,19 +2245,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_delivery_setup.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_delivery_setup.hs"
+        ),
     )
     .await;
     let (implementer, _implementer_binding) = next_project_worker(&mut campaign).await;
     assert_eq!(
         implementer.instructions.as_deref(),
         Some(include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/prompts/task.md"
+            "../../../../exomonad/examples/workspace/.exomonad/prompts/task.md"
         ))
     );
     let tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &implementer.launch_worktrees[0],
         ))
         .unwrap()
@@ -2271,16 +2280,18 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(replied["status"], "replied", "{replied}");
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_review_start.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_start.hs"
+        ),
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
     let review_instructions =
-        include_str!("../../../../exomonad/examples/workspace/.shoal/prompts/review.md");
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
     let launched = super::developer_instructions_selected(
         &reviewer.effective_role,
-        &tidepool_agent::InteractiveLaunchMode::Fresh,
+        &exomonad_agent::InteractiveLaunchMode::Fresh,
         None,
         reviewer.instructions.as_deref(),
     );
@@ -2315,7 +2326,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     committed(
         reviewer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_review_repair.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_repair.hs"
+        ),
     )
     .await;
     let pending = committed(
@@ -2378,12 +2391,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
     committed(
         reviewer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_design_question.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_design_question.hs"
+        ),
     )
     .await;
     let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
     assert_eq!(expert.model.as_deref(), Some("planner"));
-    assert_eq!(expert.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
+    assert_eq!(expert.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
     assert_eq!(expert.supervisor_parent, Some(reviewer.actor.identity()));
     assert_eq!(expert.context_parent, None);
     let question = committed(expert.policy.as_ref(), "inspectFull sessionInput").await;
@@ -2400,7 +2415,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     }
     let expert_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &expert.launch_worktrees[0],
         ))
         .unwrap()
@@ -2431,7 +2446,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     committed(
         reviewer.policy.as_ref(),
         include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/checks/project_plan_incorporation.hs"
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_plan_incorporation.hs"
         ),
     )
     .await;
@@ -2457,7 +2472,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         offered.to_string().contains(amendment.as_str()),
         "{offered}"
     );
-    let git = tidepool_worktree::git::GitCli::new();
+    let git = exomonad_worktree::git::GitCli::new();
     git.run(tree.cwd(), &["merge", "--ff-only", amendment.as_str()])
         .unwrap();
     let incorporated_head = git.run(tree.cwd(), &["rev-parse", "HEAD"]).unwrap();
@@ -2485,7 +2500,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
     let questions = committed(
         reviewer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_review_questions.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_questions.hs"
+        ),
     )
     .await;
     assert_eq!(
@@ -2503,7 +2520,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     let pending = committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/project_decision_return.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_decision_return.hs"
+        ),
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
@@ -2534,7 +2553,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     // Source incorporation remains distinct from presenting the accepted decision.
     let review_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &reviewer.launch_worktrees[0],
         ))
         .unwrap()
@@ -2551,7 +2570,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let propagated = committed(
         reviewer.policy.as_ref(),
         include_str!(
-            "../../../../exomonad/examples/workspace/.shoal/checks/project_decision_consumer.hs"
+            "../../../../exomonad/examples/workspace/.exomonad/checks/project_decision_consumer.hs"
         ),
     )
     .await;
@@ -2592,7 +2611,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     let consumer_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &consumer.launch_worktrees[0],
         ))
         .unwrap()
@@ -2654,7 +2673,7 @@ async fn route_reply_preserves_request_cancellation() {
 
 async fn route_reply_case(cancel: bool) {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     let source = campaign
         ._repository
         .writer()
@@ -2673,13 +2692,17 @@ async fn route_reply_case(cancel: bool) {
     .await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/route-reply-setup.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/route-reply-setup.hs"
+        ),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
     committed(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/route-reply-worker.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/route-reply-worker.hs"
+        ),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
@@ -2748,7 +2771,7 @@ async fn route_reply_case(cancel: bool) {
 #[tokio::test]
 async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_selection() {
     let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign._repository.writer().stage(".exomonad").unwrap();
     let baseline = campaign
         ._repository
         .writer()
@@ -2762,7 +2785,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/component-setup.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/component-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
@@ -2770,7 +2793,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     assert!(lead.supervisor_parent.is_none());
     let lead_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &lead.launch_worktrees[0],
         ))
         .unwrap()
@@ -2785,13 +2808,15 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )).await;
     committed(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/component-review.hs"),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/component-review.hs"
+        ),
     )
     .await;
     let (reviewer, _review_binding) = next_project_worker(&mut campaign).await;
     let review_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &reviewer.launch_worktrees[0],
         ))
         .unwrap()
@@ -2806,7 +2831,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let verdict = dispatch_haskell_script(
         reviewer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/owner-repair.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/owner-repair.hs"),
     )
     .await;
     assert_eq!(verdict["status"], "replied", "{verdict}");
@@ -2832,7 +2857,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     let again = committed(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/review-again.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/review-again.hs"),
     )
     .await;
     assert!(again.to_string().contains("Repair"), "{again}");
@@ -2861,7 +2886,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     })
     .await
     .unwrap();
-    tidepool_worktree::GitCli::new()
+    exomonad_worktree::GitCli::new()
         .run(review_tree.cwd(), &["merge", "--ff-only", revised.as_str()])
         .unwrap();
     assert_eq!(
@@ -2885,7 +2910,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let delivered = dispatch_haskell_script(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/deliver.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/deliver.hs"),
     )
     .await;
     assert_eq!(delivered["status"], "replied", "{delivered}");
@@ -2912,7 +2937,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.shoal/checks/rsi.hs"),
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/rsi.hs"),
     )
     .await;
     let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;
@@ -2935,20 +2960,20 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     }
     let rsi_tree = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &rsi.launch_worktrees[0],
         ))
         .unwrap()
         .unwrap();
     let changed_prompt = format!(
         "{}\nNext-wave fixture: preserve the exact plan source in every handoff.\n",
-        include_str!("../../../../exomonad/examples/workspace/.shoal/prompts/task.md")
+        include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/task.md")
     );
     let improvement_commit = campaign
         ._repository
         .writer_at(rsi_tree.cwd())
         .commit_file(
-            ".shoal/prompts/task.md",
+            ".exomonad/prompts/task.md",
             &changed_prompt,
             "improve selected task context",
         )
@@ -2965,7 +2990,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
         receipt.to_string().contains(improvement_commit.as_str()),
         "{receipt}"
     );
-    tidepool_worktree::GitCli::new()
+    exomonad_worktree::GitCli::new()
         .run(
             campaign._repository.path(),
             &["merge", "--ff-only", improvement_commit.as_str()],
@@ -2977,13 +3002,13 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )
     .await;
     assert_eq!(unchanged["items"][0]["output"], "Just False", "{unchanged}");
-    let current = crate::shoal::workspace::FrozenWorkspace::load(
+    let current = crate::exomonad::workspace::FrozenWorkspace::load(
         campaign._repository.path(),
         &campaign._runtime.path().join("run"),
     )
     .unwrap();
     let next_run = tempfile::tempdir().unwrap();
-    let next = crate::shoal::workspace::FrozenWorkspace::load(
+    let next = crate::exomonad::workspace::FrozenWorkspace::load(
         campaign._repository.path(),
         next_run.path(),
     )
@@ -3034,12 +3059,12 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     let repository = tempfile::tempdir().unwrap();
     // A candidate is a project, and a project is a Git tree: that is how `nix`
     // reads the `flake.nix` a package's pinned Haskell source is named in.
-    let git = tidepool_worktree::GitCli::new();
+    let git = exomonad_worktree::GitCli::new();
     git.try_run(repository.path(), &["init", "--quiet"])
         .unwrap();
     git.try_run(
         repository.path(),
-        &["config", "user.name", "Shoal recipe check"],
+        &["config", "user.name", "Exomonad recipe check"],
     )
     .unwrap();
     git.try_run(
@@ -3047,13 +3072,13 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
         &["config", "user.email", "recipe-check@localhost"],
     )
     .unwrap();
-    crate::shoal::workspace::copy_authored(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shoal-workspace"),
+    crate::exomonad::workspace::copy_authored(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
         repository.path(),
     )
     .unwrap();
     if let Some(checks) = checks {
-        let path = repository.path().join(".shoal/config.toml");
+        let path = repository.path().join(".exomonad/config.toml");
         let mut config: toml::Value =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         config["haskell"]["checks"] = toml::Value::Array(
@@ -3071,7 +3096,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_workspace_runs_its_own_model_free_recipes() {
     let repository = recipe_workspace(None);
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
 }
@@ -3079,9 +3104,9 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     let repository = recipe_workspace(Some(&["Project.Checks.context"]));
-    let work = repository.path().join(".shoal/Project/Plan.hs");
+    let work = repository.path().join(".exomonad/Project/Plan.hs");
     let original = std::fs::read_to_string(&work).unwrap();
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
     std::fs::write(
@@ -3093,10 +3118,10 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     )
     .unwrap();
     // This candidate still compiles; the running selected worker must expose its defect.
-    crate::shoal::check(Some(repository.path().to_path_buf()), false)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
         .await
         .unwrap();
-    let error = crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap_err();
     assert!(
@@ -3106,7 +3131,7 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
         "{error}"
     );
     std::fs::write(&work, original).unwrap();
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
 }
@@ -3114,7 +3139,7 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_routing_recipes_exercise_failure_and_attention() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.routing"]));
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
 }
@@ -3122,7 +3147,7 @@ async fn candidate_routing_recipes_exercise_failure_and_attention() {
 #[tokio::test(flavor = "multi_thread")]
 async fn typed_handoff_recipe_integrates_later_final_heads_from_both_lanes() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.twoLaneHandoff"]));
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
 }
@@ -3130,7 +3155,7 @@ async fn typed_handoff_recipe_integrates_later_final_heads_from_both_lanes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn attention_actor_recipe_retains_independent_sources_through_closure() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.independentSources"]));
-    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
 }
@@ -3138,19 +3163,22 @@ async fn attention_actor_recipe_retains_independent_sources_through_closure() {
 #[tokio::test]
 async fn work_router_queries_receipts_as_the_issuing_actor() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let package = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(Path::parent)
                 .unwrap()
-                .join("examples/shoal-workspace");
-            crate::shoal::workspace::copy_authored(&package, &config.workspace).unwrap();
+                .join("exomonad/examples/workspace");
+            crate::exomonad::workspace::copy_authored(&package, &config.workspace).unwrap();
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -3220,7 +3248,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     };
     assert_eq!(poll.owner(), sender);
     let observed = observe_notification_receipt(&poll, campaign.actor.identity(), key, &inbox);
-    assert_eq!(observed, Ok(tidepool_actor::NotificationState::Accepted));
+    assert_eq!(observed, Ok(exomonad_actor::NotificationState::Accepted));
     poll.observed(observed);
     let result = query.await.unwrap();
     assert!(

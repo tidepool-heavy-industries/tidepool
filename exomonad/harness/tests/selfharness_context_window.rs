@@ -15,20 +15,21 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, Message, ModelProvider, ProviderError, Role, StreamSink, TurnRequest,
     TurnResponse, Usage,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -117,7 +118,7 @@ async fn second_hole_sees_first_holes_exchange() {
         Some(fixtures_dir()),
     )
     .expect("answerer engine config");
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-context-window-{}.jsonl",
             std::process::id()

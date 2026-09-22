@@ -166,6 +166,7 @@ fn haskell_harness_profile_pragma_line_matches_eval_pragmas() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let main_hs = manifest_dir
         .parent()
+        .and_then(Path::parent)
         .expect("tidepool-mcp has a parent (repo root)")
         .join("bridge/haskell/app/Main.hs");
     let src = std::fs::read_to_string(&main_hs)

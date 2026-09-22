@@ -3,20 +3,20 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
 
-use tidepool_agent::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
-use tidepool_agent::seam::{
+use exomonad_agent::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
+use exomonad_agent::seam::{
     AgentActivity, AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, ModelPolicy,
     ReasoningEffort, TokenUsage, ToolCallId, ToolDeclaration, ToolOutcome,
 };
-use tidepool_agent::spawn::{
+use exomonad_agent::spawn::{
     format_running_agents, AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun,
     ParkedCycle, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep,
     SpawnWorkspace, WorkerRun,
 };
-use tidepool_worktree::error::WorktreeError as DomainWorktreeError;
-use tidepool_worktree::git::GitCli;
-use tidepool_worktree::registry::WorktreeRegistry;
-use tidepool_worktree::WorktreeManager;
+use exomonad_worktree::error::WorktreeError as DomainWorktreeError;
+use exomonad_worktree::git::GitCli;
+use exomonad_worktree::registry::WorktreeRegistry;
+use exomonad_worktree::WorktreeManager;
 
 use crate::effect_glue::JsonArg;
 use crate::handlers::worktree::{
@@ -110,9 +110,9 @@ struct CycleId(u64);
 enum SteppedCycle {
     Running {
         /// The saga, inseparable from the call it is parked on
-        /// ([`tidepool_agent::spawn::CycleProgress`]) — the same bundling
+        /// ([`exomonad_agent::spawn::CycleProgress`]) — the same bundling
         /// that closes the cross-cycle SpawnStep/CycleSaga mismatch in
-        /// `tidepool-agent`. Boxed for the same reason `Cycle::Stepped`
+        /// `exomonad-agent`. Boxed for the same reason `Cycle::Stepped`
         /// itself is: no `SteppedCycle` value should pay for the largest
         /// variant's inline size, including transiently before it's boxed.
         parked: Box<ParkedCycle>,
@@ -469,7 +469,7 @@ impl AsyncCycle {
 /// and a CYCLE TABLE: N cycles, each with its OWN backend, bounded by
 /// [`with_cycle_capacity`](Self::with_cycle_capacity). Production wires the
 /// codex adapter; every committed test wires
-/// [`tidepool_agent::backend::mock::MockBackend`] — no live-model turns in
+/// [`exomonad_agent::backend::mock::MockBackend`] — no live-model turns in
 /// tests, ever.
 ///
 /// **A parked turn lives exactly as long as this handler does.** Between a
@@ -603,7 +603,7 @@ impl SubagentHandler {
     /// Run every agent this handler spawns at `model`/`effort`.
     ///
     /// The live acceptance is the caller that needs this: its granted budget
-    /// names `gpt-5.6-luna` at low effort specifically.
+    /// names `gpt-6-luna` at low effort specifically.
     #[must_use]
     pub fn with_model_policy(mut self, model: ModelPolicy, effort: ReasoningEffort) -> Self {
         self.model = model;
@@ -741,7 +741,7 @@ impl SubagentHandler {
 
     /// What a `NotRunning` says when no stepped cycle is running `agent` —
     /// the table owns the lookup, and the rendering itself is
-    /// `tidepool_agent::spawn::format_running_agents`.
+    /// `exomonad_agent::spawn::format_running_agents`.
     fn no_such_agent_detail(&self) -> String {
         format_running_agents(&self.stepped_agents())
     }
@@ -757,7 +757,7 @@ impl SubagentHandler {
     /// conversion of the outcome / error.
     ///
     /// Every branch here is a conversion or a delegation — the saga itself
-    /// lives in `tidepool_agent::spawn`, including all rollback. This method
+    /// lives in `exomonad_agent::spawn`, including all rollback. This method
     /// adds no policy of its own beyond the trust-boundary id check that
     /// `request_from_wire` performs before any path is built.
     ///
@@ -1107,7 +1107,7 @@ impl Drop for SubagentHandler {
 // Same rules as `handlers::worktree`'s section of the same name: the
 // `tidepool_bridge_effects::Ag*` types are WIRE types, their field ORDER is
 // the wire contract (positionally matching `subagent_effect_def!`'s
-// `type_defs`), and the domain types they mirror live in `tidepool_agent`.
+// `type_defs`), and the domain types they mirror live in `exomonad_agent`.
 // The Worktree-shaped pieces are NOT re-converted here — they reuse
 // `handlers::worktree`'s `pub(crate)` conversions so one contract has one
 // conversion.
@@ -1127,7 +1127,7 @@ impl Drop for SubagentHandler {
 fn request_from_wire(
     spec: AgSpawnSpec,
     schema: JsonArg,
-    tools: Vec<tidepool_agent::seam::ToolDeclaration>,
+    tools: Vec<exomonad_agent::seam::ToolDeclaration>,
     model: ModelPolicy,
     effort: ReasoningEffort,
 ) -> Result<SpawnRequest, SpawnError> {
@@ -1142,7 +1142,7 @@ fn request_from_wire(
     // The assignment a parent hands a child is the one piece of a spawn that
     // a later reader cannot reconstruct from anywhere else.
     tracing::info!(
-        target: "shoal::content",
+        target: "exomonad::content",
         agent_label = %spec.spawn_agent_label,
         tools = tools.len(),
         task = %spec.spawn_task,
@@ -1474,15 +1474,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use exomonad_agent::backend::mock::{MockBackend, MockFailure, MockStep};
+    use exomonad_agent::seam::{CycleSpec, ThreadSpec, ToolCall, ToolReply, TurnEvent, TurnId};
+    use exomonad_worktree::create::WorktreeHandle;
+    use exomonad_worktree::id::{BranchName, GitOid, WorktreeId};
+    use exomonad_worktree::registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus};
+    use exomonad_worktree::testing::TestRepo;
+    use exomonad_worktree::Binding;
+    use exomonad_worktree::BindingState;
     use parking_lot::{Condvar, Mutex};
-    use tidepool_agent::backend::mock::{MockBackend, MockFailure, MockStep};
-    use tidepool_agent::seam::{CycleSpec, ThreadSpec, ToolCall, ToolReply, TurnEvent, TurnId};
-    use tidepool_worktree::create::WorktreeHandle;
-    use tidepool_worktree::id::{BranchName, GitOid, WorktreeId};
-    use tidepool_worktree::registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus};
-    use tidepool_worktree::testing::TestRepo;
-    use tidepool_worktree::Binding;
-    use tidepool_worktree::BindingState;
 
     use crate::handlers::worktree::never_registered;
     use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeId, WtWorktreeSource, WtWorktreeSpec};
@@ -1721,7 +1721,7 @@ mod tests {
     /// own payload — plus the controls that release them and the latches that
     /// say when each started and finished.
     struct Fleet {
-        controls: Vec<Arc<tidepool_agent::backend::mock::MockControl>>,
+        controls: Vec<Arc<exomonad_agent::backend::mock::MockControl>>,
         started: Arc<Latch>,
         completed: Arc<Latch>,
         created: Arc<AtomicUsize>,
@@ -1981,11 +1981,11 @@ mod tests {
                 assert_eq!(spec.label, "reviewer");
                 assert_eq!(
                     spec.source,
-                    tidepool_worktree::WorktreeSource::CurrentRepository
+                    exomonad_worktree::WorktreeSource::CurrentRepository
                 );
                 assert_eq!(
                     spec.dirty_policy,
-                    tidepool_worktree::DirtyPolicy::RequireClean
+                    exomonad_worktree::DirtyPolicy::RequireClean
                 );
             }
             other => panic!("expected a New workspace, got {other:?}"),
@@ -2044,7 +2044,7 @@ mod tests {
             payload,
             receipt: SpawnReceipt {
                 binding_ref: "agent-7-reviewer".to_string(),
-                resolved_model: "gpt-5.4-mini".to_string(),
+                resolved_model: "gpt-6-luna".to_string(),
                 turn: TurnId("turn-1".to_string()),
                 rounds: 0,
                 usage: None,
@@ -2086,7 +2086,7 @@ mod tests {
                     raw: "mock-thread-0".to_string()
                 },
                 // Verbatim: the receipt records the model that ran, never the tier.
-                receipt_model: "gpt-5.4-mini".to_string(),
+                receipt_model: "gpt-6-luna".to_string(),
                 receipt_turn: "turn-1".to_string(),
                 receipt_rounds: 0,
                 receipt_usage: None,
@@ -2376,7 +2376,7 @@ mod tests {
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].name, "ask_parent");
         assert_eq!(decls[0].description, "ask the parent a question");
-        assert_eq!(decls[0].kind, tidepool_agent::ToolKind::Call);
+        assert_eq!(decls[0].kind, exomonad_agent::ToolKind::Call);
         assert_eq!(
             decls[0].output_schema,
             Some(serde_json::json!({"type": "object"}))

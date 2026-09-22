@@ -1178,7 +1178,7 @@ impl Harness {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             kv_path: tidepool_runtime::paths::cache_dir().join("harness-kv.json"),
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                .unwrap_or_else(|_| "gpt-6-luna".to_string()),
         };
         let trace: EffectTrace = Arc::new(Mutex::new(Vec::new()));
         let stack =

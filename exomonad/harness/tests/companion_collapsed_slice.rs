@@ -33,13 +33,13 @@ use std::sync::Arc;
 use serde_json::{json, Value as Json};
 
 use tidepool_handlers::{ConsoleHandler, JournalHandler, SegmentPath};
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::FormShape;
-use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::operator::FormShape;
+use exomonad_harness::selfharness::persistence;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, OperatorGate,
     SelfHarnessDriver,
 };
@@ -47,7 +47,8 @@ use tidepool_harness::{
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 

@@ -10,23 +10,24 @@
 //! `reinterpret` involved at all, on the SAME row.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH
-//! (`--ignore-default-filter -p tidepool-harness` to run).
+//! (`--ignore-default-filter -p exomonad-harness` to run).
 
 use crate::support;
 
 use std::sync::Arc;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::harness::AnswerContract;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{typed_request_agent_decls, Harness, SuspensionRouting, TurnOutcome};
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::harness::AnswerContract;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{typed_request_agent_decls, Harness, SuspensionRouting, TurnOutcome};
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 

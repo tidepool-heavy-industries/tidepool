@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
 
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{GitCli, WorktreeError};
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{GitCli, WorktreeError};
 
 #[test]
 fn checkpoint_commits_partial_staging_deletions_and_new_files_on_same_branch() {
@@ -62,19 +62,19 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
     repo.writer()
         .commit_file("included", "old", "seed")
         .unwrap();
-    fs::create_dir_all(repo.path().join(".shoal")).unwrap();
-    fs::write(repo.path().join(".shoal/runtime"), "private").unwrap();
-    git.try_run(repo.path(), &["add", "-f", ".shoal/runtime"])
+    fs::create_dir_all(repo.path().join(".exomonad")).unwrap();
+    fs::write(repo.path().join(".exomonad/runtime"), "private").unwrap();
+    git.try_run(repo.path(), &["add", "-f", ".exomonad/runtime"])
         .unwrap();
     fs::write(
-        repo.path().join(".shoal/untracked-private"),
+        repo.path().join(".exomonad/untracked-private"),
         "unique excluded content that must never enter Git objects",
     )
     .unwrap();
     let excluded_blob = git
         .try_run(
             repo.path(),
-            &["hash-object", "--no-filters", ".shoal/untracked-private"],
+            &["hash-object", "--no-filters", ".exomonad/untracked-private"],
         )
         .unwrap()
         .trimmed()
@@ -105,20 +105,20 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
 
     fs::write(
         repo.path().join(".git/info/exclude"),
-        b"# local\r\n/custom/\n/.shoal/\r\n",
+        b"# local\r\n/custom/\n/.exomonad/\r\n",
     )
     .unwrap();
-    git.ensure_shoal_local_exclude(repo.path()).unwrap();
+    git.ensure_exomonad_local_exclude(repo.path()).unwrap();
     let first_exclude = fs::read(repo.path().join(".git/info/exclude")).unwrap();
     assert!(first_exclude.starts_with(b"# local\r\n/custom/\n"));
     let installed = String::from_utf8(first_exclude.clone()).unwrap();
-    // The whole-directory line hides a project's authored `.shoal` source, so
+    // The whole-directory line hides a project's authored `.exomonad` source, so
     // the writer removes it and installs only the runtime state directories.
-    assert!(!installed.lines().any(|line| line.trim() == "/.shoal/"));
-    for exclusion in tidepool_worktree::git::SHOAL_LOCAL_EXCLUDES {
+    assert!(!installed.lines().any(|line| line.trim() == "/.exomonad/"));
+    for exclusion in exomonad_worktree::git::EXOMONAD_LOCAL_EXCLUDES {
         assert!(installed.lines().any(|line| line == *exclusion));
     }
-    git.ensure_shoal_local_exclude(repo.path()).unwrap();
+    git.ensure_exomonad_local_exclude(repo.path()).unwrap();
     assert_eq!(
         fs::read(repo.path().join(".git/info/exclude")).unwrap(),
         first_exclude
@@ -126,7 +126,7 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
     let committed = git
         .checkpoint_source(
             repo.path(),
-            &[OsString::from(".shoal"), OsString::from("config")],
+            &[OsString::from(".exomonad"), OsString::from("config")],
         )
         .unwrap();
     assert_eq!(
@@ -136,7 +136,7 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
         "new"
     );
     assert!(git
-        .try_run(repo.path(), &["cat-file", "-e", "HEAD:.shoal/runtime"])
+        .try_run(repo.path(), &["cat-file", "-e", "HEAD:.exomonad/runtime"])
         .is_err());
     assert!(git
         .try_run(repo.path(), &["cat-file", "-e", "HEAD:config/private"])
@@ -160,12 +160,12 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
         git.try_run(repo.path(), &["diff", "--cached", "--name-only"])
             .unwrap()
             .trimmed(),
-        ".shoal/runtime\nconfig/private"
+        ".exomonad/runtime\nconfig/private"
     );
     assert_eq!(
         git.checkpoint_source(
             repo.path(),
-            &[OsString::from(".shoal"), OsString::from("config")]
+            &[OsString::from(".exomonad"), OsString::from("config")]
         )
         .unwrap(),
         committed

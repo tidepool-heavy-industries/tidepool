@@ -5,13 +5,13 @@
 //! residual (turn wall minus the sum of attributed stages).
 //!
 //! MEASUREMENT ONLY. Run both the DEBUG build (matches production's
-//! `target/debug/tidepool-selfharness`) and `--release` and compare; see the
+//! `target/debug/exomonad-selfharness`) and `--release` and compare; see the
 //! four scenarios below for what each measures.
 //!
 //! Run with (needs `TIDEPOOL_EXTRACT` + a with-packages GHC on `PATH`, and
-//! `flock /tmp/tidepool-ghc.lock` around the run):
-//!   `cargo build --example turn_latency_bench -p tidepool-harness`
-//!   `flock /tmp/tidepool-ghc.lock ./target/debug/examples/turn_latency_bench`
+//! `flock /tmp/exomonad-ghc.lock` around the run):
+//!   `cargo build --example turn_latency_bench -p exomonad-harness`
+//!   `flock /tmp/exomonad-ghc.lock ./target/debug/examples/turn_latency_bench`
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -26,17 +26,17 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::harness::AnswerContract;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::timing::{RUST_STAGES, STAGE_JIT_CODEGEN, STAGE_RUN_EXEC};
-use tidepool_harness::{typed_request_agent_decls, Harness, NodeId, TurnOutcome};
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::harness::AnswerContract;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::timing::{RUST_STAGES, STAGE_JIT_CODEGEN, STAGE_RUN_EXEC};
+use exomonad_harness::{typed_request_agent_decls, Harness, NodeId, TurnOutcome};
 
 // ---------------------------------------------------------------------------
 // Tracing collector — matches the event shape `timing::record_stage` emits
-// (target `tidepool_harness::timing`, fields `node`/`round`/`stage`/`ms`/
+// (target `exomonad_harness::timing`, fields `node`/`round`/`stage`/`ms`/
 // `bytes`). Zero Rust-side call sites exist yet as of this bench's authoring
 // (sibling branches land them after this one merges), so an empty `stages`
 // table per scenario is EXPECTED today, not a bug — see `Meta::note` below.
@@ -156,7 +156,7 @@ impl Visit for StageVisitor {
 }
 
 /// A `tracing_subscriber::Layer` that matches ONLY `target:
-/// "tidepool_harness::timing"` events and files their `stage`/`ms`/`node`/
+/// "exomonad_harness::timing"` events and files their `stage`/`ms`/`node`/
 /// `round`/`bytes` fields into whichever scenario window is currently open.
 /// Installed as the GLOBAL default subscriber (not composed with the
 /// caller's `RUST_LOG`/`EnvFilter`) so a human who forgets to set `RUST_LOG`
@@ -166,7 +166,7 @@ struct TimingLayer(Arc<Collector>);
 
 impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if event.metadata().target() != "tidepool_harness::timing" {
+        if event.metadata().target() != "exomonad_harness::timing" {
             return;
         }
         let mut visitor = StageVisitor::default();
@@ -272,7 +272,8 @@ struct BenchReport {
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -685,7 +686,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .to_string(),
             rust_stages: RUST_STAGES.to_vec(),
             no_node_stages: vec![STAGE_JIT_CODEGEN, STAGE_RUN_EXEC],
-            note: "Stage samples come from tidepool_harness::timing::record_stage call sites. \
+            note: "Stage samples come from exomonad_harness::timing::record_stage call sites. \
                 As of this bench's authoring, ZERO Rust-side call sites and ZERO extract-side \
                 TIDEPOOL_TIMING forwarding exist yet (two sibling branches land them, merging \
                 after this one) — an empty `stages` array, or all-zero stage stats, is EXPECTED \

@@ -29,7 +29,7 @@
 //! isolated `CODEX_HOME` to route around this. The shape that avoids the
 //! documented project-trust write is to omit `cwd` from thread start and supply
 //! it at turn start — proving that is sufficient is the first thing this
-//! adapter does, before any run that spends a token. Shoal's interactive TUI
+//! adapter does, before any run that spends a token. Exomonad's interactive TUI
 //! is the deliberate exception: it trusts one stable virtual project path,
 //! never the unbounded set of generated actor repositories.
 
@@ -48,8 +48,8 @@ pub mod replay;
 pub mod transport;
 
 pub use driver::{
-    CodexAgentBackend, CodexBackendFactory, CHEAPEST_GPT56_PREFERENCE, CHEAP_PLUMBING_PREFERENCE,
-    DEFAULT_TURN_TIMEOUT, STRONGEST_GPT56_PREFERENCE,
+    CodexAgentBackend, CodexBackendFactory, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT,
+    LUNA_PREFERENCE, STRONGEST_WORKER_PREFERENCE,
 };
 pub use node::CodexInteractiveBackend;
 pub use replay::{ReplayError, TranscriptTransport};

@@ -14,7 +14,7 @@ existing native TUI process owner. Receiving a command description does not gran
 execution authority. A receiving owner executes it under its own grants.
 
 ```haskell
-let focused = withMemory (GiB 4) [bash|just test-lib tidepool-node 'test(command_oom)'|]
+let focused = withMemory (GiB 4) [bash|just test-lib exomonad-node 'test(command_oom)'|]
 job <- Cmd.start focused
 ```
 
@@ -30,7 +30,7 @@ On overrun, the interactive workbench stops the computation and names a retained
 job binding; later observation does not resume that computation. `Cmd.observe`
 returns status normally after a bounded wait. Jobs survive tool return and
 observer disconnection; there is no automatic execution retry. See the shipped
-[command skill](../../exomonad/examples/workspace/.shoal/skills/shoal-command/SKILL.md)
+[command skill](../../exomonad/examples/workspace/.exomonad/skills/exomonad-command/SKILL.md)
 for output recovery and completion routing.
 
 The default hard limit is 256 MiB and the same value is the admission weight.
@@ -71,7 +71,7 @@ available. Disable the competing JavaScript wrapper while preserving direct tool
 The shared guide supplies a minimal example; the command skill carries occasional
 stdin/PTY/routing details. Freeze executable and prompt changes at a swarm boundary.
 
-Acceptance uses a scripted local provider with the actual native TUI and Shoal
+Acceptance uses a scripted local provider with the actual native TUI and Exomonad
 binaries, plus the real Haskell, namespace and cgroup boundaries. Cover delayed
 admission, small-command progress, OOM with subsequent steering, cancellation,
 stdin/PTY, bounded output, argument fidelity and retained completion. Focused

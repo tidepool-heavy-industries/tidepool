@@ -1,11 +1,22 @@
 # Tidepool
 
+This repository contains two products built together:
+
+- [Tidepool](tidepool/README.md) compiles and runs typed Haskell effect
+  programs as resident Cranelift state machines.
+- [Exomonad](exomonad/README.md) builds persistent agent applications,
+  Codex integration, and programmable coordination on Tidepool.
+
+Shared workspace infrastructure remains at the repository root. Mixed effect
+contracts and handlers live under the transitional [`bridge/`](bridge/README.md) while their final
+ownership is resolved.
+
 **Your agent can program how it works.**
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.md)
 
 Give your agents a shared programming language for using tools, investigating
-problems, and working together. In **Shoal**, Tidepool’s agent environment, that
+problems, and working together. In **Exomonad**, Tidepool’s agent environment, that
 language is Haskell. Agents write programs as they go: keep values between turns,
 define functions and types, launch work, and compose the results.
 
@@ -21,7 +32,7 @@ branches isolated working environments without eagerly copying every build
 artifact. Memory limits, process boundaries, fork budgets, cancellation, and
 cleanup make recursive trees practical. Easy fan-out needs an answer to the
 **Sorcerer’s Apprentice** problem: you wanted a swarm, and suddenly the machine
-is out of RAM and your SSH daemon is dead. Shoal gives the swarm an aggregate
+is out of RAM and your SSH daemon is dead. Exomonad gives the swarm an aggregate
 resource boundary and individual commands their own budgets.
 
 This is my Gastown. It is also an invitation to take a very programmable agent
@@ -34,7 +45,7 @@ whatever state the agent has kept. Ask several questions about the same evidence
 in one request. Keep the answers around. Change how you use them without reading
 the evidence into another large-model turn.
 
-Here is a small example in the Shoal workbench. These illustrative excerpts could
+Here is a small example in the Exomonad workbench. These illustrative excerpts could
 instead come from a search or a command; the question names the task explicitly:
 
 ```haskell
@@ -72,7 +83,7 @@ the notebook: a tool or an after-tool slot is compiled once when it is installed
 and every later call runs retained machine code, so the same Jev-backed judgment
 that costs you a compile as a cell costs a few hundred milliseconds as a tool.
 
-The [Jev skill](exomonad/examples/workspace/.shoal/skills/shoal-jev/SKILL.md) covers
+The [Jev skill](exomonad/examples/workspace/.exomonad/skills/exomonad-jev/SKILL.md) covers
 per-item question batteries, choices carrying executable actions, policies for
 settling an answer, and reading uncertainty. The [TypeSafe cookbooks](https://docs.typesafe.ai/patterns) are a
 rich source of things to try: semantic search, structured extraction, multi-path
@@ -90,7 +101,7 @@ Supplying the assignment resolved the ambiguity that threshold tuning could not.
 The inspiration is **XMonad and `xmonad.hs`**: configure and extend your working
 environment in the language you use to operate it.
 
-A project’s `.shoal/` package contains Haskell modules, configuration, prompts,
+A project’s `.exomonad/` package contains Haskell modules, configuration, prompts,
 and skills. Start from the [example package](exomonad/examples/workspace/README.md),
 then reshape it around your project. Choose the models, write your coordination
 rules, add useful functions. Experiment live; save the good parts as source for
@@ -101,7 +112,7 @@ it was. Existing bindings stay; later cells see the new code.
 
 ### An agent's own tools and reflexes
 
-Each checkout carries one more module, `.shoal/AgentSpec.hs`. It is the agent's
+Each checkout carries one more module, `.exomonad/AgentSpec.hs`. It is the agent's
 `xmonad.hs`: the tools it is offered, and a slot that runs after every tool call.
 
 ```haskell
@@ -183,7 +194,7 @@ running keeps the code it started with. A reload that would change a tool's
 name, description or schema is refused with the difference: the tool list is
 registered once per session, so a changed surface waits for the agent's next
 incarnation and the prompt already sent is never rewritten. The
-[agent spec skill](exomonad/examples/workspace/.shoal/skills/shoal-agent-spec/SKILL.md)
+[agent spec skill](exomonad/examples/workspace/.exomonad/skills/exomonad-agent-spec/SKILL.md)
 has the details.
 
 An agent can use ordinary shell tools or write reusable command values:
@@ -207,20 +218,20 @@ Bindings hold actual values and handles, not a prose recollection of what happen
 Large outputs can stay outside the conversation until the agent needs a particular
 part. The ordinary shell tools and Haskell commands use the same runtime owners.
 
-You can also drive a running Shoal session from a terminal or another coding
+You can also drive a running Exomonad session from a terminal or another coding
 agent, keeping bindings across submissions:
 
 ```bash
-shoal proxy my-session experiment.hs
-shoal proxy my-session --actors
+exomonad proxy my-session experiment.hs
+exomonad proxy my-session --actors
 ```
 
 That is how we run many of the lab experiments. See the
-[operator interface](docs/SHOAL-OPERATOR-HTTP.md).
+[operator interface](exomonad/docs/operator-http.md).
 
 ## Make a swarm—or something else
 
-Shoal provides the pieces to build recursive coding swarms:
+Exomonad provides the pieces to build recursive coding swarms:
 
 - **Typed assignments and replies.** `unfold` launches child actors and returns
   handles to their results and progress. Children can delegate in turn.
@@ -238,8 +249,8 @@ A fork inherits a snapshot, not future messages. New decisions still need to rea
 workers. Copy-on-write shares unchanged artifacts; new builds and writes still
 cost RAM and disk. Set limits appropriate to your machine.
 
-The [actor guide](exomonad/examples/workspace/.shoal/skills/shoal-define-actors/SKILL.md)
-and [orchestration skill](exomonad/examples/workspace/.shoal/skills/shoal-orchestrate/SKILL.md)
+The [actor guide](exomonad/examples/workspace/.exomonad/skills/exomonad-define-actors/SKILL.md)
+and [orchestration skill](exomonad/examples/workspace/.exomonad/skills/exomonad-orchestrate/SKILL.md)
 show how to compose these pieces. The supplied workflow is a starting point.
 A single agent with powerful cells, a collection of semantic background actors,
 or an experiment unrelated to coding swarms can use the same substrate.
@@ -247,11 +258,11 @@ or an experiment unrelated to coding swarms can use the same substrate.
 ## Try it
 
 The current setup is **Linux with Nix, systemd user services/cgroup v2,
-Bubblewrap, and tmux**. Shoal uses a pinned Tidepool Codex fork for its hosted
+Bubblewrap, and tmux**. Exomonad uses a pinned Tidepool Codex fork for its hosted
 interface. Authenticate that client before starting model work. For Jev, set
-`TYPESAFE_API_KEY` in the environment before launching Shoal. The Jev operators
+`TYPESAFE_API_KEY` in the environment before launching Exomonad. The Jev operators
 are [jev-dsl](https://github.com/inanna-malick/jev-dsl), compiled from the
-revision your project's `flake.nix` pins; `shoal new` writes that pin, and the
+revision your project's `flake.nix` pins; `exomonad new` writes that pin, and the
 [workspace setup guide](exomonad/examples/workspace/README.md) explains it.
 
 Build the matching host, extractor, and client from this checkout:
@@ -259,8 +270,8 @@ Build the matching host, extractor, and client from this checkout:
 ```bash
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
-nix build .#shoal
-./result/bin/shoal --help
+nix build .#exomonad
+./result/bin/exomonad --help
 ```
 
 Nix 2.27 or newer is required so flake source capture includes the matched
@@ -307,23 +318,23 @@ nix.settings.trusted-public-keys = [
 ```
 
 Configure a systemd user slice with finite RAM and swap limits appropriate to
-your machine. Shoal defaults to `swarm.slice` and checks placement before running
+your machine. Exomonad defaults to `swarm.slice` and checks placement before running
 payloads. Follow the [workspace setup guide](exomonad/examples/workspace/README.md)
 for the project package and aggregate resource boundary.
 
 From the repository you want to work on:
 
 ```bash
-/path/to/tidepool/result/bin/shoal new
-/path/to/tidepool/result/bin/shoal check --workspace .
-/path/to/tidepool/result/bin/shoal init
+/path/to/tidepool/result/bin/exomonad new
+/path/to/tidepool/result/bin/exomonad check --workspace .
+/path/to/tidepool/result/bin/exomonad init
 ```
 
-`shoal new` writes the workspace package — configuration, the jev-dsl pin, the
+`exomonad new` writes the workspace package — configuration, the jev-dsl pin, the
 Jev operators, a starter agent spec, and the skills an agent loads — into an
 empty directory or a repository that has none, and commits or stages it.
-`shoal check` compiles that package without starting actors or providers; a live
-run exercises execution and provider integration. `shoal init` starts the run:
+`exomonad check` compiles that package without starting actors or providers; a live
+run exercises execution and provider integration. `exomonad init` starts the run:
 it opens a tmux session with the host, compiler, and root agent’s Codex TUI, and
 scaffolds nothing.
 
@@ -335,7 +346,7 @@ use Jev where semantic judgment helps, and save one useful Haskell function for
 its next task. Let it change the program as it learns.
 
 Preserve useful code in Git. Restarting the host does not restore its old live
-heap, jobs, or handles. [Getting started](docs/GETTING-STARTED.md) walks through
+heap, jobs, or handles. [Getting started](exomonad/docs/getting-started.md) walks through
 each command and what it writes.
 
 ### What it does not protect you from
@@ -359,14 +370,14 @@ this recovery work adds no new limits. Stronger host isolation would require a
 separate security boundary rather than extending the trusted local resource
 service.
 
-A run records a structured trace under `.shoal/logs/`, and by default that
+A run records a structured trace under `.exomonad/logs/`, and by default that
 includes cell source, tool results and diagnostics in full, so anything a
 command prints ends up there. The directory is ignored by Git. Set
-`SHOAL_TRACE` to a narrower filter, for example `info`, to leave content out.
+`EXOMONAD_TRACE` to a narrower filter, for example `info`, to leave content out.
 
 ## What is Tidepool?
 
-Underneath Shoal is **Haskell running inside Rust**. GHC compiles the source,
+Underneath Exomonad is **Haskell running inside Rust**. GHC compiles the source,
 Tidepool extracts prepared STG, and Cranelift turns it into executable code driven
 by Rust effect handlers.
 
@@ -388,7 +399,7 @@ experiments, feeding the failures back into the interface.
 ### Extend the surface
 
 Write project functions and actors in Haskell. Add a
-[Haskell-backed tool](exomonad/examples/workspace/.shoal/skills/shoal-command/references/hosted-tools.md)
+[Haskell-backed tool](exomonad/examples/workspace/.exomonad/skills/exomonad-command/references/hosted-tools.md)
 to the agent spec when a program should also be available through a tool
 interface. For a new
 host capability, define the effect contract in
@@ -437,14 +448,14 @@ for active work. The main implementation areas are:
 | Prepared execution and resident state | [`tidepool/codegen/`](tidepool/codegen/), [`tidepool/runtime/`](tidepool/runtime/) |
 | Actors and workbench | [`exomonad/actor/`](exomonad/actor/) |
 | Processes, resource controls, worktrees | [`exomonad/node/`](exomonad/node/), [`exomonad/worktree/`](exomonad/worktree/) |
-| Providers and Shoal host | [`exomonad/agent/`](exomonad/agent/), [`tidepool/`](tidepool/) |
+| Providers and Exomonad host | [`exomonad/agent/`](exomonad/agent/), [`bridge/facade/`](bridge/facade/) |
 
 Use focused checks while developing:
 
 ```bash
 nix develop
 just --list
-just test-lib tidepool-actor 'test(your_test_name)'
+just test-lib exomonad-actor 'test(your_test_name)'
 ```
 
 ## License

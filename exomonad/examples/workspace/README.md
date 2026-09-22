@@ -1,19 +1,19 @@
-# A project-specific Shoal workbench
+# A project-specific Exomonad workbench
 
-For current development, this repository's `exomonad/examples/workspace/.shoal` is
+For current development, this repository's `exomonad/examples/workspace/.exomonad` is
 the single authoring location for the curated prompts, helpers and usage guides.
 Iterate and check them here. Next-run preparation must copy the selected canonical
 package into the target workspace automatically before startup; do not hand-edit
-the installed copy to curate another variant. The target's original-root `.shoal`
+the installed copy to curate another variant. The target's original-root `.exomonad`
 is the runtime materialization selected for that swarm. This source ownership is
 separate from its frozen runtime authority. No copy or activation is needed during
 prompt review, and updating this package does not authorize a paused run to resume.
 
-`shoal new` writes these skills and the accompanying `.agents/skills` links into
+`exomonad new` writes these skills and the accompanying `.agents/skills` links into
 a project; this directory is the source they are embedded from, so preparing a
 different repository is that command rather than a copy. The links use Codex's
-ordinary repository skill discovery and point into the canonical `.shoal/skills`;
-no Shoal-specific loader is involved. This repository already tracks those links
+ordinary repository skill discovery and point into the canonical `.exomonad/skills`;
+no Exomonad-specific loader is involved. This repository already tracks those links
 at its root. Skills cover forking,
 coordination, review, actor definitions and commands. Their Markdown examples are
 executed by the coordination recipes and resident command acceptance checks.
@@ -22,18 +22,18 @@ Keep installed skills unchanged during a wave.
 The package uses the shipped shared base and root instructions; project prompt
 resources add assignment-specific guidance without replacing that prefix.
 
-This authored .shoal package supplies a programmable working style for the current
-project, with a separate relationship-view example for shoal-repl. Begin with the human and
-[initial Astra planner](.shoal/prompts/planner.md), then the
-[plan tree](.shoal/plans/README.md), [working pattern](.shoal/plans/operating.md)
-and relevant [invocation examples](.shoal/plans/run.md).
+This authored .exomonad package supplies a programmable working style for the current
+project, with a separate relationship-view example for exomonad-repl. Begin with the human and
+[initial Astra planner](.exomonad/prompts/planner.md), then the
+[plan tree](.exomonad/plans/README.md), [working pattern](.exomonad/plans/operating.md)
+and relevant [invocation examples](.exomonad/plans/run.md).
 Astra interviews the human and owns the finished feature across waves. Sol leads
 write their own execution plans for planner review, then own substantial recursive
 scaffold/fork/integrate waves and independent review. An ordinary human-requested
 Astra engagement improves the next wave. No worker is created merely because a
 pipeline names a stage.
 
-The [composition model](.shoal/plans/composition.md) explains the what and why:
+The [composition model](.exomonad/plans/composition.md) explains the what and why:
 recursive fork/join inside local integration loops. Shared scaffolds make child
 results fit together, context forks share their reasoning, and checked integration
 produces source and understanding for the next ready frontier.
@@ -58,9 +58,9 @@ entire workflow to be useful.
   RSI receives selected evidence, not a routinely summarized raw event stream.
 
 TOML is the configuration entry point; Haskell expresses behavior and Markdown
-supplies guidance. Paths are relative to .shoal/config.toml. Prompt resources are
+supplies guidance. Paths are relative to .exomonad/config.toml. Prompt resources are
 ordinary authored names selected by Project.Work, not Rust workflow roles.
-Shoal.Workspace exposes the captured prompts, module names and definition identity.
+Exomonad.Workspace exposes the captured prompts, module names and definition identity.
 Every worker has the normal Codex TUI for engineering and direct human steering.
 
 A project can also compile Haskell that lives in another repository, pinned
@@ -86,12 +86,12 @@ This package pins jev-dsl that way and supplies `Jev/Operators.hs`, the front
 that fixes the library's JSON type to Tidepool's own `Value`. It is the one
 Haskell file here that specialises rather than decides: every declaration in it
 is a type alias or a name bound to its generic counterpart, so drift from the
-pinned revision is a compile error on the line that drifted. `shoal new` writes
+pinned revision is a compile error on the line that drifted. `exomonad new` writes
 the same revision and the same front into a project that has no `flake.nix`;
 into one that has its own it writes neither, and prints the input line and the
 lock command instead.
 
-Those directories become ordinary source roots. Shoal captures them into the
+Those directories become ordinary source roots. Exomonad captures them into the
 run's frozen workspace, compiles them through the same pipeline as authored
 source, imports the configured modules into every actor, and fingerprints them
 in the compile cache by content. There is no package build and no separate
@@ -106,7 +106,7 @@ a working directory for one input:
 jev-dsl = "../../../jev-dsl"
 ```
 
-Override paths follow the usual rule — relative to `.shoal/config.toml`, or
+Override paths follow the usual rule — relative to `.exomonad/config.toml`, or
 absolute for a checkout elsewhere. An overridden run leaves `flake.lock`
 untouched, so editing the dependency in place stays a working change rather
 than a re-pin; each edit gives the next run a different cache key and a fresh
@@ -118,11 +118,11 @@ uncommitted edits are read as written.
 
 `[launch].systemd_slice` selects the shared systemd user slice (default
 `swarm.slice`). Configure its finite RAM and swap limits on the machine before
-launching. Shoal places compiler, host, native panes and shared command resources
+launching. Exomonad places compiler, host, native panes and shared command resources
 there; the tmux server stays outside. Placement is checked before payload execution.
 `resource-budget.json` in the run directory records the effective aggregate limits.
 
-The target's original repository root has one authoritative runtime .shoal. A swarm
+The target's original repository root has one authoritative runtime .exomonad. A swarm
 captures it once; later workers use that selection even when their checkout has
 newer files. For this package, incorporate changes in the Tidepool authoring source
 and let next-run preparation copy them before explicit swarm selection. More general
@@ -147,7 +147,7 @@ and effects before replaying a launch that may already have admitted useful work
 Validate a candidate selection without providers or a swarm restart:
 
 ```sh
-shoal check --workspace /path/to/project
+exomonad check --workspace /path/to/project
 ```
 
 This compiles configuration and selected worker modules. Add `--recipes` to run
@@ -161,7 +161,7 @@ incorporation, cumulative questions and owning steering, independent progress,
 callback success/cancellation/unavailability, typed subtree handoff of later final
 heads, retained notification failures, automatic review by an available specialist,
 and explicit next-swarm customization.
-They use temporary repositories seeded with authored .shoal files and their own
+They use temporary repositories seeded with authored .exomonad files and their own
 source fixtures. These are executable coordination examples, not application tests
 or evidence of live model usability and savings. Run the application's own checks
 for its product changes; the subsequent application wave supplies live-use evidence.

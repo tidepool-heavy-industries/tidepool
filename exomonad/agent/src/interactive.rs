@@ -316,7 +316,7 @@ impl QueueReadyThread {
 
 /// One exact, behaviorally verified interactive-agent installation.
 ///
-/// Shoal resolves this once before it mutates tmux state, then passes the
+/// Exomonad resolves this once before it mutates tmux state, then passes the
 /// value through its private host-process boundary. Every launch and lifecycle
 /// command therefore addresses the same executable rather than consulting
 /// `PATH` again.
@@ -416,7 +416,7 @@ pub struct InteractivePolicyMount {
 
 /// A backend-rendered interactive process invocation.
 ///
-/// Process ownership stays with the deployment adapter (tmux for Shoal). The
+/// Process ownership stays with the deployment adapter (tmux for Exomonad). The
 /// backend owns only the exact executable and arguments required by its native
 /// client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -595,7 +595,7 @@ pub trait InteractiveAgentBackend: Send + Sync {
     fn observe<'a>(
         &'a self,
         _thread: &'a QueueReadyThread,
-    ) -> InteractiveFuture<'a, Option<tidepool_model::ProviderObservation>> {
+    ) -> InteractiveFuture<'a, Option<exomonad_model::ProviderObservation>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -609,7 +609,7 @@ pub trait InteractiveAgentBackend: Send + Sync {
         &'a self,
         _thread: &'a QueueReadyThread,
         _count: usize,
-    ) -> InteractiveFuture<'a, Option<Vec<tidepool_model::ConversationTurn>>> {
+    ) -> InteractiveFuture<'a, Option<Vec<exomonad_model::ConversationTurn>>> {
         Box::pin(async { Ok(None) })
     }
 

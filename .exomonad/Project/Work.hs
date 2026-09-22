@@ -18,11 +18,11 @@ module Project.Work
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
 import Tidepool.Worktree (renderGitOid, renderWorktreeError)
 import Project.Types
-import Shoal.Workspace (workspacePrompt)
+import Exomonad.Workspace (workspacePrompt)
 
 -- Keys are the workspace's authored resource names; selecting prose grants no
 -- permission and does not create a runtime role.
@@ -39,7 +39,7 @@ taskContext task = Text.unlines $
   , "Why: " <> rationale task
   , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
   , "Acceptance: " <> acceptance task
-  , "Read this branch's contract and .shoal/plans/language.md. Relevant operations live in Project.Work; use their supplied examples and focused :type/:info when needed."
+  , "Read this branch's contract and .exomonad/plans/language.md. Relevant operations live in Project.Work; use their supplied examples and focused :type/:info when needed."
   ] ++ map decisionContext (acceptedDecisions task)
 
 -- Only call after the owning decision and source incorporation have been checked.

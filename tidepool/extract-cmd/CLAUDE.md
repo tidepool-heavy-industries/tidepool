@@ -29,7 +29,7 @@ and is never replayed.
 
 Ordinary daemon mode exits when its request or RSS rotation bound is reached.
 `--persistent` keeps the daemon endpoint alive and rotates only the pinned GHC
-worker, for a long-lived owner such as one Shoal tmux session.
+worker, for a long-lived owner such as one Exomonad tmux session.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
 

@@ -3,8 +3,8 @@
 This crate owns backend-neutral mechanics at the boundary between a Tidepool
 actor and an external interactive agent process: durable pushed-message
 delivery, process mount boundaries, and node readiness. It does not own actor
-identity or lifecycle (`tidepool-actor`), coding-agent protocols
-(`tidepool-agent`), Haskell tool policy (`tidepool-mcp`), or composition-root
+identity or lifecycle (`exomonad-actor`), coding-agent protocols
+(`exomonad-agent`), Haskell tool policy (`tidepool-mcp`), or composition-root
 choices.
 
 - `DurableInbox` is the workspace's sole append-and-ack delivery queue. Reuse

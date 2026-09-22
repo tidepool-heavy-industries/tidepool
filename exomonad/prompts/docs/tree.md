@@ -9,7 +9,7 @@ owned worktree. Name each obligation's scope, acceptance condition, and allowed
 holes. Use `boundHead` for an allocated child checkout and `projectHead` for the source
 project. The hosted root writes the project checkout directly and has no bound
 worktree handle: seed its children with `projectHead`. Before a live-source fork,
-Shoal checkpoints eligible edits on the source's current branch. The child starts
+Exomonad checkpoints eligible edits on the source's current branch. The child starts
 from that committed source. If the optional overlay capture is busy or unavailable,
 the child starts from the checkpointed HEAD with an omission notice. If native
 source admission is busy, the committed fallback instead uses the existing HEAD
@@ -32,7 +32,7 @@ OID rather than a branch label so a retained child branch cannot move between
 review and fold. `atRef (GitRef "…")` seeds a fork from a deliberate committed
 ref; `projectHead` and `boundHead` seed it from live source. A commit you cannot
 resolve means the child has not checkpointed it yet, not that the work is gone.
-Load `shoal-unfold` for the worked cells.
+Load `exomonad-unfold` for the worked cells.
 
 `tryMerge` is the primitive, not the whole job. Merging a candidate means
 merging it, running the check, and putting the worktree back if the check goes

@@ -3,14 +3,14 @@
 
 use super::model_free::ModelFreeSession;
 use super::*;
+use crate::exomonad::workspace::FrozenWorkspace;
 use crate::generated::recipe_check::RecipeCheckReq;
-use crate::shoal::workspace::FrozenWorkspace;
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use std::collections::VecDeque;
 use tidepool_bridge::FromHaskell;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
-use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type CheckActor = (String, i64, i64);
@@ -65,11 +65,11 @@ impl Driver {
     async fn start(workspace: &Path, selected: FrozenWorkspace) -> Result<Self> {
         let repository = tempfile::tempdir()?;
         let runtime = tempfile::tempdir()?;
-        let git = tidepool_worktree::GitCli::new();
+        let git = exomonad_worktree::GitCli::new();
         git.try_run(repository.path(), &["init", "--quiet"])?;
         git.try_run(
             repository.path(),
-            &["config", "user.name", "Shoal recipe check"],
+            &["config", "user.name", "Exomonad recipe check"],
         )?;
         git.try_run(
             repository.path(),
@@ -80,7 +80,7 @@ impl Driver {
             repository.path(),
             &["config", "core.hooksPath", "/dev/null"],
         )?;
-        crate::shoal::workspace::copy_authored(workspace, repository.path())?;
+        crate::exomonad::workspace::copy_authored(workspace, repository.path())?;
         // The pin travels with the package: `nix` resolves a project's pinned
         // Haskell source from its tracked `flake.nix`.
         git.try_run(repository.path(), &["add", "--all", "--", "."])?;
@@ -100,14 +100,14 @@ impl Driver {
             systemd_slice: None,
             source_exclude: defaults.launch.source_exclude,
             command_resources: None,
-            shoal_executable: std::env::current_exe()?,
+            exomonad_executable: std::env::current_exe()?,
             workspace_inputs: Some(selected),
-            haskell_root: crate::haskell_sources::ensure_shoal_haskell()?,
+            haskell_root: crate::haskell_sources::ensure_exomonad_haskell()?,
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("selection-0"),
             root_binding_path: runtime.path().join("unused-native-binding.json"),
             // Used only as launch-preview metadata; no native launch consumer exists here.
-            interactive_agent: tidepool_agent::native_interactive_agent_from_parts(
+            interactive_agent: exomonad_agent::native_interactive_agent_from_parts(
                 std::env::current_exe()?,
                 "model-free recipe check".into(),
             )?,
@@ -154,8 +154,8 @@ impl Driver {
             return Err(runtime_error("check actor belongs to an earlier swarm"));
         }
         let actor = ActorRef {
-            id: tidepool_actor::ActorId(key.1.try_into()?),
-            incarnation: tidepool_actor::Incarnation(key.2.try_into()?),
+            id: exomonad_actor::ActorId(key.1.try_into()?),
+            incarnation: exomonad_actor::Incarnation(key.2.try_into()?),
         };
         self.installations
             .get(&actor)
@@ -173,7 +173,7 @@ impl Driver {
         Ok(self
             .session()?
             .worktrees
-            .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree))?
+            .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
             .ok_or("check worktree disappeared")?
             .cwd()
             .to_path_buf())
@@ -189,7 +189,7 @@ impl Driver {
         let (module, _) = entry
             .rsplit_once('.')
             .ok_or("invalid configured check entry")?;
-        let mut declarations = shoal_effect_declarations();
+        let mut declarations = exomonad_effect_declarations();
         declarations.push(tidepool_mcp::recipe_check_decl());
         let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
         let mut includes = effects.include_paths().to_vec();
@@ -231,7 +231,7 @@ impl Driver {
                     call_id: call_id.clone(),
                     namespace: Some("haskell".into()),
                 }),
-                name: tidepool_actor::HASKELL_TOOL.into(),
+                name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(source.clone()),
             })
             .await;
@@ -278,7 +278,7 @@ impl Driver {
                     if let [worktree] = installation.launch_worktrees.as_slice() {
                         let tree = session
                             .worktrees
-                            .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree))?
+                            .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
                             .ok_or("admitted check worktree missing")?;
                         let principal = WorktreePrincipal::exact_actor(
                             &runtime_namespace(session.session_root.path()),
@@ -377,7 +377,7 @@ impl Driver {
                 ))?
             }
             RecipeGit(actor, arguments) => cx.respond(
-                tidepool_worktree::GitCli::new()
+                exomonad_worktree::GitCli::new()
                     .try_run(&self.directory(actor)?, &arguments)?
                     .trimmed()
                     .to_owned(),

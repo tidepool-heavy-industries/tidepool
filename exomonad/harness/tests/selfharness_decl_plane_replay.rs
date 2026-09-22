@@ -11,18 +11,19 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -31,7 +32,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn spike_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness/decl-replay-spike")
+    repo_root().join("exomonad/examples/harness/decl-replay-spike")
 }
 
 /// A DECL-ONLY, multi-item block — the exact shape that used to be rejected
@@ -121,7 +122,7 @@ async fn decl_in_window_one_resolves_in_window_three_same_cycle() {
         edit_reply("bumpBy 9"), // window 3: USES the window-1 helper
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("decl-replay-{}.jsonl", std::process::id())),
         &header(),
     )

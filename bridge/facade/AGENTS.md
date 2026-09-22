@@ -1,13 +1,13 @@
-# Application and Shoal host
+# Application and Exomonad host
 
-- `src/shoal.rs` owns CLI/project defaults, tmux startup and environment
+- `src/exomonad.rs` owns CLI/project defaults, tmux startup and environment
   forwarding. `src/actor_host.rs` composes actor runtime, worktrees, provider
   launch and hosted workbench; extend these owners instead of adding launchers.
-- Backend protocol/process details belong in `tidepool-agent`; actor identity,
-  requests, watches and authority belong in `tidepool-actor`; compilation and
+- Backend protocol/process details belong in `exomonad-agent`; actor identity,
+  requests, watches and authority belong in `exomonad-actor`; compilation and
   resident-machine mechanics belong in `tidepool-runtime`.
-- Keep `InteractiveGoalPolicy::Disabled` uniform at the shared Shoal launch
-  entry point, including root and resumed nodes. Shoal owns continuation;
+- Keep `InteractiveGoalPolicy::Disabled` uniform at the shared Exomonad launch
+  entry point, including root and resumed nodes. Exomonad owns continuation;
   role-dependent goal tools would change the first cached provider input item.
 - Worker launch resolution fills omitted effort from the host configuration;
   the lower-level `launch_effort` helper's Low fallback is not that production

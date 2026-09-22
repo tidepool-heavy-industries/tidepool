@@ -384,7 +384,7 @@ withWorktree tree = withLaunchWorktree (renderWorktreeId (worktreeId tree))
 mkBranchName :: Text -> BranchName
 mkBranchName = BranchName
 
--- | A ref written as a literal is that ref: @fromRef "shoal/integration"@ and
+-- | A ref written as a literal is that ref: @fromRef "exomonad/integration"@ and
 -- @atRef "main"@ say what they mean without a constructor in the way. The
 -- constructors stay exported for code that already holds a 'Text'. Infallible
 -- for the same reason 'mkBranchName' is: Git remains the authority for whether

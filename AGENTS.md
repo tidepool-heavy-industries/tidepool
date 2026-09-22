@@ -15,12 +15,12 @@ providers, scheduling, resources, persistence, and argument parsing.
    `just test-lib <crate> 'test(<name>)'` runs one test and compiles only what
    it needs. `just verify` is the full gate and takes about two hours; do not
    run it as a routine check.
-4. To run it, follow `docs/GETTING-STARTED.md`: `shoal new` writes a workspace,
-   `shoal init` starts a run, and in this repository `just shoal-init` builds
+4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` writes a workspace,
+   `exomonad init` starts a run, and in this repository `just exomonad-init` builds
    the checkout first. To see the system from the model's side, read
    `exomonad/prompts/base.md` and the skills under
-   `exomonad/examples/workspace/.shoal/skills/`, and drive a session from a
-   terminal with `shoal proxy` (`docs/SHOAL-OPERATOR-HTTP.md`).
+   `exomonad/examples/workspace/.exomonad/skills/`, and drive a session from a
+   terminal with `exomonad proxy` (`exomonad/docs/operator-http.md`).
 
 Most changes touch one of three layers, and it helps to know which:
 
@@ -28,7 +28,7 @@ Most changes touch one of three layers, and it helps to know which:
   machine (`tidepool-repr`, `tidepool-heap`, `tidepool-codegen`). Correctness
   is differential against GHC. Changes here are rare and carefully tested.
 - **The resident runtime**: sessions, the workbench, actors, effects and their
-  handlers (`tidepool-runtime`, `tidepool-actor`, `tidepool-protocol`,
+  handlers (`tidepool-runtime`, `exomonad-actor`, `tidepool-protocol`,
   `tidepool-handlers`). Most feature work lands here.
 - **The model-facing surface**: the Haskell library in `bridge/haskell/lib`, the
   shipped prompts in `exomonad/prompts/`, and the skills. Text here is read by a
@@ -101,11 +101,11 @@ redesigns, and distinguish structural savings from measured speedups.
   machine/session substrate.
 - `tidepool-protocol`, `tidepool-mcp`, `tidepool-handlers`: effect schemas,
   generated bridge, and concrete interpreters.
-- `tidepool-model`, `tidepool-model-output`, `tidepool-agent`: provider-neutral
+- `exomonad-model`, `exomonad-model-output`, `exomonad-agent`: provider-neutral
   conversations, model-output parsing, and coding-agent backends.
-- `tidepool-actor`: actor identity, lifecycle, mailbox, and resident workbench.
-- `tidepool`: the public facade and the Shoal runtime and binaries.
-- `tidepool-worktree`: managed coding checkouts and repository observation.
+- `exomonad-actor`: actor identity, lifecycle, mailbox, and resident workbench.
+- `tidepool`: the public facade and the Exomonad runtime and binaries.
+- `exomonad-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
 `docs/GLOSSARY.md` for names, especially model-facing text. `plans/README.md`
@@ -119,7 +119,7 @@ Keep detailed design references out of always-loaded instructions.
 
 - Scaffold the shared types, semantics, source baseline, and integration owner
   before forking independent obligations. Use resident Haskell `unfold` for
-  Shoal work; native tools operate on the assigned checkout.
+  Exomonad work; native tools operate on the assigned checkout.
 - Fork around meaningful shared decisions, not a headcount target. Leads can
   recursively delegate implementation and fresh-context review. Use Sol Medium
   consistently across execution forks; use fresh Astra consultations for
@@ -132,7 +132,7 @@ Keep detailed design references out of always-loaded instructions.
   baseline, its acknowledgment, incorporation, and checks are distinct evidence.
   Review concrete commits and failure paths; integrate and verify the resulting
   revision. Retain specialists for repairs without importing all their history.
-- Shoal owns continuation: native Codex goals are disabled on every node,
+- Exomonad owns continuation: native Codex goals are disabled on every node,
   including root. Do not restore role-dependent goal-tool exposure.
 - Judge cache preservation using actual normalized provider requests and usage,
   not rollout metadata alone. Reuse existing opt-in tracing; keep full-context
@@ -142,15 +142,15 @@ Keep detailed design references out of always-loaded instructions.
 
 | Mechanism | Owning source |
 |---|---|
-| Shoal CLI, actor launch composition, prompt assembly | `bridge/facade/src/shoal.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
+| Exomonad CLI, actor launch composition, prompt assembly | `bridge/facade/src/exomonad.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
 | Shipped resident instructions and shared API guide | `exomonad/prompts/` |
-| Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.shoal/skills/`, `.agents/skills/` |
+| Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.exomonad/skills/`, `.agents/skills/` |
 | Agent spec discovery, reload, and the after-tool slot | `exomonad/actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
 | Comparing two declared tool surfaces | `exomonad/tool/src/surface.rs` |
-| Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/shoal/source.rs` |
-| Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.shoal/Jev/Operators.hs` |
-| Run trace (structured JSONL under `.shoal/logs/`) | `bridge/facade/src/shoal.rs` |
-| Actor identity, lifecycle, mailbox, resident actor workbench | `tidepool-actor` |
+| Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/exomonad/source.rs` |
+| Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |
+| Run trace (structured JSONL under `.exomonad/logs/`) | `bridge/facade/src/exomonad.rs` |
+| Actor identity, lifecycle, mailbox, resident actor workbench | `exomonad-actor` |
 | Backend protocols, interactive launch and bound input-control transport | `exomonad/agent/src/backend/codex/` |
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |

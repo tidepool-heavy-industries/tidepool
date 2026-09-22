@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use tidepool_tool::{ToolDeclaration, ToolKind};
+pub use exomonad_tool::{ToolDeclaration, ToolKind};
 
 /// Tidepool's identity for one agent. Minted by the registry, never by a
 /// backend — a backend thread id may be reassigned or absent (an ephemeral
@@ -46,7 +46,7 @@ pub struct ToolCall {
     pub thread: BackendThreadId,
     pub turn: TurnId,
     /// The wire name the child invoked — one of the declared
-    /// [`tidepool_tool::ToolDeclaration::name`]s, or something else entirely, which is
+    /// [`exomonad_tool::ToolDeclaration::name`]s, or something else entirely, which is
     /// a fact the parent must be able to refuse rather than a fact to assume.
     pub tool: String,
     /// The child's arguments, as JSON. Named-field objects: the model is the
@@ -100,7 +100,7 @@ pub enum ReasoningEffort {
     High,
 }
 
-pub use tidepool_model::TokenUsage;
+pub use exomonad_model::TokenUsage;
 
 /// Receipt-bearing observations. Model prose is never the source of any
 /// field here.
@@ -150,22 +150,18 @@ pub enum AgentBackendError {
 /// would have to anticipate every future name; this does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelPolicy {
-    /// Cheap plumbing: prefer `gpt-5.4-mini`, else `gpt-5.6-luna`.
+    /// Cheap plumbing uses `gpt-6-luna`.
     CheapPlumbing,
-    /// The cheapest gpt-5.6 tier, pinned: `gpt-5.6-luna` and nothing else.
-    ///
-    /// Distinct from [`ModelPolicy::CheapPlumbing`], which would resolve to
-    /// the cheaper `gpt-5.4-mini` — a specific budget grant names this exact
-    /// tier, and cheaper is not the same as granted.
-    CheapestGpt56,
-    /// The strongest gpt-5.6 tier available: prefer `gpt-5.6-sol`, else
-    /// `gpt-5.6-terra`, else `gpt-5.6-luna`.
+    /// The Luna tier, pinned: `gpt-6-luna` and nothing else.
+    CheapestLuna,
+    /// The strongest worker tier available: prefer `gpt-6-sol`, else
+    /// `gpt-6-luna`.
     ///
     /// The coding-worker grant (operator, 2026-08-25): iteration quality on
     /// real-repo chores is worth the tier — worker cycles are where the
     /// engineering happens, and a stronger worker saves operator-side
     /// recovery cycles.
-    StrongestGpt56,
+    StrongestWorker,
 }
 
 /// What one thread is created with. Frozen for the thread's lifetime — dynamic
@@ -173,7 +169,7 @@ pub enum ModelPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpec {
     pub ephemeral: bool,
-    pub dynamic_tools: Vec<tidepool_tool::ToolDeclaration>,
+    pub dynamic_tools: Vec<exomonad_tool::ToolDeclaration>,
 }
 
 /// One work cycle: one turn on one thread, in one workspace.
@@ -190,7 +186,7 @@ pub struct CycleSpec {
     pub task: String,
     /// JSON Schema constraining the terminal message. Derived from the
     /// caller's result type by the structural interpreter — no authored
-    /// Haskell writes one, same rule as [`tidepool_tool::ToolDeclaration::input_schema`].
+    /// Haskell writes one, same rule as [`exomonad_tool::ToolDeclaration::input_schema`].
     pub output_schema: Option<serde_json::Value>,
     pub model: ModelPolicy,
     pub effort: ReasoningEffort,

@@ -34,12 +34,12 @@ use crate::support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, TurnOutcome};
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::tree::{NodeId, NodeState};
+use exomonad_harness::{Harness, TurnOutcome};
 
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

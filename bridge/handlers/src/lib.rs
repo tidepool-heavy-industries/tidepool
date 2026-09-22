@@ -13,7 +13,7 @@
 //! let cfg = HandlerConfig {
 //!     cwd: PathBuf::from("."),
 //!     kv_path: PathBuf::from(".tidepool/kv.json"),
-//!     llm_model: "gpt-4o-mini".into(),
+//!     llm_model: "gpt-6-luna".into(),
 //! };
 //! let stack = build_base_stack(&cfg);
 //! let decls = base_decls(&stack);

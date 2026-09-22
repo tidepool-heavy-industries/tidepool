@@ -3,9 +3,9 @@
 use std::io;
 use std::num::NonZeroU64;
 
-use tidepool_agent::interactive::{PublicationIdentity, PublicationOperation, PublicationReply};
-use tidepool_agent::{InteractiveAgentBackend, QueueReadyThread};
-use tidepool_node::MountNamespace;
+use exomonad_agent::interactive::{PublicationIdentity, PublicationOperation, PublicationReply};
+use exomonad_agent::{InteractiveAgentBackend, QueueReadyThread};
+use exomonad_node::MountNamespace;
 
 #[derive(Default)]
 pub(super) struct WorkspacePublication {

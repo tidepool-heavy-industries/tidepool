@@ -4,7 +4,7 @@ Historical authored harness sources for the retired self-iterating harness
 system. The former `tidepool-selfharness` runtime and its launcher are no
 longer supported; `run.sh` fails explicitly rather than attempting to build a
 removed binary. The files remain as reference material (distinct from
-`examples/harness/`, which holds the frozen reference contract), where the
+`exomonad/examples/harness/`, which holds the frozen reference contract), where the
 "smart agent" (a clean-context Claude session) authors and iterates the harness
 by hand — the manual precursor to autonomous distillation.
 
@@ -22,7 +22,7 @@ Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
 **Minimal effect surfaces, on purpose:** the answerer row is
-`Eff '[AskUser, Fork, ReadState, Green, Finalize]` (`tidepool-harness`'s
+`Eff '[AskUser, Fork, ReadState, Green, Finalize]` (`exomonad-harness`'s
 `selfharness::driver::answerer_decls`; the delegating companion prepends
 `Subagent`/`Worktree`) — typed forms, RECURSIVE sub-answerers bounded by
 spawn-time depth/descendant budgets rather than depth-one, and the typed

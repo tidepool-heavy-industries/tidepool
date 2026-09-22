@@ -1,9 +1,9 @@
 //! Pins the timing module's emitted event shape: tracing target, message,
 //! and field set/order — the wire contract collectors depend on regardless
 //! of which crate hosts `timing.rs` (`tidepool-runtime` cannot depend on
-//! `tidepool-harness`, so the module lives on the `tidepool-runtime` side and
-//! `tidepool-harness` re-exports it). This test exercises only
-//! `tidepool_harness::timing`'s public surface, so it stays valid either way.
+//! `exomonad-harness`, so the module lives on the `tidepool-runtime` side and
+//! `exomonad-harness` re-exports it). This test exercises only
+//! `exomonad_harness::timing`'s public surface, so it stays valid either way.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-use tidepool_harness::timing::{self, ExtractTiming, NO_NODE, NO_ROUND, STAGE_TEMPLATE};
+use exomonad_harness::timing::{self, ExtractTiming, NO_NODE, NO_ROUND, STAGE_TEMPLATE};
 
 #[derive(Default, Debug, Clone)]
 struct CapturedEvent {
@@ -106,7 +106,7 @@ fn record_stage_emits_the_pinned_target_message_and_field_shape() {
 
     assert_eq!(events.len(), 1);
     let e = &events[0];
-    assert_eq!(e.target, "tidepool_harness::timing");
+    assert_eq!(e.target, "exomonad_harness::timing");
     assert_eq!(
         e.field_names,
         vec!["node", "round", "stage", "ms", "bytes"],
@@ -152,7 +152,7 @@ tidepool-timing phase=total ms=4700\n";
         ]
     );
     for e in &events {
-        assert_eq!(e.target, "tidepool_harness::timing");
+        assert_eq!(e.target, "exomonad_harness::timing");
         assert_eq!(e.field_names, vec!["node", "round", "stage", "ms", "bytes"]);
         assert_eq!(e.node.as_deref(), Some("bootstrap"));
         assert_eq!(e.round.as_deref(), Some("-"));

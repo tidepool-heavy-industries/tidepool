@@ -143,7 +143,7 @@ async fn exact_publication_request_and_lost_reply_are_not_retried() {
 fn namespace_publication_server() {
     use std::io::{Read, Write};
     use std::os::unix::fs::MetadataExt;
-    let Some(socket) = std::env::var_os("SHOAL_TEST_PUBLICATION_SOCKET") else {
+    let Some(socket) = std::env::var_os("EXOMONAD_TEST_PUBLICATION_SOCKET") else {
         return;
     };
     let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
@@ -220,7 +220,7 @@ async fn publication_peer_pid_is_host_visible_across_pid_namespace() {
             "backend::codex::workspace_publication::tests::namespace_publication_server",
             "--nocapture",
         ])
-        .env("SHOAL_TEST_PUBLICATION_SOCKET", &socket)
+        .env("EXOMONAD_TEST_PUBLICATION_SOCKET", &socket)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true)

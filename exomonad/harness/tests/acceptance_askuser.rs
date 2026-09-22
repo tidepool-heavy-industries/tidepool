@@ -13,13 +13,13 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::observer::FormSource;
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::observer::FormSource;
+use exomonad_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, OperatorGate,
     SelfHarnessDriver,
 };
@@ -28,7 +28,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -37,7 +38,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -298,7 +299,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
 
     let log_path = support::unique_temp_log_path("acceptance-askuser");
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let observer = Arc::new(CaptureObserver::default());
@@ -593,7 +594,7 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
         std::process::id()
     ));
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
     let observer = Arc::new(CaptureObserver::default());
@@ -670,14 +671,14 @@ async fn choose_with_no_options_fails_loud_before_suspending() {
         std::process::id()
     ));
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let harness = Arc::new(Harness::new(writer, agent_cfg, provider).expect("harness boots"));
 
     let root = harness
         .create_root("choose-empty root", "call choose with no options")
         .unwrap();
     harness
-        .force(root, tidepool_harness::log::Actor::Operator)
+        .force(root, exomonad_harness::log::Actor::Operator)
         .unwrap();
     let outcome = harness.run_to_hole_or_done(root).await;
     let err = outcome
@@ -710,7 +711,7 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
 
     let code = "(do { req <- askUser @DeployRequest; pure req.service }) :: M Text";
     let target = cfg.turn_target(None).expect("turn target");
-    let src = tidepool_harness::engine::template_turn_for(
+    let src = exomonad_harness::engine::template_turn_for(
         &cfg.decls,
         &target.stack,
         code,
@@ -718,13 +719,13 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
         "",
         false,
     );
-    let result = tidepool_harness::engine::compile_turn(
+    let result = exomonad_harness::engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     assert!(
         result.is_ok(),
@@ -748,7 +749,7 @@ fn maybe_unit_field_is_a_compile_error_naming_the_field() {
 
     let code = "askUser @MaybeUnitField";
     let target = cfg.turn_target(None).expect("turn target");
-    let src = tidepool_harness::engine::template_turn_for(
+    let src = exomonad_harness::engine::template_turn_for(
         &cfg.decls,
         &target.stack,
         code,
@@ -756,13 +757,13 @@ fn maybe_unit_field_is_a_compile_error_naming_the_field() {
         "",
         false,
     );
-    let result = tidepool_harness::engine::compile_turn(
+    let result = exomonad_harness::engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     let err = result
         .err()

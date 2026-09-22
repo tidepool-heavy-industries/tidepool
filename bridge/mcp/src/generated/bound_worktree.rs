@@ -5,7 +5,7 @@
 pub fn bound_worktree_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "BoundWorktree",
-        description: "Granular Shoal capability delegated to the canonical Worktree handler.",
+        description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,
         constructors: &[
             "BoundWorktreeGet :: BoundWorktree (Either WorktreeError WorktreeHandle)",

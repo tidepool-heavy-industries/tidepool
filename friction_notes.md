@@ -28,7 +28,7 @@ are nondeterministic.
   compiled, but its final result was lost with an interrupted terminal session.
   Treat this recipe as unconfirmed until a clean post-fix run completes. The
   observed failure was assertion brittleness, not demonstrated randomness.
-- The full `shoal check --recipes` run reached a late
+- The full `exomonad check --recipes` run reached a late
   `Project.RoutingChecks.routing` assertion after roughly 26 minutes. The CLI
   has no recipe selector, so isolating that case required a temporary workspace
   copy and edits to both its `checks` list and recipe body. Add a targeted

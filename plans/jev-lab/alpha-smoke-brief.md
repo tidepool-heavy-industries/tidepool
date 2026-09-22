@@ -1,6 +1,6 @@
 # Alpha smoke run: one Sol session, Jev in every layer
 
-One root agent, `gpt-5.6-sol`, in the repository's own `.shoal/` workspace, with
+One root agent, `gpt-6-sol`, in the repository's own `.exomonad/` workspace, with
 `TYPESAFE_API_KEY` set. The run is watched, then the agent is interviewed. It is
 a smoke test for publishing, so the question is whether a model that has only
 the shipped prompt and skills can use the three things the README leads with.
@@ -24,21 +24,21 @@ No scorecard: observe, interview, repair, and run it again if it was rough.
 ## Setup
 
 The root workspace ships a starter spec so the run needs no restart:
-`.shoal/Project/Tools.hs` nests the shell tools and declares `triage_search`
-with a body that ignores `looking_for`, and `.shoal/AgentSpec.hs` fills the
+`.exomonad/Project/Tools.hs` nests the shell tools and declares `triage_search`
+with a body that ignores `looking_for`, and `.exomonad/AgentSpec.hs` fills the
 after-tool slot with one that always abstains. The declared surface is fixed at
 launch; everything the agent is asked to do is a body edit and a reload.
 
 ```bash
-just shoal-smoke
+just exomonad-smoke
 ```
 
-builds this checkout, starts a `gpt-5.6-sol` run in the tmux session
-`shoal-alpha-smoke`, and pastes the brief into the root agent once its window
+builds this checkout, starts a `gpt-6-sol` run in the tmux session
+`exomonad-alpha-smoke`, and pastes the brief into the root agent once its window
 exists. It reads `TYPESAFE_API_KEY` from the environment, or from
 `~/.config/typesafe/api-key` when that is unset. Attach with
-`tmux attach -t shoal-alpha-smoke`; drive cells beside the agent with
-`shoal proxy shoal-alpha-smoke <file.hs>`.
+`tmux attach -t exomonad-alpha-smoke`; drive cells beside the agent with
+`exomonad proxy exomonad-alpha-smoke <file.hs>`.
 
 ## The brief given to the agent
 
@@ -46,7 +46,7 @@ exists. It reads `TYPESAFE_API_KEY` from the environment, or from
 
 ## What the operator reads afterwards
 
-From `<workspace>/.shoal/logs/<run_id>.jsonl` and `status view=detailed`:
+From `<workspace>/.exomonad/logs/<run_id>.jsonl` and `status view=detailed`:
 
 - each `after-tool#N` row: tool, elapsed time, disposition, install and revision;
 - one reload that swapped, and the call after it served by the higher install;

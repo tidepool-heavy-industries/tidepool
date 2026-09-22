@@ -1,18 +1,18 @@
 //! Join logical jobs to the existing native process owner and resource authority.
-use futures_util::future::BoxFuture;
-use std::sync::Arc;
-use tidepool_actor::command_jobs::{CommandBackend, CommandControl};
-use tidepool_agent::{
+use exomonad_actor::command_jobs::{CommandBackend, CommandControl};
+use exomonad_agent::{
     InteractiveAgentBackend, NativeCommandOperation as Op, NativeCommandReply as Reply,
     QueueReadyThread,
 };
+use exomonad_node::command_resources::{CommandResourceClient, CommandResourceStatus as Resource};
+use exomonad_node::host_command::{
+    HostCommand, HostCommandSpec, HostExit, HostPage, HostStdin, HostStream,
+};
+use futures_util::future::BoxFuture;
+use std::sync::Arc;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
     CommandPosition, CommandResult, CommandSpec, CommandStatus, CommandStream,
-};
-use tidepool_node::command_resources::{CommandResourceClient, CommandResourceStatus as Resource};
-use tidepool_node::host_command::{
-    HostCommand, HostCommandSpec, HostExit, HostPage, HostStdin, HostStream,
 };
 use tokio::sync::watch;
 
@@ -66,7 +66,7 @@ impl NativeCommandBackend {
         native: Arc<dyn InteractiveAgentBackend>,
         thread: QueueReadyThread,
         resources: Arc<CommandResourceClient>,
-        actor: tidepool_actor::ActorRef,
+        actor: exomonad_actor::ActorRef,
     ) -> Self {
         Self {
             native,
@@ -354,7 +354,7 @@ const PAGE_BYTES: u64 = 64 * 1024;
 /// but could not run `git reset --hard` inside it, which is how a rolled-back
 /// check left an integration worktree stranded on a red head in dogfood run 7.
 /// Running here matches where every other custody-following operation already
-/// runs: `tidepool_worktree::git::GitCli` shells out from this same process.
+/// runs: `exomonad_worktree::git::GitCli` shells out from this same process.
 pub(super) struct HostCommandBackend {
     resources: Arc<CommandResourceClient>,
     actor: String,
@@ -368,7 +368,7 @@ pub(super) struct HostCommandBackend {
 impl HostCommandBackend {
     pub(super) fn new(
         resources: Arc<CommandResourceClient>,
-        actor: tidepool_actor::ActorRef,
+        actor: exomonad_actor::ActorRef,
         roots: super::ResidentCommandRoots,
         bubblewrap: std::path::PathBuf,
     ) -> Self {
@@ -450,7 +450,7 @@ impl HostCommandBackend {
             Some(requested) => std::path::PathBuf::from(requested),
             None => self.roots.directory.clone(),
         };
-        let boundary = match tidepool_node::ProcessMountBoundary::new(
+        let boundary = match exomonad_node::ProcessMountBoundary::new(
             &directory,
             self.roots.protected.clone(),
             self.roots.writable.clone(),

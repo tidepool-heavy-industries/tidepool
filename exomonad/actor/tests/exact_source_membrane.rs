@@ -1,7 +1,7 @@
 //! Fresh actor compilation sees only exact facades, never the ambient session
 //! module that defined them.
 
-use tidepool_actor::{ActorDescriptor, ActorPlacement, ActorRef, ActorSourceImports};
+use exomonad_actor::{ActorDescriptor, ActorPlacement, ActorRef, ActorSourceImports};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
@@ -41,7 +41,7 @@ fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
         .expect("isolated compile view");
     assert_eq!(isolated_view.library(), None, "ambient Lib.G must not leak");
 
-    let actor = ActorRef::first(tidepool_actor::ActorId(1));
+    let actor = ActorRef::first(exomonad_actor::ActorId(1));
     let context = ActorDescriptor::new(
         "fresh reviewer",
         ActorPlacement {
@@ -63,6 +63,6 @@ fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
     );
     assert!(matches!(
         context.compile_view(source_view),
-        Err(tidepool_actor::ActorCompileViewError::WrongLexicalScope { .. })
+        Err(exomonad_actor::ActorCompileViewError::WrongLexicalScope { .. })
     ));
 }

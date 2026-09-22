@@ -6,29 +6,29 @@ use super::*;
 async fn research_child(
     campaign: &mut TestCampaign,
 ) -> (
-    tidepool_actor::LocalResidentInstallation,
-    Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+    exomonad_actor::LocalResidentInstallation,
+    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
 ) {
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
                 LocalResidentDeployment::PolicyInstalled(child) => {
                     let role = &child.effective_role;
-                    assert_eq!(role.role(), tidepool_actor::ActorRole::Research);
+                    assert_eq!(role.role(), exomonad_actor::ActorRole::Research);
                     assert_eq!(
                         role.workspace(),
-                        tidepool_actor::WorkspaceAccess::InspectOnly
+                        exomonad_actor::WorkspaceAccess::InspectOnly
                     );
                     assert_eq!(
                         role.native_tools(),
-                        tidepool_actor::NativeToolClass::InspectionOnly
+                        exomonad_actor::NativeToolClass::InspectionOnly
                     );
                     campaign
                         .authority
                         .install_grant(child.actor.identity().into(), worktree_grant(role.role()));
                     let worktree = campaign
                         .worktrees
-                        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+                        .lookup(&exomonad_worktree::WorktreeId::from_raw(
                             &child.launch_worktrees[0],
                         ))
                         .unwrap()
@@ -67,7 +67,7 @@ async fn research_child(
 
 #[tokio::test]
 async fn research_admission_obeys_configured_width_and_consumes_depth() {
-    let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
+    let mut campaign = TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
         maximum_depth: 1,
         maximum_active_children: Some(1),
         default_depth: 1,
@@ -82,7 +82,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
     assert_eq!(result["status"], "committed", "{result:?}");
     assert_eq!(
         research.effective_role.descendants(),
-        tidepool_actor::DescendantBudget {
+        exomonad_actor::DescendantBudget {
             maximum_depth: 1,
             maximum_active_children: Some(1)
         }
@@ -146,7 +146,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
 
 #[tokio::test]
 async fn preview_and_explicit_research_budget_match_without_spawning_during_preview() {
-    let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
+    let mut campaign = TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
         default_depth: 1,
         maximum_depth: 3,
         maximum_active_children: Some(4),
@@ -178,7 +178,7 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     assert_eq!(launch.await.unwrap()["status"], "committed");
     assert_eq!(
         coordinator.effective_role.descendants(),
-        tidepool_actor::DescendantBudget {
+        exomonad_actor::DescendantBudget {
             maximum_depth: 2,
             maximum_active_children: Some(2)
         }

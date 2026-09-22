@@ -1143,7 +1143,7 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
 ///
 /// Generic over the effect handler stack `H` and the output sink `O` so it
 /// stays below the server crate that owns the concrete buffer, exactly like
-/// [`super::PreparedEngine`]. The registry (`tidepool-harness`) instantiates
+/// [`super::PreparedEngine`]. The registry (`exomonad-harness`) instantiates
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
     /// The shared persistent session state (machine + accumulated table + the two

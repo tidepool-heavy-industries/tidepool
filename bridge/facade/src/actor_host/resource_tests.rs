@@ -1,5 +1,5 @@
 use super::*;
-use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
+use exomonad_node::command_resources::{CommandResourcePolicy, CommandResources};
 
 #[tokio::test]
 #[ignore = "requires delegated cgroups and the repository extractor setup"]
@@ -12,11 +12,11 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
     .unwrap();
     let mut selected = None;
     let campaign = test_campaign::TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.command_resources =
-                Some(tidepool_node::command_resources::CommandResourceClient::local(resources));
+                Some(exomonad_node::command_resources::CommandResourceClient::local(resources));
             selected = Some(config.clone());
         },
     )
@@ -34,7 +34,7 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
         backend: native_interactive_backend(config.interactive_agent.clone()),
         worktrees: campaign.worktrees.clone(),
         bindings: campaign.bindings.clone(),
-        actor_recovery: tidepool_actor::ActorRecoveryJournal::open(
+        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
             config.run_root.join("resource-test-actors.jsonl"),
         )
         .unwrap(),
@@ -90,8 +90,8 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
 #[test]
 fn source_checkout_launch_has_process_custody_without_a_worktree_lease() {
     let actor = ActorRef {
-        id: tidepool_actor::ActorId(0),
-        incarnation: tidepool_actor::Incarnation(1),
+        id: exomonad_actor::ActorId(0),
+        incarnation: exomonad_actor::Incarnation(1),
     };
     let mut owner = InteractiveApplicationOwner {
         supervisor: None,

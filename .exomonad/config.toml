@@ -1,5 +1,5 @@
 [defaults]
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 effort = "low"
 
 [haskell]
@@ -25,7 +25,7 @@ source_roots = ["."]
 # reader to treat an old campaign as the current goal.
 #
 # `checks` is unset. The recipe modules that were configured here import the
-# retired API generation, so `shoal check --recipes` cannot run until they are
+# retired API generation, so `exomonad check --recipes` cannot run until they are
 # ported. They were: Project.Checks.workbench,
 # Project.CollaborationChecks.collaboration, Project.RoutingChecks.routing.
 modules = [
@@ -36,7 +36,7 @@ modules = [
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
 # this repository. Only `core` is named: it is the JSON-polymorphic library,
-# and `.shoal/Jev/Operators.hs` in this package fixes its value type to
+# and `.exomonad/Jev/Operators.hs` in this package fixes its value type to
 # Tidepool's own. The input's `src` holds the same front over aeson, which
 # Tidepool does not have; naming it here would put a second `Jev.Operators`
 # on the search path that cannot compile.

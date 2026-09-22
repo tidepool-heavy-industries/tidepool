@@ -12,10 +12,10 @@ module Project.Observe
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (AgentInspection)
-import Shoal.Workspace (workspaceIdentity)
+import Exomonad.Workspace (workspaceIdentity)
 import Project.Types
 import Project.Work (projectPrompt)
 import Project.Routing (WorkState (..), WorkSource (..), WorkEvent (..), WorkDelta (..), outstandingEvidence)

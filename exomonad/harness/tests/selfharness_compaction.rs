@@ -30,13 +30,13 @@ use parking_lot::Mutex;
 
 use crate::support;
 
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, Message, ModelProvider, ProviderError, Role, StreamSink, TurnRequest,
     TurnResponse, Usage,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
@@ -44,7 +44,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -188,7 +189,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
-        tidepool_harness::log::LogWriter::create(scratch("inplace").join("log.jsonl"), &header())
+        exomonad_harness::log::LogWriter::create(scratch("inplace").join("log.jsonl"), &header())
             .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
@@ -377,7 +378,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
-        tidepool_harness::log::LogWriter::create(scratch("c1").join("log.jsonl"), &header())
+        exomonad_harness::log::LogWriter::create(scratch("c1").join("log.jsonl"), &header())
             .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 

@@ -269,7 +269,7 @@ pub async fn serve(
 /// Where a run's listen-channel state lives: the UDS socket, the durable
 /// frames log, and the durable ack cursor — resolved via
 /// `tidepool_runtime::paths` (the one path-resolution home; re-exports
-/// `tidepool-toolchain::paths`).
+/// `exomonad-toolchain::paths`).
 #[derive(Debug, Clone)]
 pub struct ListenPaths {
     pub sock: PathBuf,

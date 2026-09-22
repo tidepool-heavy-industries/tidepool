@@ -1,4 +1,4 @@
-//! tidepool-harness — typed-yield session tree over the eval substrate: the
+//! exomonad-harness — typed-yield session tree over the eval substrate: the
 //! turn engine ([`engine`]), the node tree + forcing gates ([`forcing`]/
 //! [`tree`]), the orchestrator ([`harness`]), the durable event log
 //! ([`log`]) + replay ([`replay`]),

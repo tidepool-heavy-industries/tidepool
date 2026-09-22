@@ -4,7 +4,7 @@
 //! `runLLMTurn` hole and terminates the answerer's own turn loop. The `value`
 //! field crosses IN-HEAP and may carry a non-serializable payload (a
 //! closure) — it is never JSON-decoded, here or anywhere in
-//! `tidepool-harness`; only the leading `Int` site id is read. `value`'s
+//! `exomonad-harness`; only the leading `Int` site id is read. `value`'s
 //! Rust binding is [`crate::schema::RustBinding::HaskellValue`] for exactly that
 //! reason: identity capture, no interpretation.
 //!

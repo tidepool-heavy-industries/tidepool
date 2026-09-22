@@ -1,4 +1,4 @@
-# tidepool-model-output — model text protocols
+# exomonad-model-output — model text protocols
 
 This crate owns provider-neutral parsing of model-authored response text. It
 does not call providers, execute Haskell, own conversations, or assign runtime

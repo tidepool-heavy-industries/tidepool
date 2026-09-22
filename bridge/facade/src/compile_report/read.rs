@@ -6,7 +6,7 @@
 //! handles both a harness `transcript.jsonl` and this crate's own
 //! `eval-failures.jsonl` — see [`crate::compile_report`]'s module doc):
 //!
-//! - **`answerer_round`** — `tidepool_harness::selfharness::observer::Event`'s
+//! - **`answerer_round`** — `exomonad_harness::selfharness::observer::Event`'s
 //!   `AnswererRound{node,site,round,error}` variant, as written to
 //!   `transcript.jsonl`. That type derives `Serialize` only (not
 //!   `Deserialize`) and this crate's spec forbids touching

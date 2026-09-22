@@ -43,7 +43,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::create::TIDEPOOL_SNAPSHOT_REF_PREFIX;
+use crate::create::EXOMONAD_SNAPSHOT_REF_PREFIX;
 use crate::error::{DirtySummary, WorktreeError};
 use crate::git::{inspect, GitCli};
 use crate::id::{GitOid, GitRef, WorktreeId};
@@ -148,7 +148,7 @@ pub fn snapshot_source(
         .to_string(),
     );
 
-    let snapshot_ref = GitRef::from_raw(format!("{TIDEPOOL_SNAPSHOT_REF_PREFIX}/{worktree_id}"));
+    let snapshot_ref = GitRef::from_raw(format!("{EXOMONAD_SNAPSHOT_REF_PREFIX}/{worktree_id}"));
     git.try_run(
         source,
         &[

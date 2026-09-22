@@ -1,4 +1,4 @@
-//! `shoal proxy`: submit a Haskell cell into a running Shoal session through
+//! `exomonad proxy`: submit a Haskell cell into a running Exomonad session through
 //! one resident operator workbench per run, so bindings persist between
 //! invocations of this CLI.
 use std::io::Read;
@@ -38,14 +38,14 @@ impl From<&str> for ProxyError {
     }
 }
 
-/// Resolve the run root for a live Shoal session, by scanning `runs_dir` for
+/// Resolve the run root for a live Exomonad session, by scanning `runs_dir` for
 /// `status.json` files naming that session with a not-yet-terminal phase and
 /// a still-present operator socket.
 pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, ProxyError> {
     let mut matches = Vec::new();
     let entries = std::fs::read_dir(runs_dir).map_err(|e| {
         format!(
-            "cannot read Shoal runs directory {}: {e}",
+            "cannot read Exomonad runs directory {}: {e}",
             runs_dir.display()
         )
     })?;
@@ -56,7 +56,7 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
         let Ok(bytes) = std::fs::read(&status_path) else {
             continue;
         };
-        let Ok(status) = crate::shoal::decode_run_status(&bytes) else {
+        let Ok(status) = crate::exomonad::decode_run_status(&bytes) else {
             continue;
         };
         if status.session != session {
@@ -64,7 +64,7 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
         }
         if matches!(
             status.phase,
-            crate::shoal::RunPhase::Failed { .. } | crate::shoal::RunPhase::Exited
+            crate::exomonad::RunPhase::Failed { .. } | crate::exomonad::RunPhase::Exited
         ) {
             continue;
         }
@@ -96,7 +96,7 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
 
 fn default_runs_dir() -> PathBuf {
     tidepool_runtime::paths::cache_dir()
-        .join("shoal")
+        .join("exomonad")
         .join("runs")
 }
 
@@ -295,7 +295,7 @@ fn print_blocks(response: &SubmitResponse) {
 pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Error>> {
     if !options.actors && options.file.is_none() {
         return Err(Box::new(ProxyError(
-            "shoal proxy requires FILE (or `-` for stdin) unless --actors is given".into(),
+            "exomonad proxy requires FILE (or `-` for stdin) unless --actors is given".into(),
         )));
     }
     let runs_dir = options.runs_dir.unwrap_or_else(default_runs_dir);
@@ -367,7 +367,7 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
 
 fn indeterminate(session: &str) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
-        "indeterminate: the cell may have run; inspect with `shoal proxy {session} --actors` or a display cell; not replaying"
+        "indeterminate: the cell may have run; inspect with `exomonad proxy {session} --actors` or a display cell; not replaying"
     );
     std::process::exit(2)
 }
@@ -376,7 +376,7 @@ fn indeterminate(session: &str) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    fn write_status(run_root: &Path, session: &str, phase: crate::shoal::RunPhase) {
+    fn write_status(run_root: &Path, session: &str, phase: crate::exomonad::RunPhase) {
         std::fs::create_dir_all(run_root).unwrap();
         let status = serde_json::json!({
             "version": 4,
@@ -385,14 +385,14 @@ mod tests {
             "session": session,
             "agent": {"model": "test-model", "effort": "low"},
             "phase": match phase {
-                crate::shoal::RunPhase::Starting => serde_json::json!({"state": "starting"}),
-                crate::shoal::RunPhase::Exited => serde_json::json!({"state": "exited"}),
-                crate::shoal::RunPhase::Failed { error } => {
+                crate::exomonad::RunPhase::Starting => serde_json::json!({"state": "starting"}),
+                crate::exomonad::RunPhase::Exited => serde_json::json!({"state": "exited"}),
+                crate::exomonad::RunPhase::Failed { error } => {
                     serde_json::json!({"state": "failed", "error": error})
                 }
-                crate::shoal::RunPhase::AwaitingBinding { .. }
-                | crate::shoal::RunPhase::Ready { .. }
-                | crate::shoal::RunPhase::Recovering { .. } => {
+                crate::exomonad::RunPhase::AwaitingBinding { .. }
+                | crate::exomonad::RunPhase::Ready { .. }
+                | crate::exomonad::RunPhase::Recovering { .. } => {
                     unreachable!("not exercised by these tests")
                 }
             },
@@ -413,12 +413,12 @@ mod tests {
         write_status(
             &runs.path().join("run-a"),
             "session-a",
-            crate::shoal::RunPhase::Starting,
+            crate::exomonad::RunPhase::Starting,
         );
         write_status(
             &runs.path().join("run-b"),
             "session-b",
-            crate::shoal::RunPhase::Starting,
+            crate::exomonad::RunPhase::Starting,
         );
         let resolved = run_root_for_session(runs.path(), "session-b").unwrap();
         assert_eq!(resolved, runs.path().join("run-b"));
@@ -430,7 +430,7 @@ mod tests {
         write_status(
             &runs.path().join("run-a"),
             "session-a",
-            crate::shoal::RunPhase::Starting,
+            crate::exomonad::RunPhase::Starting,
         );
         let error = run_root_for_session(runs.path(), "missing").unwrap_err();
         assert!(error.to_string().contains("missing"));
@@ -445,12 +445,12 @@ mod tests {
         write_status(
             &runs.path().join("run-a"),
             "shared",
-            crate::shoal::RunPhase::Starting,
+            crate::exomonad::RunPhase::Starting,
         );
         write_status(
             &runs.path().join("run-b"),
             "shared",
-            crate::shoal::RunPhase::Starting,
+            crate::exomonad::RunPhase::Starting,
         );
         let error = run_root_for_session(runs.path(), "shared").unwrap_err();
         assert!(error.to_string().contains("run-a"));
@@ -463,7 +463,7 @@ mod tests {
         write_status(
             &runs.path().join("run-a"),
             "session-a",
-            crate::shoal::RunPhase::Exited,
+            crate::exomonad::RunPhase::Exited,
         );
         let error = run_root_for_session(runs.path(), "session-a").unwrap_err();
         assert!(error.to_string().contains("no live run"));

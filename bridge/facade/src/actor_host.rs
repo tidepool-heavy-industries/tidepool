@@ -59,25 +59,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use frunk::{hlist, HCons, HNil};
-use futures_util::FutureExt;
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
-use tidepool_actor::{
+use exomonad_actor::{
     ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
     ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
     ExternalFailureDisposition, ForkWorkspaceAdmission, ForkWorkspaceAdmissionError,
     ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
     ResidentActorRoot, ResidentForest,
 };
-use tidepool_agent::interactive::InputProducerId;
-use tidepool_agent::{
+use exomonad_agent::interactive::InputProducerId;
+use exomonad_agent::{
     copy_interactive_binding, native_interactive_backend, read_interactive_binding,
     BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveInputEnvelope,
     InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode, InteractiveNativeSandbox,
     InteractiveNativeToolPolicy, InteractivePolicyMount, QueueReadyThread, ReasoningEffort,
 };
+use frunk::{hlist, HCons, HNil};
+use futures_util::FutureExt;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
 
@@ -85,16 +85,25 @@ include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
 mod usage_pointer_tests {
     #[test]
     fn shipped_usage_table_resolves_known_callable_and_uses_path_locators() {
-        let call = super::SHOAL_USAGE_POINTERS
+        let call = super::EXOMONAD_USAGE_POINTERS
             .iter()
             .find(|(identifier, _)| *identifier == "call")
             .map(|(_, locator)| *locator);
         assert!(call.is_some());
         assert!(call.is_some_and(|locator| {
-            locator.starts_with(".shoal/checks/") || locator.starts_with(".shoal/skills/")
+            locator.starts_with(".exomonad/checks/") || locator.starts_with(".exomonad/skills/")
         }));
     }
 }
+use exomonad_node::{
+    DurableInbox, ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient,
+    ProcessSupervisorManifest, ServiceEnvironment, TmuxLaunch, TmuxPaneId, TmuxSession,
+    BUBBLEWRAP_PROGRAM,
+};
+use exomonad_worktree::{
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, GitCli, WorktreeHandle, WorktreeId,
+    WorktreeManager, WorktreeRegistry,
+};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
@@ -102,21 +111,12 @@ use tidepool_handlers::{
     ActorWorktreeRegistryHandler, WorktreeHandler,
 };
 use tidepool_mcp::CapturedOutput;
-use tidepool_node::{
-    DurableInbox, ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient,
-    ProcessSupervisorManifest, ServiceEnvironment, TmuxLaunch, TmuxPaneId, TmuxSession,
-    BUBBLEWRAP_PROGRAM,
-};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession,
     ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
-use tidepool_worktree::{
-    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, GitCli, WorktreeHandle, WorktreeId,
-    WorktreeManager, WorktreeRegistry,
-};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -129,14 +129,14 @@ use self::socket_directory::SocketDirectory;
 /// Every interactive actor sees its own repository at this path. Bubblewrap
 /// mount namespaces make the shared name safe across concurrent actors, while
 /// Codex needs only one persisted project-trust decision.
-pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/tidepool-actor-workspace";
-const ACTOR_BUILD_TARGET: &str = ".shoal/build/cargo";
+pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/exomonad-actor-workspace";
+const ACTOR_BUILD_TARGET: &str = ".exomonad/build/cargo";
 
-const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
-const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
+const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ExomonadDriver";
+const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Exomonad";
 const DRIVER_ENTRY: &str = "rootDriver";
 const DRIVER_EFFECTS: &str = "RootEffects";
-const SHOAL_REPLACED_EFFECT_NAMES: &[&str] = &[
+const EXOMONAD_REPLACED_EFFECT_NAMES: &[&str] = &[
     "boundWorktree",
     "createWorktree",
     "listWorktrees",
@@ -152,7 +152,7 @@ const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-type ShoalHandlerStack = HCons<
+type ExomonadHandlerStack = HCons<
     tidepool_handlers::SourceHandler,
     HCons<
         ActorBoundWorktreeHandler,
@@ -165,7 +165,7 @@ type ShoalHandlerStack = HCons<
         >,
     >,
 >;
-type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
+type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
 
 #[derive(Clone)]
 struct ActorForkWorkspaceAdmission {
@@ -187,11 +187,11 @@ struct ActorWorkspaceCustody {
     inheritance_notice: Option<String>,
 }
 
-impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
     fn transfer_to(
         &self,
         successor: ActorRef,
-    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         let state = self.state.lock();
         let process_absent = match state.launch {
             scoped_custody::LaunchCustody::Unclaimed => true,
@@ -236,7 +236,7 @@ impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
             inheritance_notice: self.inheritance_notice.clone(),
         }))
     }
-    fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
+    fn actor_stopped(&self, terminal: &exomonad_actor::ActorTerminal) {
         // Observation is monotonic: duplicate notifications cannot replace the
         // first exact terminal or confuse "not completed" with "still active".
         self.state
@@ -282,8 +282,8 @@ impl ActorForkWorkspaceAdmission {
         predecessor: ActorRef,
         successor: ActorRef,
         worktree: &str,
-        role: tidepool_actor::ActorRole,
-    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        role: exomonad_actor::ActorRole,
+    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
             return Err(ForkWorkspaceAdmissionError {
                 detail: "invalid recovery worktree id".into(),
@@ -340,7 +340,7 @@ impl ActorForkWorkspaceAdmission {
         worktree: &str,
         workspace: Option<Arc<PreparedWorkspace>>,
         inheritance_notice: Option<String>,
-    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
             return Err(ForkWorkspaceAdmissionError {
                 detail: "invalid custody worktree id".into(),
@@ -388,8 +388,8 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         &self,
         actor: ActorRef,
         worktree: &str,
-        role: tidepool_actor::ActorRole,
-    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        role: exomonad_actor::ActorRole,
+    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         let custody = self.bind_workspace(actor, worktree, None, None)?;
         // Custody alone lets the actor inspect its tree; the grant is what
         // lets a coding-role holder merge into it. Interactive actors are
@@ -404,8 +404,8 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
-        policy: tidepool_actor::ForkWorkspacePolicy,
-    ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
+        policy: exomonad_actor::ForkWorkspacePolicy,
+    ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
         Box::pin(async move {
@@ -455,7 +455,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                 }
             };
             let worktree = handle.handle_receipt.tree_id.raw.clone();
-            Ok(tidepool_actor::PreparedForkWorkspace::new(
+            Ok(exomonad_actor::PreparedForkWorkspace::new(
                 handle,
                 move |actor| custody.bind_workspace(actor, &worktree, workspace, notice),
             ))
@@ -485,12 +485,12 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
-    pub systemd_slice: Option<tidepool_node::systemd_slice::SystemdSlice>,
+    pub systemd_slice: Option<exomonad_node::systemd_slice::SystemdSlice>,
     pub source_exclude: Vec<String>,
-    pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResourceClient>>,
-    /// This Shoal installation provides the internal namespace-entry executable.
-    pub shoal_executable: PathBuf,
-    pub workspace_inputs: Option<crate::shoal::workspace::FrozenWorkspace>,
+    pub command_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
+    /// This Exomonad installation provides the internal namespace-entry executable.
+    pub exomonad_executable: PathBuf,
+    pub workspace_inputs: Option<crate::exomonad::workspace::FrozenWorkspace>,
     pub workspace: PathBuf,
     pub haskell_root: PathBuf,
     pub run_root: PathBuf,
@@ -499,17 +499,17 @@ pub struct ActorHostConfig {
     pub tmux_session: String,
     pub model: String,
     pub effort: ReasoningEffort,
-    pub research_policy: tidepool_actor::ResearchPolicy,
+    pub research_policy: exomonad_actor::ResearchPolicy,
     pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
-    pub jev: Option<tidepool_actor::JevBackendHandle>,
+    pub jev: Option<exomonad_actor::JevBackendHandle>,
 }
 
 const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
 
-fn hosted_operation_journal(run_root: &Path, actor: tidepool_actor::ActorId) -> PathBuf {
+fn hosted_operation_journal(run_root: &Path, actor: exomonad_actor::ActorId) -> PathBuf {
     run_root
         .join("hosted-operations")
         .join(format!("{}.v1.jsonl", actor.0))
@@ -531,7 +531,7 @@ struct ProcessRecoveryRecord {
 struct ProcessRecoveryCheckpoint {
     version: u32,
     launch_id: String,
-    observation: tidepool_node::ProcessSupervisorObservation,
+    observation: exomonad_node::ProcessSupervisorObservation,
     operation_pending: bool,
     error: Option<String>,
 }
@@ -600,7 +600,7 @@ pub(crate) fn stop_predecessor_processes(
         }
         let terminal = (|| -> Result<_, std::io::Error> {
             if record.supervisor_socket.exists() {
-                let (mut recovery, _) = tidepool_node::ProcessSupervisorRecovery::recover(
+                let (mut recovery, _) = exomonad_node::ProcessSupervisorRecovery::recover(
                     record.supervisor_socket.clone(),
                     record.launch_id.clone(),
                     record.recovery_secret.clone(),
@@ -619,7 +619,7 @@ pub(crate) fn stop_predecessor_processes(
                     .supervisor_socket
                     .parent()
                     .ok_or_else(|| std::io::Error::other("supervisor socket has no parent"))?
-                    .join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT);
+                    .join(exomonad_node::PROCESS_SUPERVISOR_CHECKPOINT);
                 let checkpoint: ProcessRecoveryCheckpoint =
                     serde_json::from_slice(&std::fs::read(&checkpoint_path).map_err(|error| {
                         std::io::Error::other(format!(
@@ -628,7 +628,7 @@ pub(crate) fn stop_predecessor_processes(
                         ))
                     })?)
                     .map_err(std::io::Error::other)?;
-                if checkpoint.version != tidepool_node::PROCESS_SUPERVISOR_VERSION
+                if checkpoint.version != exomonad_node::PROCESS_SUPERVISOR_VERSION
                     || checkpoint.launch_id != record.launch_id
                     || checkpoint.operation_pending
                     || checkpoint.error.is_some()
@@ -651,8 +651,8 @@ pub(crate) fn stop_predecessor_processes(
         };
         if !matches!(
             terminal,
-            tidepool_node::ProcessSupervisorObservation::ProcessStopped
-                | tidepool_node::ProcessSupervisorObservation::NotSpawned
+            exomonad_node::ProcessSupervisorObservation::ProcessStopped
+                | exomonad_node::ProcessSupervisorObservation::NotSpawned
         ) {
             report.unavailable.push(actor_name);
             continue;
@@ -677,19 +677,19 @@ pub(crate) fn stop_predecessor_processes(
 }
 
 fn recovery_role(
-    durable: &tidepool_actor::DurableActorAdmission,
-    research_policy: tidepool_actor::ResearchPolicy,
-) -> Option<tidepool_actor::EffectiveRole> {
+    durable: &exomonad_actor::DurableActorAdmission,
+    research_policy: exomonad_actor::ResearchPolicy,
+) -> Option<exomonad_actor::EffectiveRole> {
     let role = match durable.role.as_str() {
-        "research" => tidepool_actor::EffectiveRole::research(),
-        "coding" => tidepool_actor::EffectiveRole::coding(),
+        "research" => exomonad_actor::EffectiveRole::research(),
+        "coding" => exomonad_actor::EffectiveRole::coding(),
         "scaffolding" => {
-            tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
+            exomonad_actor::EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
                 maximum_depth: durable.descendant_depth,
                 maximum_active_children: durable.descendant_active_children,
             })
         }
-        "integration" => tidepool_actor::EffectiveRole::integration(),
+        "integration" => exomonad_actor::EffectiveRole::integration(),
         // A second root or an inherited role carries authority that cannot be
         // reconstructed from the compact durable role name alone.
         "root" | "inherited" => return None,
@@ -711,7 +711,7 @@ fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
     Ok(ActorRef {
         id: actor.id,
-        incarnation: tidepool_actor::Incarnation(
+        incarnation: exomonad_actor::Incarnation(
             actor
                 .incarnation
                 .0
@@ -722,7 +722,7 @@ fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::erro
 }
 
 fn durable_root_identity(
-    records: &[tidepool_actor::DurableActorRecord],
+    records: &[exomonad_actor::DurableActorRecord],
     accepted_source: Option<&str>,
 ) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
     records
@@ -748,7 +748,7 @@ fn durable_root_identity(
         .transpose()
 }
 
-fn contains_durable_root_admission(records: &[tidepool_actor::DurableActorRecord]) -> bool {
+fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord]) -> bool {
     records.iter().any(|record| {
         record.admission.role == "root"
             && record.admission.creator.is_none()
@@ -758,9 +758,9 @@ fn contains_durable_root_admission(records: &[tidepool_actor::DurableActorRecord
 }
 
 fn latest_recoverable_actor_records(
-    records: &[tidepool_actor::DurableActorRecord],
+    records: &[exomonad_actor::DurableActorRecord],
     root: ActorRef,
-) -> Vec<tidepool_actor::DurableActorRecord> {
+) -> Vec<exomonad_actor::DurableActorRecord> {
     let mut latest = BTreeMap::new();
     for record in records
         .iter()
@@ -768,7 +768,7 @@ fn latest_recoverable_actor_records(
     {
         latest
             .entry(record.admission.actor.id)
-            .and_modify(|current: &mut &tidepool_actor::DurableActorRecord| {
+            .and_modify(|current: &mut &exomonad_actor::DurableActorRecord| {
                 if record.admission.actor.incarnation > current.admission.actor.incarnation {
                     *current = record;
                 }
@@ -789,17 +789,17 @@ fn latest_recoverable_actor_records(
 }
 
 async fn recover_prior_actors(
-    forest: &Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
+    forest: &Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     run_root: &Path,
     root: ActorRef,
-    incarnation: tidepool_actor::Incarnation,
-    records: &[tidepool_actor::DurableActorRecord],
+    incarnation: exomonad_actor::Incarnation,
+    records: &[exomonad_actor::DurableActorRecord],
     program: Arc<tidepool_runtime::session::CompiledTurn>,
-    research_policy: tidepool_actor::ResearchPolicy,
+    research_policy: exomonad_actor::ResearchPolicy,
     worktree_admission: &ActorForkWorkspaceAdmission,
     accepted_source: Option<&str>,
 ) -> BTreeMap<ActorRef, (ActorRef, QueueReadyThread)> {
-    if incarnation == tidepool_actor::Incarnation::FIRST {
+    if incarnation == exomonad_actor::Incarnation::FIRST {
         return BTreeMap::new();
     }
     let mut pending = latest_recoverable_actor_records(records, root);
@@ -965,12 +965,12 @@ impl ActorHostConfig {
 /// The TypeSafe client as the forest's `Jev` backend.
 struct HostJev(tidepool_handlers::JevClient);
 
-impl tidepool_actor::JevBackend for HostJev {
+impl exomonad_actor::JevBackend for HostJev {
     fn ask(
         &self,
         request: String,
-    ) -> futures_util::future::BoxFuture<'_, Result<String, tidepool_actor::JevCallFailure>> {
-        use tidepool_actor::JevCallFailure as Failure;
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
+        use exomonad_actor::JevCallFailure as Failure;
         use tidepool_handlers::JevFailure;
         Box::pin(async move {
             let body: serde_json::Value = serde_json::from_str(&request)
@@ -991,7 +991,7 @@ impl tidepool_actor::JevBackend for HostJev {
     }
 }
 
-fn jev_backend(config: &ActorHostConfig) -> tidepool_actor::JevBackendHandle {
+fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
     if let Some(backend) = &config.jev {
         return Arc::clone(backend);
     }
@@ -1004,12 +1004,12 @@ fn jev_backend(config: &ActorHostConfig) -> tidepool_actor::JevBackendHandle {
         }
         Err(error) => {
             tracing::warn!(%error, "jev client unavailable; Jev requests answer JevUnconfigured");
-            tidepool_actor::unconfigured_jev()
+            exomonad_actor::unconfigured_jev()
         }
     }
 }
 
-fn worker_launch_resolver(config: &ActorHostConfig) -> tidepool_actor::WorkerLaunchResolver {
+fn worker_launch_resolver(config: &ActorHostConfig) -> exomonad_actor::WorkerLaunchResolver {
     let config = config.clone();
     let base = FrozenBasePrompt::selected_body(
         config
@@ -1025,9 +1025,9 @@ fn worker_launch_resolver(config: &ActorHostConfig) -> tidepool_actor::WorkerLau
 
 fn resolve_worker_launch(
     config: &ActorHostConfig,
-    request: &tidepool_actor::WorkerLaunchRequest,
+    request: &exomonad_actor::WorkerLaunchRequest,
     base_fingerprint: &str,
-) -> Result<tidepool_actor::WorkerLaunchPreview, String> {
+) -> Result<exomonad_actor::WorkerLaunchPreview, String> {
     let mut instructions = developer_instructions_selected(
         &request.role,
         &InteractiveLaunchMode::Fresh,
@@ -1036,7 +1036,7 @@ fn resolve_worker_launch(
     );
     append_inheritance_authority(&mut instructions);
     let model = match &request.model {
-        Some(tidepool_actor::Model::Alias(alias)) => Some(
+        Some(exomonad_actor::Model::Alias(alias)) => Some(
             config
                 .workspace_inputs
                 .as_ref()
@@ -1044,18 +1044,18 @@ fn resolve_worker_launch(
                 .cloned()
                 .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}"))?,
         ),
-        Some(tidepool_actor::Model::Literal(model)) => Some(model.clone()),
+        Some(exomonad_actor::Model::Literal(model)) => Some(model.clone()),
         None => None,
     };
-    Ok(tidepool_actor::WorkerLaunchPreview {
+    Ok(exomonad_actor::WorkerLaunchPreview {
         model: model.or_else(|| {
-            (request.context == tidepool_actor::ForkContext::SelectedContext)
+            (request.context == exomonad_actor::ForkContext::SelectedContext)
                 .then(|| config.model.clone())
         }),
         effort: request.effort.unwrap_or(match config.effort {
-            ReasoningEffort::Low => tidepool_actor::ForkEffort::Low,
-            ReasoningEffort::Medium => tidepool_actor::ForkEffort::Medium,
-            ReasoningEffort::High => tidepool_actor::ForkEffort::High,
+            ReasoningEffort::Low => exomonad_actor::ForkEffort::Low,
+            ReasoningEffort::Medium => exomonad_actor::ForkEffort::Medium,
+            ReasoningEffort::High => exomonad_actor::ForkEffort::High,
         }),
         instructions,
         base_fingerprint: base_fingerprint.into(),
@@ -1078,12 +1078,12 @@ fn append_inheritance_authority(instructions: &mut String) {
 fn launch_effort(
     mode: &InteractiveLaunchMode,
     default: ReasoningEffort,
-    requested: Option<tidepool_actor::ForkEffort>,
+    requested: Option<exomonad_actor::ForkEffort>,
 ) -> ReasoningEffort {
     match requested {
-        Some(tidepool_actor::ForkEffort::Low) => ReasoningEffort::Low,
-        Some(tidepool_actor::ForkEffort::Medium) => ReasoningEffort::Medium,
-        Some(tidepool_actor::ForkEffort::High) => ReasoningEffort::High,
+        Some(exomonad_actor::ForkEffort::Low) => ReasoningEffort::Low,
+        Some(exomonad_actor::ForkEffort::Medium) => ReasoningEffort::Medium,
+        Some(exomonad_actor::ForkEffort::High) => ReasoningEffort::High,
         None if matches!(mode, InteractiveLaunchMode::Fork { .. }) => ReasoningEffort::Low,
         None => default,
     }
@@ -1135,12 +1135,12 @@ struct InteractiveDeployment {
     service: hosted_retirement::HostedOwner,
     socket_directory: SocketDirectory,
     process_recovery_record: PathBuf,
-    worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
+    worktree_custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
     thread: Option<QueueReadyThread>,
-    fork_gate: Option<tidepool_actor::ForkGroupGate>,
-    runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
+    fork_gate: Option<exomonad_actor::ForkGroupGate>,
+    runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
 }
 
@@ -1149,14 +1149,14 @@ struct PendingUpdateReconciliation {
     inbox: Arc<ActorInbox>,
     sequence: u64,
     context: DeliveryProvenance,
-    reconciler: tidepool_actor::RequestUpdateReconciler,
+    reconciler: exomonad_actor::RequestUpdateReconciler,
 }
 
 impl PendingUpdateReconciliation {
     fn retain_unconfirmed(&self, detail: String) {
         let exact_receipt = matches!(
             self.inbox.observe_receipt(self.sequence),
-            Ok(tidepool_node::ReceiptLookup::Retained(ref evidence))
+            Ok(exomonad_node::ReceiptLookup::Retained(ref evidence))
                 if evidence.context == self.context
         );
         if !exact_receipt {
@@ -1168,7 +1168,7 @@ impl PendingUpdateReconciliation {
         }
         if let Err(error) = self
             .reconciler
-            .reconcile(tidepool_actor::LateUpdateEvidence::Unconfirmed(detail))
+            .reconcile(exomonad_actor::LateUpdateEvidence::Unconfirmed(detail))
         {
             tracing::warn!(
                 sequence = self.sequence,
@@ -1217,7 +1217,7 @@ enum DeliveryProvenance {
     RequestUpdate {
         owner: ActorRef,
         target: ActorRef,
-        request: tidepool_actor::RequestId,
+        request: exomonad_actor::RequestId,
         update: u64,
     },
 }
@@ -1238,28 +1238,28 @@ enum TypedActorEvent {
         actor: ActorRef,
         thread: String,
         turn: String,
-        failure: tidepool_agent::ProviderFailure,
+        failure: exomonad_agent::ProviderFailure,
     },
     SessionReady {
         sequence: u64,
-        request: tidepool_actor::RequestId,
+        request: exomonad_actor::RequestId,
         input_type: String,
         message: String,
     },
     WatchChanged {
         #[serde(flatten)]
-        notification: tidepool_actor::WatchNotification,
+        notification: exomonad_actor::WatchNotification,
     },
     SettlementChanged {
         #[serde(flatten)]
-        notification: tidepool_actor::SettlementNotification,
+        notification: exomonad_actor::SettlementNotification,
     },
     RequestCancellation {
         #[serde(flatten)]
-        notification: tidepool_actor::RequestCancellationNotification,
+        notification: exomonad_actor::RequestCancellationNotification,
     },
     RequestUpdate {
-        request: tidepool_actor::RequestId,
+        request: exomonad_actor::RequestId,
         update: u64,
         message: String,
     },
@@ -1270,7 +1270,7 @@ enum TypedActorEvent {
 }
 
 impl DurableActorEvent {
-    fn session(activation: &tidepool_actor::ResidentActivation) -> Self {
+    fn session(activation: &exomonad_actor::ResidentActivation) -> Self {
         Self::Typed(TypedActorEvent::SessionReady {
             sequence: activation.id.sequence(),
             request: activation.request,
@@ -1304,7 +1304,7 @@ impl DurableActorEvent {
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
             Self::Text(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification })
-                if matches!(notification.transition, tidepool_actor::WatchTransition::RouteFailed { .. }) => format!(
+                if matches!(notification.transition, exomonad_actor::WatchTransition::RouteFailed { .. }) => format!(
                 "route {} failed: {:?} ({}). Recover owned handles with `listRoutes`, then inspect with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
                 notification.watch.0,
                 notification.current,
@@ -1396,12 +1396,12 @@ impl InteractiveCleanupReceipt {
     }
 
     /// The answer a waiting supervisor receives for `stopAgent`/cleanup.
-    fn release(&self) -> tidepool_actor::ResourceRelease {
+    fn release(&self) -> exomonad_actor::ResourceRelease {
         let retained = self.retained();
         if retained.is_empty() {
-            tidepool_actor::ResourceRelease::Released
+            exomonad_actor::ResourceRelease::Released
         } else {
-            tidepool_actor::ResourceRelease::Retained(retained.join("; "))
+            exomonad_actor::ResourceRelease::Retained(retained.join("; "))
         }
     }
 
@@ -1425,12 +1425,12 @@ struct InteractiveApplicationOwner {
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
-    fork_gate: Option<tidepool_actor::ForkGroupGate>,
-    custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
+    fork_gate: Option<exomonad_actor::ForkGroupGate>,
+    custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     hosted: hosted_retirement::HostedSlot,
     launch: HostLaunchState,
-    pending_activations: Vec<tidepool_actor::ResidentActivation>,
+    pending_activations: Vec<exomonad_actor::ResidentActivation>,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
 }
@@ -1481,15 +1481,15 @@ struct NativeForkAdmission {
 }
 
 fn native_tool_policy(
-    native_tools: tidepool_actor::NativeToolClass,
+    native_tools: exomonad_actor::NativeToolClass,
 ) -> InteractiveNativeToolPolicy {
     match native_tools {
-        tidepool_actor::NativeToolClass::InspectionOnly => {
+        exomonad_actor::NativeToolClass::InspectionOnly => {
             InteractiveNativeToolPolicy::InspectionOnly
         }
-        tidepool_actor::NativeToolClass::Coding
-        | tidepool_actor::NativeToolClass::Integration
-        | tidepool_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
+        exomonad_actor::NativeToolClass::Coding
+        | exomonad_actor::NativeToolClass::Integration
+        | exomonad_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
     }
 }
 
@@ -1503,7 +1503,7 @@ fn native_tool_policy(
 fn conversation_reader(
     owners: InteractiveOwners,
     backend: Arc<dyn InteractiveAgentBackend>,
-) -> tidepool_actor::ConversationReader {
+) -> exomonad_actor::ConversationReader {
     Arc::new(move |actor, count| {
         let bound = owners
             .lock()
@@ -1514,14 +1514,14 @@ fn conversation_reader(
         let backend = Arc::clone(&backend);
         Box::pin(async move {
             let Some(thread) = bound else {
-                return Err(tidepool_actor::ConversationUnavailable::Unbound);
+                return Err(exomonad_actor::ConversationUnavailable::Unbound);
             };
             match backend.conversation(&thread, count).await {
                 Ok(Some(turns)) => Ok(turns),
-                Ok(None) => Err(tidepool_actor::ConversationUnavailable::Unreadable(
+                Ok(None) => Err(exomonad_actor::ConversationUnavailable::Unreadable(
                     "this conversation keeps no readable durable record".into(),
                 )),
-                Err(error) => Err(tidepool_actor::ConversationUnavailable::Unreadable(
+                Err(error) => Err(exomonad_actor::ConversationUnavailable::Unreadable(
                     error.to_string(),
                 )),
             }
@@ -1533,7 +1533,7 @@ impl NativeForkAdmission {
     async fn build_snapshot(
         &self,
         creator: ActorRef,
-        native_tools: tidepool_actor::NativeToolClass,
+        native_tools: exomonad_actor::NativeToolClass,
     ) -> Option<OverlaySnapshot> {
         if native_tool_policy(native_tools) == InteractiveNativeToolPolicy::InspectionOnly {
             return None;
@@ -1655,7 +1655,7 @@ pub(crate) enum RetainedProcessState {
     Released,
     ReleaseUnconfirmed,
     Stopping,
-    ProcessStopped(Option<tidepool_node::ServiceScopeCleanup>),
+    ProcessStopped(Option<exomonad_node::ServiceScopeCleanup>),
 }
 
 #[derive(Debug)]
@@ -1673,7 +1673,7 @@ pub(crate) enum RetainedProcessError {
     #[error("retained process observation deadline elapsed")]
     Deadline,
     #[error(transparent)]
-    Scope(#[from] tidepool_node::ServiceScopeError),
+    Scope(#[from] exomonad_node::ServiceScopeError),
     #[error("retained process supervisor: {0}")]
     Supervisor(String),
 }
@@ -1681,7 +1681,7 @@ pub(crate) enum RetainedProcessError {
 #[allow(dead_code)]
 impl RetainedInteractiveFleet {
     /// Recover the actual resource-bearing error after the host's ordinary
-    /// Box<dyn Error> propagation. Crate visibility lets shoal own a subsequent
+    /// Box<dyn Error> propagation. Crate visibility lets exomonad own a subsequent
     /// recovery policy without exposing this mechanism to authored programs.
     pub(crate) fn from_error<'a>(
         error: &'a mut (dyn std::error::Error + 'static),
@@ -1783,7 +1783,7 @@ impl RetainedInteractiveFleet {
                         scope.pin_init(deadline)?;
                         RetainedProcessState::Pinned
                     }
-                    _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
+                    _ => return Err(exomonad_node::ServiceScopeError::WrongPhase.into()),
                 }
             }
         };
@@ -1916,8 +1916,8 @@ struct InteractiveFleet {
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
-    source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
-    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
+    actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
     recovered_root_predecessor: Option<ActorRef>,
 }
@@ -1932,7 +1932,7 @@ struct InteractiveLaunchContext {
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
-    actor_recovery: Arc<tidepool_actor::ActorRecoveryJournal>,
+    actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
@@ -1944,7 +1944,7 @@ fn active_source_identity(
         return Ok(None);
     }
     Ok(Some(
-        crate::shoal::source::SourceLayer::new(run_root)
+        crate::exomonad::source::SourceLayer::new(run_root)
             .read_active()?
             .ok_or("root compilation did not publish its accepted source revision")?
             .identity,
@@ -1967,7 +1967,7 @@ pub(crate) async fn run(
     let tmux = TmuxSession::new(&config.tmux_session)?;
     if !tmux.exists().await? {
         return Err(runtime_error(format!(
-            "Shoal tmux session {:?} does not exist",
+            "Exomonad tmux session {:?} does not exist",
             config.tmux_session
         )));
     }
@@ -1975,10 +1975,10 @@ pub(crate) async fn run(
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
     let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
-    let actor_recovery = if host_incarnation.incarnation() == tidepool_actor::Incarnation::FIRST {
-        tidepool_actor::ActorRecoveryJournal::open(actor_recovery_path)
+    let actor_recovery = if host_incarnation.incarnation() == exomonad_actor::Incarnation::FIRST {
+        exomonad_actor::ActorRecoveryJournal::open(actor_recovery_path)
     } else {
-        tidepool_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
+        exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
     let (source, root, program) = compile_root(
@@ -2026,7 +2026,7 @@ pub(crate) async fn run(
         Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
-        .with_usage_pointers(SHOAL_USAGE_POINTERS)
+        .with_usage_pointers(EXOMONAD_USAGE_POINTERS)
         .with_recovery_journal(actor_recovery.clone())
         .with_conversation_reader(conversation_reader(
             application_owners.clone(),
@@ -2107,7 +2107,7 @@ pub(crate) async fn run(
                 .into(),
         });
     }
-    if host_incarnation.incarnation() != tidepool_actor::Incarnation::FIRST {
+    if host_incarnation.incarnation() != exomonad_actor::Incarnation::FIRST {
         let notice_path = run_root.join("host-recovery-notice.txt");
         let mut notice = std::fs::read_to_string(&notice_path).unwrap_or_default();
         let recovered = recovered_threads
@@ -2143,7 +2143,7 @@ pub(crate) async fn run(
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
     let operator_role =
-        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy);
+        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy);
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -2256,8 +2256,8 @@ pub(crate) async fn run(
                         }
                     }
                     root_config.send_replace(config.clone());
-                    (root_actor, root_task) = forest.recover_program_root(root_actor.identity(), "shoal-root".into(),
-                        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy), program.clone())
+                    (root_actor, root_task) = forest.recover_program_root(root_actor.identity(), "exomonad-root".into(),
+                        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy), program.clone())
                         .await.map_err(|e| runtime_error(e.to_string()))?;
                     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
                 }
@@ -2310,7 +2310,7 @@ async fn prepare_root_recovery(
         ?resident_state,
         recovery = *recovery,
         thread = %thread.id().0,
-        "Shoal root stopped abnormally; recreating a fresh root incarnation"
+        "Exomonad root stopped abnormally; recreating a fresh root incarnation"
     );
     config.root_launch_mode = launch_mode;
     Ok(RootRunDisposition::Recover)
@@ -2328,17 +2328,17 @@ async fn root_recovery_launch_mode(
         ResidentSessionState::Uninitialized | ResidentSessionState::Reusable => {}
         ResidentSessionState::Running => {
             return Err(runtime_error(
-                "Shoal root failed while its resident session remains running; automatic recovery cannot overtake the admitted operation",
+                "Exomonad root failed while its resident session remains running; automatic recovery cannot overtake the admitted operation",
             ));
         }
         ResidentSessionState::Unavailable => {
             return Err(runtime_error(
-                "Shoal root failed with an unavailable resident machine; automatic recovery cannot recreate live values or grants",
+                "Exomonad root failed with an unavailable resident machine; automatic recovery cannot recreate live values or grants",
             ));
         }
         ResidentSessionState::Gone => {
             return Err(runtime_error(
-                "Shoal root failed after its resident session was retired; automatic recovery requires the original session incarnation",
+                "Exomonad root failed after its resident session was retired; automatic recovery requires the original session incarnation",
             ));
         }
     }
@@ -2346,7 +2346,7 @@ async fn root_recovery_launch_mode(
         .await
         .map_err(|error| {
             runtime_error(format!(
-                "Shoal root {terminal:?} and its conversation cannot be resumed: {error}"
+                "Exomonad root {terminal:?} and its conversation cannot be resumed: {error}"
             ))
         })?;
     Ok(Some((
@@ -2373,12 +2373,12 @@ async fn await_applications(
 
 fn actor_worktree_resources(
     workspace: &Path,
-) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
+) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
     let root = tidepool_runtime::paths::cache_dir()
-        .join("shoal")
+        .join("exomonad")
         .join("actor-worktrees")
         .join(project);
     actor_worktree_resources_at(&root, workspace)
@@ -2387,7 +2387,7 @@ fn actor_worktree_resources(
 fn actor_worktree_resources_at(
     root: &Path,
     workspace: &Path,
-) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
+) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
     let registry = WorktreeRegistry::open(root.join("registry"))?;
     let worktree_root = root.join("worktrees");
     // The root's own allocation directory exists before ANY launch: a mount
@@ -2399,7 +2399,7 @@ fn actor_worktree_resources_at(
         &worktree_root.join(WorktreeManager::ROOT_ALLOCATION_DIR),
     ] {
         std::fs::create_dir_all(directory).map_err(|error| {
-            tidepool_worktree::WorktreeError::StorageFailure {
+            exomonad_worktree::WorktreeError::StorageFailure {
                 path: directory.clone(),
                 detail: error.to_string(),
             }
@@ -2413,9 +2413,9 @@ fn actor_worktree_resources_at(
 
 /// The run id, as the durable principal and resource namespace for ONE host run.
 ///
-/// `run_root` is `.../shoal/runs/<run id>`, so its file name IS the run id the
+/// `run_root` is `.../exomonad/runs/<run id>`, so its file name IS the run id the
 /// host loop was launched with. Every principal spelled with this namespace
-/// (see [`tidepool_worktree::AgentRef::exact_actor`]) is therefore unreachable
+/// (see [`exomonad_worktree::AgentRef::exact_actor`]) is therefore unreachable
 /// from any other run — which matters because the binding table is durable and
 /// per-project while actor identities restart from zero in each run, and a
 /// degraded teardown retains its `Active` row rather than manufacturing
@@ -2432,7 +2432,7 @@ fn input_producer_id(
     run_root: &Path,
     actor: ActorRef,
     inbox_key: &str,
-) -> Result<InputProducerId, tidepool_agent::interactive::InputEnvelopeError> {
+) -> Result<InputProducerId, exomonad_agent::interactive::InputEnvelopeError> {
     InputProducerId::new(format!(
         "{}\0{}\0{}\0{}",
         run_root.to_string_lossy(),
@@ -2442,7 +2442,7 @@ fn input_producer_id(
     ))
 }
 
-pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
+pub(crate) fn exomonad_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::agent_tools_decl(),
@@ -2469,7 +2469,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-struct CompiledShoalDriver {
+struct CompiledExomonadDriver {
     preamble: String,
     include: Vec<PathBuf>,
     compiled: tidepool_runtime::session::CompiledTurn,
@@ -2479,11 +2479,11 @@ struct CompiledShoalDriver {
 /// Initialization uses this before replacing a live swarm; admission uses the
 /// same compiler path and the toolchain owner's content-addressed cache.
 pub(crate) fn validate_workspace_program(
-    inputs: &crate::shoal::workspace::FrozenWorkspace,
+    inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     compile_driver(
-        &crate::haskell_sources::ensure_shoal_haskell()?,
+        &crate::haskell_sources::ensure_exomonad_haskell()?,
         Some(inputs),
         run_root,
         None,
@@ -2502,7 +2502,7 @@ pub(crate) fn validate_workspace_program(
 /// checkout's layer sits in its own actor's include list, and the run's layer
 /// must stay on the path beneath it either way.
 pub(crate) fn typecheck_candidate_revision(
-    inputs: &crate::shoal::workspace::FrozenWorkspace,
+    inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
     haskell_root: &Path,
     candidate: &[PathBuf],
@@ -2542,10 +2542,10 @@ pub(crate) fn source_service(
     config: &ActorHostConfig,
     run_root: &Path,
     worktrees: WorktreeManager,
-) -> Option<Arc<crate::shoal::source::ShoalSourceReload>> {
+) -> Option<Arc<crate::exomonad::source::ExomonadSourceReload>> {
     let inputs = config.workspace_inputs.as_ref()?;
     Some(Arc::new(
-        crate::shoal::source::ShoalSourceReload::new(
+        crate::exomonad::source::ExomonadSourceReload::new(
             inputs.clone(),
             config.workspace.clone(),
             run_root.to_path_buf(),
@@ -2556,7 +2556,7 @@ pub(crate) fn source_service(
 }
 
 fn source_handler(
-    service: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
+    service: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
 ) -> tidepool_handlers::SourceHandler {
     match service {
         Some(service) => tidepool_handlers::SourceHandler::new(service.clone()),
@@ -2583,11 +2583,11 @@ struct DriverSources {
 
 fn driver_sources(
     haskell_root: &Path,
-    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     run_root: &Path,
     candidate: Option<CandidateSources<'_>>,
 ) -> Result<DriverSources, Box<dyn std::error::Error>> {
-    let declarations = shoal_effect_declarations();
+    let declarations = exomonad_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
     include.push(haskell_root.to_path_buf());
@@ -2597,7 +2597,7 @@ fn driver_sources(
             &declarations,
             false,
             tidepool_mcp::CompanionImports::Omit,
-            SHOAL_REPLACED_EFFECT_NAMES,
+            EXOMONAD_REPLACED_EFFECT_NAMES,
         ),
         DRIVER_MODULE,
     );
@@ -2605,7 +2605,7 @@ fn driver_sources(
         // The live source layer goes AHEAD of the run's frozen capture, so a
         // reloaded module shadows the copy the run started from. The frozen
         // capture stays on the path beneath it as the verified floor.
-        let layer = crate::shoal::source::SourceLayer::new(run_root);
+        let layer = crate::exomonad::source::SourceLayer::new(run_root);
         let roots = inputs.captured_source_roots().len();
         if let Some(candidate) = &candidate {
             include.extend(candidate.include.iter().cloned());
@@ -2625,7 +2625,7 @@ fn driver_sources(
             preamble = insert_preamble_imports(&preamble, module);
         }
         // What an actor installs at startup is compiled here too, so a broken
-        // spec fails `shoal check` and `shoal init` instead of the first actor
+        // spec fails `exomonad check` and `exomonad init` instead of the first actor
         // to start. None of these is in `[haskell] modules`: the spec module is
         // found by convention, and the two keys name a value, not an import.
         // They are imported qualified because they only need to typecheck.
@@ -2649,10 +2649,10 @@ fn driver_sources(
 
 fn compile_driver(
     haskell_root: &Path,
-    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     run_root: &Path,
     candidate: Option<CandidateSources<'_>>,
-) -> Result<CompiledShoalDriver, Box<dyn std::error::Error>> {
+) -> Result<CompiledExomonadDriver, Box<dyn std::error::Error>> {
     let DriverSources { preamble, include } =
         driver_sources(haskell_root, inputs, run_root, candidate)?;
     let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
@@ -2682,7 +2682,7 @@ fn compile_driver(
         }
     };
 
-    Ok(CompiledShoalDriver {
+    Ok(CompiledExomonadDriver {
         preamble,
         include,
         compiled,
@@ -2694,16 +2694,16 @@ fn compile_root(
     run_root: &Path,
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
-    source: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
+    source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
 ) -> Result<
     (
         ActorWorkbenchSource,
-        ShoalRoot,
+        ExomonadRoot,
         Arc<tidepool_runtime::session::CompiledTurn>,
     ),
     Box<dyn std::error::Error>,
 > {
-    let CompiledShoalDriver {
+    let CompiledExomonadDriver {
         preamble,
         include,
         compiled,
@@ -2713,14 +2713,14 @@ fn compile_root(
         run_root,
         None,
     )?;
-    let declarations = shoal_effect_declarations();
+    let declarations = exomonad_effect_declarations();
     let session_root = run_root.join("haskell-session");
     let session = fresh_session_id();
     let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
         &declarations,
         false,
         tidepool_mcp::CompanionImports::Omit,
-        SHOAL_REPLACED_EFFECT_NAMES,
+        EXOMONAD_REPLACED_EFFECT_NAMES,
     );
     if let Some(inputs) = &config.workspace_inputs {
         module_env.imports.extend(inputs.imports());
@@ -2734,7 +2734,7 @@ fn compile_root(
         successor_session = recovery_report.successor_session,
         replayed = recovery_report.replayed.len(),
         lost = recovery_report.lost.len(),
-        "attached Shoal root declaration recovery manifest"
+        "attached Exomonad root declaration recovery manifest"
     );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
@@ -2765,7 +2765,7 @@ fn compile_root(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     )?;
-    let outcome = machine.run_with_sites("shoal_root_driver", compiled.code())?;
+    let outcome = machine.run_with_sites("exomonad_root_driver", compiled.code())?;
     let resource_scope = match &outcome {
         tidepool_runtime::session::ResidentOutcome::Suspended { hole, .. } => machine
             .parked_realm(hole)
@@ -2777,7 +2777,7 @@ fn compile_root(
         }
     };
     let descriptor = ActorDescriptor::new(
-        "shoal-root",
+        "exomonad-root",
         ActorPlacement {
             session,
             resource_scope,
@@ -2788,7 +2788,7 @@ fn compile_root(
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
     .with_effective_role(
-        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy),
+        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy),
     );
     // A run that does not supply `Jev.Operators` gets a workbench without `J`,
     // rather than a compile failure over a module nothing on its search path
@@ -2851,7 +2851,7 @@ fn render_root_compile_failure(
                 diagnostics,
                 &tidepool_runtime::diag::RenderOpts {
                     anchor: "Expr.hs",
-                    label: "<shoal-driver>",
+                    label: "<exomonad-driver>",
                     user_lines: None,
                     line_offset: 0,
                     col_indent: 0,
@@ -3026,7 +3026,7 @@ async fn retain_input_custody_and_bind(
         return Ok(());
     }
     match backend.bind_input(thread).await {
-        Ok(tidepool_agent::InputAdmission::Admitted) => Ok(()),
+        Ok(exomonad_agent::InputAdmission::Admitted) => Ok(()),
         Ok(outcome) => Err(format!("native input bind returned {outcome:?}")),
         Err(error) => Err(format!("could not bind native input control: {error}")),
     }
@@ -3063,7 +3063,7 @@ async fn run_interactive_applications(
             .map(String::as_str),
         config.jev_surface(),
     )
-    .map_err(|error| format!("cannot prepare Shoal base prompt: {error}"))?;
+    .map_err(|error| format!("cannot prepare Exomonad base prompt: {error}"))?;
     let mut root_identity = root.identity();
     let mut launch_context = InteractiveLaunchContext {
         base_prompt,
@@ -3083,7 +3083,7 @@ async fn run_interactive_applications(
     let mut retirements = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
     // the receipt slot when it already exists, else when retirement joins.
-    let mut release_waiters: HashMap<ActorRef, Vec<Arc<tidepool_actor::ReleaseAwait>>> =
+    let mut release_waiters: HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>> =
         HashMap::new();
     let mut notifications = JoinSet::new();
     let mut publication_retries = JoinSet::new();
@@ -3143,7 +3143,7 @@ async fn run_interactive_applications(
                     if snapshot.provider_observation_stale { continue; }
                     for turn in snapshot.provider_failures {
                     let deployment = &deployments[index];
-                    let tidepool_agent::ProviderTurnState::Failed(failure) = turn.state else { continue; };
+                    let exomonad_agent::ProviderTurnState::Failed(failure) = turn.state else { continue; };
                     let key = (turn.thread.clone(), turn.turn.clone());
                     if deployment.notified_provider_failures.contains(&key) { continue; }
                     let actor = deployment.actor;
@@ -3389,7 +3389,7 @@ async fn run_interactive_applications(
                         // held interactive resources.
                         let actor = request.actor;
                         let settled = match application_owners.lock().get(&actor) {
-                            None => Some(tidepool_actor::ResourceRelease::Released),
+                            None => Some(exomonad_actor::ResourceRelease::Released),
                             Some(owner) => owner.retirement.lock().as_ref().map(InteractiveCleanupReceipt::release),
                         };
                         match settled {
@@ -3412,7 +3412,7 @@ async fn run_interactive_applications(
                                 match deployments.iter().find(|app| app.actor == request.owner).and_then(|app| app.thread.clone()) {
                                     Some(thread) => Ok(Arc::new(commands::NativeCommandBackend::new(
                                         launch_context.backend.clone(), thread, resources, request.owner,
-                                    )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>),
+                                    )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>),
                                     None => {
                                         let bubblewrap = resolve_scope_bubblewrap(
                                             &launch_context.config.pane_environment,
@@ -3433,7 +3433,7 @@ async fn run_interactive_applications(
                                             ),
                                             bubblewrap,
                                         ))
-                                            as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
+                                            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
                                     }
                                 }
                             });
@@ -3442,11 +3442,11 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::NotificationSend(command) => {
                         let target = command.target();
                         let Some(application) = deployments.iter().find(|app| app.actor == target) else {
-                            command.rejected(tidepool_actor::NotificationError::Unavailable);
+                            command.rejected(exomonad_actor::NotificationError::Unavailable);
                             continue;
                         };
                         if !application.thread.as_ref().is_some_and(QueueReadyThread::supports_active_input) {
-                            command.rejected(tidepool_actor::NotificationError::Unavailable);
+                            command.rejected(exomonad_actor::NotificationError::Unavailable);
                             continue;
                         }
                         let inbox = Arc::clone(&application.inbox);
@@ -3461,7 +3461,7 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::NotificationPoll(command) => {
                         let result = deployments.iter()
                             .find(|application| application.actor == command.receipt().target())
-                            .ok_or(tidepool_actor::NotificationError::Unavailable)
+                            .ok_or(exomonad_actor::NotificationError::Unavailable)
                             .and_then(|application| observe_notification_receipt(
                                 &command, application.actor,
                                 &application.notification_inbox_key, &application.inbox,
@@ -3529,7 +3529,7 @@ async fn run_interactive_applications(
                             producer: application.input_producer.clone(),
                             sequence,
                         };
-                        let correlation = tidepool_actor::RequestUpdateCorrelation {
+                        let correlation = exomonad_actor::RequestUpdateCorrelation {
                             producer: operation_id.producer.as_str().to_owned(),
                             sequence,
                         };
@@ -4307,7 +4307,7 @@ async fn launch_prepared_interactive_application(
                         actor_identity.id.0, actor_identity.incarnation.0
                     )
                 });
-            let policy = tidepool_actor::ForkWorkspacePolicy {
+            let policy = exomonad_actor::ForkWorkspacePolicy {
                 native_tools: installation.effective_role.native_tools(),
                 workspace: installation.effective_role.workspace(),
             };
@@ -4395,11 +4395,11 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork { .. } => None,
     };
     runtime_observation.publish_cache_boundary(match &launch_mode {
-        InteractiveLaunchMode::Fresh => tidepool_actor::CacheBoundaryReason::Fresh,
-        InteractiveLaunchMode::Fork { .. } => tidepool_actor::CacheBoundaryReason::ForkedPrefix,
-        InteractiveLaunchMode::Resume(_) => tidepool_actor::CacheBoundaryReason::ReattachedThread,
+        InteractiveLaunchMode::Fresh => exomonad_actor::CacheBoundaryReason::Fresh,
+        InteractiveLaunchMode::Fork { .. } => exomonad_actor::CacheBoundaryReason::ForkedPrefix,
+        InteractiveLaunchMode::Resume(_) => exomonad_actor::CacheBoundaryReason::ReattachedThread,
     });
-    let workspace_observation = tidepool_actor::ActorWorkspaceObservation {
+    let workspace_observation = exomonad_actor::ActorWorkspaceObservation {
         workspace_path: agent_workspace.clone(),
         host_storage_path: workspace.clone(),
         worktree_id: installation.launch_worktrees.first().cloned(),
@@ -4414,14 +4414,14 @@ async fn launch_prepared_interactive_application(
         .map(|_| {
             resolve_worker_launch(
                 &config,
-                &tidepool_actor::WorkerLaunchRequest {
+                &exomonad_actor::WorkerLaunchRequest {
                     role: installation.effective_role.clone(),
                     model: installation.model.clone(),
                     effort: installation.fork_effort,
                     context: if matches!(launch_mode, InteractiveLaunchMode::Fork { .. }) {
-                        tidepool_actor::ForkContext::InheritedContext
+                        exomonad_actor::ForkContext::InheritedContext
                     } else {
-                        tidepool_actor::ForkContext::SelectedContext
+                        exomonad_actor::ForkContext::SelectedContext
                     },
                     instructions: installation.instructions.clone(),
                 },
@@ -4466,7 +4466,7 @@ async fn launch_prepared_interactive_application(
         PromptId::composed_fingerprint(
             base_prompt.body(),
             &developer_instructions,
-            &tidepool_actor::shoal_hosted_prompt_fingerprint(),
+            &exomonad_actor::exomonad_hosted_prompt_fingerprint(),
         ),
     );
     let (model, effort) = if let Some(resolved) = resolved_worker {
@@ -4491,11 +4491,11 @@ async fn launch_prepared_interactive_application(
         .then(|| std::fs::read_to_string(config.run_root.join("host-recovery-notice.txt")).ok())
         .flatten();
     let spec = InteractiveAgentSpec {
-        shell_tools: tidepool_agent::InteractiveShellTools::Hosted,
+        shell_tools: exomonad_agent::InteractiveShellTools::Hosted,
         mode: launch_mode,
-        // Shoal owns continuation on every node. Keep the native tool surface
+        // Exomonad owns continuation on every node. Keep the native tool surface
         // identical across roots and forks, without inheriting native goals.
-        goal_policy: tidepool_agent::InteractiveGoalPolicy::Disabled,
+        goal_policy: exomonad_agent::InteractiveGoalPolicy::Disabled,
         model,
         effort: Some(effort),
         developer_instructions,
@@ -4531,7 +4531,7 @@ async fn launch_prepared_interactive_application(
             .policy
             .tools()
             .iter()
-            .filter(|tool| tool.name() != tidepool_actor::HASKELL_TOOL)
+            .filter(|tool| tool.name() != exomonad_actor::HASKELL_TOOL)
             .cloned()
             .collect(),
         binding_path.clone(),
@@ -4566,7 +4566,7 @@ async fn launch_prepared_interactive_application(
     // Shell commands must resolve the same verified installation as delivery.
     // An inherited PATH or override can name a different rollout protocol.
     launch_environment.set.insert(
-        "TIDEPOOL_INTERACTIVE_CODEX_BIN".into(),
+        "EXOMONAD_INTERACTIVE_CODEX_BIN".into(),
         config
             .interactive_agent
             .executable()
@@ -4649,7 +4649,7 @@ async fn launch_prepared_interactive_application(
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
     let supervisor_socket = manifest.socket_path();
-    manifest.retained_view = Some(tidepool_node::RetainedProcessView {
+    manifest.retained_view = Some(exomonad_node::RetainedProcessView {
         entry: workspace_view.entry().map_err(|error| {
             application_error(actor_identity, InteractiveOperation::BuildCommand, error)
         })?,
@@ -4694,8 +4694,8 @@ async fn launch_prepared_interactive_application(
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
-    let supervisor_command = tidepool_node::ProcessInvocation {
-        program: config.shoal_executable.to_string_lossy().into_owned(),
+    let supervisor_command = exomonad_node::ProcessInvocation {
+        program: config.exomonad_executable.to_string_lossy().into_owned(),
         args: vec![
             "process-supervisor".into(),
             "--manifest".into(),
@@ -4704,7 +4704,7 @@ async fn launch_prepared_interactive_application(
     };
     let supervisor_command = match &config.systemd_slice {
         Some(slice) => {
-            slice.scope(slice.verified_command(&config.shoal_executable, supervisor_command))
+            slice.scope(slice.verified_command(&config.exomonad_executable, supervisor_command))
         }
         None => supervisor_command,
     };
@@ -5006,7 +5006,7 @@ fn socket_launch_failure(
 
 async fn deliver_session_activation(
     application: &mut InteractiveDeployment,
-    activation: tidepool_actor::ResidentActivation,
+    activation: exomonad_actor::ResidentActivation,
 ) -> Result<(), String> {
     let actor = activation.id.actor();
     if accepts_activation(application, &activation) {
@@ -5040,7 +5040,7 @@ async fn deliver_session_activation(
 
 fn accepts_activation(
     deployment: &InteractiveDeployment,
-    activation: &tidepool_actor::ResidentActivation,
+    activation: &exomonad_actor::ResidentActivation,
 ) -> bool {
     accepts_activation_id(
         deployment.actor,
@@ -5148,7 +5148,7 @@ fn resolve_scope_bubblewrap(
 
 fn orient_launch_instructions(
     message: &str,
-    observation: &tidepool_actor::ActorRuntimeObservation,
+    observation: &exomonad_actor::ActorRuntimeObservation,
 ) -> String {
     match observation.launch_orientation() {
         Some(orientation) => format!("{message}\n\n{orientation}"),
@@ -5156,7 +5156,7 @@ fn orient_launch_instructions(
     }
 }
 
-fn admit_notification(command: &tidepool_actor::NotificationSend, key: String, inbox: &ActorInbox) {
+fn admit_notification(command: &exomonad_actor::NotificationSend, key: String, inbox: &ActorInbox) {
     match inbox.publish_tracked(
         DurableActorEvent::Text(command.message().to_owned()),
         DeliveryProvenance::Notification {
@@ -5165,25 +5165,25 @@ fn admit_notification(command: &tidepool_actor::NotificationSend, key: String, i
         },
     ) {
         Ok(row) => command.admitted(key, row.sequence),
-        Err(error @ tidepool_node::InboxError::UncertainWrite { .. }) => {
-            command.rejected(tidepool_actor::NotificationError::Unconfirmed(
+        Err(error @ exomonad_node::InboxError::UncertainWrite { .. }) => {
+            command.rejected(exomonad_actor::NotificationError::Unconfirmed(
                 error.to_string(),
             ));
         }
-        Err(error) => command.rejected(tidepool_actor::NotificationError::StorageFailure(
+        Err(error) => command.rejected(exomonad_actor::NotificationError::StorageFailure(
             error.to_string(),
         )),
     }
 }
 
 fn observe_notification_receipt(
-    command: &tidepool_actor::NotificationPoll,
+    command: &exomonad_actor::NotificationPoll,
     target: ActorRef,
     inbox_key: &str,
     inbox: &ActorInbox,
-) -> Result<tidepool_actor::NotificationState, tidepool_actor::NotificationError> {
-    use tidepool_actor::{NotificationError, NotificationState};
-    use tidepool_node::{DeliveryPhase, ReceiptLookup};
+) -> Result<exomonad_actor::NotificationState, exomonad_actor::NotificationError> {
+    use exomonad_actor::{NotificationError, NotificationState};
+    use exomonad_node::{DeliveryPhase, ReceiptLookup};
     let receipt = command.receipt();
     if receipt.owner() != command.owner() {
         return Err(NotificationError::Unauthorized);
@@ -5228,7 +5228,7 @@ async fn deliver_pending(
     producer: &InputProducerId,
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
     workspace: &Path,
-    runtime_observation: &tidepool_actor::ActorRuntimeObservationHandle,
+    runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
@@ -5312,9 +5312,9 @@ async fn deliver_tracked_message(
     backend: &dyn InteractiveAgentBackend,
     producer: &InputProducerId,
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
-    observation: &tidepool_actor::ActorRuntimeObservationHandle,
+    observation: &exomonad_actor::ActorRuntimeObservationHandle,
 ) -> Result<(), String> {
-    use tidepool_node::{DeliveryPhase, ReceiptLookup};
+    use exomonad_node::{DeliveryPhase, ReceiptLookup};
     let sequence = inbox
         .cursor()
         .checked_add(1)
@@ -5344,7 +5344,7 @@ async fn deliver_tracked_message(
         finish_update_reconciliation(
             reconciliations,
             &native_key,
-            tidepool_actor::LateUpdateEvidence::Compacted(
+            exomonad_actor::LateUpdateEvidence::Compacted(
                 "native input evidence is compacted; resubmission remains fenced".into(),
             ),
         )?;
@@ -5406,8 +5406,8 @@ async fn deliver_tracked_message(
                 Ok(outcome) => {
                     let persisted = if matches!(
                         outcome,
-                        tidepool_agent::InputAdmission::Unknown
-                            | tidepool_agent::InputAdmission::Compacted
+                        exomonad_agent::InputAdmission::Unknown
+                            | exomonad_agent::InputAdmission::Compacted
                     ) {
                         attempt.unconfirmed()
                     } else {
@@ -5416,11 +5416,11 @@ async fn deliver_tracked_message(
                     persisted.map_err(|e| e.to_string())?;
                     outcome
                 }
-                Err(tidepool_agent::InteractiveInputError::NotSubmitted(error)) => {
+                Err(exomonad_agent::InteractiveInputError::NotSubmitted(error)) => {
                     attempt.not_submitted().map_err(|e| e.to_string())?;
                     return Err(error.to_string());
                 }
-                Err(tidepool_agent::InteractiveInputError::Unconfirmed(error)) => {
+                Err(exomonad_agent::InteractiveInputError::Unconfirmed(error)) => {
                     attempt.unconfirmed().map_err(|e| e.to_string())?;
                     retain_update_unconfirmed(reconciliations, &native_key, error.to_string());
                     return Err(error.to_string());
@@ -5439,45 +5439,45 @@ async fn deliver_tracked_message(
     };
 
     match outcome {
-        tidepool_agent::InputAdmission::Presented => {
+        exomonad_agent::InputAdmission::Presented => {
             inbox
                 .confirm_presented_exact(sequence, &evidence.context)
                 .map_err(|e| e.to_string())?;
             finish_update_reconciliation(
                 reconciliations,
                 &native_key,
-                tidepool_actor::LateUpdateEvidence::Presented,
+                exomonad_actor::LateUpdateEvidence::Presented,
             )?;
             observation.publish_event_activation(vec![sequence], inbox.watermark());
             Ok(())
         }
-        tidepool_agent::InputAdmission::Withdrawn => {
+        exomonad_agent::InputAdmission::Withdrawn => {
             inbox
                 .confirm_withdrawn(sequence, &evidence.context)
                 .map_err(|e| e.to_string())?;
             finish_update_reconciliation(
                 reconciliations,
                 &native_key,
-                tidepool_actor::LateUpdateEvidence::NotPresented(
+                exomonad_actor::LateUpdateEvidence::NotPresented(
                     "native input was withdrawn before presentation".into(),
                 ),
             )?;
             Ok(())
         }
-        tidepool_agent::InputAdmission::Rejected => {
+        exomonad_agent::InputAdmission::Rejected => {
             inbox
                 .confirm_rejected(sequence, &evidence.context)
                 .map_err(|e| e.to_string())?;
             finish_update_reconciliation(
                 reconciliations,
                 &native_key,
-                tidepool_actor::LateUpdateEvidence::NotPresented(
+                exomonad_actor::LateUpdateEvidence::NotPresented(
                     "native input was rejected before presentation".into(),
                 ),
             )?;
             Ok(())
         }
-        tidepool_agent::InputAdmission::Compacted => {
+        exomonad_agent::InputAdmission::Compacted => {
             inbox
                 .confirm_compacted_exact(sequence, &evidence.context)
                 .map_err(|e| e.to_string())?;
@@ -5486,14 +5486,14 @@ async fn deliver_tracked_message(
             finish_update_reconciliation(
                 reconciliations,
                 &native_key,
-                tidepool_actor::LateUpdateEvidence::Compacted(detail.clone()),
+                exomonad_actor::LateUpdateEvidence::Compacted(detail.clone()),
             )?;
             Err(detail)
         }
-        tidepool_agent::InputAdmission::NotSubmitted
-        | tidepool_agent::InputAdmission::Admitted
-        | tidepool_agent::InputAdmission::Dispatching
-        | tidepool_agent::InputAdmission::Unknown => Err(format!(
+        exomonad_agent::InputAdmission::NotSubmitted
+        | exomonad_agent::InputAdmission::Admitted
+        | exomonad_agent::InputAdmission::Dispatching
+        | exomonad_agent::InputAdmission::Unknown => Err(format!(
             "message {sequence} awaits terminal native input evidence"
         )),
     }
@@ -5512,7 +5512,7 @@ fn retain_update_unconfirmed(
 fn finish_update_reconciliation(
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
     native_key: &str,
-    evidence: tidepool_actor::LateUpdateEvidence,
+    evidence: exomonad_actor::LateUpdateEvidence,
 ) -> Result<(), String> {
     let pending = reconciliations.lock().get(native_key).cloned();
     let Some(pending) = pending else {
@@ -5535,8 +5535,8 @@ async fn run_delivery_pump(
     producer: InputProducerId,
     reconciliations: Arc<Mutex<BTreeMap<String, PendingUpdateReconciliation>>>,
     workspace: PathBuf,
-    runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
-    source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
+    runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
+    source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: WorktreeManager,
     mut shutdown: oneshot::Receiver<()>,
 ) {
@@ -5601,8 +5601,8 @@ async fn run_delivery_pump(
 /// runs on a blocking thread; nothing here runs on the async executor.
 async fn poll_source_drift(
     actor: ActorRef,
-    runtime_observation: &tidepool_actor::ActorRuntimeObservationHandle,
-    source_layers: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
+    runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
+    source_layers: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: &WorktreeManager,
 ) {
     let worktree_id = runtime_observation
@@ -5654,11 +5654,11 @@ async fn poll_source_drift(
 /// The checkout's Git head and dirty files, via [`GitCli`] — the sole
 /// sanctioned way to invoke git in this repository. There is no recorded
 /// build revision for the running binary to compare `head` against; see
-/// `tidepool_actor::CheckoutGitDrift`.
+/// `exomonad_actor::CheckoutGitDrift`.
 fn checkout_git_drift(
     worktrees: &WorktreeManager,
     worktree_id: &str,
-) -> std::result::Result<tidepool_actor::CheckoutGitDrift, String> {
+) -> std::result::Result<exomonad_actor::CheckoutGitDrift, String> {
     let handle = worktrees
         .lookup(&WorktreeId::from_raw(worktree_id))
         .map_err(|error| error.to_string())?
@@ -5669,7 +5669,7 @@ fn checkout_git_drift(
         .map_err(|error| error.to_string())?
         .trimmed()
         .to_owned();
-    let dirty = tidepool_worktree::git::inspect::dirty_summary(git, handle.cwd())
+    let dirty = exomonad_worktree::git::inspect::dirty_summary(git, handle.cwd())
         .map_err(|error| error.to_string())?;
     let mut dirty_files: Vec<String> = dirty
         .staged
@@ -5679,11 +5679,11 @@ fn checkout_git_drift(
         .collect();
     dirty_files.sort();
     dirty_files.dedup();
-    Ok(tidepool_actor::CheckoutGitDrift { head, dirty_files })
+    Ok(exomonad_actor::CheckoutGitDrift { head, dirty_files })
 }
 
 fn prepare_owner_notification(
-    notice: &tidepool_actor::ChildExitNotice,
+    notice: &exomonad_actor::ChildExitNotice,
     deployments: &[InteractiveDeployment],
 ) -> Option<OwnerNotification> {
     if notice
@@ -6165,16 +6165,16 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 fn developer_instructions(
-    effective_role: &tidepool_actor::EffectiveRole,
+    effective_role: &exomonad_actor::EffectiveRole,
     mode: &InteractiveLaunchMode,
 ) -> String {
     developer_instructions_selected(effective_role, mode, None, None)
 }
 
 fn developer_instructions_selected(
-    effective_role: &tidepool_actor::EffectiveRole,
+    effective_role: &exomonad_actor::EffectiveRole,
     mode: &InteractiveLaunchMode,
-    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     instructions: Option<&str>,
 ) -> String {
     if let Some(body) = instructions {
@@ -6182,42 +6182,42 @@ fn developer_instructions_selected(
     }
     let role = effective_role.role();
     let key = match role {
-        tidepool_actor::ActorRole::Root => "root",
-        tidepool_actor::ActorRole::Research => "research",
-        tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Inherited => "coding",
-        tidepool_actor::ActorRole::Scaffolding => "scaffolding",
-        tidepool_actor::ActorRole::Integration => "integration",
+        exomonad_actor::ActorRole::Root => "root",
+        exomonad_actor::ActorRole::Research => "research",
+        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => "coding",
+        exomonad_actor::ActorRole::Scaffolding => "scaffolding",
+        exomonad_actor::ActorRole::Integration => "integration",
     };
     if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
         let mut body = body.clone();
-        if role == tidepool_actor::ActorRole::Root
+        if role == exomonad_actor::ActorRole::Root
             && matches!(mode, InteractiveLaunchMode::Resume(_))
         {
             body.push_str(PromptId::RecreatedRoot.body());
         }
         return append_effective_role(body, effective_role);
     }
-    if role == tidepool_actor::ActorRole::Root {
-        let mut instructions = PromptId::ShoalRoot.body().to_string();
+    if role == exomonad_actor::ActorRole::Root {
+        let mut instructions = PromptId::ExomonadRoot.body().to_string();
         if matches!(mode, InteractiveLaunchMode::Resume(_)) {
             instructions.push_str(PromptId::RecreatedRoot.body());
         }
         append_effective_role(instructions, effective_role)
     } else {
         let instructions = match role {
-            tidepool_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
-            tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Inherited => {
+            exomonad_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
+            exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => {
                 PromptId::WorktreeAgent.body().into()
             }
-            tidepool_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
-            tidepool_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
-            tidepool_actor::ActorRole::Root => unreachable!("root handled above"),
+            exomonad_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
+            exomonad_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
+            exomonad_actor::ActorRole::Root => unreachable!("root handled above"),
         };
         append_effective_role(instructions, effective_role)
     }
 }
 
-fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
+fn append_effective_role(mut instructions: String, role: &exomonad_actor::EffectiveRole) -> String {
     let descendants = role.descendants();
     instructions.push_str(&format!(
         "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
@@ -6227,27 +6227,27 @@ fn append_effective_role(mut instructions: String, role: &tidepool_actor::Effect
         role.native_tools(),
         role.workspace(),
         descendants.maximum_depth,
-        tidepool_actor::render_child_budget(descendants.maximum_active_children),
+        exomonad_actor::render_child_budget(descendants.maximum_active_children),
     ));
     instructions
 }
 
-fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
+fn worktree_grant(role: exomonad_actor::ActorRole) -> ActorWorktreeGrant {
     match role {
-        tidepool_actor::ActorRole::Root => ActorWorktreeGrant::Repository,
-        tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Scaffolding => {
+        exomonad_actor::ActorRole::Root => ActorWorktreeGrant::Repository,
+        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Scaffolding => {
             ActorWorktreeGrant::Bound {
                 enumerate: false,
                 allocate: true,
                 integrate: true,
             }
         }
-        tidepool_actor::ActorRole::Integration => ActorWorktreeGrant::Bound {
+        exomonad_actor::ActorRole::Integration => ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: false,
             integrate: true,
         },
-        tidepool_actor::ActorRole::Research | tidepool_actor::ActorRole::Inherited => {
+        exomonad_actor::ActorRole::Research | exomonad_actor::ActorRole::Inherited => {
             ActorWorktreeGrant::default()
         }
     }
@@ -6323,7 +6323,7 @@ struct ResidentCommandRoots {
 /// typed observation, never by writing in the child's checkout.
 fn writable_repository_roots(
     root: bool,
-    workspace_access: tidepool_actor::WorkspaceAccess,
+    workspace_access: exomonad_actor::WorkspaceAccess,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
@@ -6335,12 +6335,12 @@ fn writable_repository_roots(
         let mut writable = vec![source.to_path_buf()];
         writable.extend(root_worktrees.map(Path::to_path_buf));
         writable
-    } else if workspace_access == tidepool_actor::WorkspaceAccess::WritableBound {
+    } else if workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
     } else {
         Vec::new()
     };
-    if root || workspace_access == tidepool_actor::WorkspaceAccess::WritableBound {
+    if root || workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
         // Writable linked worktrees intentionally share objects, refs, config,
         // and per-worktree administrative state. Inspection-only actors must
         // observe the same metadata without being able to mutate it.
@@ -6371,7 +6371,7 @@ mod tests {
         use tidepool_repr::execution_schema::{Group, HeapRhs, ResultContract, RuntimeRep};
 
         tidepool_testing::eval_harness::require_extract();
-        let haskell = crate::haskell_sources::ensure_shoal_haskell().unwrap();
+        let haskell = crate::haskell_sources::ensure_exomonad_haskell().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let sources = driver_sources(&haskell, None, directory.path(), None).unwrap();
         let names = [
@@ -6465,14 +6465,14 @@ mod tests {
 
     #[tokio::test]
     async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
-        use tidepool_actor::ResidentToolEndpoint as _;
+        use exomonad_actor::ResidentToolEndpoint as _;
 
         let mut campaign = test_campaign::TestCampaign::start().await;
         let target = campaign
             .forest
             .new_workbench(
                 "notification-target".into(),
-                tidepool_actor::EffectiveRole::root(),
+                exomonad_actor::EffectiveRole::root(),
             )
             .await
             .unwrap();
@@ -6489,8 +6489,8 @@ mod tests {
                 call_id: "native-call".into(),
                 namespace: None,
             }),
-            name: tidepool_actor::HASKELL_TOOL.into(),
-            arguments: tidepool_tool::ToolArguments::Raw(source),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: exomonad_tool::ToolArguments::Raw(source),
         };
         let policy = campaign.root_installation.policy.clone();
         let mut first = tokio::spawn(policy.dispatch_boxed(request.clone()));
@@ -6535,7 +6535,7 @@ mod tests {
             .recover_program_root(
                 campaign.actor.identity(),
                 "recovered-root".into(),
-                tidepool_actor::EffectiveRole::root(),
+                exomonad_actor::EffectiveRole::root(),
                 campaign.program.clone(),
             )
             .await
@@ -6546,12 +6546,12 @@ mod tests {
             .recover_program_root(
                 campaign.actor.identity(),
                 "duplicate-recovery".into(),
-                tidepool_actor::EffectiveRole::root(),
+                exomonad_actor::EffectiveRole::root(),
                 campaign.program.clone(),
             )
             .await
             .is_err());
-        let successor_policy = tidepool_actor::ResidentInteractivePolicy::local(successor.clone());
+        let successor_policy = exomonad_actor::ResidentInteractivePolicy::local(successor.clone());
         let mut retry = tokio::spawn(successor_policy.dispatch_boxed(request.clone()));
         let replay = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
@@ -6574,7 +6574,7 @@ mod tests {
             "replay preserves the original execution receipt"
         );
         let mut altered = request;
-        altered.arguments = tidepool_tool::ToolArguments::Raw("pure (99 :: Int)".into());
+        altered.arguments = exomonad_tool::ToolArguments::Raw("pure (99 :: Int)".into());
         let conflict = successor_policy.dispatch_boxed(altered).await.unwrap_err();
         assert!(conflict.to_string().contains("different Haskell input"));
         campaign.forest.shutdown().await;
@@ -6586,7 +6586,7 @@ mod tests {
         let campaign = test_campaign::TestCampaign::start().await;
         let operator = campaign
             .forest
-            .new_workbench("operator".into(), tidepool_actor::EffectiveRole::root())
+            .new_workbench("operator".into(), exomonad_actor::EffectiveRole::root())
             .await
             .unwrap();
         assert_eq!(
@@ -6613,7 +6613,7 @@ mod tests {
             let (reply, receive) = tokio::sync::oneshot::channel();
             actor
                 .address()
-                .send_message(tidepool_actor::KernelMessage::Workbench {
+                .send_message(exomonad_actor::KernelMessage::Workbench {
                     request: tidepool_runtime::session::WorkbenchRequest::from_cell_input(source),
                     control: None,
                     reply: reply.into(),
@@ -6683,7 +6683,7 @@ mod tests {
             .recover_program_root(
                 campaign.actor.identity(),
                 "replacement".into(),
-                tidepool_actor::EffectiveRole::root(),
+                exomonad_actor::EffectiveRole::root(),
                 campaign.program.clone(),
             )
             .await
@@ -7015,13 +7015,13 @@ mod tests {
     fn provider_failure_notice_preserves_identity_and_old_inbox_payloads() {
         let notice = super::DurableActorEvent::Typed(super::TypedActorEvent::ProviderTurnFailed {
             revision: 10,
-            actor: tidepool_actor::ActorRef {
-                id: tidepool_actor::ActorId(7),
-                incarnation: tidepool_actor::Incarnation(3),
+            actor: exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(7),
+                incarnation: exomonad_actor::Incarnation(3),
             },
             thread: "provider-thread".into(),
             turn: "provider-turn".into(),
-            failure: tidepool_agent::ProviderFailure::Other("unknown provider code".into()),
+            failure: exomonad_agent::ProviderFailure::Other("unknown provider code".into()),
         });
         let encoded = serde_json::to_string(&notice).unwrap();
         assert_eq!(
@@ -7041,11 +7041,11 @@ mod tests {
         let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor.clone()).unwrap());
         let notice = |turn: &str, revision| {
             DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
-                actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
+                actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
                 thread: "thread".into(),
                 turn: turn.into(),
                 revision,
-                failure: tidepool_agent::ProviderFailure::RequestRejected,
+                failure: exomonad_agent::ProviderFailure::RequestRejected,
             })
         };
         publish_inbox_event(inbox.clone(), notice("first", 10))
@@ -7070,8 +7070,8 @@ mod tests {
 
     #[test]
     fn fork_effort_defaults_low_and_preserves_explicit_overrides() {
-        use tidepool_actor::ForkEffort;
-        use tidepool_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
+        use exomonad_actor::ForkEffort;
+        use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
         let fork = InteractiveLaunchMode::Fork {
             parent: BackendThreadId("parent".into()),
             after_call: "call".into(),
@@ -7111,17 +7111,17 @@ mod tests {
     }
 
     use super::*;
-    use tidepool_agent::{
+    use exomonad_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
-    use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
-    use tidepool_worktree::WorktreeSpec;
+    use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+    use exomonad_worktree::WorktreeSpec;
 
-    fn durable_root(actor: ActorRef) -> tidepool_actor::DurableActorRecord {
-        tidepool_actor::DurableActorRecord {
-            admission: tidepool_actor::DurableActorAdmission {
+    fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
+        exomonad_actor::DurableActorRecord {
+            admission: exomonad_actor::DurableActorAdmission {
                 actor,
-                label: "shoal-root".into(),
+                label: "exomonad-root".into(),
                 creator: None,
                 supervisor_parent: None,
                 context_parent: None,
@@ -7135,7 +7135,7 @@ mod tests {
                 launch_worktrees: Vec::new(),
                 source_layer: Vec::new(),
             },
-            application: Some(tidepool_actor::DurableActorApplication {
+            application: Some(exomonad_actor::DurableActorApplication {
                 binding_path: std::path::PathBuf::from(format!(
                     "binding-{}-{}.json",
                     actor.id.0, actor.incarnation.0
@@ -7150,12 +7150,12 @@ mod tests {
     fn durable_child(
         actor: ActorRef,
         conversation: Option<&str>,
-    ) -> tidepool_actor::DurableActorRecord {
+    ) -> exomonad_actor::DurableActorRecord {
         let mut record = durable_root(actor);
         record.admission.role = "coding".into();
-        record.admission.creator = Some(ActorRef::first(tidepool_actor::ActorId(1)));
+        record.admission.creator = Some(ActorRef::first(exomonad_actor::ActorId(1)));
         record.application =
-            conversation.map(|conversation| tidepool_actor::DurableActorApplication {
+            conversation.map(|conversation| exomonad_actor::DurableActorApplication {
                 binding_path: std::path::PathBuf::from(format!(
                     "binding-{}-{}.json",
                     actor.id.0, actor.incarnation.0
@@ -7170,11 +7170,11 @@ mod tests {
     fn actor_recovery_records_the_published_source_revision() {
         let project = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
-        let authored = project.path().join(".shoal/Project");
+        let authored = project.path().join(".exomonad/Project");
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(
-            project.path().join(".shoal/config.toml"),
-            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+            project.path().join(".exomonad/config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
         )
         .unwrap();
         std::fs::write(
@@ -7183,8 +7183,8 @@ mod tests {
         )
         .unwrap();
         let frozen =
-            crate::shoal::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let layer = crate::shoal::source::SourceLayer::new(run.path());
+            crate::exomonad::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = crate::exomonad::source::SourceLayer::new(run.path());
         let first = layer.ensure_active(&frozen).unwrap();
 
         assert_eq!(
@@ -7194,7 +7194,7 @@ mod tests {
         assert_ne!(first.identity, frozen.identity());
 
         std::fs::write(
-            project.path().join(".shoal/Project/Work.hs"),
+            project.path().join(".exomonad/Project/Work.hs"),
             "module Project.Work where\nwork :: Int\nwork = 2\n",
         )
         .unwrap();
@@ -7214,10 +7214,10 @@ mod tests {
 
     #[test]
     fn recovery_preserves_root_logical_id_and_advances_actor_incarnation() {
-        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let first = ActorRef::first(exomonad_actor::ActorId(7));
         let second = ActorRef {
             id: first.id,
-            incarnation: tidepool_actor::Incarnation(2),
+            incarnation: exomonad_actor::Incarnation(2),
         };
         let records = vec![durable_root(first), durable_root(second)];
         assert_eq!(
@@ -7226,7 +7226,7 @@ mod tests {
                 second,
                 ActorRef {
                     id: first.id,
-                    incarnation: tidepool_actor::Incarnation(3),
+                    incarnation: exomonad_actor::Incarnation(3),
                 }
             ))
         );
@@ -7234,10 +7234,10 @@ mod tests {
 
     #[test]
     fn root_recovery_does_not_fall_back_past_incomplete_latest_evidence() {
-        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let first = ActorRef::first(exomonad_actor::ActorId(7));
         let second = ActorRef {
             id: first.id,
-            incarnation: tidepool_actor::Incarnation(2),
+            incarnation: exomonad_actor::Incarnation(2),
         };
         let mut latest = durable_root(second);
         latest.application.as_mut().unwrap().accepted_source = Some("different-source".into());
@@ -7250,14 +7250,14 @@ mod tests {
 
     #[test]
     fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
-        let first = ActorRef::first(tidepool_actor::ActorId(7));
+        let first = ActorRef::first(exomonad_actor::ActorId(7));
         let second = ActorRef {
             id: first.id,
-            incarnation: tidepool_actor::Incarnation(2),
+            incarnation: exomonad_actor::Incarnation(2),
         };
         let mut latest = durable_root(second);
-        latest.terminal = Some(tidepool_actor::DurableActorTerminal {
-            kind: tidepool_actor::ActorExitKind::Completed,
+        latest.terminal = Some(exomonad_actor::DurableActorTerminal {
+            kind: exomonad_actor::ActorExitKind::Completed,
             summary: "retired".into(),
         });
 
@@ -7280,14 +7280,14 @@ mod tests {
     #[test]
     fn repeated_recovery_uses_only_the_latest_logical_actor_incarnation() {
         let root = ActorRef {
-            id: tidepool_actor::ActorId(1),
-            incarnation: tidepool_actor::Incarnation(4),
+            id: exomonad_actor::ActorId(1),
+            incarnation: exomonad_actor::Incarnation(4),
         };
-        let child = tidepool_actor::ActorId(2);
+        let child = exomonad_actor::ActorId(2);
         let first = durable_child(
             ActorRef {
                 id: child,
-                incarnation: tidepool_actor::Incarnation(1),
+                incarnation: exomonad_actor::Incarnation(1),
             },
             Some("old-conversation"),
         );
@@ -7296,7 +7296,7 @@ mod tests {
                 id: child,
                 // Actor incarnations can advance independently of the host
                 // generation and may happen to have the same number.
-                incarnation: tidepool_actor::Incarnation(4),
+                incarnation: exomonad_actor::Incarnation(4),
             },
             Some("latest-conversation"),
         );
@@ -7309,7 +7309,7 @@ mod tests {
         let unpublished = durable_child(
             ActorRef {
                 id: child,
-                incarnation: tidepool_actor::Incarnation(5),
+                incarnation: exomonad_actor::Incarnation(5),
             },
             None,
         );
@@ -7320,7 +7320,7 @@ mod tests {
         .is_empty());
 
         let mut retired = second;
-        retired.terminal = Some(tidepool_actor::DurableActorTerminal {
+        retired.terminal = Some(exomonad_actor::DurableActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
         });
@@ -7399,11 +7399,11 @@ mod tests {
         )
         .unwrap();
         tidepool_atomic_write::write_durable(
-            &socket_root.join(tidepool_node::PROCESS_SUPERVISOR_CHECKPOINT),
+            &socket_root.join(exomonad_node::PROCESS_SUPERVISOR_CHECKPOINT),
             &serde_json::to_vec(&ProcessRecoveryCheckpoint {
-                version: tidepool_node::PROCESS_SUPERVISOR_VERSION,
+                version: exomonad_node::PROCESS_SUPERVISOR_VERSION,
                 launch_id: "child-launch".into(),
-                observation: tidepool_node::ProcessSupervisorObservation::ProcessStopped,
+                observation: exomonad_node::ProcessSupervisorObservation::ProcessStopped,
                 operation_pending: false,
                 error: None,
             })
@@ -7437,8 +7437,8 @@ mod tests {
 
     #[test]
     fn activation_delivery_refuses_duplicates_and_stale_sequences() {
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let other_actor = ActorRef::first(tidepool_actor::ActorId(8));
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let other_actor = ActorRef::first(exomonad_actor::ActorId(8));
         assert!(accepts_activation_id(actor, 0, actor, 1));
         assert!(!accepts_activation_id(actor, 1, actor, 1));
         assert!(accepts_activation_id(actor, 1, actor, 3));
@@ -7448,7 +7448,7 @@ mod tests {
 
     #[test]
     fn native_input_producer_binds_run_inbox_and_actor_incarnation() {
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
         let first = input_producer_id(Path::new("/runs/first"), actor, "actor-inbox").unwrap();
         let reconnect = input_producer_id(Path::new("/runs/first"), actor, "actor-inbox").unwrap();
         let another_run =
@@ -7457,7 +7457,7 @@ mod tests {
             Path::new("/runs/first"),
             ActorRef {
                 id: actor.id,
-                incarnation: tidepool_actor::Incarnation(2),
+                incarnation: exomonad_actor::Incarnation(2),
             },
             "actor-inbox",
         )
@@ -7470,8 +7470,8 @@ mod tests {
 
     #[test]
     fn notification_receipt_provenance_keeps_legacy_untagged_shape() {
-        let sender = ActorRef::first(tidepool_actor::ActorId(7));
-        let target = ActorRef::first(tidepool_actor::ActorId(8));
+        let sender = ActorRef::first(exomonad_actor::ActorId(7));
+        let target = ActorRef::first(exomonad_actor::ActorId(8));
         let encoded =
             serde_json::to_value(DeliveryProvenance::Notification { sender, target }).unwrap();
         assert!(encoded.get("kind").is_none());
@@ -7482,7 +7482,7 @@ mod tests {
     }
 
     async fn dispatch_haskell(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         items: impl IntoIterator<Item = &'static str>,
     ) -> serde_json::Value {
         let mut last = None;
@@ -7498,7 +7498,7 @@ mod tests {
     }
 
     pub(super) async fn dispatch_haskell_script(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         script: &str,
     ) -> serde_json::Value {
         dispatch_haskell_script_result(endpoint, script)
@@ -7507,9 +7507,9 @@ mod tests {
     }
 
     pub(super) async fn dispatch_haskell_script_result(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         script: &str,
-    ) -> Result<serde_json::Value, tidepool_actor::ResidentToolError> {
+    ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
         let call_id = uuid::Uuid::new_v4().simple().to_string();
         let result = endpoint
             .dispatch_boxed(ToolInvocation {
@@ -7520,7 +7520,7 @@ mod tests {
                     call_id: call_id.clone(),
                     namespace: Some("haskell".into()),
                 }),
-                name: tidepool_actor::HASKELL_TOOL.into(),
+                name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(script.into()),
             })
             .await;
@@ -7535,7 +7535,7 @@ mod tests {
     }
 
     pub(super) async fn dispatch_structured_tool(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         name: &str,
         arguments: serde_json::Value,
     ) -> serde_json::Value {
@@ -7565,7 +7565,7 @@ mod tests {
     }
 
     pub(super) async fn dispatch_lookup(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         queries: &[&str],
     ) -> serde_json::Value {
         dispatch_structured_tool(
@@ -7577,7 +7577,7 @@ mod tests {
     }
 
     pub(super) async fn dispatch_status(
-        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
         view: &str,
     ) -> serde_json::Value {
         dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
@@ -7587,8 +7587,8 @@ mod tests {
     async fn idle_application_waits_for_current_host_attachment_despite_retained_binding() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let session = TmuxSession::with_socket(
-            format!("shoal_binding_{}", &suffix[..8]),
-            format!("shoal-binding-{}", &suffix[..8]),
+            format!("exomonad_binding_{}", &suffix[..8]),
+            format!("exomonad-binding-{}", &suffix[..8]),
         )
         .unwrap();
         let pane = session
@@ -7605,9 +7605,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("binding.json");
         let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &path,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             thread.clone(),
             None,
         )
@@ -7623,7 +7623,7 @@ mod tests {
         let socket = root.path().join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(host.serve(listener));
-        let actor = ActorRef::first(tidepool_actor::ActorId(1));
+        let actor = ActorRef::first(exomonad_actor::ActorId(1));
         let binding = discover_interactive_binding(
             actor,
             InteractiveBindingRequest {
@@ -7649,7 +7649,7 @@ mod tests {
         let response = client
             .post("http://localhost/v1/dynamic-tools/session")
             .json(&serde_json::json!({
-                "protocolVersion": tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+                "protocolVersion": exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
                 "threadId": thread.0
             }))
             .send()
@@ -7670,17 +7670,17 @@ mod tests {
 
     #[test]
     fn root_instructions_preserve_idle_and_resume_contracts() {
-        let role = tidepool_actor::EffectiveRole::root();
+        let role = exomonad_actor::EffectiveRole::root();
         let fresh = developer_instructions(&role, &InteractiveLaunchMode::Fresh);
         let resumed = developer_instructions(
             &role,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
-        assert!(fresh.starts_with(PromptId::ShoalRoot.body()));
-        assert!(!fresh.contains(PromptId::ShoalBase.body()));
-        assert!(!resumed.contains(PromptId::ShoalBase.body()));
+        assert!(fresh.starts_with(PromptId::ExomonadRoot.body()));
+        assert!(!fresh.contains(PromptId::ExomonadBase.body()));
+        assert!(!resumed.contains(PromptId::ExomonadBase.body()));
         assert!(!fresh.contains(PromptId::RecreatedRoot.body()));
-        assert!(resumed.starts_with(PromptId::ShoalRoot.body()));
+        assert!(resumed.starts_with(PromptId::ExomonadRoot.body()));
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
         assert!(normalized_prompt(&resumed).contains("Previous actor handles"));
         let root_effects = role.haskell_effects_type();
@@ -7699,9 +7699,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let binding = root.path().join("root-binding.json");
         let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &binding,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             thread.clone(),
             None,
         )
@@ -7802,7 +7802,7 @@ mod tests {
         assert!(actor_workspace_request(true, &one).is_err());
         assert!(actor_workspace_request(false, &two).is_err());
 
-        let research = tidepool_actor::EffectiveRole::research();
+        let research = exomonad_actor::EffectiveRole::research();
         let instructions = developer_instructions(&research, &InteractiveLaunchMode::Fresh);
         assert!(instructions.starts_with(PromptId::ReadonlyAgent.body()));
         let normalized = normalized_prompt(&instructions);
@@ -7811,12 +7811,12 @@ mod tests {
         assert!(instructions.contains(&research.haskell_effects_type()));
 
         let worker = developer_instructions(
-            &tidepool_actor::EffectiveRole::coding(),
+            &exomonad_actor::EffectiveRole::coding(),
             &InteractiveLaunchMode::Fresh,
         );
         assert!(worker.starts_with(PromptId::WorktreeAgent.body()));
         let scaffold = developer_instructions(
-            &tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
+            &exomonad_actor::EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
                 maximum_depth: 2,
                 maximum_active_children: Some(3),
             }),
@@ -7829,12 +7829,12 @@ mod tests {
         assert!(scaffold.contains("descendant_depth=2; active_children=3"));
         assert!(!scaffold.contains("Some("), "{scaffold}");
         let integration = developer_instructions(
-            &tidepool_actor::EffectiveRole::integration(),
+            &exomonad_actor::EffectiveRole::integration(),
             &InteractiveLaunchMode::Fresh,
         );
         assert!(integration.starts_with(PromptId::IntegrationAgent.body()));
         let root = developer_instructions(
-            &tidepool_actor::EffectiveRole::root(),
+            &exomonad_actor::EffectiveRole::root(),
             &InteractiveLaunchMode::Fresh,
         );
         assert!(root.contains("active_children=unbounded"), "{root}");
@@ -7849,7 +7849,7 @@ mod tests {
         assert_eq!(
             writable_repository_roots(
                 true,
-                tidepool_actor::WorkspaceAccess::WritableBound,
+                exomonad_actor::WorkspaceAccess::WritableBound,
                 source,
                 None,
                 common,
@@ -7860,7 +7860,7 @@ mod tests {
         assert_eq!(
             writable_repository_roots(
                 false,
-                tidepool_actor::WorkspaceAccess::WritableBound,
+                exomonad_actor::WorkspaceAccess::WritableBound,
                 source,
                 Some(worker),
                 common,
@@ -7871,7 +7871,7 @@ mod tests {
         assert_eq!(
             writable_repository_roots(
                 false,
-                tidepool_actor::WorkspaceAccess::InspectOnly,
+                exomonad_actor::WorkspaceAccess::InspectOnly,
                 source,
                 Some(worker),
                 common,
@@ -7893,7 +7893,7 @@ mod tests {
 
         let writable = writable_repository_roots(
             true,
-            tidepool_actor::WorkspaceAccess::WritableBound,
+            exomonad_actor::WorkspaceAccess::WritableBound,
             source,
             None,
             common,
@@ -7914,7 +7914,7 @@ mod tests {
         assert!(
             !writable_repository_roots(
                 false,
-                tidepool_actor::WorkspaceAccess::WritableBound,
+                exomonad_actor::WorkspaceAccess::WritableBound,
                 source,
                 Some(&managed.join("wt-child")),
                 common,
@@ -7940,7 +7940,7 @@ mod tests {
             ]),
             false,
             Some(Path::new(
-                "/tmp/tidepool-actor-workspace/.shoal/build/cargo",
+                "/tmp/exomonad-actor-workspace/.exomonad/build/cargo",
             )),
         );
         assert_eq!(
@@ -7955,7 +7955,7 @@ mod tests {
         );
         assert_eq!(
             launch.set.get("CARGO_TARGET_DIR").map(String::as_str),
-            Some("/tmp/tidepool-actor-workspace/.shoal/build/cargo")
+            Some("/tmp/exomonad-actor-workspace/.exomonad/build/cargo")
         );
         assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
         assert_eq!(
@@ -7996,7 +7996,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         let visible = root.path().join("visible");
         let resource = root.path().join("build-resource");
-        let relative_target = Path::new(".shoal/build/cargo");
+        let relative_target = Path::new(".exomonad/build/cargo");
         for path in [
             workspace.join("src"),
             workspace.join(".cargo"),
@@ -8057,7 +8057,7 @@ mod tests {
     fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
         let request = DurableActorEvent::Typed(TypedActorEvent::SessionReady {
             sequence: 4,
-            request: tidepool_actor::RequestId(7),
+            request: exomonad_actor::RequestId(7),
             input_type: "Candidate".into(),
             message: "Review it.".into(),
         });
@@ -8067,19 +8067,19 @@ mod tests {
         assert_eq!(request.render(None), "Review it.");
 
         let watch = DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
-            notification: tidepool_actor::WatchNotification {
-                owner: tidepool_actor::ActorRef {
-                    id: tidepool_actor::ActorId(1),
-                    incarnation: tidepool_actor::Incarnation(1),
+            notification: exomonad_actor::WatchNotification {
+                owner: exomonad_actor::ActorRef {
+                    id: exomonad_actor::ActorId(1),
+                    incarnation: exomonad_actor::Incarnation(1),
                 },
-                watch: tidepool_actor::WatchId(9),
+                watch: exomonad_actor::WatchId(9),
                 label: "join".into(),
-                previous: tidepool_actor::WatchStateProjection::Pending,
-                current: tidepool_actor::WatchStateProjection::Ready,
-                transition: tidepool_actor::WatchTransition::Ready,
+                previous: exomonad_actor::WatchStateProjection::Pending,
+                current: exomonad_actor::WatchStateProjection::Ready,
+                transition: exomonad_actor::WatchTransition::Ready,
                 occurred_at_unix_ms: 754_000,
-                sequence: tidepool_actor::ActorEventSequence(3),
-                watermark: tidepool_actor::ActorEventSequence(3),
+                sequence: exomonad_actor::ActorEventSequence(3),
+                watermark: exomonad_actor::ActorEventSequence(3),
             },
         });
         // The argument is the reading actor's launch time, so the text must not
@@ -8095,19 +8095,19 @@ mod tests {
         assert_eq!(encoded["watch"], 9);
 
         let settlement = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
-            notification: tidepool_actor::SettlementNotification {
-                owner: tidepool_actor::ActorRef {
-                    id: tidepool_actor::ActorId(1),
-                    incarnation: tidepool_actor::Incarnation(1),
+            notification: exomonad_actor::SettlementNotification {
+                owner: exomonad_actor::ActorRef {
+                    id: exomonad_actor::ActorId(1),
+                    incarnation: exomonad_actor::Incarnation(1),
                 },
-                request: tidepool_actor::RequestId(11),
+                request: exomonad_actor::RequestId(11),
                 label: "implementation".into(),
-                transition: tidepool_actor::SettlementTransition::Unavailable(
-                    tidepool_actor::ResponseFailure::TargetUnavailable,
+                transition: exomonad_actor::SettlementTransition::Unavailable(
+                    exomonad_actor::ResponseFailure::TargetUnavailable,
                 ),
                 occurred_at_unix_ms: 754_000,
-                sequence: tidepool_actor::ActorEventSequence(4),
-                watermark: tidepool_actor::ActorEventSequence(4),
+                sequence: exomonad_actor::ActorEventSequence(4),
+                watermark: exomonad_actor::ActorEventSequence(4),
             },
         });
         let rendered = settlement.render(Some(0));
@@ -8175,7 +8175,7 @@ mod tests {
             &'a self,
             _thread: &'a QueueReadyThread,
             envelope: &'a InteractiveInputEnvelope,
-        ) -> tidepool_agent::InteractiveInputFuture<'a> {
+        ) -> exomonad_agent::InteractiveInputFuture<'a> {
             Box::pin(async move {
                 self.0.messages.lock().unwrap().push(format!(
                     "{}:{}",
@@ -8183,11 +8183,11 @@ mod tests {
                     String::from_utf8_lossy(envelope.bytes())
                 ));
                 if self.0.fail.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(tidepool_agent::InteractiveInputError::Unconfirmed(
+                    Err(exomonad_agent::InteractiveInputError::Unconfirmed(
                         "lost confirmation".into(),
                     ))
                 } else {
-                    Ok(tidepool_agent::InputAdmission::Presented)
+                    Ok(exomonad_agent::InputAdmission::Presented)
                 }
             })
         }
@@ -8196,8 +8196,8 @@ mod tests {
             &'a self,
             _thread: &'a QueueReadyThread,
             _id: &'a InputOperationId,
-        ) -> tidepool_agent::InteractiveInputFuture<'a> {
-            Box::pin(async { Ok(tidepool_agent::InputAdmission::Unknown) })
+        ) -> exomonad_agent::InteractiveInputFuture<'a> {
+            Box::pin(async { Ok(exomonad_agent::InputAdmission::Unknown) })
         }
 
         fn prepare_native_tool_policy(
@@ -8231,7 +8231,7 @@ mod tests {
     }
 
     struct LostAckThenLate {
-        late: tidepool_agent::InputAdmission,
+        late: exomonad_agent::InputAdmission,
         submissions: std::sync::Mutex<Vec<String>>,
         queries: std::sync::Mutex<Vec<String>>,
     }
@@ -8275,13 +8275,13 @@ mod tests {
             &'a self,
             _thread: &'a QueueReadyThread,
             envelope: &'a InteractiveInputEnvelope,
-        ) -> tidepool_agent::InteractiveInputFuture<'a> {
+        ) -> exomonad_agent::InteractiveInputFuture<'a> {
             Box::pin(async move {
                 self.submissions
                     .lock()
                     .unwrap()
                     .push(envelope.id().native_key());
-                Err(tidepool_agent::InteractiveInputError::Unconfirmed(
+                Err(exomonad_agent::InteractiveInputError::Unconfirmed(
                     "native accepted input but its reply was lost".into(),
                 ))
             })
@@ -8291,7 +8291,7 @@ mod tests {
             &'a self,
             _thread: &'a QueueReadyThread,
             id: &'a InputOperationId,
-        ) -> tidepool_agent::InteractiveInputFuture<'a> {
+        ) -> exomonad_agent::InteractiveInputFuture<'a> {
             Box::pin(async move {
                 self.queries.lock().unwrap().push(id.native_key());
                 Ok(self.late)
@@ -8301,19 +8301,19 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_steering_preserves_order_and_never_retries_uncertain_input() {
-        use tidepool_node::{DeliveryPhase, ReceiptLookup};
+        use exomonad_node::{DeliveryPhase, ReceiptLookup};
         for uncertain in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let inbox = Arc::new(
                 ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
             );
-            let actor = ActorRef::first(tidepool_actor::ActorId(7));
+            let actor = ActorRef::first(exomonad_actor::ActorId(7));
             for message in ["A", "B"] {
                 inbox
                     .publish_tracked(
                         DurableActorEvent::Text(message.into()),
                         DeliveryProvenance::Notification {
-                            sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                            sender: ActorRef::first(exomonad_actor::ActorId(8)),
                             target: actor,
                         },
                     )
@@ -8324,18 +8324,18 @@ mod tests {
                 messages: std::sync::Mutex::new(Vec::new()),
             });
             let binding = root.path().join("binding.json");
-            tidepool_agent::accept_interactive_session_binding(
+            exomonad_agent::accept_interactive_session_binding(
                 &binding,
-                tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+                exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
                 BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
                 None,
             )
             .await
             .unwrap();
-            let thread = tidepool_agent::read_interactive_binding(&binding)
+            let thread = exomonad_agent::read_interactive_binding(&binding)
                 .await
                 .unwrap();
-            let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+            let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
             let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
             for _ in 0..3 {
                 let outcome = deliver_pending(
@@ -8397,12 +8397,12 @@ mod tests {
 
     #[tokio::test]
     async fn restart_queries_exact_lost_ack_and_late_compacted_permanently_fences_successor() {
-        use tidepool_node::{DeliveryPhase, ReceiptLookup};
+        use exomonad_node::{DeliveryPhase, ReceiptLookup};
         let root = tempfile::tempdir().unwrap();
         let rows = root.path().join("rows");
         let cursor = root.path().join("cursor");
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let sender = ActorRef::first(tidepool_actor::ActorId(8));
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let sender = ActorRef::first(exomonad_actor::ActorId(8));
         let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor.clone()).unwrap());
         for message in ["lost ack", "later"] {
             inbox
@@ -8416,23 +8416,23 @@ mod tests {
                 .unwrap();
         }
         let binding = root.path().join("binding.json");
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &binding,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
             None,
         )
         .await
         .unwrap();
-        let thread = tidepool_agent::read_interactive_binding(&binding)
+        let thread = exomonad_agent::read_interactive_binding(&binding)
             .await
             .unwrap();
         let backend = LostAckThenLate {
-            late: tidepool_agent::InputAdmission::Compacted,
+            late: exomonad_agent::InputAdmission::Compacted,
             submissions: std::sync::Mutex::new(Vec::new()),
             queries: std::sync::Mutex::new(Vec::new()),
         };
-        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
         let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
 
         assert!(deliver_pending(
@@ -8495,9 +8495,9 @@ mod tests {
 
     #[tokio::test]
     async fn production_native_socket_lost_ack_restarts_as_exact_query_without_overtaking() {
+        use exomonad_agent::{InputAdmission, InteractiveSessionBinding};
+        use exomonad_node::{DeliveryPhase, ReceiptLookup};
         use std::os::unix::fs::PermissionsExt;
-        use tidepool_agent::{InputAdmission, InteractiveSessionBinding};
-        use tidepool_node::{DeliveryPhase, ReceiptLookup};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         async fn read_request(stream: &mut tokio::net::UnixStream) -> serde_json::Value {
@@ -8580,15 +8580,15 @@ mod tests {
         });
         let binding_path = root.path().join("binding.json");
         let thread_id = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &binding_path,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             thread_id,
             Some(socket),
         )
         .await
         .unwrap();
-        let thread = tidepool_agent::read_interactive_binding(&binding_path)
+        let thread = exomonad_agent::read_interactive_binding(&binding_path)
             .await
             .unwrap()
             .with_challenged_session_binding(Some(binding));
@@ -8596,16 +8596,16 @@ mod tests {
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let installation =
-            tidepool_agent::native_interactive_agent_from_parts(executable, "codex-test".into())
+            exomonad_agent::native_interactive_agent_from_parts(executable, "codex-test".into())
                 .unwrap();
-        let backend = tidepool_agent::native_interactive_backend(installation);
+        let backend = exomonad_agent::native_interactive_backend(installation);
         assert_eq!(
             backend.bind_input(&thread).await.unwrap(),
             InputAdmission::Admitted
         );
 
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let sender = ActorRef::first(tidepool_actor::ActorId(8));
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let sender = ActorRef::first(exomonad_actor::ActorId(8));
         let rows = root.path().join("rows");
         let cursor = root.path().join("cursor");
         let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor.clone()).unwrap());
@@ -8620,7 +8620,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
         let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
         assert!(deliver_pending(
             actor,
@@ -8677,7 +8677,7 @@ mod tests {
     #[tokio::test]
     async fn launch_shutdown_preserves_socket_error_and_completed_results() {
         let root = tempfile::tempdir().unwrap();
-        let actor = ActorRef::first(tidepool_actor::ActorId(80));
+        let actor = ActorRef::first(exomonad_actor::ActorId(80));
         let successful_path = root.path().join("successful");
         let failed_path = root.path().join("failed");
         let mut successful = SocketDirectory::create(successful_path.clone()).unwrap();
@@ -8765,7 +8765,7 @@ mod tests {
     #[tokio::test]
     async fn socket_preparation_cleans_failed_inbox_open_and_preserves_collision() {
         let root = tempfile::tempdir().unwrap();
-        let actor = ActorRef::first(tidepool_actor::ActorId(77));
+        let actor = ActorRef::first(exomonad_actor::ActorId(77));
         let socket_path = root.path().join("socket");
         let rows = root.path().join("rows");
         let cursor = root.path().join("cursor");
@@ -8802,7 +8802,7 @@ mod tests {
         // Valid directory component, but longer than Unix socket sockaddr paths.
         let path = root.path().join("s".repeat(150));
         let error = prepare_socket_inbox(
-            ActorRef::first(tidepool_actor::ActorId(79)),
+            ActorRef::first(exomonad_actor::ActorId(79)),
             path.clone(),
             root.path().join("rows"),
             root.path().join("cursor"),
@@ -8820,7 +8820,7 @@ mod tests {
     #[tokio::test]
     async fn socket_postsubmission_error_and_retirement_report_retention() {
         let root = tempfile::tempdir().unwrap();
-        let actor = ActorRef::first(tidepool_actor::ActorId(78));
+        let actor = ActorRef::first(exomonad_actor::ActorId(78));
         for retire in [false, true] {
             let path = root.path().join(if retire { "retire" } else { "launch" });
             let (mut socket, listener, _) = prepare_socket_inbox(
@@ -8928,7 +8928,7 @@ mod tests {
             };
         let result =
             observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox);
-        assert_eq!(result, Ok(tidepool_actor::NotificationState::Accepted));
+        assert_eq!(result, Ok(exomonad_actor::NotificationState::Accepted));
         assert_eq!(
             observe_notification_receipt(
                 &poll_command,
@@ -8936,7 +8936,7 @@ mod tests {
                 "foreign-inbox",
                 &inbox
             ),
-            Err(tidepool_actor::NotificationError::InvalidReceipt)
+            Err(exomonad_actor::NotificationError::InvalidReceipt)
         );
         let foreign_directory = tempfile::tempdir().unwrap();
         let foreign = ActorInbox::open(
@@ -8951,7 +8951,7 @@ mod tests {
                 inbox_key,
                 &foreign
             ),
-            Err(tidepool_actor::NotificationError::Unavailable)
+            Err(exomonad_actor::NotificationError::Unavailable)
         );
         foreign
             .publish_tracked(
@@ -8969,15 +8969,15 @@ mod tests {
                 inbox_key,
                 &foreign
             ),
-            Err(tidepool_actor::NotificationError::Unauthorized)
+            Err(exomonad_actor::NotificationError::Unauthorized)
         );
         let stale = ActorRef {
-            incarnation: tidepool_actor::Incarnation(child.actor.identity().incarnation.0 + 1),
+            incarnation: exomonad_actor::Incarnation(child.actor.identity().incarnation.0 + 1),
             ..child.actor.identity()
         };
         assert_eq!(
             observe_notification_receipt(&poll_command, stale, inbox_key, &inbox),
-            Err(tidepool_actor::NotificationError::InvalidReceipt)
+            Err(exomonad_actor::NotificationError::InvalidReceipt)
         );
         drop(inbox);
         let inbox = ActorInbox::open(
@@ -8987,7 +8987,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
-            Ok(tidepool_actor::NotificationState::Accepted)
+            Ok(exomonad_actor::NotificationState::Accepted)
         );
         // Submitted transport acceptance is explicitly NOT model presentation.
         inbox
@@ -8997,7 +8997,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
-            Ok(tidepool_actor::NotificationState::Unconfirmed)
+            Ok(exomonad_actor::NotificationState::Unconfirmed)
         );
         poll_command.observed(result);
         let observed = poll.await.unwrap();
@@ -9041,7 +9041,7 @@ mod tests {
                 assert_eq!(notification.label, "notification-original");
                 assert_eq!(
                     notification.transition,
-                    tidepool_actor::SettlementTransition::Ready
+                    exomonad_actor::SettlementTransition::Ready
                 );
             }
             event => panic!(
@@ -9481,7 +9481,7 @@ mod tests {
         let inbox = Arc::new(
             ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
         );
-        let target = ActorRef::first(tidepool_actor::ActorId(7));
+        let target = ActorRef::first(exomonad_actor::ActorId(7));
         inbox
             .publish(DurableActorEvent::Text("ordinary prefix".into()))
             .unwrap();
@@ -9489,7 +9489,7 @@ mod tests {
             .publish_tracked(
                 DurableActorEvent::Text("one-way text".into()),
                 DeliveryProvenance::Notification {
-                    sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                    sender: ActorRef::first(exomonad_actor::ActorId(8)),
                     target,
                 },
             )
@@ -9518,18 +9518,18 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         };
         let binding = root.path().join("binding.json");
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &binding,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
             None,
         )
         .await
         .unwrap();
-        let thread = tidepool_agent::read_interactive_binding(&binding)
+        let thread = exomonad_agent::read_interactive_binding(&binding)
             .await
             .unwrap();
-        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
         let (producer, reconciliations) = test_delivery_dependencies(root.path(), target);
         deliver_pending(
             target,
@@ -9562,13 +9562,13 @@ mod tests {
         assert_eq!(inbox.watermark(), 3);
         assert!(matches!(
             inbox.pending(),
-            Err(tidepool_node::InboxError::TrackedBarrier { sequence: 2 })
+            Err(exomonad_node::InboxError::TrackedBarrier { sequence: 2 })
         ));
         assert!(inbox.legacy_pending_prefix().unwrap().is_empty());
         assert!(matches!(
             inbox.observe_receipt(2).unwrap(),
-            tidepool_node::ReceiptLookup::Retained(evidence)
-                if evidence.phase == tidepool_node::DeliveryPhase::Accepted
+            exomonad_node::ReceiptLookup::Retained(evidence)
+                if evidence.phase == exomonad_node::DeliveryPhase::Accepted
         ));
     }
 
@@ -9587,26 +9587,26 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         };
         let binding_path = root.path().join("binding.json");
-        tidepool_agent::accept_interactive_session_binding(
+        exomonad_agent::accept_interactive_session_binding(
             &binding_path,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
             None,
         )
         .await
         .unwrap();
-        let thread = tidepool_agent::read_interactive_binding(&binding_path)
+        let thread = exomonad_agent::read_interactive_binding(&binding_path)
             .await
             .unwrap();
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
         let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
         assert_eq!(
             orient_launch_instructions("event", &observation.snapshot()),
             "event"
         );
-        observation.publish_launch_role(tidepool_actor::EffectiveRole::research(), 0);
-        observation.publish_workspace(tidepool_actor::ActorWorkspaceObservation {
+        observation.publish_launch_role(exomonad_actor::EffectiveRole::research(), 0);
+        observation.publish_workspace(exomonad_actor::ActorWorkspaceObservation {
             workspace_path: "/tmp/visible".into(),
             host_storage_path: "/host/research".into(),
             worktree_id: Some("research-tree".into()),
@@ -9640,7 +9640,7 @@ mod tests {
         assert_eq!(inbox.pending().expect("pending after refusal").len(), 1);
         assert_eq!(
             observation.snapshot().activation_kind,
-            tidepool_actor::ActorActivationKind::RootStarted
+            exomonad_actor::ActorActivationKind::RootStarted
         );
         inbox
             .publish(DurableActorEvent::Text("second event".into()))
@@ -9671,7 +9671,7 @@ mod tests {
         );
         assert_eq!(
             observation.snapshot().activation_kind,
-            tidepool_actor::ActorActivationKind::EventsActivated {
+            exomonad_actor::ActorActivationKind::EventsActivated {
                 inbox_sequences: vec![1, 2]
             }
         );
@@ -9682,7 +9682,7 @@ mod tests {
             inbox
                 .publish(DurableActorEvent::Typed(TypedActorEvent::SessionReady {
                     sequence,
-                    request: tidepool_actor::RequestId(sequence),
+                    request: exomonad_actor::RequestId(sequence),
                     input_type: "Text".into(),
                     message: message.clone(),
                 }))
@@ -9725,7 +9725,7 @@ mod tests {
 
     #[tokio::test]
     async fn retired_delivery_is_forced_without_claiming_tool_service_cleanup() {
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
         let mut delivery = tokio::spawn(std::future::pending::<()>());
         let outcome = stop_retired_delivery(actor, &mut delivery, Duration::ZERO).await;
         assert!(delivery.is_finished());
@@ -9746,7 +9746,7 @@ mod tests {
 
     #[test]
     fn panicked_retirement_preserves_every_cleanup_domain_as_unknown() {
-        let actor = ActorRef::first(tidepool_actor::ActorId(8));
+        let actor = ActorRef::first(exomonad_actor::ActorId(8));
         let receipt = panicked_cleanup_receipt(actor);
 
         assert_eq!(receipt.actor, actor);
@@ -9778,7 +9778,7 @@ mod tests {
     #[test]
     fn degraded_cleanup_receipt_preserves_each_component_without_becoming_fleet_failure() {
         let receipt = InteractiveCleanupReceipt {
-            actor: ActorRef::first(tidepool_actor::ActorId(7)),
+            actor: ActorRef::first(exomonad_actor::ActorId(7)),
             components: vec![
                 CleanupComponentReceipt {
                     component: CleanupComponent::Process,
@@ -9809,7 +9809,7 @@ mod tests {
 
     #[test]
     fn worker_workspaces_are_distinct_linked_worktrees_in_one_git_namespace() {
-        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
             .commit_file("README.md", "source\n", "seed")
@@ -9831,11 +9831,11 @@ mod tests {
         assert!(first.cwd().join(".git").is_file());
         assert!(second.cwd().join(".git").is_file());
         assert_eq!(
-            tidepool_worktree::git::inspect::git_common_dir(manager.git(), first.cwd()).unwrap(),
+            exomonad_worktree::git::inspect::git_common_dir(manager.git(), first.cwd()).unwrap(),
             repository.path().join(".git")
         );
         assert_eq!(
-            tidepool_worktree::git::inspect::git_common_dir(manager.git(), second.cwd()).unwrap(),
+            exomonad_worktree::git::inspect::git_common_dir(manager.git(), second.cwd()).unwrap(),
             repository.path().join(".git")
         );
         assert_eq!(
@@ -9870,7 +9870,7 @@ mod tests {
 
         let inspected = dispatch_lookup(
             root_installation.policy.as_ref(),
-            &["DefinitelyMissingFromShoal", "request", "fmt"],
+            &["DefinitelyMissingFromExomonad", "request", "fmt"],
         )
         .await;
         assert_eq!(inspected["status"], "committed", "{inspected:?}");
@@ -9956,12 +9956,12 @@ mod tests {
             assert_eq!(installation.context_parent, Some(actor.identity()));
             assert_eq!(
                 installation.fork_group,
-                Some(tidepool_actor::ForkGroupId(1))
+                Some(exomonad_actor::ForkGroupId(1))
             );
             let expected_role = if installation.label.ends_with("/scaffold") {
-                tidepool_actor::ActorRole::Coding
+                exomonad_actor::ActorRole::Coding
             } else {
-                tidepool_actor::ActorRole::Research
+                exomonad_actor::ActorRole::Research
             };
             assert_eq!(installation.effective_role.role(), expected_role);
             authority.install_grant(
@@ -9972,7 +9972,7 @@ mod tests {
                 panic!("forked research actor did not receive one named worktree")
             };
             let worktree = worktrees
-                .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree_id))
+                .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree_id))
                 .expect("named worktree lookup")
                 .expect("named worktree remains registered");
             assert_eq!(
@@ -10171,7 +10171,7 @@ mod tests {
         .expect("watch transition timeout");
         assert_eq!(
             notification.transition,
-            tidepool_actor::WatchTransition::Ready
+            exomonad_actor::WatchTransition::Ready
         );
 
         let observed = dispatch_haskell_script(
@@ -10306,7 +10306,7 @@ mod tests {
         .expect("follow-up watch transition timeout");
         assert_eq!(
             followup_notification.transition,
-            tidepool_actor::WatchTransition::Ready
+            exomonad_actor::WatchTransition::Ready
         );
         let followup_result = dispatch_haskell_script(
             root_installation.policy.as_ref(),
@@ -10377,7 +10377,7 @@ mod tests {
             .find(|installation| installation.label.ends_with("/verification"))
             .expect("nested verification installation")
             .clone();
-        let scaffold_tree_id = tidepool_worktree::WorktreeId::from_raw(
+        let scaffold_tree_id = exomonad_worktree::WorktreeId::from_raw(
             scaffold_installation.launch_worktrees[0].clone(),
         );
         let scaffold_tree = worktrees
@@ -10393,7 +10393,7 @@ mod tests {
         for installation in &nested_installations {
             assert_eq!(
                 installation.effective_role.role(),
-                tidepool_actor::ActorRole::Coding
+                exomonad_actor::ActorRole::Coding
             );
             assert_eq!(
                 installation.effective_role.descendants().maximum_depth + 1,
@@ -10405,9 +10405,9 @@ mod tests {
             assert!(installation
                 .effective_role
                 .effect_keys()
-                .contains(&tidepool_actor::ActorEffectKey::Forks));
+                .contains(&exomonad_actor::ActorEffectKey::Forks));
             let worktree_id =
-                tidepool_worktree::WorktreeId::from_raw(installation.launch_worktrees[0].clone());
+                exomonad_worktree::WorktreeId::from_raw(installation.launch_worktrees[0].clone());
             let worktree = worktrees
                 .lookup(&worktree_id)
                 .expect("nested worktree lookup")
@@ -10487,7 +10487,7 @@ mod tests {
             (&verification, "verification.txt", "verified\n"),
         ] {
             let tree = worktrees
-                .lookup(&tidepool_worktree::WorktreeId::from_raw(
+                .lookup(&exomonad_worktree::WorktreeId::from_raw(
                     installation.launch_worktrees[0].clone(),
                 ))
                 .expect("lookup nested commit tree")
@@ -10556,7 +10556,7 @@ mod tests {
                     Some(LocalResidentDeployment::WatchChanged { notification })
                         if notification.owner == verification.actor.identity()
                             && notification.transition
-                                == tidepool_actor::WatchTransition::Ready =>
+                                == exomonad_actor::WatchTransition::Ready =>
                     {
                         break
                     }
@@ -10605,7 +10605,7 @@ mod tests {
         .expect("nested watch wake timeout");
         assert_eq!(
             nested_notification.transition,
-            tidepool_actor::WatchTransition::Ready
+            exomonad_actor::WatchTransition::Ready
         );
 
         let folded = dispatch_haskell_script(
@@ -10634,7 +10634,7 @@ mod tests {
         .expect("scaffold watch wake timeout");
         assert_eq!(
             scaffold_notification.transition,
-            tidepool_actor::WatchTransition::Ready
+            exomonad_actor::WatchTransition::Ready
         );
         let scaffold_result = dispatch_haskell_script(
             root_installation.policy.as_ref(),
@@ -10653,12 +10653,12 @@ mod tests {
         {
             installation
                 .runtime_observation
-                .publish_provider_observation(tidepool_agent::ProviderObservation {
-                    turn: Some(tidepool_agent::ProviderTurnObservation {
+                .publish_provider_observation(exomonad_agent::ProviderObservation {
+                    turn: Some(exomonad_agent::ProviderTurnObservation {
                         thread: format!("test-{}", installation.actor.identity().id.0),
                         turn: "completed".into(),
                         revision: 1,
-                        state: tidepool_agent::ProviderTurnState::Succeeded,
+                        state: exomonad_agent::ProviderTurnState::Succeeded,
                     }),
                     ..Default::default()
                 });
@@ -10694,7 +10694,7 @@ mod tests {
         let blocked_output = blocked["items"][0]["output"].as_str().unwrap();
         assert!(blocked_output.contains("CleanupBlocked"), "{blocked:?}");
         assert!(!blocked_output.contains("CleanupForgot"), "{blocked:?}");
-        stale_runtime.publish_provider_observation(tidepool_agent::ProviderObservation {
+        stale_runtime.publish_provider_observation(exomonad_agent::ProviderObservation {
             turn: confirmed_turn,
             ..Default::default()
         });

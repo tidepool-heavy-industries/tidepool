@@ -1,7 +1,7 @@
 [package]
 autotests = false
 autobins = false
-name = "tidepool-harness"
+name = "exomonad-harness"
 description = "Typed-yield session tree over the tidepool eval substrate: forcing, event log, provider-driven turns"
 version.workspace = true
 edition.workspace = true
@@ -16,9 +16,9 @@ tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
-tidepool-model-output.workspace = true
-tidepool-model.workspace = true
-tidepool-node.workspace = true
+exomonad-model-output.workspace = true
+exomonad-model.workspace = true
+exomonad-node.workspace = true
 tidepool-handlers.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
@@ -65,8 +65,8 @@ tidepool-testing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # The outer-row Subagent acceptance (tests/outer_subagent.rs): a MockBackend-
 # backed SubagentHandler + a TestRepo the curator spawns against.
-tidepool-agent.workspace = true
-tidepool-worktree.workspace = true
+exomonad-agent.workspace = true
+exomonad-worktree.workspace = true
 
 [[test]]
 name = "acceptance"

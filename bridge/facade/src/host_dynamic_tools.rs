@@ -10,22 +10,22 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use exomonad_actor::{
+    ResidentToolEndpoint, ResidentToolError, WorkbenchBoundaryReconciliation,
+    WorkbenchCancellationOutcome,
+};
+use exomonad_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
+use exomonad_agent::{
+    accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
+    HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+};
+use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tidepool_actor::{
-    ResidentToolEndpoint, ResidentToolError, WorkbenchBoundaryReconciliation,
-    WorkbenchCancellationOutcome,
-};
-use tidepool_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
-use tidepool_agent::{
-    accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
-    HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
-};
-use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
@@ -81,7 +81,7 @@ pub(crate) struct HostToolControl {
 
 pub(crate) type HostToolSealFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<tidepool_actor::HostedWorkSeal, HostToolSealError>>
+        dyn std::future::Future<Output = Result<exomonad_actor::HostedWorkSeal, HostToolSealError>>
             + Send,
     >,
 >;
@@ -94,8 +94,8 @@ pub(crate) enum HostToolSealError {
     Endpoint(#[from] ResidentToolError),
     #[error("resident seal belongs to {actual:?}, expected {expected:?}")]
     ForeignActor {
-        expected: tidepool_actor::ActorRef,
-        actual: tidepool_actor::ActorRef,
+        expected: exomonad_actor::ActorRef,
+        actual: exomonad_actor::ActorRef,
     },
 }
 
@@ -123,7 +123,7 @@ impl HostToolControl {
     #[allow(dead_code)] // Parent pending/lifecycle consumer is staged separately.
     pub(crate) fn quiesce_and_seal(
         &self,
-        expected: tidepool_actor::ActorRef,
+        expected: exomonad_actor::ActorRef,
     ) -> HostToolSealFuture {
         let mut already_draining = false;
         self.phase.send_modify(|phase| match phase {
@@ -177,7 +177,7 @@ impl HostToolControl {
 #[derive(Clone)]
 struct HostState {
     command_resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResourceClient>,
+        Arc<exomonad_node::command_resources::CommandResourceClient>,
         String,
     )>,
     control: HostToolControl,
@@ -295,7 +295,7 @@ impl HostDynamicToolService {
     pub(crate) fn with_command_resources(
         mut self,
         resources: Option<(
-            Arc<tidepool_node::command_resources::CommandResourceClient>,
+            Arc<exomonad_node::command_resources::CommandResourceClient>,
             String,
         )>,
     ) -> Self {
@@ -451,7 +451,7 @@ impl WorkbenchInterruptionResponse {
     clippy::expect_used,
     reason = "WorkbenchResponse serialization is infallible"
 )]
-fn workbench_reply(reply: tidepool_actor::KernelWorkbenchReply) -> CallResponse {
+fn workbench_reply(reply: exomonad_actor::KernelWorkbenchReply) -> CallResponse {
     match reply {
         Ok(response) => CallResponse::domain(
             ToolKind::Custom,
@@ -788,7 +788,7 @@ async fn attach_session(
     )
     .await
     .map_err(|error| match &error {
-        tidepool_agent::AgentBackendError::ProtocolRejected { .. } => {
+        exomonad_agent::AgentBackendError::ProtocolRejected { .. } => {
             tracing::warn!(%error, "rejected host dynamic-tool session binding");
             (StatusCode::BAD_REQUEST, "unsupported protocol version")
         }
@@ -842,7 +842,7 @@ impl CallResponse {
     fn text(text: String) -> Self {
         Self {
             content_items: vec![CallContent::InputText {
-                text: tidepool_actor::bound_workbench_display(&text, MODEL_OUTPUT_LIMIT),
+                text: exomonad_actor::bound_workbench_display(&text, MODEL_OUTPUT_LIMIT),
             }],
             success: true,
         }
@@ -851,9 +851,9 @@ impl CallResponse {
     fn failure(error: &HostToolFailure) -> Self {
         let text = match error {
             HostToolFailure::Dispatch(ResidentToolError::Invocation(
-                tidepool_actor::KernelInvocationFailure::Workbench(failure),
+                exomonad_actor::KernelInvocationFailure::Workbench(failure),
             )) => workbench_failure_transcript(failure),
-            _ => tidepool_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
+            _ => exomonad_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
         };
         Self {
             content_items: vec![CallContent::InputText { text }],
@@ -862,8 +862,8 @@ impl CallResponse {
     }
 }
 
-fn workbench_failure_transcript(failure: &tidepool_actor::KernelWorkbenchFailure) -> String {
-    let detail = tidepool_actor::bound_workbench_display(&failure.detail, 2048);
+fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure) -> String {
+    let detail = exomonad_actor::bound_workbench_display(&failure.detail, 2048);
     let mut text = format!(
         "actor {:?} workbench input unit {} of {} failed: {detail}\n",
         failure.actor,
@@ -881,7 +881,7 @@ fn workbench_failure_transcript(failure: &tidepool_actor::KernelWorkbenchFailure
             text.push_str("\n[additional receipt output omitted]");
             break;
         }
-        text.push_str(&tidepool_actor::bound_workbench_display(
+        text.push_str(&exomonad_actor::bound_workbench_display(
             &receipt.output,
             allowance,
         ));
@@ -892,7 +892,7 @@ fn workbench_failure_transcript(failure: &tidepool_actor::KernelWorkbenchFailure
         .iter()
         .flat_map(|receipt| &receipt.operations)
     {
-        let effect = tidepool_actor::bound_workbench_display(&operation.effect, 256);
+        let effect = exomonad_actor::bound_workbench_display(&operation.effect, 256);
         let line = format!(
             "operation {}:{}:{} {:?} ({effect})\n",
             operation.id.execution,
@@ -1154,8 +1154,8 @@ async fn call(
     };
     let response = match result {
         Ok(Ok(value)) => match state.endpoint.output_format() {
-            tidepool_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
-            tidepool_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
+            exomonad_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
+            exomonad_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
         },
         Ok(Err(error)) => {
             let failure = HostToolFailure::Dispatch(error);
@@ -1208,11 +1208,11 @@ fn record_operation_response(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use exomonad_actor::ResidentToolFuture;
+    use exomonad_tool::{CustomToolDeclaration, ToolDeclaration};
     use std::num::NonZeroU64;
     use std::sync::Mutex as StdMutex;
-    use tidepool_actor::ResidentToolFuture;
     use tidepool_runtime::session::{WorkbenchExecutionId, WorkbenchResponse, WorkbenchRunStatus};
-    use tidepool_tool::{CustomToolDeclaration, ToolDeclaration};
 
     struct EchoEndpoint {
         tools: Vec<HostedTool>,
@@ -1679,7 +1679,7 @@ pub(crate) mod tests {
         );
 
         let mut foreign_namespace = cancellation_request("call-a");
-        foreign_namespace.namespace = Some("tidepool_actor".into());
+        foreign_namespace.namespace = Some("exomonad_actor".into());
         assert_eq!(
             cancel_workbench(State(state.clone()), Json(foreign_namespace))
                 .await
@@ -1966,8 +1966,8 @@ pub(crate) mod tests {
             &self.tools
         }
 
-        fn output_format(&self) -> tidepool_actor::ResidentToolOutput {
-            tidepool_actor::ResidentToolOutput::Workbench
+        fn output_format(&self) -> exomonad_actor::ResidentToolOutput {
+            exomonad_actor::ResidentToolOutput::Workbench
         }
 
         fn instructions(&self) -> Option<&str> {
@@ -2007,7 +2007,7 @@ pub(crate) mod tests {
                     "required": ["queries"]
                 }),
                 output_schema: None,
-                kind: tidepool_tool::ToolKind::Call,
+                kind: exomonad_tool::ToolKind::Call,
             })],
         });
         let state = attached_state(endpoint).await;
@@ -2033,7 +2033,7 @@ pub(crate) mod tests {
                     description: "Inspect a value".into(),
                     input_schema: serde_json::json!({"type": "object"}),
                     output_schema: None,
-                    kind: tidepool_tool::ToolKind::Call,
+                    kind: exomonad_tool::ToolKind::Call,
                 })],
             });
             let state = attached_state(endpoint).await;
@@ -2059,7 +2059,7 @@ pub(crate) mod tests {
                     description: "Structured".into(),
                     input_schema: serde_json::json!({"type":"object"}),
                     output_schema: None,
-                    kind: tidepool_tool::ToolKind::Call,
+                    kind: exomonad_tool::ToolKind::Call,
                 }),
             ],
         });
@@ -2114,8 +2114,8 @@ pub(crate) mod tests {
             "λ".repeat(15_000),
             "x".repeat(30_000)
         );
-        let failure = tidepool_actor::KernelWorkbenchFailure {
-            actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
+        let failure = exomonad_actor::KernelWorkbenchFailure {
+            actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
             failed_index: 1,
             total: 3,
             detail: "large diagnostic λ\n".repeat(20_000),
@@ -2146,7 +2146,7 @@ pub(crate) mod tests {
         };
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
-                tidepool_actor::KernelInvocationFailure::Workbench(failure),
+                exomonad_actor::KernelInvocationFailure::Workbench(failure),
             )));
         let CallContent::InputText { text } = &response.content_items[0];
         assert!(!response.success);
@@ -2341,7 +2341,7 @@ pub(crate) mod tests {
                     description: "Run a command".into(),
                     input_schema: serde_json::json!({"type":"object"}),
                     output_schema: None,
-                    kind: tidepool_tool::ToolKind::Call,
+                    kind: exomonad_tool::ToolKind::Call,
                 })],
             }),
             PathBuf::from("unused-binding"),
@@ -2366,7 +2366,7 @@ pub(crate) mod tests {
                 description: "Structured tool".into(),
                 input_schema: serde_json::json!({"type": "object"}),
                 output_schema: None,
-                kind: tidepool_tool::ToolKind::Call,
+                kind: exomonad_tool::ToolKind::Call,
             })],
         });
         let mismatch = call_haskell(
@@ -2585,7 +2585,7 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(
-            tidepool_agent::read_interactive_binding(&binding)
+            exomonad_agent::read_interactive_binding(&binding)
                 .await
                 .unwrap()
                 .id(),
@@ -2679,7 +2679,7 @@ async fn command_resources(
     axum::extract::State(state): axum::extract::State<HostState>,
     Json(request): Json<CommandResourceRequest>,
 ) -> Result<
-    Json<tidepool_node::command_resources::CommandResourceStatus>,
+    Json<exomonad_node::command_resources::CommandResourceStatus>,
     (axum::http::StatusCode, String),
 > {
     let (owner, actor) = state.command_resources.as_ref().ok_or((

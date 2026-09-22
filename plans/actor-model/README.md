@@ -6,7 +6,7 @@ and next delivery stage are in
 
 The context-unfold interaction, recursive worked campaigns, and recursive
 collaboration described by earlier plans in this directory landed; their
-stable user contracts now live in [SHOAL.md](../../SHOAL.md) and the shipped
+stable user contracts now live in [the Exomonad guide](../../exomonad/README.md) and the shipped
 `Tidepool.Actors.Unfold`/`Tidepool.QQ.Bash` surface, not in planning documents.
 
 ## Thesis
@@ -44,7 +44,7 @@ heterogeneous child work, fold typed commits and evidence back upward, and
 then unfold again from what integration revealed. The canonical contract is
 [the architecture's self-hosting shape](architecture.md#self-hosting-shape-iterative-worktree-hylomorphisms).
 
-The first production composition root is `shoal`: one host process owns the
+The first production composition root is `exomonad`: one host process owns the
 resident Haskell machine and every actor, while Codex TUIs occupy tmux panes
 and connect to actor-scoped HTTP-over-UDS host dynamic tools. Local
 actor scheduling, mailboxes, links, and supervision use Ractor. Tidepool adds
@@ -69,7 +69,7 @@ above that substrate; it does not maintain a second actor scheduler.
   handles govern concrete runtime resources independently.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
-- Shoal's ordinary unit is a long-lived agent-backed actor in the recursive
+- Exomonad's ordinary unit is a long-lived agent-backed actor in the recursive
   ownership tree, not a one-shot model invocation disguised as an actor.
   Haskell starts the actor once, sends any number of ad hoc typed requests to
   that exact incarnation, and stops it separately. One-shot work is a small
@@ -93,9 +93,9 @@ above that substrate; it does not maintain a second actor scheduler.
   call, shares an immutable Haskell environment snapshot, narrows the child
   effect list and runtime authority, and returns persistent typed actor
   handles. The landed contract is documented in
-  [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold).
+  [the Exomonad guide](../../exomonad/README.md#cache-preserving-context-unfold).
 - Fork groups and workers form one readable hierarchical path projected into
-  actor labels, `shoal/<path>` Git branches, status, and receipts. Opaque actor
+  actor labels, `exomonad/<path>` Git branches, status, and receipts. Opaque actor
   and worktree IDs remain exact authority/correlation keys, not the primary
   way a model navigates its swarm.
 - `startActor` publishes only a ready exact reference. Exact calls
@@ -149,7 +149,7 @@ fixture generation, and executable acceptance within typed orchestration.
 The request/activation contract, cache-preserving context unfold, and
 recursive collaboration/scaffold designs once tracked here all landed; their
 architecture and verification record are in git history, and their stable
-user contracts live in [SHOAL.md](../../SHOAL.md), `exomonad/actor/CLAUDE.md`,
+user contracts live in [the Exomonad guide](../../exomonad/README.md), `exomonad/actor/CLAUDE.md`,
 and the shipped Haskell surface.
 
 ## Vocabulary
@@ -187,7 +187,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
   its [crate charter](../../tidepool/runtime/CLAUDE.md) own resident-machine
   suspension, checkout, roots, and frontend mounting seams. This plan consumes
   those mechanisms rather than introducing another continuation registry.
-- [`ValueHandle`'s contract](../../docs/continuation-parking-contract.md)
+- [`ValueHandle`'s contract](../../tidepool/runtime/src/session/resident.rs)
   already proves that same-machine closure delivery is possible. The actor
   layer adds mailbox ownership and caller authorization above it.
 

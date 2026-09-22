@@ -17,8 +17,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{
     AgentRef, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid, HeadChangeKind,
     HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin,
     WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
@@ -42,7 +42,7 @@ fn minimal_receipt(id: &WorktreeId) -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: id.clone(),
         cwd: PathBuf::from("/nonexistent/cwd"),
-        branch: BranchName::from_raw("tidepool/worktree/fixture"),
+        branch: BranchName::from_raw("exomonad/worktree/fixture"),
         source_head: GitOid::from_raw("0".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,

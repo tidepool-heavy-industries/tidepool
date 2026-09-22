@@ -1,4 +1,5 @@
 //! Systemd placement shared by launchers; resource limits belong to system policy.
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -98,7 +99,12 @@ impl SystemdSlice {
     /// Run a host as a restart-bounded per-run service. `--wait` keeps the
     /// tmux diagnostics window attached to the unit through automatic restarts;
     /// an intentional `systemctl stop` is successful and does not restart.
-    pub fn supervised_service(&self, unit: &str, command: ProcessInvocation) -> ProcessInvocation {
+    pub fn supervised_service(
+        &self,
+        unit: &str,
+        command: ProcessInvocation,
+        environment: &BTreeMap<String, String>,
+    ) -> ProcessInvocation {
         let mut args = vec![
             "--user".into(),
             "--quiet".into(),
@@ -114,9 +120,9 @@ impl SystemdSlice {
             "--property=StartLimitIntervalSec=60s".into(),
             "--property=StartLimitBurst=5".into(),
             format!("--unit={unit}"),
-            "--".into(),
-            command.program,
         ];
+        args.extend(environment.keys().map(|name| format!("--setenv={name}")));
+        args.extend(["--".into(), command.program]);
         args.extend(command.args);
         ProcessInvocation {
             program: "systemd-run".into(),
@@ -181,7 +187,7 @@ impl SliceLimits {
             .collect();
         if fields.get("LoadState") != Some(&"loaded") {
             return Err(std::io::Error::other(
-                "configure the swarm slice before launching Shoal",
+                "configure the swarm slice before launching Exomonad",
             ));
         }
         let limit = |name| -> std::io::Result<u64> {
@@ -243,12 +249,14 @@ mod tests {
 
     #[test]
     fn supervised_service_has_bounded_failure_restart_and_literal_arguments() {
+        let environment = BTreeMap::from([("PATH".into(), "/bin".into())]);
         let wrapped = SystemdSlice::default().supervised_service(
-            "shoal-host-run-1",
+            "exomonad-host-run-1",
             ProcessInvocation {
-                program: "/a path/shoal".into(),
+                program: "/a path/exomonad".into(),
                 args: vec!["host".into(), "$HOME;literal".into()],
             },
+            &environment,
         );
         assert_eq!(wrapped.program, "systemd-run");
         assert!(wrapped
@@ -258,6 +266,7 @@ mod tests {
             .args
             .contains(&"--property=StartLimitBurst=5".into()));
         assert!(wrapped.args.contains(&"--wait".into()));
+        assert!(wrapped.args.contains(&"--setenv=PATH".into()));
         assert_eq!(wrapped.args.last().unwrap(), "$HOME;literal");
     }
 }

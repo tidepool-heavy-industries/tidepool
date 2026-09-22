@@ -26,7 +26,7 @@ import qualified Jev.Operators as J
 import Jev.Operators (Packet ((:=), (:&)))
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands, Jev)
 import Tidepool.Effects.Row (knownEffects)

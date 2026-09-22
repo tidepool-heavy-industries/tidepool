@@ -247,8 +247,8 @@ pub(crate) struct LookupEntry {
     pub(crate) origin: LookupOrigin,
     pub(crate) quality: MatchQuality,
     pub(crate) availability: InspectionAvailability,
-    /// A locator for one worked use of this callable — a shipped Shoal
-    /// example (`.shoal/checks/<file>.hs`) or skill (`skill: <name>`) that
+    /// A locator for one worked use of this callable — a shipped Exomonad
+    /// example (`.exomonad/checks/<file>.hs`) or skill (`skill: <name>`) that
     /// actually uses the qualified name. `None` when no shipped example uses
     /// it. Derived from the shipped examples/skills at build time; see
     /// `crate::usage_pointer`. Not populated for non-callable kinds (types,
@@ -271,7 +271,7 @@ fn availability_rank(availability: InspectionAvailability) -> u8 {
 /// tell the file is not its own, and the coordinates describe generated source
 /// it never wrote. Keep the message and drop the location.
 ///
-/// `tidepool-toolchain`'s `render_diagnostics` does this properly for ordinary
+/// `exomonad-toolchain`'s `render_diagnostics` does this properly for ordinary
 /// compiles, but it needs structured spans and this path is a flat string by the
 /// time it leaves the worker, so the same anchor rule is applied here.
 pub(crate) fn strip_generated_query_locations(diagnostic: &str) -> String {
@@ -1180,7 +1180,7 @@ mod tests {
                 LookupResult::found(
                     "Cmd.readOutput".into(),
                     vec![LookupEntry {
-                        usage_pointer: Some(".shoal/checks/handler-call.hs".into()),
+                        usage_pointer: Some(".exomonad/checks/handler-call.hs".into()),
                         ..entry("readOutput", MatchQuality::Exact)
                     }],
                     8,
@@ -1195,7 +1195,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("(see: .shoal/checks/handler-call.hs)"),
+            rendered.contains("(see: .exomonad/checks/handler-call.hs)"),
             "{rendered}"
         );
     }

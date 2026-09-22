@@ -1314,7 +1314,7 @@ impl<Item, Committed> WorkSequence<Item, Committed> {
 }
 
 /// One already-parsed runnable block and its position in an assistant
-/// response. Parsing belongs to `tidepool-model-output`; this type begins the
+/// response. Parsing belongs to `exomonad-model-output`; this type begins the
 /// execution contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedBlock {
@@ -1548,16 +1548,16 @@ mod tests {
             .discovery()
             .is_err());
         assert_eq!(
-            MetaCommandLine::parse(":browse! Tidepool.Actors.Shoal")
+            MetaCommandLine::parse(":browse! Tidepool.Actors.Exomonad")
                 .unwrap()
                 .discovery()
                 .unwrap(),
             Some(WorkbenchDiscovery::Browse {
-                module: Some("Tidepool.Actors.Shoal".into()),
+                module: Some("Tidepool.Actors.Exomonad".into()),
                 expanded: true,
             })
         );
-        assert!(MetaCommandLine::parse(":browse *Tidepool.Actors.Shoal")
+        assert!(MetaCommandLine::parse(":browse *Tidepool.Actors.Exomonad")
             .unwrap()
             .discovery()
             .is_err());
@@ -1593,9 +1593,9 @@ mod tests {
 
     #[test]
     fn input_normalization_is_frontend_neutral() {
-        let encoded = serde_json::Value::String("{\"name\":\"shoal\"}".into());
+        let encoded = serde_json::Value::String("{\"name\":\"exomonad\"}".into());
         let normalized = normalize_workbench_input(&encoded);
-        assert_eq!(normalized, serde_json::json!({"name": "shoal"}));
+        assert_eq!(normalized, serde_json::json!({"name": "exomonad"}));
         assert_eq!(
             normalize_workbench_input(&serde_json::Value::String("42".into())),
             serde_json::Value::String("42".into())

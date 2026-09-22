@@ -87,7 +87,7 @@ campaign tree is in Git history.
 Use the actual task/result contracts and callable signatures. Importing a module
 or binding a composition starts no worker.
 
-There is one original-root runtime .shoal and one frozen selection per swarm.
+There is one original-root runtime .exomonad and one frozen selection per swarm.
 This package is tracked in the repository, so a worktree gets it from git and
 there is one maintained copy to edit; it is not copied forward by hand between
 runs. A changed prompt, completed check or watch notification does not release an

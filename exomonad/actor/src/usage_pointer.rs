@@ -23,7 +23,7 @@ pub(crate) fn pointer_for(table: UsagePointerTable, name: &str) -> Option<String
 /// checks are offered only where the workspace path exists.
 fn present(locator: &str, workspace: &Path) -> Option<String> {
     if let Some(skill) = locator
-        .strip_prefix(".shoal/skills/")
+        .strip_prefix(".exomonad/skills/")
         .and_then(|rest| rest.strip_suffix("/SKILL.md"))
     {
         return Some(format!("skill {skill}"));
@@ -40,10 +40,10 @@ mod tests {
 
     #[test]
     fn pointer_lookup_uses_the_supplied_immutable_table() {
-        static TABLE: &[(&str, &str)] = &[("call", ".shoal/skills/shoal-command/SKILL.md")];
+        static TABLE: &[(&str, &str)] = &[("call", ".exomonad/skills/exomonad-command/SKILL.md")];
         assert_eq!(
             pointer_for(TABLE, "call").as_deref(),
-            Some("skill shoal-command")
+            Some("skill exomonad-command")
         );
         assert_eq!(pointer_for(TABLE, "missing"), None);
     }
@@ -52,18 +52,26 @@ mod tests {
     fn a_pointer_is_offered_only_where_it_can_be_followed() {
         let elsewhere = tempfile::tempdir().unwrap();
         assert_eq!(
-            present(".shoal/skills/shoal-command/SKILL.md", elsewhere.path()).as_deref(),
-            Some("skill shoal-command")
+            present(
+                ".exomonad/skills/exomonad-command/SKILL.md",
+                elsewhere.path()
+            )
+            .as_deref(),
+            Some("skill exomonad-command")
         );
         assert_eq!(
-            present(".shoal/checks/handler-call.hs", elsewhere.path()),
+            present(".exomonad/checks/handler-call.hs", elsewhere.path()),
             None
         );
-        std::fs::create_dir_all(elsewhere.path().join(".shoal/checks")).unwrap();
-        std::fs::write(elsewhere.path().join(".shoal/checks/handler-call.hs"), "").unwrap();
+        std::fs::create_dir_all(elsewhere.path().join(".exomonad/checks")).unwrap();
+        std::fs::write(
+            elsewhere.path().join(".exomonad/checks/handler-call.hs"),
+            "",
+        )
+        .unwrap();
         assert_eq!(
-            present(".shoal/checks/handler-call.hs", elsewhere.path()).as_deref(),
-            Some(".shoal/checks/handler-call.hs")
+            present(".exomonad/checks/handler-call.hs", elsewhere.path()).as_deref(),
+            Some(".exomonad/checks/handler-call.hs")
         );
     }
 }

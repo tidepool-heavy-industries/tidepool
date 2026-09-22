@@ -11,7 +11,7 @@
 //!
 //! 1. **[`WorktreeReceipt`]** — `exomonad/worktree/src/registry.rs`. One JSON
 //!    file per worktree id at `<registry_root>/records/<id>.json`. Write:
-//!    [`WorktreeRegistry::put`](tidepool_worktree::WorktreeRegistry::put) via
+//!    [`WorktreeRegistry::put`](exomonad_worktree::WorktreeRegistry::put) via
 //!    `write_atomic` + `serde_json::to_vec_pretty`. Read:
 //!    `WorktreeRegistry::get`/`list` via `serde_json::from_slice`.
 //!    Closure: [`WorktreeId`], `PathBuf` (×2), [`BranchName`], [`GitOid`],
@@ -43,7 +43,7 @@
 //! Goldens live under `tests/goldens/durable/`, one file per sample, pinned
 //! byte-for-byte via `serde_json::to_string_pretty`. Regenerate (only after a
 //! deliberate, reviewed change to one of the types above) with
-//! `TIDEPOOL_REGEN_WORKTREE_GOLDENS=1 cargo test -p tidepool-worktree
+//! `EXOMONAD_REGEN_WORKTREE_GOLDENS=1 cargo test -p exomonad-worktree
 //! --test durable_formats`.
 //!
 //! ## Checked and found NOT durable
@@ -83,8 +83,8 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_worktree::testing::binding_row;
-use tidepool_worktree::{
+use exomonad_worktree::testing::binding_row;
+use exomonad_worktree::{
     AgentRef, Binding, BindingState, BranchName, CommitReceipt, EventId, GitOid, GitRef,
     HeadChangeKind, HeadChangeReceipt, ObservationBatch, RepositoryEvent, WorktreeError,
     WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
@@ -96,11 +96,11 @@ fn goldens_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/durable")
 }
 
-const REGEN_VAR: &str = "TIDEPOOL_REGEN_WORKTREE_GOLDENS";
+const REGEN_VAR: &str = "EXOMONAD_REGEN_WORKTREE_GOLDENS";
 
 /// Serialize `value` with `serde_json::to_string_pretty`, assert it matches
 /// the committed golden `name` byte-for-byte, and return the JSON so the
-/// caller can also round-trip it. Regenerate with `TIDEPOOL_REGEN_WORKTREE_GOLDENS=1`.
+/// caller can also round-trip it. Regenerate with `EXOMONAD_REGEN_WORKTREE_GOLDENS=1`.
 fn assert_golden<T: serde::Serialize>(name: &str, value: &T) -> String {
     let json = serde_json::to_string_pretty(value)
         .unwrap_or_else(|e| panic!("failed to serialize golden {name}: {e}"));
@@ -136,7 +136,7 @@ fn assert_golden<T: serde::Serialize>(name: &str, value: &T) -> String {
          serde_json::to_string_pretty output — this means the Worktree \
          migration (or some other change) moved a byte of an on-disk \
          durable format. If this is a deliberate, reviewed change, \
-         regenerate with {REGEN_VAR}=1 cargo test -p tidepool-worktree \
+         regenerate with {REGEN_VAR}=1 cargo test -p exomonad-worktree \
          --test durable_formats",
         name,
         path.display()
@@ -168,8 +168,8 @@ fn receipt_source_checkout() -> WorktreeReceipt {
 fn receipt_provisional() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-provisional-0001"),
-        cwd: PathBuf::from("/var/tidepool/worktrees/wt-provisional-0001"),
-        branch: BranchName::from_raw("tidepool/worktree/sample-wt-provisional-0001"),
+        cwd: PathBuf::from("/var/exomonad/worktrees/wt-provisional-0001"),
+        branch: BranchName::from_raw("exomonad/worktree/sample-wt-provisional-0001"),
         source_head: oid('a'),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -182,11 +182,11 @@ fn receipt_provisional() -> WorktreeReceipt {
 fn receipt_finalized_ref_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0002"),
-        cwd: PathBuf::from("/var/tidepool/worktrees/wt-finalized-0002"),
-        branch: BranchName::from_raw("tidepool/worktree/sample-wt-finalized-0002"),
+        cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0002"),
+        branch: BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0002"),
         source_head: oid('b'),
         snapshot_ref: Some(GitRef::from_raw(
-            "refs/tidepool/snapshots/wt-finalized-0002",
+            "refs/exomonad/snapshots/wt-finalized-0002",
         )),
         origin: WorktreeOrigin::Ref(GitRef::from_raw("refs/heads/main")),
         source_repository: PathBuf::from("/home/dev/repo"),
@@ -198,8 +198,8 @@ fn receipt_finalized_ref_origin() -> WorktreeReceipt {
 fn receipt_finalized_worktree_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0003"),
-        cwd: PathBuf::from("/var/tidepool/worktrees/wt-finalized-0003"),
-        branch: BranchName::from_raw("tidepool/worktree/sample-wt-finalized-0003"),
+        cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0003"),
+        branch: BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0003"),
         source_head: oid('c'),
         snapshot_ref: None,
         origin: WorktreeOrigin::Worktree(WorktreeId::from_raw("wt-parent-0000")),
@@ -258,7 +258,7 @@ fn journal_entries() -> Vec<ObservationBatch> {
                 new_head: oid('2'),
                 kind: HeadChangeKind::Advanced(vec![oid('3'), oid('4')]),
                 branch: Some(BranchName::from_raw(
-                    "tidepool/worktree/sample-wt-finalized-0002",
+                    "exomonad/worktree/sample-wt-finalized-0002",
                 )),
                 observed_at_ms: 1_700_000_010_000,
             }),
@@ -287,7 +287,7 @@ fn journal_entries() -> Vec<ObservationBatch> {
                 new_head: oid('6'),
                 kind: HeadChangeKind::Rewritten(vec![(oid('7'), oid('8')), (oid('9'), oid('0'))]),
                 branch: Some(BranchName::from_raw(
-                    "tidepool/worktree/sample-wt-finalized-0002",
+                    "exomonad/worktree/sample-wt-finalized-0002",
                 )),
                 observed_at_ms: 1_700_000_030_000,
             }),
@@ -307,7 +307,7 @@ fn journal_entries() -> Vec<ObservationBatch> {
                 new_head: oid('6'),
                 kind: HeadChangeKind::Rewound,
                 branch: Some(BranchName::from_raw(
-                    "tidepool/worktree/sample-wt-finalized-0002",
+                    "exomonad/worktree/sample-wt-finalized-0002",
                 )),
                 observed_at_ms: 1_700_000_040_000,
             }),
@@ -321,7 +321,7 @@ fn journal_entries() -> Vec<ObservationBatch> {
                 old_head: Some(oid('6')),
                 new_head: oid('b'),
                 kind: HeadChangeKind::Switched,
-                branch: Some(BranchName::from_raw("tidepool/worktree/other-branch")),
+                branch: Some(BranchName::from_raw("exomonad/worktree/other-branch")),
                 observed_at_ms: 1_700_000_050_000,
             }),
             recorded_at_ms: 1_700_000_050_001,
@@ -499,7 +499,7 @@ fn worktree_receipt_field_shape_is_pinned_inline() {
     let sample = WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-pin"),
         cwd: PathBuf::from("/tmp/wt-pin"),
-        branch: BranchName::from_raw("tidepool/worktree/pin"),
+        branch: BranchName::from_raw("exomonad/worktree/pin"),
         source_head: oid('f'),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -511,7 +511,7 @@ fn worktree_receipt_field_shape_is_pinned_inline() {
         .unwrap_or_else(|e| panic!("failed to serialize the inline WorktreeReceipt pin: {e}"));
     assert_eq!(
         json,
-        r#"{"worktree_id":"wt-pin","cwd":"/tmp/wt-pin","branch":"tidepool/worktree/pin","source_head":"ffffffffffffffffffffffffffffffffffffffff","snapshot_ref":null,"origin":"CurrentRepository","source_repository":"/tmp/repo","created_at_ms":1,"status":"Finalized"}"#,
+        r#"{"worktree_id":"wt-pin","cwd":"/tmp/wt-pin","branch":"exomonad/worktree/pin","source_head":"ffffffffffffffffffffffffffffffffffffffff","snapshot_ref":null,"origin":"CurrentRepository","source_repository":"/tmp/repo","created_at_ms":1,"status":"Finalized"}"#,
         "WorktreeReceipt's serde shape (field names, field order, or the \
          WorktreeOrigin/WorktreeRecordStatus variant tags) drifted — this is an \
          inline literal, independent of tests/goldens/durable/, so no regen \

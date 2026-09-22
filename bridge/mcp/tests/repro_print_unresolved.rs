@@ -18,6 +18,7 @@ use tidepool_runtime::compile_and_run;
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
         .unwrap()
         .join("bridge/haskell/lib")
         .leak()

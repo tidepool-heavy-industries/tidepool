@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The Shoal host transport for the Jev authoring surface: one Jev
+-- | The Exomonad host transport for the Jev authoring surface: one Jev
 -- request/response exchanged as JSON text with the host through the generated
 -- @Jev@ effect (@Tidepool.Effects.Core@, constructor
 -- @JevAskWith :: Text -> Jev (Either JevCallError Text)@ — request and

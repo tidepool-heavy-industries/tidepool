@@ -22,5 +22,5 @@ presentation rather than replacing them.
   declaration order.
 - Operator questions, notes, continue gates, and steering share one
   operator-gate mechanism.
-- Use one focused GHC-backed test via `scripts/battery.sh -p tidepool-harness
+- Use one focused GHC-backed test via `scripts/battery.sh -p exomonad-harness
   -E 'test(<name>)'`; broad harness shards are major-boundary checks.

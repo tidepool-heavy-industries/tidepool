@@ -45,20 +45,21 @@ use tidepool_handlers::{
     JournalEntry, JournalHandler, ObservationSource, RepoEventHandler, SegmentPath,
     WorktreeHandler,
 };
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::DynModelProvider;
-use tidepool_harness::replay::ReplayProvider;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::DynModelProvider;
+use exomonad_harness::replay::ReplayProvider;
+use exomonad_harness::{
     acquire_lease, load_harness_source, typed_request_agent_decls, DriverError, Harness,
     LogObserver, SelfHarnessDriver,
 };
-use tidepool_worktree::testing::TestRepo;
+use exomonad_worktree::testing::TestRepo;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -109,7 +110,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("outer-effects-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -278,7 +279,7 @@ async fn outer_worktree_without_handler_errors_legibly() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("outer-effects-nh-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -320,7 +321,7 @@ async fn outer_journal_without_handler_errors_legibly() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("outer-effects-nj-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -384,7 +385,7 @@ fn text_array<'a>(state: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
 /// segment order — the run's TRUE PHYSICAL WRITE ORDER.
 fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry> {
     let mut entries = Vec::new();
-    for segment in tidepool_harness::list_segments(log_dir, run_id).expect("list segments") {
+    for segment in exomonad_harness::list_segments(log_dir, run_id).expect("list segments") {
         entries.extend(load_journal(&segment).expect("segment loads"));
     }
     entries
@@ -430,7 +431,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     )
     .expect("answerer engine config");
     let fresh_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let fresh_writer = tidepool_harness::log::LogWriter::create(
+    let fresh_writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("resume-fold-fresh-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -491,7 +492,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     )
     .expect("answerer engine config");
     let resumed_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let resumed_writer = tidepool_harness::log::LogWriter::create(
+    let resumed_writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("resume-fold-resumed-{}.jsonl", std::process::id())),
         &header(),
     )
@@ -582,7 +583,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     )
     .expect("answerer engine config");
     let refused_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
-    let refused_writer = tidepool_harness::log::LogWriter::create(
+    let refused_writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("resume-fold-refused-{}.jsonl", std::process::id())),
         &header(),
     )

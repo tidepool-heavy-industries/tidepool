@@ -81,7 +81,7 @@ integrated head, child states and retained merge receipts. An old notification
 is never the authoritative snapshot. The parent spends this turn inspecting
 the result and choosing its next scaffold, rather than relaying receipts.
 
-## Shoal binding
+## Exomonad binding
 
 This is executable Haskell policy, not a new Git or process interpreter. A
 record actor retains the `Batch`, dispatches requests and receives typed
@@ -113,7 +113,7 @@ not that the dependency succeeded. The parent sees that distinction in `view`.
 ## Implementation boundary
 
 The pure policy and its command/reply scenarios execute under pinned GHC.
-Binding the operations to role-specific native worker tools remains Shoal
+Binding the operations to role-specific native worker tools remains Exomonad
 integration work. The protocol specifies what those tools must do; it does
 not claim that a new worker tool or a live swarm has been installed. Parent
 source changes at an early frontier must be serialized through the same
@@ -122,5 +122,5 @@ integration owner, which checks the actual head before a later merge.
 Run the policy scenarios without launching models:
 
 ```sh
-bash scripts/dev-shell.sh runghc -Wall -Werror -iexomonad/examples/workspace/.shoal exomonad/examples/workspace/.shoal/tests/SwarmSpec.hs
+bash scripts/dev-shell.sh runghc -Wall -Werror -iexomonad/examples/workspace/.exomonad exomonad/examples/workspace/.exomonad/tests/SwarmSpec.hs
 ```

@@ -40,7 +40,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Aeson.Value (Value, object, (.=))
 import Tidepool.Agent.Contract
-import Tidepool.Actors.Shoal (parentAgent, sendMessage)
+import Tidepool.Actors.Exomonad (parentAgent, sendMessage)
 import Tidepool.Effects.Core
   ( ActorContext, ActorContextInfo (..), ConversationTurn (..), Jev, Notifications, Reflect
   , TurnItem (..), actorContext, reflect

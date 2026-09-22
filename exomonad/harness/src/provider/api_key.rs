@@ -13,7 +13,7 @@ use crate::provider::{ModelProvider, ProviderError, TurnRequest, TurnResponse};
 #[derive(Debug, Clone)]
 pub struct ApiKeyConfig {
     /// Env var / secrets-file name the key is resolved from, e.g.
-    /// `"TIDEPOOL_HARNESS_API_KEY"`.
+    /// `"EXOMONAD_HARNESS_API_KEY"`.
     pub env_var: String,
     pub model: String,
     /// Endpoint override — `None` uses genai's normal resolution for
@@ -153,7 +153,7 @@ mod tests {
         std::env::set_var("TIDEPOOL_CONFIG_DIR", dir.path());
         with_env("TEST_APIKEY_MISSING_FOR_COMPLETE", None, || {});
 
-        let cfg = ApiKeyConfig::new("TEST_APIKEY_MISSING_FOR_COMPLETE", "gpt-4o-mini");
+        let cfg = ApiKeyConfig::new("TEST_APIKEY_MISSING_FOR_COMPLETE", "gpt-6-luna");
         let provider = ApiKeyProvider::new(cfg);
         let req = TurnRequest {
             messages: vec![],

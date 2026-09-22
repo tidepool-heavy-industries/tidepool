@@ -1,9 +1,9 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
-use tidepool_actor::command_jobs::{CommandBackend, CommandControl};
+use exomonad_actor::command_jobs::{CommandBackend, CommandControl};
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_bridge_effects::*;
-use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 pub(super) struct TestCommands {
     specs: Mutex<Vec<CommandSpec>>,
@@ -247,7 +247,7 @@ async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
 }
 pub(super) async fn backend_request(
     campaign: &mut TestCampaign,
-) -> Arc<tidepool_actor::command_jobs::CommandBackendRequest> {
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     loop {
         if let LocalResidentDeployment::CommandBackend(request) =
             campaign.deployments.recv().await.unwrap()
@@ -262,7 +262,7 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     assert!(policy.tools().iter().any(|tool| matches!(tool,
-        tidepool_tool::HostedTool::Function(declaration) if declaration.name == "bash")));
+        exomonad_tool::HostedTool::Function(declaration) if declaration.name == "bash")));
     let script = "cat <<'EOF'\nλ; $(literal) [bash|text|]\nEOF\n";
     let invocation = ToolInvocation {
         name: "bash".into(),
@@ -448,7 +448,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
                 "--norc".into(),
                 "-c".into(),
                 "printf literal".into(),
-                "shoal-bash".into()
+                "exomonad-bash".into()
             ],
             directory: Some("src".into()),
             environment: vec![("EXAMPLE".into(), "value".into())],
@@ -726,7 +726,7 @@ async fn command_jobs_retain_completion_and_route_to_record_actors() {
             "--norc",
             "-c",
             "printf '%s' \"$1\"",
-            "shoal-bash",
+            "exomonad-bash",
             "a b;$HOME\n'quoted'"
         ]
     );
@@ -1029,7 +1029,7 @@ async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecu
             call_id: call_id.clone(),
             namespace: Some("haskell".into()),
         }),
-        name: tidepool_actor::HASKELL_TOOL.into(),
+        name: exomonad_actor::HASKELL_TOOL.into(),
         arguments: ToolArguments::Raw(include_str!("command_foreground_stop.hs").into()),
     };
     let policy = campaign.root_installation.policy.clone();
@@ -1272,8 +1272,9 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
 #[tokio::test]
 async fn command_skill_examples_execute_in_the_resident_workbench() {
     let mut campaign = TestCampaign::start().await;
-    let skill =
-        include_str!("../../../../exomonad/examples/workspace/.shoal/skills/shoal-command/SKILL.md");
+    let skill = include_str!(
+        "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-command/SKILL.md"
+    );
     let mut examples = skill
         .split("```haskell\n")
         .skip(1)

@@ -81,7 +81,8 @@ fn run_prepared_once_with_nursery(
         })
 }
 
-const ARTIFACT: &[u8] = include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+const ARTIFACT: &[u8] =
+    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 const FREER_RETENTION_ARTIFACT: &[u8] =
     include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor");
 const FREER_RESUME_ARTIFACT: &[u8] =
@@ -2975,8 +2976,9 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
-const IMPORT_CONSUMER_RESULT_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/import-consumer-result.cbor");
+const IMPORT_CONSUMER_RESULT_ARTIFACT: &[u8] = include_bytes!(
+    "../../../bridge/haskell/test-prepared-stg/fixtures/import-consumer-result.cbor"
+);
 
 /// S6, the direct-call half: `consumerResultAt 0#` -- whose body is
 /// `producerFn (length producerValue)`, the imported function called

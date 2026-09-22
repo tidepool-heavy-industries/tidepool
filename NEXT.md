@@ -1,4 +1,4 @@
-# Next: use Shoal, and program how you work
+# Next: use Exomonad, and program how you work
 
 Outlook for the next resident agents, 2026-09-17. This replaces the old
 implementation handoff. Exact APIs and availability belong to the installed
@@ -146,13 +146,13 @@ The most useful entry points are:
   commands; three investigation steps executed without an intervening model
   turn. **These examples truncate their own evidence to 700 characters. Fix that
   before adapting them. Autonomous termination was not demonstrated.**
-- `.shoal/examples/33-threeway.hs` / `.shoal/examples/35-threeway-fair.hs`: the
+- `.exomonad/examples/33-threeway.hs` / `.exomonad/examples/35-threeway-fair.hs`: the
   same routing problem before and after repairing the alternatives. A
   confident error became a correct answer on the tested fixture. Debug the
   semantic program before rejecting the pattern.
 - `32-traverse-content.hs`: repository navigation supplied with actual branch
   contents, rather than asking filenames to stand in for evidence.
-- `.shoal/examples/37-reflect-intent.hs`: simulated history supplies intent
+- `.exomonad/examples/37-reflect-intent.hs`: simulated history supplies intent
   missing from the artifacts. Superseded instructions remain an open failure
   in those examples.
 

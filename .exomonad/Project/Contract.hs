@@ -38,7 +38,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 import qualified Jev.Operators as J
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 
 -- ---------------------------------------------------------------------------
 -- The editable policy. Everything a reader tunes first lives here: which

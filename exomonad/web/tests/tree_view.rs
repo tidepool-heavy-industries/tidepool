@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
-use tidepool_web::{router, AppState};
+use exomonad_harness::selfharness::operator::{FormShape, OperatorGate};
+use exomonad_web::{router, AppState};
 use tokio::net::TcpListener;
 
 async fn boot() -> (SocketAddr, AppState) {
@@ -111,10 +111,10 @@ fn realistic_tree_fixture() -> Vec<&'static str> {
 /// Register [`realistic_tree_fixture`]'s whole shape on `state`, keyed off
 /// the default node id (a root gate with a nested `node_gate` per child) so
 /// parent links line up with the fixture's own slash paths.
-fn register_realistic_tree(state: &tidepool_web::AppState) {
-    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+fn register_realistic_tree(state: &exomonad_web::AppState) {
+    let root_gate = state.register_node(exomonad_web::DEFAULT_NODE_ID);
     for id in realistic_tree_fixture() {
-        if id == tidepool_web::DEFAULT_NODE_ID {
+        if id == exomonad_web::DEFAULT_NODE_ID {
             continue;
         }
         root_gate.node_gate(id).expect("child gate registers");
@@ -228,7 +228,7 @@ async fn api_tree_reports_ids_parent_links_and_statuses() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+    let root_gate = state.register_node(exomonad_web::DEFAULT_NODE_ID);
     let _child = root_gate
         .node_gate("root/1-x")
         .expect("child gate registers");
@@ -269,7 +269,7 @@ async fn api_tree_accepts_a_fork_child_shaped_path_nested_under_a_branch() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+    let root_gate = state.register_node(exomonad_web::DEFAULT_NODE_ID);
     let branch_gate = root_gate
         .node_gate("root/1-x")
         .expect("branch child gate registers");
@@ -440,7 +440,7 @@ async fn node_panel_route_percent_encodes_slash_path_ids() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+    let root_gate = state.register_node(exomonad_web::DEFAULT_NODE_ID);
     let child_gate = root_gate.node_gate("root/1-x").expect("child gate");
     child_gate.post_note("child note");
 

@@ -1,8 +1,8 @@
-You are working in the Tidepool repository. Load the `shoal-jev` and
-`shoal-agent-spec` skills before you start.
+You are working in the Tidepool repository. Load the `exomonad-jev` and
+`exomonad-agent-spec` skills before you start.
 
-This checkout has an agent spec, `.shoal/AgentSpec.hs`, and its tools live in
-`.shoal/Project/Tools.hs`. One of your tools, `triage_search`, is declared but
+This checkout has an agent spec, `.exomonad/AgentSpec.hs`, and its tools live in
+`.exomonad/Project/Tools.hs`. One of your tools, `triage_search`, is declared but
 dumb: it lists every matching file and ignores what you said you were looking
 for. Your after-tool slot exists and always abstains. Make both of them smart
 with Jev, live, in this session. Everything below is a body edit followed by

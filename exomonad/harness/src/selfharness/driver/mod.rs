@@ -344,7 +344,7 @@ fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
 /// (`Eff '[RunLLMTurn]`, distinct from any Agent node's session) plus a
 /// nested [`Harness`] used ONLY to answer `runLLMTurn` holes by driving an
 /// Agent turn loop to `finalize`. One driver per running self-harness
-/// process (`tidepool-selfharness`).
+/// process (`exomonad-selfharness`).
 /// Default fragment ceiling for the shared machine before rotation
 /// (`TIDEPOOL_MACHINE_FRAGMENT_CEILING` overrides): each answerer round
 /// compiles ~1 fragment, so this is hundreds of loops of headroom while
@@ -534,7 +534,7 @@ pub struct SelfHarnessDriver {
     /// cross that boundary) — see that method's doc for why the dispatch
     /// itself still serializes on this ONE lock (the handler's own
     /// `SubagentSpawn`/`SubagentAwait` methods take `&mut self` for their
-    /// full synchronous duration; `tidepool-handlers`/`tidepool-agent` are
+    /// full synchronous duration; `tidepool-handlers`/`exomonad-agent` are
     /// out of this crate's reach), and
     /// `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`'s addendum for why that still
     /// yields real overlap for `spawnAgent`'s two-suspension
@@ -800,7 +800,7 @@ impl SelfHarnessDriver {
 
     /// Wire the operator listen channel's publisher handle — the
     /// composition root constructs a [`crate::listen::ListenServer`] at boot
-    /// (see `tidepool-selfharness`'s `main`) and hands it here so any future
+    /// (see `exomonad-selfharness`'s `main`) and hands it here so any future
     /// harness code can publish outbound frames via [`Self::listen_server`].
     pub fn set_listen_server(&mut self, listen: Arc<crate::listen::ListenServer>) {
         self.listen = Some(listen);
@@ -1246,7 +1246,7 @@ mod tests {
 
     /// `fork_child_path_segment` slugs a model-authored fork brief into a
     /// GUI/DOM node id segment —
-    /// `tidepool-web`'s loopback trust model rests on "`node_id` is always a
+    /// `exomonad-web`'s loopback trust model rests on "`node_id` is always a
     /// substrate identifier, never model-produced text"
     /// (`exomonad/web/src/lib.rs` interpolates `id="panel-<node_id>"` into
     /// the DOM). The hostile corpus pins containment directly on the pure

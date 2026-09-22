@@ -4,7 +4,7 @@ Read your assigned plan and the relevant recipe below. For recursive parallel
 implementation, start with [local waves](operating.md#repeated-local-waves-and-context-choices).
 Only the initial designated leads submit execution plans for planner review;
 descendants implement within that agreement unless their assignment says otherwise.
-The optional [graph walkthrough](graph/run.md) illustrates a separate project.
+The optional graph walkthrough in the example workspace illustrates a separate project.
 
 Launch preparation and package checks belong to the launch operator; workers
 start with their assigned product work. See [launch.md](launch.md) when preparing

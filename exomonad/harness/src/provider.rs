@@ -1,5 +1,5 @@
 //! Calling-model provider adapters. The neutral request, response, streaming,
-//! error, and call traits live in `tidepool-model`; this module contains the
+//! error, and call traits live in `exomonad-model`; this module contains the
 //! ChatGPT-subscription OAuth and API-key implementations plus their settings.
 //! This is not the in-program `Llm` effect (`tidepool-handlers`): it has a
 //! different consumer and budget contract.
@@ -16,7 +16,7 @@ pub mod oauth;
 pub(crate) mod paths;
 pub mod settings;
 
-pub use tidepool_model::{
+pub use exomonad_model::{
     DynModelProvider, Message, ModelProvider, ProviderError, ReasoningItem, Role, StreamDelta,
     StreamSink, TurnRequest, TurnResponse, Usage,
 };

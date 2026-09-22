@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Private construction and protocols for persistent Shoal agents.
+-- | Private construction and protocols for persistent Exomonad agents.
 module Tidepool.Actors.Internal.Agent
   ( AgentSpec
   , AgentRef
@@ -284,7 +284,7 @@ startAgent spec = do
   pure (AgentRef actor (agentWorktree spec))
 
 -- | Start an agent by forking the caller's active provider and Haskell
--- snapshots. Public Shoal code reaches this through the applicative unfold DSL.
+-- snapshots. Public Exomonad code reaches this through the applicative unfold DSL.
 startForkedAgent
   :: Member Forks effs
   => Actor.LaunchRole

@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
+use exomonad_tool::{CustomToolDeclaration, HostedTool, ToolArguments, ToolInvocation};
 use tidepool_runtime::session::WorkbenchRequest;
-use tidepool_tool::{CustomToolDeclaration, HostedTool, ToolArguments, ToolInvocation};
 
 use crate::prompt_catalog::PromptId;
 use crate::resident_tools::{
@@ -71,9 +71,9 @@ impl ResidentInteractivePolicy {
 }
 
 pub(crate) fn project_tools(
-    declarations: Vec<tidepool_tool::ToolDeclaration>,
+    declarations: Vec<exomonad_tool::ToolDeclaration>,
 ) -> Result<Vec<HostedTool>, ResidentToolError> {
-    use tidepool_tool::ToolKind;
+    use exomonad_tool::ToolKind;
     let mut names = std::collections::HashSet::from([
         HASKELL_TOOL.to_string(),
         crate::status_tool::STATUS_TOOL.to_string(),
@@ -221,7 +221,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn cancel_workbench_boxed(
         &self,
-        invocation: tidepool_tool::ToolInvocationContext,
+        invocation: exomonad_tool::ToolInvocationContext,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -239,13 +239,13 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 mod tests {
     use super::*;
 
-    fn raw(name: &str) -> tidepool_tool::ToolDeclaration {
-        tidepool_tool::ToolDeclaration {
+    fn raw(name: &str) -> exomonad_tool::ToolDeclaration {
+        exomonad_tool::ToolDeclaration {
             name: name.into(),
             description: "literal input".into(),
             input_schema: serde_json::json!({"type":"string"}),
             output_schema: None,
-            kind: tidepool_tool::ToolKind::Raw,
+            kind: exomonad_tool::ToolKind::Raw,
         }
     }
 
@@ -257,15 +257,15 @@ mod tests {
         assert!(project_tools(vec![raw("lookup")]).is_ok());
         assert!(project_tools(vec![raw("bash"), raw("bash")]).is_err());
         let mut structured = raw("structured");
-        structured.kind = tidepool_tool::ToolKind::Call;
+        structured.kind = exomonad_tool::ToolKind::Call;
         assert!(project_tools(vec![structured.clone()]).is_err());
         structured.input_schema = serde_json::json!({"type":"object","properties":{}});
         let projected = project_tools(vec![raw("bash"), structured]).unwrap();
         assert!(matches!(projected[0], HostedTool::Custom(_)));
         assert!(matches!(projected[1], HostedTool::Function(_)));
         for kind in [
-            tidepool_tool::ToolKind::Update,
-            tidepool_tool::ToolKind::Finish,
+            exomonad_tool::ToolKind::Update,
+            exomonad_tool::ToolKind::Finish,
         ] {
             let mut unsupported = raw("stateful");
             unsupported.kind = kind;

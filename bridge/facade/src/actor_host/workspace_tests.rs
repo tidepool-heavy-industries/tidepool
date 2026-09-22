@@ -1,10 +1,10 @@
 use super::*;
+use exomonad_actor::{ForkWorkspaceAdmission, ForkWorkspacePolicy};
+use exomonad_agent::interactive::*;
+use exomonad_agent::{AgentBackendError, BackendThreadId};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Stdio};
-use tidepool_actor::{ForkWorkspaceAdmission, ForkWorkspacePolicy};
-use tidepool_agent::interactive::*;
-use tidepool_agent::{AgentBackendError, BackendThreadId};
 
 #[derive(Default)]
 struct Backend {
@@ -168,7 +168,7 @@ fn shell(workspace: &PreparedWorkspace, script: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 fn build(workspace: &PreparedWorkspace) -> Vec<bool> {
-    let output = shell(workspace, "CARGO_HOME=\"$PWD/.shoal/build/cargo/home\" CARGO_TARGET_DIR=\"$PWD/.shoal/build/cargo\" RUSTC_WRAPPER= cargo build --offline --message-format=json");
+    let output = shell(workspace, "CARGO_HOME=\"$PWD/.exomonad/build/cargo/home\" CARGO_TARGET_DIR=\"$PWD/.exomonad/build/cargo\" RUSTC_WRAPPER= cargo build --offline --message-format=json");
     let artifacts: Vec<bool> = output
         .lines()
         .filter_map(|line| {
@@ -189,7 +189,7 @@ fn owner(
         supervisor: None,
         creator_workspace: Some(BoundWorkspace {
             workspace: Arc::new(ActiveWorkspace {
-                view: tidepool_node::MountNamespace::capture(native.0.id()).unwrap(),
+                view: exomonad_node::MountNamespace::capture(native.0.id()).unwrap(),
                 prepared: workspace,
             }),
             thread,
@@ -208,13 +208,13 @@ fn owner(
     }
 }
 const CODING: ForkWorkspacePolicy = ForkWorkspacePolicy {
-    native_tools: tidepool_actor::NativeToolClass::Coding,
-    workspace: tidepool_actor::WorkspaceAccess::WritableBound,
+    native_tools: exomonad_actor::NativeToolClass::Coding,
+    workspace: exomonad_actor::WorkspaceAccess::WritableBound,
 };
 
 #[test]
 fn source_exclusions_keep_tracked_files_and_untagged_directories() {
-    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer()
         .commit_file("tracked/source", "source", "seed")
         .unwrap();
@@ -258,7 +258,7 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
         layout.source_exclusions(repo.path(), repo.path()).is_err(),
         "HEAD must still protect a staged deletion"
     );
-    let mut config = crate::shoal::LaunchConfig::default();
+    let mut config = crate::exomonad::LaunchConfig::default();
     for invalid in ["../outside", "", ".git", "build*"] {
         config.source_exclude = vec![invalid.into()];
         assert!(config.validate().is_err(), "{invalid:?}");
@@ -267,7 +267,7 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
 
 #[test]
 fn root_import_reuse_requires_matching_content_and_exclusions() {
-    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "first", "seed").unwrap();
     std::fs::write(repo.path().join("dirty"), "dirty").unwrap();
     std::fs::hard_link(repo.path().join("file"), repo.path().join("linked")).unwrap();
@@ -322,7 +322,7 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
 
 #[test]
 fn root_workspace_resources_are_isolated_between_runs() {
-    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
@@ -349,7 +349,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
             None,
         )
         .unwrap();
-    shell(&first, "echo first > .shoal/build/cargo/marker");
+    shell(&first, "echo first > .exomonad/build/cargo/marker");
     let collision = layout
         .prepare(
             repo.path().into(),
@@ -378,10 +378,13 @@ fn root_workspace_resources_are_isolated_between_runs() {
         .unwrap();
     shell(
         &second,
-        "test ! -e .shoal/build/cargo/marker; echo second > .shoal/build/cargo/marker",
+        "test ! -e .exomonad/build/cargo/marker; echo second > .exomonad/build/cargo/marker",
     );
-    assert_eq!(shell(&first, "cat .shoal/build/cargo/marker"), "first\n");
-    assert_eq!(shell(&second, "cat .shoal/build/cargo/marker"), "second\n");
+    assert_eq!(shell(&first, "cat .exomonad/build/cargo/marker"), "first\n");
+    assert_eq!(
+        shell(&second, "cat .exomonad/build/cargo/marker"),
+        "second\n"
+    );
     assert_eq!(
         std::fs::read_to_string(legacy.join("retained")).unwrap(),
         "old run"
@@ -390,7 +393,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
 
 #[tokio::test]
 async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
-    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("Cargo.toml", "[package]\nname = \"workspace-fork-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "crate").unwrap();
     repo.writer()
         .commit_file(
@@ -407,10 +410,10 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .commit_file("file", "committed", "seed")
         .unwrap();
     repo.writer()
-        .commit_file(".gitignore", "ignored\n.shoal/\n", "ignore")
+        .commit_file(".gitignore", "ignored\n.exomonad/\n", "ignore")
         .unwrap();
-    std::fs::create_dir(repo.path().join(".shoal")).unwrap();
-    std::fs::write(repo.path().join(".shoal/config"), "canonical").unwrap();
+    std::fs::create_dir(repo.path().join(".exomonad")).unwrap();
+    std::fs::write(repo.path().join(".exomonad/config"), "canonical").unwrap();
     std::fs::write(repo.path().join("file"), "staged").unwrap();
     repo.git().try_run(repo.path(), &["add", "file"]).unwrap();
     std::fs::write(repo.path().join("file"), "working").unwrap();
@@ -427,7 +430,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let (manager, bindings) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
     let bindings = Arc::new(Mutex::new(bindings));
     let authority = ActorWorktreeAuthority::new("workspace-test", bindings.clone());
-    let root = ActorRef::first(tidepool_actor::ActorId(1));
+    let root = ActorRef::first(exomonad_actor::ActorId(1));
     authority.install_grant(
         root.into(),
         tidepool_handlers::handlers::worktree::ActorWorktreeGrant::Repository,
@@ -449,15 +452,15 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let _native = NativeProcess::start(&workspace, &backend);
 
     let binding = runtime.path().join("binding.json");
-    tidepool_agent::accept_interactive_session_binding(
+    exomonad_agent::accept_interactive_session_binding(
         &binding,
-        tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
         BackendThreadId(uuid::Uuid::new_v4().to_string()),
         None,
     )
     .await
     .unwrap();
-    let thread = tidepool_agent::read_interactive_binding(&binding)
+    let thread = exomonad_agent::read_interactive_binding(&binding)
         .await
         .unwrap();
     let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
@@ -487,7 +490,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .await
         .unwrap();
     let custody = prepared
-        .install(ActorRef::first(tidepool_actor::ActorId(2)))
+        .install(ActorRef::first(exomonad_actor::ActorId(2)))
         .unwrap();
     let child = (custody.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -568,14 +571,14 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         "changed build-script input must rebuild"
     );
     assert_eq!(
-        shell(child, ".shoal/build/cargo/debug/workspace-fork-fixture"),
+        shell(child, ".exomonad/build/cargo/debug/workspace-fork-fixture"),
         "second\n"
     );
 
     assert_eq!(
         shell(
             child,
-            "cat file; git show :file; cat untracked ignored .shoal/config"
+            "cat file; git show :file; cat untracked ignored .exomonad/config"
         ),
         "workingworkinguntrackedignoredcanonical"
     );
@@ -622,7 +625,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(root, "root/tagged-cache".into(), seed(), CODING)
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(30)))
+        .install(ActorRef::first(exomonad_actor::ActorId(30)))
         .unwrap();
     let tagged = (tagged.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -675,7 +678,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     for (actor, prepared) in [(31, first), (32, next)] {
         let custody = prepared
-            .install(ActorRef::first(tidepool_actor::ActorId(actor)))
+            .install(ActorRef::first(exomonad_actor::ActorId(actor)))
             .unwrap();
         let child = (custody.as_ref() as &dyn std::any::Any)
             .downcast_ref::<ActorWorkspaceCustody>()
@@ -715,7 +718,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(root, "root/busy".into(), seed(), CODING)
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(3)))
+        .install(ActorRef::first(exomonad_actor::ActorId(3)))
         .unwrap();
     let fallback = (fallback.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -822,15 +825,15 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             .all(|(sequence, _)| *sequence == retries[0].0));
     }
     let _child_native = NativeProcess::start(child, &backend);
-    let child_actor = ActorRef::first(tidepool_actor::ActorId(2));
-    let child_binding = tidepool_agent::read_interactive_binding(&binding)
+    let child_actor = ActorRef::first(exomonad_actor::ActorId(2));
+    let child_binding = exomonad_agent::read_interactive_binding(&binding)
         .await
         .unwrap();
     admission.native.as_ref().unwrap().owners.lock().insert(
         child_actor,
         owner(child.clone(), child_binding, &_child_native),
     );
-    shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .shoal/build/cargo/artifact");
+    shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .exomonad/build/cargo/artifact");
     let grandchild = admission
         .admit(
             child_actor,
@@ -840,7 +843,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         )
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(4)))
+        .install(ActorRef::first(exomonad_actor::ActorId(4)))
         .unwrap();
     let grandchild = (grandchild.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -854,16 +857,16 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             grandchild,
-            "cat file; git show :file; cat .shoal/build/cargo/artifact .shoal/config"
+            "cat file; git show :file; cat .exomonad/build/cargo/artifact .exomonad/config"
         ),
         "dirty-childdirty-childwarmcanonical"
     );
     shell(
         child,
-        "printf later-child > file; printf later-build > .shoal/build/cargo/artifact",
+        "printf later-child > file; printf later-build > .exomonad/build/cargo/artifact",
     );
     assert_eq!(
-        shell(grandchild, "cat file .shoal/build/cargo/artifact"),
+        shell(grandchild, "cat file .exomonad/build/cargo/artifact"),
         "dirty-childwarm"
     );
     shell(
@@ -878,13 +881,13 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             "root/child/inspection".into(),
             ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
             ForkWorkspacePolicy {
-                native_tools: tidepool_actor::NativeToolClass::InspectionOnly,
-                workspace: tidepool_actor::WorkspaceAccess::InspectOnly,
+                native_tools: exomonad_actor::NativeToolClass::InspectionOnly,
+                workspace: exomonad_actor::WorkspaceAccess::InspectOnly,
             },
         )
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(5)))
+        .install(ActorRef::first(exomonad_actor::ActorId(5)))
         .unwrap();
     let inspection = (inspection.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -946,7 +949,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         )
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(7)))
+        .install(ActorRef::first(exomonad_actor::ActorId(7)))
         .unwrap();
     let foreign = (foreign.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -955,7 +958,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             foreign,
-            "cat input.txt; .shoal/build/cargo/debug/workspace-fork-fixture"
+            "cat input.txt; .exomonad/build/cargo/debug/workspace-fork-fixture"
         ),
         "secondfirst\n",
         "source follows the selected child; cache follows the root creator"
@@ -976,7 +979,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         )
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(8)))
+        .install(ActorRef::first(exomonad_actor::ActorId(8)))
         .unwrap();
     assert_eq!(
         backend.calls.lock().len(),
@@ -1001,7 +1004,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         )
         .await
         .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(9)))
+        .install(ActorRef::first(exomonad_actor::ActorId(9)))
         .unwrap();
     let unavailable = (unavailable.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
@@ -1053,7 +1056,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         loop {
             let complete = admission.manager.list().unwrap().iter().any(|summary| {
                 summary.receipt.branch.as_str() == branch
-                    && summary.receipt.status == tidepool_worktree::WorktreeRecordStatus::Mounted
+                    && summary.receipt.status == exomonad_worktree::WorktreeRecordStatus::Mounted
             });
             if complete {
                 break;
@@ -1067,7 +1070,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     // Exercise retirement through the same composed admission fixture: dirty
     // source and the index survive, while descendants keep their warm layers.
     shell(child, "printf preserved > retirement-untracked; printf '*.ignored\\n' > .gitignore; printf ignored > retirement.ignored; rm -f input.txt");
-    let status = shell(child, "git status --porcelain=v1 -- . ':!.shoal'");
+    let status = shell(child, "git status --porcelain=v1 -- . ':!.exomonad'");
     let index = shell(child, "git show :file");
     let child_head = shell(child, "git rev-parse HEAD");
     drop(_child_native);
@@ -1094,7 +1097,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert!(!receipt.cwd.join("input.txt").exists());
     for (arguments, expected) in [
         (
-            vec!["status", "--porcelain=v1", "--", ".", ":!.shoal"],
+            vec!["status", "--porcelain=v1", "--", ".", ":!.exomonad"],
             status,
         ),
         (vec!["show", ":file"], index),
@@ -1110,5 +1113,8 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             expected.trim_end()
         );
     }
-    assert_eq!(shell(grandchild, "cat .shoal/build/cargo/artifact"), "warm");
+    assert_eq!(
+        shell(grandchild, "cat .exomonad/build/cargo/artifact"),
+        "warm"
+    );
 }

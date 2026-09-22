@@ -1,4 +1,4 @@
-# tidepool-model — provider-neutral conversation seam
+# exomonad-model — provider-neutral conversation seam
 
 This crate owns provider-neutral roles, messages, requests, responses, usage,
 accumulating transcripts, streaming observations, and the model-call trait.

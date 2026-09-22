@@ -57,13 +57,13 @@ use serde_json::json;
 
 use crate::support;
 
-use tidepool_harness::engine;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{
+use exomonad_harness::engine;
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse,
 };
-use tidepool_harness::{
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
@@ -71,7 +71,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -80,7 +81,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn header() -> LogHeader {
@@ -155,7 +156,7 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     )
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(AlwaysFailingProvider);
-    let writer = tidepool_harness::log::LogWriter::create(
+    let writer = exomonad_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "state-injection-memo-hit-{}.jsonl",
             std::process::id()

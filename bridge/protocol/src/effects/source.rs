@@ -1,6 +1,6 @@
 //! Reloading an actor's own Haskell source inside a live run.
 //!
-//! A Shoal run captures its declared source roots once and compiles every cell
+//! A Exomonad run captures its declared source roots once and compiles every cell
 //! against that capture. `Source` lets a program re-read the roots IT works in,
 //! check the whole affected module graph, and publish it as the revision its
 //! own later cells compile against — without restarting the session, and
@@ -41,7 +41,7 @@ pub fn source() -> Effect {
         description: &[
             "Reload the Haskell source YOUR OWN cells compile against. Which source that ",
             "is was decided when you were created and cannot be chosen per call: if you ",
-            "work in your own checkout, it is the `.shoal` package in that checkout, and ",
+            "work in your own checkout, it is the `.exomonad` package in that checkout, and ",
             "your reload is invisible to every other actor; if you own the run, it is the ",
             "run's own package, which every actor without a checkout of its own compiles ",
             "against. Write a module under a configured source root with ordinary file ",

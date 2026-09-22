@@ -55,11 +55,11 @@ use crate::support;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_harness::engine::{EngineConfig, EngineError};
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::{EngineConfig, EngineError};
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
@@ -77,7 +77,8 @@ impl Observer for CapturingObserver {
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -132,7 +133,7 @@ fn build_driver(
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let log_path = std::env::temp_dir().join(format!("{log_label}-{}.jsonl", std::process::id()));
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     let observer = Arc::new(CapturingObserver::default());
     (SelfHarnessDriver::new(agent, observer.clone()), observer)

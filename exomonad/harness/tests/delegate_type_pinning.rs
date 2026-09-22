@@ -4,7 +4,7 @@
 //! `finalize_type_pinning.rs`: one deterministic `tidepool-extract` call per
 //! case, no model in the loop.
 //!
-//! The row under test is [`tidepool_harness::typed_request_agent_decls_with_delegate`]
+//! The row under test is [`exomonad_harness::typed_request_agent_decls_with_delegate`]
 //! (`Subagent`/`Worktree` prepended to the answerer's `[AskUser, Fork,
 //! ReadState, Finalize]`). `runDelegate` is applied at the compiled turn's
 //! RESULT position now (`engine::template_turn_for`'s `delegate_wrap`
@@ -19,11 +19,11 @@ use crate::support;
 
 use std::sync::Arc;
 
-use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{
+use exomonad_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls_with_delegate, Harness, TurnOutcome,
 };
 use tidepool_runtime::CompileError;
@@ -44,7 +44,8 @@ fn full_diag(e: CompileError) -> String {
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -59,7 +60,7 @@ fn delegating_cfg() -> EngineConfig {
     )
     .expect("delegating answerer engine config")
     .with_delegate_wrap();
-    cfg.include.push(repo_root().join("examples/harness"));
+    cfg.include.push(repo_root().join("exomonad/examples/harness"));
     cfg
 }
 
@@ -98,8 +99,8 @@ fn compile_delegating_turn(
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
 }
 
@@ -199,8 +200,8 @@ fn compile_delegating_answerer_turn(
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     )
 }
 
@@ -346,8 +347,8 @@ fn worktree_verb_compiles_when_the_row_actually_carries_worktree() {
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     assert!(
         result.is_ok(),

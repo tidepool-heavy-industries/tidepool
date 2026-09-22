@@ -103,7 +103,8 @@ mod tests {
     use tidepool_repr::execution_schema::{ImportedValue, RuntimeRep};
 
     fn fixture() -> Vec<u8> {
-        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor").to_vec()
+        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
+            .to_vec()
     }
 
     fn imports(prepared: &PreparedProgram) -> MachineImports {

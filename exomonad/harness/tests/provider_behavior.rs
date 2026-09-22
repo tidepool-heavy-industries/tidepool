@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
-use tidepool_harness::provider::oauth::{self, OauthConfig, OauthProvider};
-use tidepool_harness::provider::{Message, ModelProvider, ProviderError, Role, TurnRequest};
+use exomonad_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
+use exomonad_harness::provider::oauth::{self, OauthConfig, OauthProvider};
+use exomonad_harness::provider::{Message, ModelProvider, ProviderError, Role, TurnRequest};
 
 // ---------------------------------------------------------------------
 // Mock server: queued (status, json-body) responses keyed by (method, path).
@@ -188,7 +188,7 @@ fn chat_ok_body(text: &str, prompt_tokens: i64, completion_tokens: i64) -> serde
     serde_json::json!({
         "id": "chatcmpl-test",
         "object": "chat.completion",
-        "model": "gpt-4o-mini",
+        "model": "gpt-6-luna",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
     })
@@ -306,7 +306,7 @@ async fn api_key_provider_completes_ok() {
     server.queue("POST", "/chat/completions", 200, chat_ok_body("pong", 3, 1));
 
     std::env::set_var("SHARED_SUITE_API_KEY_OK", "sk-test");
-    let mut cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_OK", "gpt-4o-mini");
+    let mut cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_OK", "gpt-6-luna");
     cfg.base_url = Some(server.base_url());
     let provider = ApiKeyProvider::new(cfg);
 
@@ -325,7 +325,7 @@ async fn api_key_provider_401_is_auth_error() {
     );
 
     std::env::set_var("SHARED_SUITE_API_KEY_BAD", "sk-stale");
-    let mut cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_BAD", "gpt-4o-mini");
+    let mut cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_BAD", "gpt-6-luna");
     cfg.base_url = Some(server.base_url());
     let provider = ApiKeyProvider::new(cfg);
 
@@ -339,7 +339,7 @@ async fn api_key_provider_missing_key_is_auth_error() {
     with_config_dir(dir.path(), || {});
     std::env::set_var("TIDEPOOL_CONFIG_DIR", dir.path());
     std::env::remove_var("SHARED_SUITE_API_KEY_MISSING");
-    let cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_MISSING", "gpt-4o-mini");
+    let cfg = ApiKeyConfig::new("SHARED_SUITE_API_KEY_MISSING", "gpt-6-luna");
     let provider = ApiKeyProvider::new(cfg);
 
     let result = provider.complete(sample_req(), None).await;
@@ -356,7 +356,7 @@ fn oauth_cfg_for_mock(
     token_server_base: &str,
     token_path: std::path::PathBuf,
 ) -> OauthConfig {
-    let mut cfg = OauthConfig::new("gpt-4o-mini");
+    let mut cfg = OauthConfig::new("gpt-6-luna");
     cfg.oauth.token_url = format!("{token_server_base}oauth/token");
     cfg.chat_base_url = Some(chat_server.base_url());
     cfg.token_path = token_path;
@@ -429,14 +429,14 @@ async fn oauth_provider_with_live_settings_reflects_a_dial_change_on_the_next_re
     write_token(&token_path, "at", "rt", 3600);
 
     let mut cfg = oauth_cfg_for_mock(&chat_server, "http://127.0.0.1:1/", token_path);
-    cfg.model = "gpt-5.6-terra".to_string();
+    cfg.model = "gpt-6-astra".to_string();
     cfg.tuning.effort = oauth::ReasoningEffort::Medium;
 
     let settings_path = dir.path().join("settings.json");
-    let live = tidepool_harness::provider::settings::SharedModelSettings::load_or(
+    let live = exomonad_harness::provider::settings::SharedModelSettings::load_or(
         settings_path,
-        tidepool_harness::provider::settings::ModelSettings::new(
-            "gpt-5.6-terra",
+        exomonad_harness::provider::settings::ModelSettings::new(
+            "gpt-6-astra",
             oauth::ReasoningEffort::Medium,
         ),
     );
@@ -449,12 +449,12 @@ async fn oauth_provider_with_live_settings_reflects_a_dial_change_on_the_next_re
     let first_body = chat_server
         .body_seen("POST", "/responses")
         .expect("first request landed");
-    assert_eq!(first_body["model"], "gpt-5.6-terra");
+    assert_eq!(first_body["model"], "gpt-6-astra");
     assert_eq!(first_body["reasoning"]["effort"], "medium");
 
     // The dial: mutate the SAME handle the provider holds, no new provider.
-    live.set(tidepool_harness::provider::settings::ModelSettings::new(
-        "gpt-5.6-sol",
+    live.set(exomonad_harness::provider::settings::ModelSettings::new(
+        "gpt-6-sol",
         oauth::ReasoningEffort::High,
     ))
     .expect("dial change persists");
@@ -467,7 +467,7 @@ async fn oauth_provider_with_live_settings_reflects_a_dial_change_on_the_next_re
         .body_seen("POST", "/responses")
         .expect("second request landed");
     assert_eq!(
-        second_body["model"], "gpt-5.6-sol",
+        second_body["model"], "gpt-6-sol",
         "the next request must use the dialed model"
     );
     assert_eq!(
@@ -779,7 +779,7 @@ async fn oauth_provider_request_body_prompt_cache_key_matches_session_id_header(
 async fn oauth_token_lands_0600_under_config_dir_convention() {
     let dir = tempfile::tempdir().unwrap();
     with_config_dir(dir.path(), || {
-        let cfg = OauthConfig::new("gpt-4o-mini");
+        let cfg = OauthConfig::new("gpt-6-luna");
         assert!(cfg.token_path.starts_with(dir.path().join("secrets")));
 
         let token = openai_auth::TokenSet {

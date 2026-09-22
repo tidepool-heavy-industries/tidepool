@@ -3,7 +3,7 @@
 #
 # Usage: source this file, then call `resolve_tidepool_extract`. Callers must
 # already be cd'd to the repo root since
-# the build step below runs `cd haskell`.
+# the build step below runs `cd bridge/haskell`.
 #
 # Also owns the resident-compile-daemon lifecycle helpers
 # (start_battery_daemon / teardown_battery_daemon) used by test wrappers.
@@ -59,7 +59,7 @@ resolve_tidepool_extract() {
       echo "error: the active GHC does not expose lens; run through 'just' or enter 'nix develop'" >&2
       exit 1
     fi
-    ( cd haskell && cabal build tidepool-extract-bin ) || return 1
+    ( cd bridge/haskell && cabal build tidepool-extract-bin ) || return 1
     # Cargo owns target-directory, profile, and target-triple resolution.
     # Read its artifact path, including on a fresh=true cache hit.
     TIDEPOOL_EXTRACT="$(
@@ -72,7 +72,7 @@ resolve_tidepool_extract() {
     # Split assignment from export: `export VAR="$(cmd)"` masks the command's
     # exit status (SC2155), so a failed list-bin would proceed with an empty
     # var.
-    TIDEPOOL_EXTRACT_WORKER="$(cd haskell && cabal list-bin tidepool-extract-bin)" || return 1
+    TIDEPOOL_EXTRACT_WORKER="$(cd bridge/haskell && cabal list-bin tidepool-extract-bin)" || return 1
     export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_WORKER
   fi
 
@@ -90,7 +90,7 @@ resolve_tidepool_extract() {
           echo "warning: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)" >&2
         else
           echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources" >&2
-          echo "  fix: cargo build -p tidepool-extract-cmd --bin tidepool-extract; cd haskell && cabal build tidepool-extract-bin" >&2
+          echo "  fix: cargo build -p tidepool-extract-cmd --bin tidepool-extract; cd bridge/haskell && cabal build tidepool-extract-bin" >&2
           echo "  or, for a deliberate cross-worktree/pinned run: TIDEPOOL_ALLOW_STALE_EXTRACT=1" >&2
           echo "  (full diagnostic: scripts/toolchain-doctor.sh)" >&2
           exit 1
@@ -137,7 +137,7 @@ resolve_tidepool_extract() {
 
 # The frontend resolves its compiler worker before publishing this identity. EOF
 # after the identity is an incomplete request, so the exit status is not a
-# successful-request signal. Share this preflight with Shoal bootstrap.
+# successful-request signal. Share this preflight with Exomonad bootstrap.
 validate_tidepool_extract_endpoint() (
   local probe_dir endpoint_magic probe_status=0
   probe_dir="$(mktemp -d -t tidepool-endpoint-probe.XXXXXX)" || return 1

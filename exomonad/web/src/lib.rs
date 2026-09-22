@@ -1,4 +1,4 @@
-//! tidepool-web — the operator GUI for the self-iterating harness, built on
+//! exomonad-web — the operator GUI for the self-iterating harness, built on
 //! the minimal node model: N REGISTERED NODES in a tree (slash-separated
 //! `node_id` paths), each one lifecycle — a SEED prompt in, an append-only
 //! TIMELINE of notes and asks, a FINAL VALUE (or failure) out — served over
@@ -7,10 +7,10 @@
 //! always-visible outline section.
 //!
 //! The harness driver blocks on an
-//! [`OperatorGate`](tidepool_harness::selfharness::operator::OperatorGate);
+//! [`OperatorGate`](exomonad_harness::selfharness::operator::OperatorGate);
 //! [`server::WebGate`] implements that gate over a web round trip, bound to
 //! one registered node: `present_form` publishes a
-//! [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
+//! [`FormShape`](exomonad_harness::selfharness::operator::FormShape)
 //! (rendered by [`render`]) onto that node's timeline and parks a channel
 //! resolved by `POST /node/{node}/submit/{interaction}` — this covers the
 //! self-iterating harness's between-loops gate too: it is an ordinary
@@ -39,11 +39,11 @@
 //!   the SSE broadcast stream, and [`server::WebGate`].
 //! - [`formapi`] — a DISABLED-BY-DEFAULT testing-convenience surface
 //!   (`GET`/`POST /node/{node}/api/form`) mounted onto the same router when
-//!   `TIDEPOOL_FORM_API=1`; see that module's docs for the hardening story.
+//!   `EXOMONAD_FORM_API=1`; see that module's docs for the hardening story.
 //!
 //! Loopback bind by default: reachability is the authorization boundary.
 //! There is still no auth token on the HTTP surface itself — see
-//! `TIDEPOOL_WEB_BIND_HOST` on [`bind_addr`] for the one, deliberate,
+//! `EXOMONAD_WEB_BIND_HOST` on [`bind_addr`] for the one, deliberate,
 //! opt-in exception.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
@@ -71,7 +71,7 @@ pub const DEFAULT_NODE_ID: &str = "root";
 /// listener and never opens one of its own, so pinning this literal pins its
 /// reachability too.
 ///
-/// **`TIDEPOOL_WEB_BIND_HOST`** is a deliberate, opt-in escape hatch (operator
+/// **`EXOMONAD_WEB_BIND_HOST`** is a deliberate, opt-in escape hatch (operator
 /// decision, 2026-08-18): when set to a valid IP, the server binds there
 /// instead of loopback — e.g. a box's own Tailscale interface address, so the
 /// operator GUI is reachable from another machine on the tailnet without an
@@ -82,12 +82,12 @@ pub const DEFAULT_NODE_ID: &str = "root";
 /// `0.0.0.0` or a publicly-routable address. An unparseable value falls back
 /// to loopback with a loud warning rather than failing to bind.
 fn bind_addr(port: u16) -> SocketAddr {
-    match std::env::var("TIDEPOOL_WEB_BIND_HOST") {
+    match std::env::var("EXOMONAD_WEB_BIND_HOST") {
         Ok(host) => match host.parse::<std::net::IpAddr>() {
             Ok(ip) => SocketAddr::from((ip, port)),
             Err(e) => {
                 eprintln!(
-                    "[boot] TIDEPOOL_WEB_BIND_HOST={host:?} is not a valid IP ({e}); \
+                    "[boot] EXOMONAD_WEB_BIND_HOST={host:?} is not a valid IP ({e}); \
                      falling back to loopback"
                 );
                 SocketAddr::from(([127, 0, 0, 1], port))
@@ -107,17 +107,17 @@ fn bind_addr(port: u16) -> SocketAddr {
 /// process alive (e.g. by driving a blocking `run_loop` on another thread of
 /// the same runtime).
 ///
-/// Also mounts the [`formapi`] testing surface when `TIDEPOOL_FORM_API=1` is
+/// Also mounts the [`formapi`] testing surface when `EXOMONAD_FORM_API=1` is
 /// set in the process environment — disabled otherwise.
 pub async fn spawn_operator_server_multi(port: u16) -> std::io::Result<(AppState, Arc<WebGate>)> {
     let state = AppState::new();
     let gate = state.register_node(DEFAULT_NODE_ID);
     let addr = bind_addr(port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let form_api_enabled = std::env::var("TIDEPOOL_FORM_API").as_deref() == Ok("1");
+    let form_api_enabled = std::env::var("EXOMONAD_FORM_API").as_deref() == Ok("1");
     if form_api_enabled {
         eprintln!(
-            "[boot] form-api ENABLED (TIDEPOOL_FORM_API=1) — testing-convenience surface on \
+            "[boot] form-api ENABLED (EXOMONAD_FORM_API=1) — testing-convenience surface on \
              GET/POST /node/{{node}}/api/form, loopback-only, not for browser/production use"
         );
     }
@@ -151,7 +151,7 @@ mod tests {
         // (root CLAUDE.md), so no other test observes this process's env —
         // still explicitly ensured absent first, defensively, for a plain
         // `cargo test` run sharing one process.
-        std::env::remove_var("TIDEPOOL_WEB_BIND_HOST");
+        std::env::remove_var("EXOMONAD_WEB_BIND_HOST");
         let addr = bind_addr(4601);
         assert!(addr.ip().is_loopback(), "{addr} is not loopback");
         assert_ne!(
@@ -164,14 +164,14 @@ mod tests {
     /// (never panics, never silently binds nothing) on an unparseable value.
     #[test]
     fn bind_host_override() {
-        std::env::set_var("TIDEPOOL_WEB_BIND_HOST", "100.84.124.37");
+        std::env::set_var("EXOMONAD_WEB_BIND_HOST", "100.84.124.37");
         let addr = bind_addr(4602);
         assert_eq!(addr, "100.84.124.37:4602".parse().unwrap());
 
-        std::env::set_var("TIDEPOOL_WEB_BIND_HOST", "not-an-ip");
+        std::env::set_var("EXOMONAD_WEB_BIND_HOST", "not-an-ip");
         let addr = bind_addr(4602);
         assert!(addr.ip().is_loopback(), "{addr} is not loopback");
 
-        std::env::remove_var("TIDEPOOL_WEB_BIND_HOST");
+        std::env::remove_var("EXOMONAD_WEB_BIND_HOST");
     }
 }

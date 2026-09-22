@@ -76,7 +76,7 @@ materialization is impossible, the graceful layer never runs.
 unit per value node and per copied payload byte."* 100_000 units is therefore
 roughly **100 KB of reachable payload**, not 100k values. A cell that reads a
 handful of source files and binds the result exceeds it. `reflect 3` over a
-Shoal session — three turns carrying cell sources and outputs — exceeds it on
+Exomonad session — three turns carrying cell sources and outputs — exceeds it on
 its own, which makes Reflect unusable at its documented default.
 
 ## Required behaviour

@@ -1,9 +1,9 @@
 //! Reloading one actor's agent spec from inside a live session, and the
 //! after-tool slot that spec fills.
 //!
-//! The comparison itself is checked in `tidepool_tool::surface`, discovery in
-//! `tidepool_actor::agent_spec`, and the delivery rules in
-//! `tidepool_actor::after_tool`. What is checked HERE is what only a live actor
+//! The comparison itself is checked in `exomonad_tool::surface`, discovery in
+//! `exomonad_actor::agent_spec`, and the delivery rules in
+//! `exomonad_actor::after_tool`. What is checked HERE is what only a live actor
 //! can answer: a rebuilt record that declares the same surface swaps and a
 //! later call runs the new code; one that declares a different surface is
 //! refused and the previous record keeps answering; a spec found by convention
@@ -135,21 +135,21 @@ const SLEEPS_THEN_ANNOTATES: &str =
 const REENTERS: &str =
     "Annotated . (T.pack \"the slot ran the tool body and got: \" <>) <$> Tools.probeBody (Tools.Probe (T.pack \"again\"))";
 
-const CONFIG: &str = "[defaults]\nmodel = 'gpt-5.6-sol'\n\
+const CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
                       [haskell]\nsource_roots = ['.']\nmodules = ['Project.Tools']\n\
                       tools = 'Project.Tools.tools'\n";
 
 /// The same workspace with rule two answering: `[haskell] spec` names the
 /// module, so the ROOT installs the spec and its slot without needing a
 /// checkout of its own.
-const SPEC_CONFIG: &str = "[defaults]\nmodel = 'gpt-5.6-sol'\n\
+const SPEC_CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
                            [haskell]\nsource_roots = ['.']\n\
                            modules = ['Project.Tools', 'AgentSpec']\n\
                            tools = 'Project.Tools.tools'\n\
                            spec = 'AgentSpec.agentSpec'\n";
 
 fn write_workspace(workspace: &Path, description: &str, answer: &str) {
-    let authored = workspace.join(".shoal");
+    let authored = workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(authored.join("config.toml"), CONFIG).unwrap();
     std::fs::write(
@@ -163,13 +163,16 @@ const DESCRIPTION: &str = "Answer one fixed question about a topic.";
 
 async fn start(description: &str, answer: &str) -> TestCampaign {
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, description, answer);
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -182,16 +185,19 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
     let slot = slot.to_owned();
     let answer = answer.to_owned();
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
-            let authored = config.workspace.join(".shoal");
+            let authored = config.workspace.join(".exomonad");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), spec_module(&slot)).unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -204,16 +210,19 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
     let slot = slot.to_owned();
     let answer = answer.to_owned();
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
-            let authored = config.workspace.join(".shoal");
+            let authored = config.workspace.join(".exomonad");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), spec_module_with_sleep(&slot)).unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -221,20 +230,20 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
 }
 
 /// What the one hosted tool answers right now.
-async fn probe(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
+async fn probe(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
     let result =
         dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": "anything"})).await;
     result.to_string()
 }
 
 /// Ask this actor to rebuild its own spec, and read the receipt.
-async fn reload(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
+async fn reload(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
     dispatch_structured_tool(policy, "reload_agent_spec", serde_json::json!({}))
         .await
         .to_string()
 }
 
-async fn status(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
+async fn status(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
     dispatch_structured_tool(policy, "status", serde_json::json!({"view": "detailed"}))
         .await
         .to_string()
@@ -284,7 +293,10 @@ async fn actor_spec_cost_measurement() {
         assert!(receipt.contains("swapped"), "{receipt}");
 
         std::fs::write(
-            campaign._repository.path().join(".shoal/Project/Tools.hs"),
+            campaign
+                ._repository
+                .path()
+                .join(".exomonad/Project/Tools.hs"),
             tools_module(DESCRIPTION, "measurement-two"),
         )
         .unwrap();
@@ -325,7 +337,7 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
     // Only the handler body moves. The description and both schemas are
     // spelled identically, so the declared surface cannot have changed.
     std::fs::write(
-        workspace.join(".shoal/Project/Tools.hs"),
+        workspace.join(".exomonad/Project/Tools.hs"),
         tools_module(DESCRIPTION, "two"),
     )
     .unwrap();
@@ -354,7 +366,7 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
     assert!(probe(policy).await.contains("one"));
 
     std::fs::write(
-        workspace.join(".shoal/Project/Tools.hs"),
+        workspace.join(".exomonad/Project/Tools.hs"),
         tools_module("Answer one fixed question, and explain it.", "two"),
     )
     .unwrap();
@@ -386,7 +398,7 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
     let broken =
         tools_module(DESCRIPTION, "one").replace("pure \"one\"", "pure undefinedByThisSpecReload");
     assert!(broken.contains("undefinedByThisSpecReload"), "{broken}");
-    std::fs::write(workspace.join(".shoal/Project/Tools.hs"), &broken).unwrap();
+    std::fs::write(workspace.join(".exomonad/Project/Tools.hs"), &broken).unwrap();
     let receipt = reload(policy).await;
     assert!(receipt.contains("rejected"), "{receipt}");
     assert!(receipt.contains("undefinedByThisSpecReload"), "{receipt}");
@@ -395,7 +407,7 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
     let after = probe(policy).await;
     assert!(after.contains("one"), "{after}");
     assert_eq!(
-        std::fs::read_to_string(workspace.join(".shoal/Project/Tools.hs")).unwrap(),
+        std::fs::read_to_string(workspace.join(".exomonad/Project/Tools.hs")).unwrap(),
         broken,
         "the edited file is exactly as it was written"
     );
@@ -437,19 +449,22 @@ async fn a_workspace_without_a_spec_file_reports_the_tools_key_and_behaves_as_be
 #[tokio::test]
 async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
             std::fs::write(
-                config.workspace.join(".shoal/AgentSpec.hs"),
+                config.workspace.join(".exomonad/AgentSpec.hs"),
                 spec_module(ANNOTATES),
             )
             .unwrap();
             commit(&config.workspace, "authored package with a spec");
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -465,13 +480,13 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
 
     let checkout = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &child.launch_worktrees[0],
         ))
         .unwrap()
         .unwrap();
     assert!(
-        checkout.cwd().join(".shoal/AgentSpec.hs").exists(),
+        checkout.cwd().join(".exomonad/AgentSpec.hs").exists(),
         "the checkout carries the spec module"
     );
 
@@ -513,19 +528,22 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
 #[tokio::test]
 async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
     let mut campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
             std::fs::write(
-                config.workspace.join(".shoal/AgentSpec.hs"),
+                config.workspace.join(".exomonad/AgentSpec.hs"),
                 spec_module(ANNOTATES),
             )
             .unwrap();
             commit(&config.workspace, "authored package with a spec");
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -541,7 +559,7 @@ async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
 
     let checkout = campaign
         .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
             &child.launch_worktrees[0],
         ))
         .unwrap()
@@ -550,7 +568,7 @@ async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
     assert!(probe(root.as_ref()).await.contains("one"));
 
     std::fs::write(
-        checkout.cwd().join(".shoal/Project/Tools.hs"),
+        checkout.cwd().join(".exomonad/Project/Tools.hs"),
         tools_module(DESCRIPTION, "two"),
     )
     .unwrap();
@@ -690,7 +708,7 @@ async fn a_slot_that_fails_delivers_the_original_with_one_compact_line() {
 async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
     // The wait is five minutes, which is not a test. Shortening it to nothing
     // is the whole of what this knob is for.
-    std::env::set_var(tidepool_actor::AFTER_TOOL_WAIT_ENV, "0");
+    std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "0");
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
@@ -706,7 +724,7 @@ async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
     let status = status(policy).await;
     assert!(status.contains("timed out after 0ms"), "{status}");
 
-    std::env::remove_var(tidepool_actor::AFTER_TOOL_WAIT_ENV);
+    std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -717,7 +735,7 @@ async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
 /// answering at its usual pace, and the late slot answer reaches nobody.
 #[tokio::test]
 async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
-    std::env::set_var(tidepool_actor::AFTER_TOOL_WAIT_ENV, "400");
+    std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "400");
     let campaign = start_with_sleeping_slot("keptwhole", SLEEPS_THEN_ANNOTATES).await;
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
@@ -798,7 +816,7 @@ async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
         "{status_after}"
     );
 
-    std::env::remove_var(tidepool_actor::AFTER_TOOL_WAIT_ENV);
+    std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -808,19 +826,22 @@ async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
 #[tokio::test]
 async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
     let campaign = TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
             // CONFIG names only the tools key, and lists no spec module.
             std::fs::write(
-                config.workspace.join(".shoal/AgentSpec.hs"),
+                config.workspace.join(".exomonad/AgentSpec.hs"),
                 spec_module(ANNOTATES),
             )
             .unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -928,7 +949,7 @@ fn commit(workspace: &Path, message: &str) {
     ]);
 }
 
-async fn next_child(campaign: &mut TestCampaign) -> tidepool_actor::LocalResidentInstallation {
+async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResidentInstallation {
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
@@ -993,16 +1014,19 @@ tools = MyTools
 /// A campaign whose workspace `[haskell] tools` key names the nesting record.
 async fn start_nested() -> TestCampaign {
     TestCampaign::start_with_config(
-        tidepool_actor::ResearchPolicy::default(),
+        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            let authored = config.workspace.join(".shoal");
+            let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
             std::fs::write(authored.join("config.toml"), CONFIG).unwrap();
             std::fs::write(authored.join("Project/Tools.hs"), NESTED_TOOLS_MODULE).unwrap();
             config.workspace_inputs = Some(
-                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -1018,7 +1042,7 @@ async fn start_nested() -> TestCampaign {
 /// alone.
 #[tokio::test]
 async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answer() {
-    use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+    use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
     let mut campaign = start_nested().await;
     let policy = campaign.root_installation.policy.clone();

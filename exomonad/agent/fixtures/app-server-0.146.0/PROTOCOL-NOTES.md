@@ -56,7 +56,7 @@ directory, confirmed by grep — zero `$ref` to `DynamicToolSpec` from any
 reachable property) or the crate's generated bindings, even though the wire
 protocol accepts it.
 
-**Consequence for the adapter:** `tidepool-agent`'s `backend::codex` module
+**Consequence for the adapter:** `exomonad-agent`'s `backend::codex` module
 must hand-roll `DynamicToolSpec`/`DynamicToolFunctionSpec`/
 `DynamicToolNamespaceSpec`/`DynamicToolNamespaceTool` locally (shapes below,
 straight from `codex-rs/protocol/src/dynamic_tools.rs` @ `rust-v0.146.0`) and
@@ -284,7 +284,7 @@ not needed anything from `codex-codes` beyond what's listed above.
 
 The `.jsonl` files beside this document are RECORDINGS of real app-server
 conversations, and they are the evidence behind every protocol claim
-`tidepool-agent` makes in a test. `MockBackend` is deliberately dumb (mock
+`exomonad-agent` makes in a test. `MockBackend` is deliberately dumb (mock
 policy, root/human 2026-08-11), so protocol behavior — frame ordering, the
 parked correlation triple, the `success:false` reply shape, `turn/completed`
 projection, `thread/tokenUsage/updated` capture — is proven by driving the

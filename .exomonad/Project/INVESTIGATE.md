@@ -12,7 +12,7 @@ import qualified Project.Investigate as Inv
 
 Inv.renderInvestigation <$> Inv.investigate
   Inv.defaultInvestigationPolicy
-  "/home/inanna/dev/shoal-evals/tui-test-app"   -- repository to run git in
+  "/home/inanna/dev/exomonad-evals/tui-test-app"   -- repository to run git in
   "f726882"                                     -- the revision the check ran on
   ["src/panels/"]                               -- the paths you own
   ["adding a tag from the detail panel updates the visible tag list"]

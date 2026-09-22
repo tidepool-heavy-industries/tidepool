@@ -13,9 +13,9 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use tidepool_harness::provider::oauth::ReasoningEffort;
-use tidepool_harness::provider::settings::{ModelSettings, SharedModelSettings};
-use tidepool_web::{router, AppState};
+use exomonad_harness::provider::oauth::ReasoningEffort;
+use exomonad_harness::provider::settings::{ModelSettings, SharedModelSettings};
+use exomonad_web::{router, AppState};
 use tokio::net::TcpListener;
 
 /// Boot the real router on an ephemeral loopback port.
@@ -49,7 +49,7 @@ async fn render_shows_current_and_post_mutates_and_persists() {
     let path = settings_path();
     let live = SharedModelSettings::load_or(
         path.clone(),
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
     );
     let state = AppState::new();
     state.set_model_settings(live);
@@ -67,7 +67,7 @@ async fn render_shows_current_and_post_mutates_and_persists() {
         .unwrap();
     assert!(page.contains("class=\"model-dial\""), "{page}");
     assert!(
-        page.contains("value=\"gpt-5.6-terra\" selected"),
+        page.contains("value=\"gpt-6-astra\" selected"),
         "current model must be pre-selected: {page}"
     );
     assert!(
@@ -77,7 +77,7 @@ async fn render_shows_current_and_post_mutates_and_persists() {
 
     let resp = client
         .post(format!("{base}/settings"))
-        .json(&serde_json::json!({"model": "gpt-5.6-sol", "effort": "high"}))
+        .json(&serde_json::json!({"model": "gpt-6-sol", "effort": "high"}))
         .send()
         .await
         .unwrap();
@@ -94,7 +94,7 @@ async fn render_shows_current_and_post_mutates_and_persists() {
         .await
         .unwrap();
     assert!(
-        page.contains("value=\"gpt-5.6-sol\" selected"),
+        page.contains("value=\"gpt-6-sol\" selected"),
         "the dial must reflect the just-posted model: {page}"
     );
     assert!(
@@ -106,11 +106,11 @@ async fn render_shows_current_and_post_mutates_and_persists() {
     // the persisted dial choice, not the original construction-time default.
     let reloaded = SharedModelSettings::load_or(
         path,
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
     );
     assert_eq!(
         reloaded.get(),
-        ModelSettings::new("gpt-5.6-sol", ReasoningEffort::High)
+        ModelSettings::new("gpt-6-sol", ReasoningEffort::High)
     );
 }
 
@@ -120,7 +120,7 @@ async fn render_shows_current_and_post_mutates_and_persists() {
 async fn post_rejects_a_non_allowlisted_model() {
     let live = SharedModelSettings::load_or(
         settings_path(),
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
     );
     let state = AppState::new();
     state.set_model_settings(live.clone());
@@ -129,7 +129,7 @@ async fn post_rejects_a_non_allowlisted_model() {
 
     let resp = client
         .post(format!("http://{addr}/settings"))
-        .json(&serde_json::json!({"model": "gpt-4o-mini", "effort": "high"}))
+        .json(&serde_json::json!({"model": "unsupported-model", "effort": "high"}))
         .send()
         .await
         .unwrap();
@@ -137,13 +137,13 @@ async fn post_rejects_a_non_allowlisted_model() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], false, "{body}");
     assert!(
-        body["error"].as_str().unwrap().contains("gpt-4o-mini"),
+        body["error"].as_str().unwrap().contains("unsupported-model"),
         "{body}"
     );
 
     assert_eq!(
         live.get(),
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
         "a rejected submission must not mutate the pending settings"
     );
 }
@@ -154,7 +154,7 @@ async fn post_rejects_a_non_allowlisted_model() {
 async fn post_rejects_an_unknown_effort() {
     let live = SharedModelSettings::load_or(
         settings_path(),
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
     );
     let state = AppState::new();
     state.set_model_settings(live.clone());
@@ -163,7 +163,7 @@ async fn post_rejects_an_unknown_effort() {
 
     let resp = client
         .post(format!("http://{addr}/settings"))
-        .json(&serde_json::json!({"model": "gpt-5.6-sol", "effort": "ludicrous"}))
+        .json(&serde_json::json!({"model": "gpt-6-sol", "effort": "ludicrous"}))
         .send()
         .await
         .unwrap();
@@ -173,7 +173,7 @@ async fn post_rejects_an_unknown_effort() {
 
     assert_eq!(
         live.get(),
-        ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+        ModelSettings::new("gpt-6-astra", ReasoningEffort::Medium),
         "a rejected submission must not mutate the pending settings"
     );
 }
@@ -200,7 +200,7 @@ async fn settings_route_404s_and_masthead_omits_the_dial_when_nothing_is_wired()
 
     let resp = client
         .post(format!("{base}/settings"))
-        .json(&serde_json::json!({"model": "gpt-5.6-sol", "effort": "high"}))
+        .json(&serde_json::json!({"model": "gpt-6-sol", "effort": "high"}))
         .send()
         .await
         .unwrap();

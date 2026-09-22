@@ -9,8 +9,8 @@ build audit called it?
 
 | Client | Version | Reached via |
 |--------|---------|-------------|
-| reqwest | 0.13.4 | `tidepool-harness`, `tidepool-web`, and `genai 0.5.3` (→ handlers, tidepool, repl) |
-| reqwest | 0.12.28 | `openai-auth 1.0.0` → `tidepool-harness` → `tidepool-web` |
+| reqwest | 0.13.4 | `exomonad-harness`, `exomonad-web`, and `genai 0.5.3` (→ handlers, tidepool, repl) |
+| reqwest | 0.12.28 | `openai-auth 1.0.0` → `exomonad-harness` → `exomonad-web` |
 | ureq | 2.12.1 | `tidepool-handlers` (→ tidepool, harness, repl) and `examples/tide` |
 
 Crypto: `rustls 0.23.42` resolves with **both** provider features enabled —

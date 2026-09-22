@@ -30,13 +30,13 @@ use crate::support;
 use std::sync::Arc;
 
 use tidepool_bridge::HaskellValue;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::harness::AnswerContract;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeState;
-use tidepool_harness::{Harness, SuspensionRouting, TurnOutcome};
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::harness::AnswerContract;
+use exomonad_harness::log::{Actor, LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::tree::NodeState;
+use exomonad_harness::{Harness, SuspensionRouting, TurnOutcome};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -265,20 +265,20 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
     let target = cfg
         .turn_target(Some(("Int -> Int", &[])))
         .expect("turn target");
-    let src = tidepool_harness::engine::template_turn(
+    let src = exomonad_harness::engine::template_turn(
         &cfg,
         &target.stack,
         "(finalize @(Int -> Int) (\\x -> x + 1) :: M ())\n",
         "",
         "",
     );
-    let result = tidepool_harness::engine::compile_turn(
+    let result = exomonad_harness::engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",
         &target.include,
-        tidepool_harness::timing::NO_NODE,
-        tidepool_harness::timing::NO_ROUND,
+        exomonad_harness::timing::NO_NODE,
+        exomonad_harness::timing::NO_ROUND,
     );
     assert!(
         result.is_ok(),

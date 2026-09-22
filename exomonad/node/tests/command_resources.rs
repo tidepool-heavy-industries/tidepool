@@ -1,9 +1,9 @@
 //! Run with `just test-command-resources-delegated`; the target needs an
 //! isolated delegated service cgroup with no other resident process.
-use std::{path::Path, sync::Arc, time::Duration};
-use tidepool_node::command_resources::{
+use exomonad_node::command_resources::{
     CommandResourcePolicy, CommandResourceStatus, CommandResources,
 };
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::process::{Child, Command};
 fn spawn_in(path: &Path, script: &str) -> Child {
     use std::os::fd::AsRawFd;
@@ -186,7 +186,7 @@ async fn actor_admission_times_out_without_starting() {
 #[tokio::test]
 #[ignore = "requires a fresh delegated systemd cgroup scope"]
 async fn shared_clients_retain_queued_work_after_observer_disconnect() {
-    use tidepool_node::command_resources::{service, CommandResourceClient};
+    use exomonad_node::command_resources::{service, CommandResourceClient};
     let policy = CommandResourcePolicy {
         general_bytes: 64 * 1024 * 1024,
         protected_bytes: 0,

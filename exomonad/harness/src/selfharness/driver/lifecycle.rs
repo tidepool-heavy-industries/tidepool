@@ -211,7 +211,7 @@ impl SelfHarnessDriver {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             kv_path: tidepool_runtime::paths::cache_dir().join("selfharness-kv.json"),
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                .unwrap_or_else(|_| "gpt-6-luna".to_string()),
         };
         let stack: crate::harness::BoxedStack =
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));

@@ -347,7 +347,7 @@ impl BindingTable {
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(storage_failure(&lock_path,
-                        "another process already owns this binding root; stop its Shoal session and wait for shutdown before launching again (ownership was not changed)"));
+                        "another process already owns this binding root; stop its Exomonad session and wait for shutdown before launching again (ownership was not changed)"));
                 }
                 Err(std::fs::TryLockError::Error(error)) => {
                     return Err(storage_failure(&lock_path, error));

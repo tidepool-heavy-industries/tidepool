@@ -9,8 +9,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
+use exomonad_actor::Incarnation;
 use serde::{Deserialize, Serialize};
-use tidepool_actor::Incarnation;
 
 const STATE_VERSION: u32 = 1;
 
@@ -21,7 +21,7 @@ struct IncarnationState {
     last_incarnation: u64,
 }
 
-/// Exclusive claim on one Shoal host incarnation.
+/// Exclusive claim on one Exomonad host incarnation.
 #[derive(Debug)]
 pub(crate) struct HostIncarnationLease {
     incarnation: Incarnation,
@@ -45,7 +45,7 @@ impl HostRunLock {
         match file.try_lock() {
             Ok(()) => Ok(Self(file)),
             Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
-                "another Shoal host or maintenance operation already owns {}",
+                "another Exomonad host or maintenance operation already owns {}",
                 run_root.display()
             ))),
             Err(std::fs::TryLockError::Error(error)) => Err(error),
@@ -57,7 +57,7 @@ impl Drop for HostRunLock {
         // Concurrent fork may temporarily inherit the open description.
         // Unlock ends ownership without waiting for that child to exec.
         if let Err(error) = self.0.unlock() {
-            tracing::warn!(%error, "Shoal host owner unlock failed");
+            tracing::warn!(%error, "Exomonad host owner unlock failed");
         }
     }
 }
@@ -71,7 +71,7 @@ impl HostIncarnationLease {
         let previous = read_previous(&state_path)?;
         let next = previous.checked_add(1).ok_or_else(|| {
             io::Error::other(format!(
-                "Shoal host incarnation exhausted at {}",
+                "Exomonad host incarnation exhausted at {}",
                 state_path.display()
             ))
         })?;
@@ -118,7 +118,7 @@ fn invalid_state(path: &Path, detail: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "invalid Shoal host incarnation state {}: {detail}",
+            "invalid Exomonad host incarnation state {}: {detail}",
             path.display()
         ),
     )

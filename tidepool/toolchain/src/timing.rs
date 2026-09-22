@@ -12,7 +12,7 @@
 //! # The event shape
 //!
 //! One `tracing` DEBUG event per stage, on the retained target
-//! `tidepool_harness::timing`,
+//! `exomonad_harness::timing`,
 //! message `"turn stage"`, fields:
 //!
 //! | field   | type          | meaning                                        |
@@ -78,7 +78,7 @@
 //!
 //! The runtime and the historical harness frontend used this format; this
 //! module owns the shared event shape so callers do not hand-mirror it. The
-//! target string remains `tidepool_harness::timing` for collector compatibility
+//! target string remains `exomonad_harness::timing` for collector compatibility
 //! regardless of which crate calls [`record_stage`].
 
 use std::time::Duration;
@@ -255,7 +255,7 @@ pub fn record_stage(node: u64, round: u64, stage: &str, elapsed: Duration, bytes
     let node_label = render_node(node);
     let round_label = render_round(round);
     tracing::debug!(
-        target: "tidepool_harness::timing",
+        target: "exomonad_harness::timing",
         node = node_label.as_str(),
         round = round_label.as_str(),
         stage,

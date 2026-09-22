@@ -1,8 +1,9 @@
 //! The real resident MCP policy driven directly by the canonical local actor.
 
-use tidepool_actor::{
+use exomonad_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
 };
+use exomonad_tool::{ToolArguments, ToolInvocation};
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -15,7 +16,6 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
-use tidepool_tool::{ToolArguments, ToolInvocation};
 
 mod support;
 
@@ -161,7 +161,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         session,
         machine,
         None,
-        tidepool_actor::Incarnation::FIRST,
+        exomonad_actor::Incarnation::FIRST,
     );
     for invalid in [
         ActorDescriptor::new(
@@ -173,15 +173,15 @@ async fn resident_cleanup_case(fail_hook: bool) {
         ),
         descriptor
             .clone()
-            .with_supervisor_parent(tidepool_actor::ActorRef {
-                id: tidepool_actor::ActorId(1),
-                incarnation: tidepool_actor::Incarnation::FIRST,
+            .with_supervisor_parent(exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(1),
+                incarnation: exomonad_actor::Incarnation::FIRST,
             }),
         descriptor
             .clone()
-            .with_context_parent(tidepool_actor::ActorRef {
-                id: tidepool_actor::ActorId(1),
-                incarnation: tidepool_actor::Incarnation::FIRST,
+            .with_context_parent(exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(1),
+                incarnation: exomonad_actor::Incarnation::FIRST,
             }),
     ] {
         assert!(forest
@@ -260,7 +260,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert!(matches!(
         child_retired,
         LocalResidentDeployment::Retired { ref terminal, .. }
-            if terminal.kind == tidepool_actor::ActorExitKind::Completed
+            if terminal.kind == exomonad_actor::ActorExitKind::Completed
     ));
     let finished = policy
         .dispatch_boxed(ToolInvocation {
@@ -277,18 +277,18 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(cleanup.is_confirmed(), !fail_hook, "{cleanup:?}");
     assert!(matches!(
         cleanup.realm(),
-        tidepool_actor::CleanupComponentOutcome::Confirmed
+        exomonad_actor::CleanupComponentOutcome::Confirmed
     ));
     if fail_hook {
         assert!(matches!(
             cleanup.children(),
-            tidepool_actor::CleanupComponentOutcome::Unconfirmed(_)
+            exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)
         ));
     }
 
     assert_eq!(
         actor.terminal().wait().await.kind,
-        tidepool_actor::ActorExitKind::Completed
+        exomonad_actor::ActorExitKind::Completed
     );
     assert!(matches!(
         deployments.recv().await,
@@ -297,13 +297,13 @@ async fn resident_cleanup_case(fail_hook: bool) {
     ));
     // External host composition can construct the canonical projection, but a
     // terminal actor cannot silently retarget its independently live sibling.
-    let canonical = tidepool_actor::ResidentInteractivePolicy::local(actor.clone());
-    let error = tidepool_actor::ResidentToolEndpoint::seal_hosted_work_boxed(&canonical)
+    let canonical = exomonad_actor::ResidentInteractivePolicy::local(actor.clone());
+    let error = exomonad_actor::ResidentToolEndpoint::seal_hosted_work_boxed(&canonical)
         .await
         .expect_err("terminal canonical projection remains terminal");
     assert!(matches!(error,
-        tidepool_actor::ResidentToolError::Invocation(
-            tidepool_actor::KernelInvocationFailure::ActorExited(identity))
+        exomonad_actor::ResidentToolError::Invocation(
+            exomonad_actor::KernelInvocationFailure::ActorExited(identity))
                 if identity == actor.identity()));
 
     // The first tree's retirement must preserve the sibling's live closures.
@@ -329,6 +329,6 @@ async fn resident_cleanup_case(fail_hook: bool) {
     sibling_task.await.expect("sibling task");
     assert_eq!(
         sibling.terminal().wait().await.kind,
-        tidepool_actor::ActorExitKind::Completed
+        exomonad_actor::ActorExitKind::Completed
     );
 }

@@ -8,8 +8,9 @@ use tidepool_repr::execution_schema::{
 
 const M3_ARTIFACT: &[u8] =
     include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
-const SCHEMA6_SEED_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor");
+const SCHEMA6_SEED_ARTIFACT: &[u8] = include_bytes!(
+    "../../../bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
+);
 
 #[test]
 fn w5_no_success_is_not_a_successful_empty_return() {

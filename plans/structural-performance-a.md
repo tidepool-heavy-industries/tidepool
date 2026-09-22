@@ -212,8 +212,8 @@ count now dominates its wall time. These measurements make reusable display
 execution and a checked-cell execution bundle concrete next-wave questions.
 
 Use a Sol integration lead and at most three children concurrently: Luna for
-bounded cleanup/fixtures/scripts, Terra for substantive implementation, and
-independent Sol review for consequential compiler and GC changes. Use
+bounded cleanup/fixtures/scripts, Sol for substantive implementation, and
+independent Astra review for consequential compiler and GC changes. Use
 isolated file ownership and concrete commits. Independently review consequential
 compiler and GC changes. Establish shared contracts before parallel consumers.
 No broad batteries in children; root owns integration corpus checks.
@@ -336,7 +336,7 @@ claims are not mistaken for the supported state.
 The selfharness and operator-web crates remain in the repository as historical
 source for future reference, but are outside the supported Cargo workspace and
 are not compiled by the default or all-supported-target checks. The supported
-surface retains Shoal, the toolchain-stamp utility, and the independent compile
+surface retains Exomonad, the toolchain-stamp utility, and the independent compile
 reporter. The following requirements are retired with this parcel:
 
 - `tidepool-selfharness` and `tidepool-selfharness-web` are no longer

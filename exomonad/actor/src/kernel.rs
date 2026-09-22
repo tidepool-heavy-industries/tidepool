@@ -181,7 +181,7 @@ pub enum KernelMessage {
         reply: RpcReplyPort<KernelCallReply>,
     },
     Tool {
-        invocation: tidepool_tool::ToolInvocation,
+        invocation: exomonad_tool::ToolInvocation,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     Workbench {
@@ -190,7 +190,7 @@ pub enum KernelMessage {
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
     ReconcileWorkbenchCancellation {
-        invocation: Option<tidepool_tool::ToolInvocationContext>,
+        invocation: Option<exomonad_tool::ToolInvocationContext>,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
         reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
     },

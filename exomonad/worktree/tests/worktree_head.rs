@@ -2,19 +2,19 @@
 //! HEAD lookup on the public surface.
 //!
 //! Every test drives a REAL temporary git repository via
-//! [`tidepool_worktree::testing::TestRepo`] and [`ScriptedWriter`]. There is
+//! [`exomonad_worktree::testing::TestRepo`] and [`ScriptedWriter`]. There is
 //! no mock of git anywhere.
 //!
 //! The whole point of this verb is that it is a FRESH read, never a cached
-//! one — not [`tidepool_worktree::WorktreeHandle::source_head`] (the frozen
-//! seed commit) and not anything a [`tidepool_worktree::WorktreeMonitor`]
+//! one — not [`exomonad_worktree::WorktreeHandle::source_head`] (the frozen
+//! seed commit) and not anything a [`exomonad_worktree::WorktreeMonitor`]
 //! last reconciled. Every test here is built to fail an implementation that
 //! quietly returns one of those instead.
 
 use std::path::Path;
 
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{
     EventJournal, GitCli, WorktreeError, WorktreeManager, WorktreeRegistry, WorktreeSpec,
 };
 
@@ -121,7 +121,7 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
     // loop iteration unregistering its handlers and the next re-registering them.
     let journal_dir = tempfile::TempDir::new().expect("journal tempdir");
     let journal = EventJournal::open(journal_dir.path().join("events.jsonl")).expect("journal");
-    let mut monitor = tidepool_worktree::WorktreeMonitor::new(GitCli::new(), journal);
+    let mut monitor = exomonad_worktree::WorktreeMonitor::new(GitCli::new(), journal);
     monitor
         .register(handle.id().clone(), handle.cwd().to_path_buf())
         .expect("register");

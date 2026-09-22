@@ -3,7 +3,7 @@
 use tidepool_bridge_effects::{
     WtBranchName, WtDirtyPolicy, WtGitOid, WtGitRef, WtInProgressKind, WtWorktreeId,
 };
-use tidepool_worktree::{BranchName, DirtyPolicy, GitOid, GitRef, InProgressKind, WorktreeId};
+use exomonad_worktree::{BranchName, DirtyPolicy, GitOid, GitRef, InProgressKind, WorktreeId};
 
 pub(crate) fn worktree_id_to_wire(worktree_id: &WorktreeId) -> WtWorktreeId {
     WtWorktreeId {

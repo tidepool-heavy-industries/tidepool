@@ -31,12 +31,12 @@ use std::sync::{Arc, Mutex};
 use crate::support;
 
 use serde_json::json;
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::LogHeader;
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::operator::{FormShape, OperatorGate};
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, NodeState,
     SelfHarnessDriver,
 };
@@ -45,7 +45,8 @@ fn repo_root() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
@@ -54,7 +55,7 @@ fn prelude_dir() -> std::path::PathBuf {
 }
 
 fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
+    repo_root().join("exomonad/examples/harness")
 }
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -111,7 +112,7 @@ fn build_driver_with_provider(
     .expect("answerer engine config");
     let log_path = std::env::temp_dir().join(format!("{label}-{}.jsonl", std::process::id()));
     let writer =
-        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+        exomonad_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     (
         SelfHarnessDriver::new(agent.clone(), Arc::new(LogObserver)),
@@ -172,11 +173,11 @@ fn card_needle(brief: &str) -> String {
 /// compiled, and the budget test "passed" without ever forking).
 fn logged_turn_texts(log_path: &std::path::Path) -> Vec<String> {
     let (_header, events) =
-        tidepool_harness::log::LogReader::open(log_path).expect("open test log");
+        exomonad_harness::log::LogReader::open(log_path).expect("open test log");
     events
         .filter_map(|r| r.ok())
         .filter_map(|r| match r.event {
-            tidepool_harness::log::Event::TurnDelta { content, .. } => Some(content),
+            exomonad_harness::log::Event::TurnDelta { content, .. } => Some(content),
             _ => None,
         })
         .collect()
@@ -1109,7 +1110,7 @@ async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let log_path =
         std::env::temp_dir().join(format!("fork-child-gui-{}.jsonl", std::process::id()));
-    let writer = tidepool_harness::log::LogWriter::create(&log_path, &fork_child_gui_header())
+    let writer = exomonad_harness::log::LogWriter::create(&log_path, &fork_child_gui_header())
         .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 

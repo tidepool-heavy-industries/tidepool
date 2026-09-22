@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
+use exomonad_worktree::testing::TestRepo;
+use exomonad_worktree::{
     GitCli, HeadState, InProgressKind, WorktreeError, WorktreeManager, WorktreeRegistry,
     WorktreeSpec,
 };

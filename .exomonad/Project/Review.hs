@@ -70,7 +70,7 @@ import Jev.Operators (Packet ((:=), (:&)), Settled (Settled))
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
-import Tidepool.Actors.Shoal
+import Tidepool.Actors.Exomonad
 import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (GitRef (..), Jev, Commands)
 import Tidepool.Worktree (renderGitOid)
@@ -170,9 +170,9 @@ reviewActor name = R.definition name (Actor.Selected knownEffects)
 -- | The parent starts one merge actor per merge target, then one review per
 -- implementer right after admission:
 --
--- > Right tree <- createWorktree (fromRef "shoal/integration" "integration")
--- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration")
--- >                     ["just", "test-lib", "tidepool-actor", "test(request::updates)"])
+-- > Right tree <- createWorktree (fromRef "exomonad/integration" "integration")
+-- > merge <- R.start (mergeInto (worktreeId tree) (Just "exomonad/integration")
+-- >                     ["just", "test-lib", "exomonad-actor", "test(request::updates)"])
 -- > worker <- unfold group (childWithProgress @ImplNote @ImplReport branch)
 -- > review <- R.start (reviewOf contract worker (MergeTarget merge))
 reviewOf
@@ -691,7 +691,7 @@ startReviewer own _contract brief oid = do
   reviewer <- unfold (subgroup "review") $ child $
     withInstructions reviewerInstructions $
     withContext (selected renderBrief) $
-    withModel (Literal "gpt-5.6-luna") $
+    withModel (Literal "gpt-6-luna") $
     withEffort Medium $
     narrowed @ReviewerEffects knownEffects
       (inspectionPolicy (atRef (GitRef (renderGitOid oid))))

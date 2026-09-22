@@ -48,7 +48,7 @@
 //! * leaves → the corresponding JSON scalar.
 //!
 //! The collector that builds this JSON from the rendered controls is
-//! `tidepool-web`'s submission path, guided by the same [`FormShape`].
+//! `exomonad-web`'s submission path, guided by the same [`FormShape`].
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -281,7 +281,7 @@ pub struct VariantShape {
 }
 
 /// The bind path a recursively-rendered [`FormShape`] sits at when it IS the
-/// whole form — the root `tidepool-web`'s renderer and its submission
+/// whole form — the root `exomonad-web`'s renderer and its submission
 /// collector must BOTH start from, since a bind path is only meaningful
 /// relative to the root it was built from.
 ///

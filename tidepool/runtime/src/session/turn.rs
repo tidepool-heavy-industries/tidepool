@@ -488,7 +488,7 @@ pub struct TurnRequest<'a> {
     /// means the extract's scaffold-reserved default (`__result`), which is
     /// what a template authored for this path should use. Supply it only when
     /// a template's target binder is fixed by a builder shared with another
-    /// path — `tidepool-harness`'s expression wrapper comes from
+    /// path — `exomonad-harness`'s expression wrapper comes from
     /// `tidepool_mcp::template_haskell`, which the stateless eval server also
     /// uses and which names its target `result`. Forwarded as `--target`; the
     /// output file base is `result.cbor` either way.
@@ -619,7 +619,7 @@ pub fn prepared_scaffold_binding_named(scaffold_target: &str, target: &str) -> S
 /// these bodies take a target-specific argument (`resumeLifted` and the apply
 /// roots' own `settle` are the same computation
 /// regardless of which settled entry suspended) — so a module settling
-/// several targets ([`with_settled_scaffolds`] in `tidepool-harness::engine`)
+/// several targets ([`with_settled_scaffolds`] in `exomonad-harness::engine`)
 /// emits this ONCE for the whole module, not once per target the way
 /// [`prepared_scaffold_binding_named`]'s settled line must be.
 ///
@@ -1581,7 +1581,7 @@ const PREAMBLE_DEFAULT_MARKER: &str = "default (Int, Double, Text)\n";
 /// [`PREAMBLE_DEFAULT_MARKER`] line — the same injection point
 /// `template_haskell` uses. A no-op (returns `preamble` unchanged) when
 /// `imports` is blank. The ONE import-insertion mechanism a session-turn
-/// module builder needs — `tidepool-repl`'s and `tidepool-harness`'s own turn
+/// module builder needs — `tidepool-repl`'s and `exomonad-harness`'s own turn
 /// wrappers call this rather than reimplementing the same marker search.
 pub fn insert_preamble_imports(preamble: &str, imports: &str) -> String {
     if imports.trim().is_empty() {
@@ -1652,7 +1652,7 @@ pub fn assemble_inspection_module(preamble: &str, imports: &str, expressions: &[
 ///
 /// This is the ONE mechanism behind every BIND/BINDDISCARD/MULTIBIND session
 /// wrapper in both `tidepool-repl` (`wrap_bind_source`/
-/// `wrap_bind_discard_source`/`wrap_multi_bind_source`) and `tidepool-harness`
+/// `wrap_bind_discard_source`/`wrap_multi_bind_source`) and `exomonad-harness`
 /// (`template_session_bind`/`session_bind_template`) — those stay as each
 /// crate's own thin, policy-only callers (what `extra`/`tail`/`delegate_wrap`
 /// to pass), not a second copy of this assembly.
@@ -1885,7 +1885,7 @@ pub fn assemble_opaque_expression_module(
 }
 
 /// Place `turn_text` as a `do`-block statement — the `{{TURN_STMT}}`
-/// placement mode. Mirrors `tidepool-repl`'s and `tidepool-harness`'s own
+/// placement mode. Mirrors `tidepool-repl`'s and `exomonad-harness`'s own
 /// `push_braced_stmt` wrappers (both now thin callers of this function): a
 /// `let` turn (at column 1, since a raw turn has no leading indentation)
 /// needs explicit decl braces there (a layout `let` swallows the following
@@ -3623,7 +3623,8 @@ mod ambiguity_advice_tests {
 
     #[test]
     fn a_failed_pattern_bind_names_the_bind_and_says_to_inspect_the_value() {
-        let cell = "Right tree <- createWorktree (fromRef (GitRef \"shoal/dry8\") \"merge\")\ntree";
+        let cell =
+            "Right tree <- createWorktree (fromRef (GitRef \"exomonad/dry8\") \"merge\")\ntree";
         assert_eq!(
             runtime_failure_advice(DO_BLOCK_FAILURE, cell).unwrap(),
             "`Right tree` on line 1 did not match, so the cell stopped there; \

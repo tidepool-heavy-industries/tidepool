@@ -66,7 +66,7 @@ pub fn generated_files() -> Vec<GeneratedFile> {
 
 /// Every generated file for the suspension-decode roster
 /// ([`effects::suspension_roster`]) MINUS `Ask` — the decode-only request
-/// enums `tidepool-harness`'s `classify_hole` consumes. Separate from
+/// enums `exomonad-harness`'s `classify_hole` consumes. Separate from
 /// [`generated_files`] because this roster is disjoint from [`effects::all`]
 /// (see that function's doc): a decl-side change to one migrated effect must
 /// never regenerate an unrelated harness decode file, and vice versa.
@@ -97,10 +97,10 @@ pub fn harness_generated_files() -> Vec<GeneratedFile> {
 }
 
 /// The `Ask` member of the suspension-decode roster, generated into
-/// `tidepool-runtime` instead of `tidepool-harness` — shared by
+/// `tidepool-runtime` instead of `exomonad-harness` — shared by
 /// `tidepool-runtime::session::engine::extract_ask_request` (consumed by
 /// both `tidepool-repl` and the one-shot MCP eval server) AND by
-/// `tidepool-harness`'s own `RosterRequest::Ask`, which reuses this exact
+/// `exomonad-harness`'s own `RosterRequest::Ask`, which reuses this exact
 /// type rather than carrying a second, kept-in-sync copy. See
 /// [`gen::suspension_req_rs`]'s doc for the layering argument.
 ///
@@ -126,7 +126,7 @@ pub fn runtime_generated_files() -> Vec<GeneratedFile> {
     out
 }
 
-/// The actor-runtime request decoder, generated into `tidepool-actor` so the
+/// The actor-runtime request decoder, generated into `exomonad-actor` so the
 /// actor kernel owns its orchestration boundary rather than teaching the
 /// transitional harness classifier about actor lifecycle.
 #[must_use]
@@ -170,7 +170,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
     out
 }
 
-/// Decode-only recipe operations are consumed by the Shoal composition root.
+/// Decode-only recipe operations are consumed by the Exomonad composition root.
 #[must_use]
 pub fn recipe_generated_files() -> Vec<GeneratedFile> {
     let effects = vec![effects::recipe_check::recipe_check()];

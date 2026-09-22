@@ -4,7 +4,7 @@ These synthetic worlds follow the planned-swarm, coordination and small-agent
 designs (now landed; their plan documents are in Git history): authored shared
 contracts, small-worker execution, consequential specialist consultation, distinct
 responsibility/context/supervision graphs, and evidence attached to exact revisions.
-They are not observations of a running Shoal instance.
+They are not observations of a running Exomonad instance.
 
 ## Expectations recorded before calls
 
@@ -94,7 +94,7 @@ Latencies: conflict 218 ms, local 281 ms, renamed 234 ms, joint packet 342 ms,
 per-piece packet 221 ms. Private ignored evidence: `evidence/world-*-001.json`.
 `src/worlds.rs` is included in harness source fingerprints. Package build, 12 unit
 tests, clippy with warnings denied, formatting, and diff whitespace checks passed.
-No workspace battery or running Shoal acceptance was attempted.
+No workspace battery or running Exomonad acceptance was attempted.
 
 ## Limits and next challenge
 

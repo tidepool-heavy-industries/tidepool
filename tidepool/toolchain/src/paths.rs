@@ -183,7 +183,7 @@ pub fn listen_cursor_path(run_id: &str) -> PathBuf {
     listen_dir(run_id).join("cursor")
 }
 
-/// Actor-incarnation-owned mutable build output for one Shoal run.
+/// Actor-incarnation-owned mutable build output for one Exomonad run.
 ///
 /// `run_id` is the composition root's filesystem-safe lease identity. Actor
 /// numbers are separate path segments so no model-visible path depends on
@@ -223,7 +223,7 @@ fn existing_roots(leaf: &str) -> Vec<PathBuf> {
 /// Walk up from `start` to the filesystem root, returning the nearest ancestor
 /// that contains a directory named `marker` (git-style project discovery,
 /// generalized over the marker name so a caller with its own project-root
-/// concept — e.g. Shoal's `.shoal/`-rooted workspace, distinct from this
+/// concept — e.g. Exomonad's `.exomonad/`-rooted workspace, distinct from this
 /// crate's own `.tidepool/` project state — does not need to duplicate the
 /// walk). `None` if no ancestor carries it.
 pub fn find_root_with_marker(start: &Path, marker: &str) -> Option<PathBuf> {
@@ -243,8 +243,8 @@ pub fn find_root_with_marker(start: &Path, marker: &str) -> Option<PathBuf> {
 ///
 /// This is this crate's OWN `.tidepool/` project marker (used by
 /// [`load_secrets`]'s walk-up) — not a general-purpose "find my project root"
-/// for every marker directory. A caller with a different marker (Shoal's
-/// `.shoal/`, say) must call [`find_root_with_marker`] with its own marker
+/// for every marker directory. A caller with a different marker (Exomonad's
+/// `.exomonad/`, say) must call [`find_root_with_marker`] with its own marker
 /// name rather than reuse this: reusing it silently matches on the WRONG
 /// marker, and a `.tidepool/` that legitimately exists somewhere up the tree
 /// (e.g. the user-global legacy `~/.tidepool`) then wins over the caller's
@@ -369,34 +369,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&orphan);
     }
 
-    /// A caller with its own marker (Shoal's `.shoal/`) must not be confused
+    /// A caller with its own marker (Exomonad's `.exomonad/`) must not be confused
     /// by an unrelated `.tidepool/` sitting closer to `start` — regression
-    /// coverage for the bug where `shoal init`'s cwd-detection reused
+    /// coverage for the bug where `exomonad init`'s cwd-detection reused
     /// [`find_project_root`] (this crate's OWN `.tidepool/` marker) and so
-    /// silently resolved a nested Shoal workspace to whichever ancestor
+    /// silently resolved a nested Exomonad workspace to whichever ancestor
     /// (often `$HOME`) happened to carry a `.tidepool/` first, ignoring a
-    /// `.shoal/` that was actually closer.
+    /// `.exomonad/` that was actually closer.
     #[test]
     fn find_root_with_marker_is_not_confused_by_a_different_markers_directory() {
         let tmp = std::env::temp_dir().join(format!("tp-paths-marker-{}", std::process::id()));
         let nested = tmp.join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
         // `tmp` (an ancestor of `nested`) carries the OTHER marker, closer
-        // than nothing at all would be — a `.shoal` search must not match it.
+        // than nothing at all would be — a `.exomonad` search must not match it.
         std::fs::create_dir_all(tmp.join(".tidepool")).unwrap();
         assert_eq!(
             find_root_with_marker(&nested, ".tidepool"),
             Some(tmp.clone())
         );
-        assert_eq!(find_root_with_marker(&nested, ".shoal"), None);
+        assert_eq!(find_root_with_marker(&nested, ".exomonad"), None);
 
         // Once `nested` itself carries the marker being searched for, that
         // nearer directory wins over the farther `.tidepool` ancestor —
         // exactly the "workspace directly under an unrelated parent
-        // workspace" case `shoal init` must get right.
-        std::fs::create_dir_all(nested.join(".shoal")).unwrap();
+        // workspace" case `exomonad init` must get right.
+        std::fs::create_dir_all(nested.join(".exomonad")).unwrap();
         assert_eq!(
-            find_root_with_marker(&nested, ".shoal"),
+            find_root_with_marker(&nested, ".exomonad"),
             Some(nested.clone())
         );
 

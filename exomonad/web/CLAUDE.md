@@ -1,11 +1,11 @@
-# tidepool-web — selfharness operator UI
+# exomonad-web — selfharness operator UI
 
 ## Charter
 
 This crate renders the operator-facing HTTP/SSE interface for the resident
 harness: node tree, timeline, typed forms, notes, continue gates, and live
 model/effort settings. Harness lifecycle and persistence belong to
-`tidepool-harness`.
+`exomonad-harness`.
 
 ## State model
 
@@ -88,5 +88,5 @@ changes to browser behavior, inspect the generated shell and exercise the HTTP
 route through the server rather than snapshotting a helper in isolation.
 
 ```bash
-cargo nextest run -p tidepool-web
+cargo nextest run -p exomonad-web
 ```

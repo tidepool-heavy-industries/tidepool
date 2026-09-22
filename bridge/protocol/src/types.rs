@@ -504,7 +504,7 @@ pub enum Validation {
     /// byte ascii-alphanumeric or in `extra_allowed`.
     ///
     /// Byte-oriented rather than char-oriented deliberately: this mirrors
-    /// `tidepool_worktree::WorktreeId::is_path_safe`, which is byte-oriented
+    /// `exomonad_worktree::WorktreeId::is_path_safe`, which is byte-oriented
     /// because the value is joined into a filesystem path as one component.
     /// A cross-check test guards the duplication this creates.
     Segment {
@@ -679,7 +679,7 @@ impl WireDerives {
 #[derive(Clone, Debug)]
 pub struct DomainMap {
     /// The Rust path of the domain type, resolved at the CONSUMING crate
-    /// (`tidepool_worktree::WorktreeId`). A path, never Haskell source — the
+    /// (`exomonad_worktree::WorktreeId`). A path, never Haskell source — the
     /// same pressure valve `RustBinding::Path` already is, and the reason the
     /// schema crate can stay a leaf while the adapters generate into
     /// `tidepool-handlers`.

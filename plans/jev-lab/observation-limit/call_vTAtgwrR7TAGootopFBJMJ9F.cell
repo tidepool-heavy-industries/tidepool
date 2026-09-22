@@ -23,9 +23,9 @@ auditSemanticModule path = do
             else do
               let name = T.dropEnd 3 (last (T.splitOn "/" path))
               consumers <- readInvestigationSources
-                [("consumer references", Cmd.argv ["rg", "-n", "Project\\." <> name <> "|Text.take|J.accept|RanHere|ChildReported", ".shoal/Project"])
-                ,("evidence types and constructors", Cmd.argv ["cat", ".shoal/Project/Evidence.hs"])
-                ,("review consumer", Cmd.argv ["cat", ".shoal/Project/Review.hs"])]
+                [("consumer references", Cmd.argv ["rg", "-n", "Project\\." <> name <> "|Text.take|J.accept|RanHere|ChildReported", ".exomonad/Project"])
+                ,("evidence types and constructors", Cmd.argv ["cat", ".exomonad/Project/Evidence.hs"])
+                ,("review consumer", Cmd.argv ["cat", ".exomonad/Project/Review.hs"])]
               verdict <- J.ask1 (J.state (object
                 ["suspect_path" .= path, "complete_suspect_source" .= body
                 , "hypotheses" .= [object ["risk" .= label, "initial_score" .= score] | (label,score) <- risks, score >= 0.65]
@@ -42,7 +42,7 @@ auditSemanticModule path = do
                         (#defect id J..| #intentional id J..| #unresolved id)
               pure (SemanticAudit path risks (sources ++ consumers) conclusion)
     _ -> pure (SemanticAudit path [] sources "Source read failed; not reviewed.")
-let semanticModulePaths = [".shoal/Project/" <> name <> ".hs" | name <- ["Types","Actors","Work","Routing","Observe","Reflex","Evidence","Contract","Investigate","Merge","Review"]]
+let semanticModulePaths = [".exomonad/Project/" <> name <> ".hs" | name <- ["Types","Actors","Work","Routing","Observe","Reflex","Evidence","Contract","Investigate","Merge","Review"]]
 semanticAudits <- traverse auditSemanticModule semanticModulePaths
 [(path, filter ((>= 0.65) . snd) risks, conclusion) | SemanticAudit path risks _ conclusion <- semanticAudits]
 

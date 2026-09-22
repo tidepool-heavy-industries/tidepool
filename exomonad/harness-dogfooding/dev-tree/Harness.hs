@@ -28,7 +28,7 @@
 -- @RunLLMTurn@, @AskUser@, @Console@, @Worktree@, @RepoEvent@, @Exec@,
 -- @Subagent@, and @Journal@ — which is exactly the driver's widened outer
 -- session (@selfharness::driver::outer_decls@).
--- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ compiles it against
+-- @exomonad-harness\/tests\/dogfood_harness_typecheck.rs@ compiles it against
 -- that row.
 --
 -- __Why there IS rebase propagation now.__ v1 argued depth-first ordering

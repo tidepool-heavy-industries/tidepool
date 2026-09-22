@@ -1,9 +1,9 @@
 //! Embed complete Haskell source trees into the installed binaries. Generated
-//! `&[(relative_path, contents)]` tables cover the Tidepool library and Shoal's
+//! `&[(relative_path, contents)]` tables cover the Tidepool library and Exomonad's
 //! interactive actor surface without hand-maintained file lists. Only `.hs`
 //! sources are included; build artifacts and test-only probes are excluded.
 //!
-//! The same mechanism carries the package `shoal new` scaffolds: the workspace
+//! The same mechanism carries the package `exomonad new` scaffolds: the workspace
 //! skills, the Jev facade, and the starter agent spec are embedded from the
 //! files this repository already keeps them in, so scaffolding cannot drift
 //! from the source it is copied out of.
@@ -22,24 +22,24 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    // The embed root is `bridge/haskell/lib` itself (not `bridge/haskell/lib/Tidepool`),
+    // The embed root is `haskell/lib` itself (not `haskell/lib/Tidepool`),
     // so every top-level module namespace under it — `Tidepool.*` and
     // `Jev.*` alike — is embedded with no per-namespace registration. A
-    // module's relative path under `bridge/haskell/lib` is its embedded path
-    // verbatim, matching the `-ibridge/haskell/lib` GHC search root actors compile
+    // module's relative path under `haskell/lib` is its embedded path
+    // verbatim, matching the `-ihaskell/lib` GHC search root actors compile
     // against.
     #[allow(
         clippy::expect_used,
-        reason = "bridge/haskell/lib must exist relative to the tidepool crate"
+        reason = "haskell/lib must exist relative to the tidepool crate"
     )]
     let stdlib_root = Path::new(&manifest)
-        .join("../bridge/haskell/lib")
+        .join("../haskell/lib")
         .canonicalize()
-        .expect("bridge/haskell/lib must exist relative to the tidepool crate");
+        .expect("haskell/lib must exist relative to the tidepool crate");
 
     emit_bundle(
         &stdlib_root,
-        "../bridge/haskell/lib",
+        "../haskell/lib",
         "",
         "EMBEDDED_STDLIB",
         "embedded_stdlib.rs",
@@ -47,24 +47,24 @@ fn main() {
 
     #[allow(
         clippy::expect_used,
-        reason = "bridge/haskell/actors must exist relative to the tidepool crate"
+        reason = "haskell/actors must exist relative to the tidepool crate"
     )]
     let actor_root = Path::new(&manifest)
-        .join("../bridge/haskell/actors")
+        .join("../haskell/actors")
         .canonicalize()
-        .expect("bridge/haskell/actors must exist relative to the tidepool crate");
+        .expect("haskell/actors must exist relative to the tidepool crate");
     emit_bundle(
         &actor_root,
-        "../bridge/haskell/actors",
+        "../haskell/actors",
         "",
-        "EMBEDDED_SHOAL_HASKELL",
-        "embedded_shoal_haskell.rs",
+        "EMBEDDED_EXOMONAD_HASKELL",
+        "embedded_exomonad_haskell.rs",
     );
 
     emit_scaffold_package(Path::new(&manifest).join("../.."));
 }
 
-/// The Shoal package `shoal new` writes into a project, as
+/// The Exomonad package `exomonad new` writes into a project, as
 /// `&[(workspace_relative_path, contents)]`, plus the jev-dsl revision the
 /// shipped example workspace pins.
 ///
@@ -77,41 +77,41 @@ fn emit_scaffold_package(repository: PathBuf) {
     let mut entries: Vec<(String, PathBuf)> = [
         (
             "Jev/Operators.hs",
-            "exomonad/examples/workspace/.shoal/Jev/Operators.hs",
+            "exomonad/examples/workspace/.exomonad/Jev/Operators.hs",
         ),
         (
             "AgentSpec.hs",
-            "exomonad/examples/workspace/.shoal/AgentSpec.hs",
+            "exomonad/examples/workspace/.exomonad/AgentSpec.hs",
         ),
         (
             "Project/Tools.hs",
-            "exomonad/examples/workspace/.shoal/Project/Tools.hs",
+            "exomonad/examples/workspace/.exomonad/Project/Tools.hs",
         ),
         (
             "Project/Shell.hs",
-            "exomonad/examples/workspace/.shoal/Project/Shell.hs",
+            "exomonad/examples/workspace/.exomonad/Project/Shell.hs",
         ),
         (
             "Project/Lookup.hs",
-            "exomonad/examples/workspace/.shoal/Project/Lookup.hs",
+            "exomonad/examples/workspace/.exomonad/Project/Lookup.hs",
         ),
-        ("Project/Watchdog.hs", ".shoal/Project/Watchdog.hs"),
+        ("Project/Watchdog.hs", ".exomonad/Project/Watchdog.hs"),
     ]
     .into_iter()
-    .map(|(relative, source)| (format!(".shoal/{relative}"), repository.join(source)))
+    .map(|(relative, source)| (format!(".exomonad/{relative}"), repository.join(source)))
     .collect();
 
-    let skills = repository.join("exomonad/examples/workspace/.shoal/skills");
+    let skills = repository.join("exomonad/examples/workspace/.exomonad/skills");
     println!("cargo:rerun-if-changed={}", skills.display());
     let mut skill_files = Vec::new();
     collect_all(&skills, &skills, &mut skill_files);
     skill_files.sort();
     for (relative, path) in &skill_files {
-        entries.push((format!(".shoal/skills/{relative}"), path.clone()));
+        entries.push((format!(".exomonad/skills/{relative}"), path.clone()));
     }
 
     let mut out = String::from(
-        "// @generated by build.rs — the package `shoal new` scaffolds.\n\
+        "// @generated by build.rs — the package `exomonad new` scaffolds.\n\
          pub(crate) static SCAFFOLD_PACKAGE: &[(&str, &str)] = &[\n",
     );
     for (relative, path) in &entries {
@@ -141,11 +141,11 @@ fn emit_scaffold_package(repository: PathBuf) {
     emit_usage_pointer_index(&repository, &skill_files);
 }
 
-/// Generate the compact lookup table consumed by `tidepool-actor`. The
+/// Generate the compact lookup table consumed by `exomonad-actor`. The
 /// facade already owns the shipped source inventory; only identifier/locator
 /// pairs cross the crate boundary, so actor builds never embed skill text.
 fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]) {
-    let checks = repository.join("exomonad/examples/workspace/.shoal/checks");
+    let checks = repository.join("exomonad/examples/workspace/.exomonad/checks");
     println!("cargo:rerun-if-changed={}", checks.display());
     let mut sources: Vec<(String, PathBuf)> = std::fs::read_dir(&checks)
         .unwrap_or_else(|error| panic!("read {}: {error}", checks.display()))
@@ -157,7 +157,7 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
         .filter(|path| path.extension().is_some_and(|extension| extension == "hs"))
         .map(|path| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            (format!(".shoal/checks/{name}"), path)
+            (format!(".exomonad/checks/{name}"), path)
         })
         .collect();
     sources.sort_by(|left, right| left.0.cmp(&right.0));
@@ -166,7 +166,7 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
             .file_name()
             .is_some_and(|name| name == "SKILL.md")
     }) {
-        sources.push((format!(".shoal/skills/{relative}"), path.clone()));
+        sources.push((format!(".exomonad/skills/{relative}"), path.clone()));
     }
 
     let mut index = BTreeMap::<String, String>::new();
@@ -187,7 +187,7 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
 
     let mut out = String::from(
         "// @generated by build.rs — compact shipped usage pointers.\n\
-         pub(crate) static SHOAL_USAGE_POINTERS: &[(&str, &str)] = &[\n",
+         pub(crate) static EXOMONAD_USAGE_POINTERS: &[(&str, &str)] = &[\n",
     );
     for (identifier, locator) in index {
         out.push_str(&format!("    ({identifier:?}, {locator:?}),\n"));

@@ -1,5 +1,5 @@
 //! The operator's live model/reasoning-effort dial: one shared,
-//! durably-persisted [`ModelSettings`] handle. `tidepool-web`'s settings
+//! durably-persisted [`ModelSettings`] handle. `exomonad-web`'s settings
 //! route is the ONLY writer ([`SharedModelSettings::set`]); [`super::oauth`]'s
 //! `OauthProvider` (built via `OauthProvider::with_live_settings`) is the
 //! reader, at every request-build time — see [`super::oauth::OauthConfig`]'s
@@ -20,7 +20,7 @@ use super::oauth::ReasoningEffort;
 /// allowlist a model name is validated against everywhere one enters the
 /// system: the GUI dropdown, the durable settings file, and the settings
 /// POST route. Never accepted as free text anywhere on this path.
-pub const MODEL_ALLOWLIST: &[&str] = &["gpt-5.6-terra", "gpt-5.6-sol"];
+pub const MODEL_ALLOWLIST: &[&str] = &["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"];
 
 /// Whether `model` is on [`MODEL_ALLOWLIST`] — the one check every entry
 /// point (GUI render, settings-file load, POST route) shares.
@@ -121,16 +121,17 @@ mod tests {
 
     #[test]
     fn is_allowed_model_checks_the_fixed_allowlist() {
-        assert!(is_allowed_model("gpt-5.6-terra"));
-        assert!(is_allowed_model("gpt-5.6-sol"));
-        assert!(!is_allowed_model("gpt-4o-mini"));
+        assert!(is_allowed_model("gpt-6-astra"));
+        assert!(is_allowed_model("gpt-6-sol"));
+        assert!(is_allowed_model("gpt-6-luna"));
+        assert!(!is_allowed_model("unsupported-model"));
         assert!(!is_allowed_model(""));
     }
 
     #[test]
     fn load_or_uses_default_when_file_absent() {
         let path = tempdir_path("absent").join("settings.json");
-        let default = ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium);
+        let default = ModelSettings::new("gpt-6-sol", ReasoningEffort::Medium);
         let handle = SharedModelSettings::load_or(path, default.clone());
         assert_eq!(handle.get(), default);
     }
@@ -138,11 +139,11 @@ mod tests {
     #[test]
     fn load_or_prefers_the_persisted_file_over_the_default() {
         let path = tempdir_path("present").join("settings.json");
-        let persisted = ModelSettings::new("gpt-5.6-sol", ReasoningEffort::High);
+        let persisted = ModelSettings::new("gpt-6-sol", ReasoningEffort::High);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_vec(&persisted).unwrap()).unwrap();
 
-        let default = ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium);
+        let default = ModelSettings::new("gpt-6-luna", ReasoningEffort::Medium);
         let handle = SharedModelSettings::load_or(path, default);
         assert_eq!(handle.get(), persisted);
     }
@@ -150,10 +151,10 @@ mod tests {
     #[test]
     fn set_persists_and_a_fresh_load_sees_the_new_value() {
         let path = tempdir_path("roundtrip").join("settings.json");
-        let default = ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium);
+        let default = ModelSettings::new("gpt-6-sol", ReasoningEffort::Medium);
         let handle = SharedModelSettings::load_or(path.clone(), default);
 
-        let dialed = ModelSettings::new("gpt-5.6-sol", ReasoningEffort::High);
+        let dialed = ModelSettings::new("gpt-6-sol", ReasoningEffort::High);
         handle.set(dialed.clone()).expect("set persists");
         assert_eq!(handle.get(), dialed);
 
@@ -161,7 +162,7 @@ mod tests {
         // restart) must see the persisted value, not the original default.
         let reloaded = SharedModelSettings::load_or(
             path,
-            ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium),
+            ModelSettings::new("gpt-6-luna", ReasoningEffort::Medium),
         );
         assert_eq!(reloaded.get(), dialed);
     }
@@ -169,14 +170,14 @@ mod tests {
     #[test]
     fn clones_share_the_same_underlying_state() {
         let path = tempdir_path("shared").join("settings.json");
-        let default = ModelSettings::new("gpt-5.6-terra", ReasoningEffort::Medium);
+        let default = ModelSettings::new("gpt-6-sol", ReasoningEffort::Medium);
         let handle = SharedModelSettings::load_or(path, default);
         let clone = handle.clone();
 
         clone
-            .set(ModelSettings::new("gpt-5.6-sol", ReasoningEffort::Low))
+            .set(ModelSettings::new("gpt-6-sol", ReasoningEffort::Low))
             .expect("set persists");
-        assert_eq!(handle.get().model, "gpt-5.6-sol");
+        assert_eq!(handle.get().model, "gpt-6-sol");
         assert_eq!(handle.get().effort, ReasoningEffort::Low);
     }
 }

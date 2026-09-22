@@ -14,7 +14,7 @@ archive).
   slot. [Alpha smoke run](jev-lab/alpha-smoke-brief.md) is the brief that
   exercises it with Jev in every layer.
 - [Jev lab](jev-lab/README.md): the live measurement lab behind the
-  `shoal-jev` skill. [Results](jev-lab/RESULTS.md) and the
+  `exomonad-jev` skill. [Results](jev-lab/RESULTS.md) and the
   [intent experiment](jev-lab/INTENT-EXPERIMENT.md) cover programs that turn
   failed builds into source investigations; [wording A/B](jev-lab/wording-ab.md)
   has the before/after numbers behind the skill's wording rule. The breadth
@@ -25,7 +25,7 @@ archive).
 - [Shared execution server](interactive-applications/shared-server.md):
   direction for one native execution server per swarm shared across ordinary
   interactive TUIs, reusing the existing app-server/client boundary.
-- [Shoal implementation handoff](../NEXT.md): the current programmable
+- [Exomonad implementation handoff](../NEXT.md): the current programmable
   workspace direction — model/context selection, frozen customization,
   routes, scoped observations, launch previews and executable planned Sol
   recipes.
@@ -35,7 +35,7 @@ archive).
   [Implementation checkpoints](next/command-jobs-implementation.md) (with its
   [wave delivery contract](next/WaveContract.hs)) track the matched
   native/resident acceptance and release.
-- [Shoal commit-and-fork operating model](next/shoal-commit-forks.md): a
+- [Exomonad commit-and-fork operating model](next/exomonad-commit-forks.md): a
   proposed operating model from user interview, not an implementation
   commitment — when delegation pays, keeping planning infodense with the
   parent, and Luna's recursive-delegation shape.
@@ -65,7 +65,7 @@ are not current assignments.
   actor, request and residency design references, and the maintained
   landed-versus-pending inventory. The request/reply/watch contract and
   cache-preserving context unfold they once specified have landed; their
-  stable user contracts are in `SHOAL.md` and `exomonad/actor/CLAUDE.md`.
+  stable user contracts are in `exomonad/README.md` and `exomonad/actor/CLAUDE.md`.
 - [Live values and authority](actor-model/live-values-and-authority.md):
   same-machine value transfer, caller identity, launch grants, and the
   distinction between invoking a closure and calling an actor.
@@ -126,7 +126,7 @@ Small still-open items whose originating plan doc has been retired:
   cell cannot see a value bound earlier in the same cell (declarations
   compile in a separate plane from statements); an authored project module
   is invisible to the agent's own `lookup`/`doc`, so a human must name the
-  file path by hand; a Shoal session's workspace binding lock is keyed on
+  file path by hand; a Exomonad session's workspace binding lock is keyed on
   the worktree path, not the session name, so several distinctly-named
   sessions cannot launch concurrently against one shared `--workspace`
   (`exomonad/worktree/src/binding.rs`) — the second session gets a hard
@@ -151,7 +151,7 @@ Small still-open items whose originating plan doc has been retired:
   actor/machine incarnation needs a durable provider idle/reattachment
   contract that makes duplicate turns impossible; generalizing root
   source-only successor recovery to independently-owned child machines needs
-  Shoal's machine-boundary work first; a durable actor/request/watch/fork
+  Exomonad's machine-boundary work first; a durable actor/request/watch/fork
   transition ledger (with replay tests at every commit point) should be
   owner-emitted, not inferred from composition-root observations; and
   handle-filtered `:trace`/campaign renderers are worth adding only once a

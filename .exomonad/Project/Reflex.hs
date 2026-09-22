@@ -2,7 +2,7 @@
 
 -- The reflex table as typed data: the precedence-ordered list this project
 -- uses to classify compiler, lint and test output without spending a model
--- turn. Ported entry for entry from .shoal/reflex-table.json (v1,
+-- turn. Ported entry for entry from .exomonad/reflex-table.json (v1,
 -- 2026-09-17). Pure: no effects, no I/O, no Jev. `reflexFor` is the entry
 -- point -- exit 0 is green before any matcher is consulted, and output that
 -- matches nothing at all returns Nothing, which is the caller's signal to

@@ -1,17 +1,17 @@
 use super::*;
-use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
-use tidepool_agent::{
+use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use exomonad_agent::{
     AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     InteractiveInputError, InteractiveNativeToolPolicy, InteractivePolicyMount,
 };
+use exomonad_tool::{HostedTool, ToolInvocation};
 use tidepool_runtime::session::ModuleEnv;
-use tidepool_tool::{HostedTool, ToolInvocation};
 use tokio::sync::Semaphore;
 
 const URL: &str = "http://localhost/v1/dynamic-tools";
 const THREAD: &str = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
 fn protocol() -> u32 {
-    tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION
+    exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION
 }
 fn client(socket: &Path) -> reqwest::Client {
     reqwest::Client::builder()
@@ -201,7 +201,7 @@ impl InteractiveAgentBackend for SealBackend {
         &'a self,
         thread: &'a QueueReadyThread,
         producer: &'a InputProducerId,
-    ) -> tidepool_agent::InputProducerControlFuture<'a> {
+    ) -> exomonad_agent::InputProducerControlFuture<'a> {
         assert_eq!(thread.id().0, THREAD);
         assert_eq!(producer.as_str(), "fixture-producer");
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -250,7 +250,7 @@ impl InteractiveAgentBackend for SealBackend {
 
 async fn queue_ready_thread(directory: &Path) -> QueueReadyThread {
     let binding = directory.join("native-binding.json");
-    tidepool_agent::accept_interactive_session_binding(
+    exomonad_agent::accept_interactive_session_binding(
         &binding,
         protocol(),
         BackendThreadId(THREAD.into()),
@@ -258,7 +258,7 @@ async fn queue_ready_thread(directory: &Path) -> QueueReadyThread {
     )
     .await
     .unwrap();
-    tidepool_agent::read_interactive_binding(&binding)
+    exomonad_agent::read_interactive_binding(&binding)
         .await
         .unwrap()
 }
@@ -268,7 +268,7 @@ fn producer() -> InputProducerId {
 
 async fn active_queue_ready_thread(directory: &Path) -> QueueReadyThread {
     let binding = directory.join("active-native-binding.json");
-    tidepool_agent::accept_interactive_session_binding(
+    exomonad_agent::accept_interactive_session_binding(
         &binding,
         protocol(),
         BackendThreadId(THREAD.into()),
@@ -276,7 +276,7 @@ async fn active_queue_ready_thread(directory: &Path) -> QueueReadyThread {
     )
     .await
     .unwrap();
-    tidepool_agent::read_interactive_binding(&binding)
+    exomonad_agent::read_interactive_binding(&binding)
         .await
         .unwrap()
 }
@@ -995,9 +995,9 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     let outcome = machine
         .run_with_sites("failed_child_host", compiled.code())
         .unwrap();
-    let descriptor = tidepool_actor::ActorDescriptor::new(
+    let descriptor = exomonad_actor::ActorDescriptor::new(
         "host-failed-child",
-        tidepool_actor::ActorPlacement {
+        exomonad_actor::ActorPlacement {
             session,
             resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
@@ -1008,7 +1008,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
         session,
         machine,
         None,
-        tidepool_actor::Incarnation::FIRST,
+        exomonad_actor::Incarnation::FIRST,
     );
     let (actor, task) = forest.admit_root(descriptor, outcome).await.unwrap();
     let Some(LocalResidentDeployment::PolicyInstalled(installation)) = events.recv().await else {
@@ -1048,7 +1048,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     assert!(
         matches!(
             cleanup.children(),
-            tidepool_actor::CleanupComponentOutcome::Unconfirmed(_)
+            exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)
         ),
         "{cleanup:?}"
     );
@@ -1066,77 +1066,77 @@ struct ShutdownGate {
     calls: std::sync::atomic::AtomicUsize,
 }
 struct GatedBehavior(Arc<ShutdownGate>);
-impl tidepool_actor::KernelBehavior for GatedBehavior {
+impl exomonad_actor::KernelBehavior for GatedBehavior {
     fn start<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
-    ) -> BoxFuture<'a, Result<tidepool_actor::KernelStep<()>, tidepool_actor::KernelBehaviorError>>
+        _: &'a exomonad_actor::KernelContext,
+    ) -> BoxFuture<'a, Result<exomonad_actor::KernelStep<()>, exomonad_actor::KernelBehaviorError>>
     {
-        Box::pin(async { Ok(tidepool_actor::KernelStep::Continue(())) })
+        Box::pin(async { Ok(exomonad_actor::KernelStep::Continue(())) })
     }
     fn cast<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: ActorRef,
-        _: tidepool_actor::MailboxValue,
-    ) -> BoxFuture<'a, Result<tidepool_actor::KernelStep<()>, tidepool_actor::KernelBehaviorError>>
+        _: exomonad_actor::MailboxValue,
+    ) -> BoxFuture<'a, Result<exomonad_actor::KernelStep<()>, exomonad_actor::KernelBehaviorError>>
     {
         Box::pin(async { panic!("unexpected cast") })
     }
     fn call<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: ActorRef,
-        _: tidepool_actor::CallAncestry,
-        _: tidepool_actor::MailboxValue,
+        _: exomonad_actor::CallAncestry,
+        _: exomonad_actor::MailboxValue,
     ) -> BoxFuture<
         'a,
         Result<
-            tidepool_actor::KernelStep<tidepool_actor::MailboxValue>,
-            tidepool_actor::KernelBehaviorError,
+            exomonad_actor::KernelStep<exomonad_actor::MailboxValue>,
+            exomonad_actor::KernelBehaviorError,
         >,
     > {
         Box::pin(async { panic!("unexpected call") })
     }
     fn tool<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: ToolInvocation,
     ) -> BoxFuture<
         'a,
         Result<
-            tidepool_actor::KernelStep<serde_json::Value>,
-            tidepool_actor::KernelInvocationFailure,
+            exomonad_actor::KernelStep<serde_json::Value>,
+            exomonad_actor::KernelInvocationFailure,
         >,
     > {
         Box::pin(async { panic!("unexpected tool") })
     }
     fn workbench<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: tidepool_runtime::session::WorkbenchRequest,
-        _: Option<Arc<tidepool_actor::WorkbenchExecutionControl>>,
+        _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
     ) -> BoxFuture<
         'a,
         Result<
-            tidepool_actor::KernelStep<tidepool_runtime::session::WorkbenchResponse>,
-            tidepool_actor::KernelInvocationFailure,
+            exomonad_actor::KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+            exomonad_actor::KernelInvocationFailure,
         >,
     > {
         Box::pin(async { panic!("unexpected workbench") })
     }
     fn external_application_failed<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
-        _: tidepool_actor::ExternalApplicationFailure,
-    ) -> BoxFuture<'a, tidepool_actor::ExternalFailureDisposition> {
+        _: &'a exomonad_actor::KernelContext,
+        _: exomonad_actor::ExternalApplicationFailure,
+    ) -> BoxFuture<'a, exomonad_actor::ExternalFailureDisposition> {
         Box::pin(async { panic!("unexpected external application") })
     }
     fn shutdown<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: &'a ActorTerminal,
-    ) -> BoxFuture<'a, Result<(), tidepool_actor::KernelBehaviorError>> {
+    ) -> BoxFuture<'a, Result<(), exomonad_actor::KernelBehaviorError>> {
         Box::pin(async move {
             self.0
                 .calls
@@ -1148,12 +1148,12 @@ impl tidepool_actor::KernelBehavior for GatedBehavior {
     }
     fn stopped<'a>(
         &'a mut self,
-        _: &'a tidepool_actor::KernelContext,
+        _: &'a exomonad_actor::KernelContext,
         _: &'a ActorTerminal,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
-    fn child_exited(&mut self, _: tidepool_actor::ChildExitNotice) -> BoxFuture<'_, ()> {
+    fn child_exited(&mut self, _: exomonad_actor::ChildExitNotice) -> BoxFuture<'_, ()> {
         Box::pin(async { panic!("unexpected child") })
     }
 }
@@ -1184,14 +1184,14 @@ async fn hosted_lost_pending_shutdown_waiter_retains_real_operation() {
         release: Semaphore::new(0),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
-    let (actor, task) = tidepool_actor::spawn_local_actor(None, GatedBehavior(gate.clone()))
+    let (actor, task) = exomonad_actor::spawn_local_actor(None, GatedBehavior(gate.clone()))
         .await
         .unwrap();
     let fixture = HttpFixture::start(
         actor.clone(),
         Arc::new(ActorSealEndpoint(
             actor.clone(),
-            vec![HostedTool::Custom(tidepool_tool::CustomToolDeclaration {
+            vec![HostedTool::Custom(exomonad_tool::CustomToolDeclaration {
                 name: "unused".into(),
                 description: "No invocations supported by shutdown fixture".into(),
             })],
@@ -1242,11 +1242,11 @@ async fn hosted_lost_pending_shutdown_waiter_retains_real_operation() {
     assert_eq!(cleanup.actor(), actor.identity());
     assert!(matches!(
         cleanup.hook(),
-        tidepool_actor::CleanupComponentOutcome::Confirmed
+        exomonad_actor::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
         cleanup.realm(),
-        tidepool_actor::CleanupComponentOutcome::Unsupported
+        exomonad_actor::CleanupComponentOutcome::Unsupported
     ));
     assert!(!cleanup.is_confirmed());
     assert!(matches!(

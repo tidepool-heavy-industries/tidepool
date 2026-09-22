@@ -11,7 +11,7 @@
 //! — a copied fixture would keep passing while the shipped harness rotted),
 //! booting `EngineConfig::from_decls(typed_request_agent_decls_with_delegate(), ..)
 //! .with_delegate_wrap()` for the answerer config — the same wiring
-//! `bridge/facade/src/bin/tidepool-selfharness.rs` selects live — so the
+//! `bridge/facade/src/bin/exomonad-selfharness.rs` selects live — so the
 //! root session compiles against the narrow delegating row.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
@@ -24,27 +24,28 @@ use std::sync::Arc;
 
 use serde_json::{json, Value as Json};
 
-use tidepool_agent::backend::mock::MockBackend;
-use tidepool_agent::seam::CycleResultPayload;
+use exomonad_agent::backend::mock::MockBackend;
+use exomonad_agent::seam::CycleResultPayload;
 use tidepool_handlers::{
     ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler, WorktreeHandler,
 };
-use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::FormShape;
-use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{
+use exomonad_harness::engine::EngineConfig;
+use exomonad_harness::log::{LogHeader, LogWriter};
+use exomonad_harness::provider::{DynModelProvider, Usage};
+use exomonad_harness::replay::{RecordedReply, ReplayProvider};
+use exomonad_harness::selfharness::operator::FormShape;
+use exomonad_harness::selfharness::persistence;
+use exomonad_harness::{
     load_harness_source, typed_request_agent_decls_with_delegate, Harness, LogObserver,
     OperatorGate, SelfHarnessDriver,
 };
-use tidepool_worktree::testing::TestRepo;
+use exomonad_worktree::testing::TestRepo;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-harness has a parent (the repo root)")
+        .and_then(|path| path.parent())
+        .expect("exomonad-harness has a parent (the repo root)")
         .to_path_buf()
 }
 
