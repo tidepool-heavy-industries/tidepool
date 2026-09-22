@@ -228,7 +228,8 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
   ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
-    (do preallocate projectable
+    (do validatePreparedEvidence context projectable
+        preallocate projectable
         groups <- concat <$> mapM projectModule projectable
         (types, sites, verbSites) <- lowerPreparedEvidence context projectable
         jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
@@ -757,14 +758,7 @@ lowerPreparedEvidence context modules = do
     [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
  where
   lowerOne (priorNodes, priorSites) prepared = do
-    let owners = mkUniqSet
-          [ varUnique binder
-          | (binding, _) <- pmBindings prepared
-          , binder <- topBinders binding
-          ]
-        selected = filter
-          (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
-          (pmPreparedSites prepared)
+    let selected = selectedPreparedSites prepared
         roots = concat
           [ psWireNode site : psInputNodes site | site <- selected ]
     (lowered, rebase) <- lowerTypeGraph (length priorNodes)
@@ -781,6 +775,34 @@ lowerPreparedEvidence context modules = do
               , siteInputs = inputs
               }) selected
     pure (priorNodes <> lowered, priorSites <> rows)
+
+-- Compare all reachable constructor evidence before projecting bindings or
+-- lowering any one graph. Representation recovery may roll one graph's local
+-- state back; a conflict in that graph must still reject the complete program
+-- in either encounter order. Publication remains owned by 'internConstructor'.
+validatePreparedEvidence :: ProjectionContext -> [PreparedModule] -> P ()
+validatePreparedEvidence context modules = do
+  moduleEvidence <- lift . fmap concat . traverse evidenceForModule $ modules
+  (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
+  auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
+  validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence)
+ where
+  evidenceForModule prepared =
+    constructorsForTypeGraph
+      (TypePolicy.tgNodes (pmTypeGraph prepared))
+      (concat [ psWireNode site : psInputNodes site
+              | site <- selectedPreparedSites prepared ])
+
+selectedPreparedSites :: PreparedModule -> [PreparedSite]
+selectedPreparedSites prepared =
+  let owners = mkUniqSet
+        [ varUnique binder
+        | (binding, _) <- pmBindings prepared
+        , binder <- topBinders binding
+        ]
+  in filter
+    (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
+    (pmPreparedSites prepared)
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -806,6 +828,13 @@ lowerPreparedEvidence context modules = do
 -- are unaffected by this filter.
 lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
 lowerAuxiliaryRootEvidence context modules base = do
+  (nodes, graphRoots) <- auxiliaryRootTypeGraph context modules
+  (lowered, _rebase) <- lowerTypeGraph base nodes graphRoots
+  pure lowered
+
+auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
+  -> P ([TypePolicy.TypeNodeG], [TypePolicy.TypeNodeId])
+auxiliaryRootTypeGraph context modules = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
   let answerTypes =
@@ -821,9 +850,7 @@ lowerAuxiliaryRootEvidence context modules base = do
       (graphRoots, builder) = runState
         (traverse TypePolicy.internType answerTypes)
         TypePolicy.emptyTypeGraphBuilder
-  (lowered, _rebase) <- lowerTypeGraph base
-    (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) graphRoots
-  pure lowered
+  pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
 -- | One synthetic 'HostAnswer' row per interned constructor with a closed
 -- reply index ('requestReplyIndex'), and the table naming it. Only the index
@@ -875,23 +902,24 @@ lowerTypeGraph base nodes roots = do
       rebase node = maybe
         (failShape "prepared type graph reachability omitted a referenced node")
         pure (Map.lookup node mapping)
-      constructors = concatMap (nodeConstructors graphNodes) ordered
-  -- Representation policy may deliberately turn an unpacked or flattened
-  -- authored type into TypeUnconstructible. Compare all constructor evidence
-  -- first, outside that recoverable transaction, so a conflicting declaration
-  -- cannot disappear with the rollback and later be published in the opposite
-  -- encounter order.
-  validateConstructorEvidence constructors
   lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
   pure (lowered, rebase)
+
+constructorsForTypeGraph :: [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
+  -> Either ProjectionError [DataCon]
+constructorsForTypeGraph nodes roots = do
+  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
+  reachable <- reachableTypeNodes graphNodes roots
+  pure (concatMap nodeConstructors
+    [ node | (index, node) <- IntMap.toAscList graphNodes
+           , Set.member index reachable ])
  where
-  nodeConstructors graphNodes (TypePolicy.TypeNodeId raw) =
-    case IntMap.lookup (fromIntegral raw) graphNodes of
-      Just (TypePolicy.DataG _ _ _ rows) -> map fst rows
-      Just (TypePolicy.TextG _ constructors) -> constructors
-      Just (TypePolicy.IntegerG _ constructors) -> constructors
-      Just (TypePolicy.NaturalG _ constructors) -> constructors
-      _ -> []
+  nodeConstructors node = case node of
+    TypePolicy.DataG _ _ _ rows -> map fst rows
+    TypePolicy.TextG _ constructors -> constructors
+    TypePolicy.IntegerG _ constructors -> constructors
+    TypePolicy.NaturalG _ constructors -> constructors
+    _ -> []
 
 reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError (Set Int)

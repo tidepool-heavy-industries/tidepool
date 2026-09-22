@@ -41,7 +41,8 @@ import Tidepool.EffectSchema
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
-import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
+import Tidepool.PreparedSites
+  ( PreparedSite(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
@@ -391,23 +392,85 @@ verifyRepeatedConstructorEvidence result = do
       project pair = projectEntry
         (result { pprModules = map (replace pair) (pprModules result) })
         "StrictPlainMetadata" "noUnpack" mempty
+      target = case filter ((== "StrictPlainMetadata")
+            . moduleNameString . moduleName . pmModule) (pprModules result) of
+        [prepared] -> prepared
+        prepared -> error ("constructor collision fixture expected one target module, got "
+          ++ show (map (moduleNameString . moduleName . pmModule) prepared))
+      replaceNominal occurrence replacement prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
+              [ (if occNameString (nameOccName (dataConName con)) == occurrence
+                  then replacement else con, children)
+              | (con, children) <- rows ]
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      siteOwnedBy occurrence site = occurrence `isInfixOf`
+        Text.unpack (ysOrigin (psSite site))
+      noUnpackRoot = case filter (siteOwnedBy "noUnpack") (pmPreparedSites target) of
+        [site] -> psWireNode site
+        sites -> error ("constructor collision fixture expected one noUnpack site, got "
+          ++ show (length sites))
+      graphModule bindingName replacement =
+        let selected = filter (siteOwnedBy bindingName) (pmPreparedSites target)
+            rooted = [ if bindingName == "automatic"
+                then site { psWireNode = noUnpackRoot }
+                else site
+              | site <- selected ]
+            owners = map (idName . psOwner) selected
+            ownsSelected (binding, _) = any ((`elem` owners) . idName)
+              (Projection.topBinders binding)
+        in (replaceNominal "NoUnpack" replacement target)
+          { pmBindings = filter ownsSelected (pmBindings target)
+          , pmPreparedSites = rooted
+          , pmSiteRejections = []
+          }
+      otherModules = filter ((/= "StrictPlainMetadata")
+        . moduleNameString . moduleName . pmModule) (pprModules result)
+      projectAcrossGraphs first second = Projection.projectPrepared context
+        (otherModules
+          ++ [ graphModule "noUnpack" first
+             , graphModule "automatic" second
+             ])
+      context = Projection.ProjectionContext
+        { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+        , Projection.projectionToolchain = "ghc-9.12.2"
+        , Projection.projectionTarget =
+            Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+        , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionEntry = Schema.SymbolIdentity "main"
+            (fromString "StrictPlainMetadata") "value" (fromString "noUnpack") Nothing
+        , Projection.projectionAuxiliaryRoots = []
+        , Projection.projectionFormattingAuthority = Nothing
+        , Projection.projectionTimeAuthority = Nothing
+        , Projection.projectionJsonAuthority = Nothing
+        , Projection.projectionTextUnit = Nothing
+        }
       rejects pair = case project pair of
         Left (Projection.InvalidPreparedIdentity detail) ->
           assert ("conflicting physical declarations" `Text.isInfixOf` detail)
             ("unexpected constructor rejection: " ++ show detail)
         outcome -> ioError (userError ("conflicting constructor evidence was not rejected: "
           ++ either show (const "accepted") outcome))
+      rejectsAcrossGraphs first second = case projectAcrossGraphs first second of
+        Left (Projection.InvalidPreparedIdentity detail) ->
+          assert ("conflicting physical declarations" `Text.isInfixOf` detail)
+            ("unexpected cross-graph constructor rejection: " ++ show detail)
+        outcome -> ioError (userError
+          ("conflicting constructor evidence in separate graphs was not rejected: "
+            ++ either show (const "accepted") outcome))
   assertProjects "identical constructor provenance"
     (project [original, clone otherName fields runtimeFields])
   mapM_ (\changed -> do
     rejects [original, changed]
-    rejects [changed, original])
+    rejects [changed, original]
+    rejectsAcrossGraphs original changed
+    rejectsAcrossGraphs changed original)
     [ clone name conflictingFields conflictingFields
     , clone otherName conflictingFields conflictingFields
     , clone name fields conflictingFields
     , clone otherName fields conflictingFields
     ]
-
 assertWireSite :: String -> Schema.SiteDelivery -> String
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
 assertWireSite label delivery family outcome = case outcome of
