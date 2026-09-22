@@ -57,6 +57,157 @@ call-site evidence.
 
 ## Delivery and evidence
 
+### Notebook cost profile: 2026-09-22 UTC
+
+A quiet run of the frozen baseline (prebuilt binaries, one resident daemon,
+other build jobs paused) measured two recurring one-statement cells at 29.943s
+and 29.856s, and two six-statement cells at 66.766s and 67.339s. This is a
+baseline attribution, not a before/after speedup. The measurement test passed.
+Raw compiler/client logs and machine-readable phase totals are retained under
+`target/structural-performance-a/compile-profile/`.
+
+Mean attribution for the recurring one-statement cells:
+
+| Work | Seconds | Share of cell wall time |
+| --- | ---: | ---: |
+| GHC desugaring and Core optimization | 23.675 | 79.2% |
+| Prepared STG production | 2.319 | 7.8% |
+| Parsing/typechecking | 1.965 | 6.6% |
+| Prepared projection and recovery | 0.727 | 2.4% |
+| Prepared tidy | 0.411 | 1.4% |
+| Native compilation | 0.122 | 0.4% |
+| Module interfaces | 0.114 | 0.4% |
+| Remaining setup, transport, execution, and unattributed time | 0.567 | 1.9% |
+| Total | 29.900 | 100% |
+
+These are disjoint phase totals; request totals and module breakdowns are
+alternative views and must not be added to the table. Per-phase millisecond
+rounding limits precision. The first-cell phase block also contains bootstrap
+and must not be compared directly with its cell-only wall counter. The external
+`time` process does not own the sibling daemon, so its CPU/RSS statistics do not
+measure compiler CPU/RSS. Full lowering allocation/GC attribution remains open.
+
+Each one-statement cell issues five compiler requests: cell preflight, expression,
+display-page construction, display metadata, and display alias publication.
+The four executable requests each take roughly 7–7.6s. Six-statement cells
+issue ten requests. Lookup alone takes 41ms, including one compiler request.
+
+The compiler log repeatedly reports `Tidepool.Effects.Core` as non-reusable due
+to `untracked-compile-time-execution`, cascading into dependent-module misses.
+The generated module inherits `QuasiQuotes` from the authored-cell dialect even
+though its generated static definitions need no quasiquotation. A representative
+warm request spends 3.307s in Effects.Core, versus 37ms in its Expr module;
+Contract, Actors.Unfold, and Command take 372ms, 363ms, and 296ms respectively.
+These module numbers are subsets of the phase totals above.
+
+Priority is therefore (1) remove unnecessary quasiquotation from generated
+support only, retaining conservative validation and authored language behavior,
+then measure actual reuse; (2) fuse display preparation to remove whole compiler
+requests while preserving fresh lexical identities and failure publication;
+(3) reassess immutable-support packaging against the remaining measured cost.
+Packaging is held pending the cheaper reuse correction. Native lookup/interface
+micro-optimizations are not the primary notebook-latency work. Reuse and request
+removal overlap: measure the combined result rather than adding their projected
+savings.
+
+The generated-support correction landed in `b5f094270`. Against the same frozen
+baseline workload, two current recurring one-statement cells measured 5.017s
+and 5.021s (29.900s baseline mean to 5.019s current mean, 83.2% lower wall
+time). Two six-statement cells measured 11.055s and 11.118s (67.053s to
+11.087s, 83.5% lower). One-statement lowering fell from 23.675s to 2.864s;
+prepared STG from 2.319s to 0.305s; and typechecking from 1.965s to 0.354s.
+Native compilation remained approximately 0.12s, as expected. This is a
+matched structural speedup for the measured notebook workload, not a general
+throughput claim.
+
+The generated-support run completed every cell measurement but its final
+standalone `lookup map` probe failed after checked compilation. Investigation
+found that metadata-only interface elision had left lookup's generated row
+sentinel on an HPT lookup path; the exact checked `Id` must travel with the
+other immediate inspection probes. The cell results precede and do not depend
+on that probe, but the measurement test is not considered passing until the
+lookup regression is repaired and rerun.
+
+After generated Core became reusable, `Tidepool.Worktree` was the remaining
+repeated `untracked-compile-time-execution` miss and invalidated six actor
+modules. Its blanket `QuasiQuotes` extension is unused; `Tidepool.Event` has
+the same latent issue. Both are being narrowed and will be measured only after
+the facade's embedded source bundle is rebuilt, since editing the repository
+source alone does not change an already-built test binary.
+
+The complete static-source correction landed in `c00b7797a`: Worktree, Event,
+and the generated library-isolation probe omit quasiquotation, while authored
+cells and declaration templates retain it. After rebuilding the embedded
+source bundle, the full matched measurement passed, including lookup:
+
+| Workload | Frozen baseline | Current | Wall-time reduction |
+| --- | ---: | ---: | ---: |
+| First measured one-statement cell | 30.205s | 5.180s | 82.9% |
+| Recurring one-statement cell, mean of two | 29.900s | 1.504s | 95.0% |
+| Recurring six-statement cell, mean of two | 67.053s | 3.044s | 95.5% |
+| Lookup | 41ms | 32ms | 22.0% |
+
+In the final recurring one-statement cells, mean GHC typechecking was 45ms,
+lowering 12ms, prepared STG 4ms, and native compilation 121ms. The remaining
+compiler-side cost is primarily prepared projection/recovery (mean 971ms,
+with one 1.119s projection outlier) and the four executable requests still
+made by each cell. This changes the next priority: display fusion removes
+whole requests and their projection/recovery work. Building a separate stable
+support package no longer attacks the measured dominant phase and stays held
+until the post-fusion profile demonstrates otherwise.
+
+The final compiler log has no recurring Worktree or Effects.Core untracked
+execution miss. Each appears during cold dependency population; Worktree has
+one additional `executable-body-not-prepared` miss when first demanded, which
+is the intended separation between stable dependency facts and on-demand
+prepared bodies. Lookup's row-sentinel fix is `cfc7df9b0`; the final lookup
+probe passed.
+
+Display fusion landed in `a69ef8216` and the same matched measurement passed.
+The page, strict metadata tuple, and fresh `cellDisplay` identity now compile
+as one three-binder request; failure coverage proves that metadata failure
+keeps the captured value but publishes no new alias. Results:
+
+| Workload | Before display fusion | Fused display | Additional reduction |
+| --- | ---: | ---: | ---: |
+| First measured one-statement cell | 5.180s | 4.609s | 11.0% |
+| Recurring one-statement cell, mean of two | 1.504s | 0.705s | 53.1% |
+| Recurring six-statement cell, mean of two | 3.044s | 2.826s | 7.2% |
+| Lookup | 32ms | 38ms | noise-scale change |
+
+The recurring one-statement cell now makes three compiler requests instead of
+five. The six-statement cell makes eight instead of ten because only its final
+expression has a display; six separately compiled execution items remain. The
+fused final machine has 14,287 native functions, 4,963,201 native-code bytes,
+and 13 installed programs, versus 14,617 functions, 5,033,170 bytes, and 14
+programs before fusion. This is 330 fewer functions (2.3%), about 70 KB less
+native code (1.4%), and one fewer live program for the measured sequence.
+
+Against the original frozen baseline, recurring one-statement latency is now
+97.6% lower (29.900s to 0.705s) and recurring six-statement latency is 95.8%
+lower (67.053s to 2.826s). Do not add these end-to-end reductions to the
+intermediate generated-support or display percentages; they are nested views
+of the same workload. Raw evidence is retained under
+`target/structural-performance-a/compile-profile-display/`.
+
+The final integrated revision repeated the same matched workload after host
+authority, constructor cleanup, and dependency pruning. It passed at 4.607s
+first cell, 0.689s and 0.684s recurring one-statement cells (0.687s mean),
+2.780s and 2.760s recurring six-statement cells (2.770s mean), and 33ms lookup,
+with the same 3/8/1 compiler-request counts. These small improvements over the
+display-fusion run are noise-scale confirmation that the closing work did not
+regress the hot path, not an additional speedup claim. Final state was 14,299
+native functions, 4,970,777 native-code bytes, and 13 programs. Evidence is
+under `target/structural-performance-a/compile-profile-final/`.
+
+The remaining warm request shape is now explicit. Ordinary executable requests
+still spend about 240--270ms in the compiler endpoint, dominated by prepared
+projection/recovery rather than GHC lowering. The fused display program also
+adds roughly 100ms of native compilation and about 187 KB of generated code per
+cell. One six-statement run had a 927ms request outlier, and its linear request
+count now dominates its wall time. These measurements make reusable display
+execution and a checked-cell execution bundle concrete next-wave questions.
+
 Use a Sol integration lead and at most three children concurrently: Luna for
 bounded cleanup/fixtures/scripts, Terra for substantive implementation, and
 independent Sol review for consequential compiler and GC changes. Use
@@ -77,6 +228,62 @@ and clean/incremental Rust build, link, selected-test and fixture preparation.
 Record requests/stages, CPU/allocation/GC, native functions/bytes, live versus
 cumulative memory, root/probe counts, fixture preparations, and physical versus
 apparent disk use. Prebuild before runtime timing; do not clear shared caches.
+
+## Next Astra review: live questions
+
+Carry these forward with the final measurements and resolved bug list; prune
+questions that this implementation closes before handoff.
+
+- After display-request fusion, what fraction of warm cell latency remains in
+  prepared projection/recovery, native compilation, execution, and transport?
+  Is there another structural reuse boundary, or would further work optimize
+  hundreds of milliseconds with disproportionate compiler risk?
+- Does the fully fused callable display ABI earn its extra fresh-alias/mount
+  machinery after the safe multi-bind fusion is measured? Current evidence says
+  it could remove one roughly 260ms compiler request, about 100ms of native
+  compilation, and roughly 187 KB of generated code from each displayed cell;
+  validate a design that preserves dynamic keys/budgets and partial commits.
+- Does a stable support package still remove meaningful work now that recurring
+  typechecking/lowering/prepared-STG total about 60ms per one-statement cell?
+  Require a post-fusion profile before reviving it.
+- Are every host Text/JSON payload, actor reply, request update, and generated
+  effect response on the one visitor/incremental-builder boundary? Which eager
+  snapshots remain real consumers of `to_value`?
+- Can immutable actor-spec compilation be reused under exact source/import/
+  effect/toolchain identity while every actor still receives fresh machine and
+  live-handle state? Is repeated spec preparation still visible after compiler
+  reuse?
+- Native state reaches roughly 14,299 functions and 5.0MB cumulative code after
+  the measured sequence. Which retained functions/programs are still live and
+  demanded, and which exist only through broad exports, adapters, display
+  requests, or retired session generations?
+- Static lookup is now logarithmic and exact, but the measured run still makes
+  hundreds of thousands of collector lookups. Is traversal itself the next GC
+  cost, or does wall/CPU attribution show it is already cheap enough?
+- Which compiler/runtime tests still compile fixed sources independently, test
+  removed mechanisms, or pull heavy support through dev-dependency edges after
+  the fixture and Cargo-graph changes?
+- Are support-program extraction, static-region indexing beyond the current
+  catalog, or literal reclamation justified by final live/cumulative memory and
+  code-size evidence? Keep them deferred without that evidence.
+- What failure cases remain weakly covered: nested forcing during display,
+  cancellation between construction and publication, source drift at
+  publication, retirement during quiescent transition, and reuse after partial
+  failure?
+- Is the designed single-cell executable bundle now worthwhile, or do fused
+  display requests and support reuse make its complexity unnecessary? The
+  six-statement cell still makes eight requests and takes 2.770s while a
+  one-statement cell takes 0.687s, so request batching is the largest measured
+  multi-statement latency opportunity.
+- Can the JSON/Text authority values already resolved during prepared
+  projection be threaded to the host-binding sidecar without widening the
+  request pipeline? The completed gate adds no work to ordinary binds, but a
+  typed host-carrier request currently repeats its candidate authority lookup.
+- Revisit the resident-Haskell compute candidates recorded in
+  `stg-specialization-followup.md`: first confirm whether `Tidepool.Patch`'s
+  production `planUpdate` path is still used, then measure its linked-String
+  parser/Myers/list-indexing costs. Keep typed `FromJSON`, inspection rendering,
+  CSV/TSV helpers, and compile-time quasiquoters evidence-gated.
 
 ## Shared contracts and delivery state
 
@@ -105,13 +312,15 @@ apparent disk use. Prebuild before runtime timing; do not clear shared caches.
   daemon startup and signal cleanup. Selection tests: 16 passed; command tests:
   4 passed; shell syntax/Python compilation/diff check passed.
 
-### Pending
+### Completion state
 
-Compiler leaf interfaces; support packaging/export lifetime; artifact ownership;
-turn-product deletion; display fusion; typed mounts; actor-spec reuse; temporary
-and observation roots; static catalog; JSON visitor follow-through; test-support
-and asset dependency reduction; immutable test preparation; embedded fixture
-migration; independent reviews; integration checks and matched measurements.
+The authorized implementation wave is complete. Stable support packaging and
+cross-actor spec artifact reuse remain evidence-gated: current profiles do not
+justify adding a new package/cache owner. Actor-spec timing is instrumented but
+has no controlled activation/reload workload result yet. Per-carrier native
+function/byte deltas are also unmeasured; the structural evidence proves one
+compiler request and one program for each Text/Job carrier, not a wall-time or
+native-byte claim.
 
 ### Baseline evidence
 
@@ -132,13 +341,14 @@ No timings from concurrent-build runs will be presented as controlled speedups.
   numeric-boundary counting assertion passed. HTTP unit group: 15 passed and
   one failed because ambient worker protocol was stale; exact JIT HTTP family
   rerun with frozen matched frontend/worker via `just test-lib` passed (1).
-- `b2e32b272`: checked leaf-interface elision implemented; independent review
-  found session Lib interfaces needed by injected source-less Val interfaces.
-  Repair and regression coverage in progress; not accepted as complete yet.
-- `b3da35b33`: chunked roots/explicit consumption, lazy observation roots,
-  borrowed static inventory and reverse constructor lookup implemented.
-  Independent review/repair in progress: slot reuse must fence stale handles,
-  clear pointer words before registration and preserve nested root ownership.
+- `b2e32b272`, repaired by `3ae07389f` and `5e942226f`: checked leaf-interface
+  elision retains the session Lib interfaces required by source-less Val
+  interfaces and shares prepared tidy work. Focused metadata/prepared/TH/boot
+  tests passed.
+- `b3da35b33`, repaired by `f895bea4a`: chunked roots/explicit consumption,
+  lazy observation roots, borrowed static inventory and reverse constructor
+  lookup are generation-safe. Focused stale/duplicate/nested/tiny-nursery and
+  allocation-failure tests passed.
 - Initial frozen-executable cell harness passed: one-statement cells make 5
   compiler requests, six-statement cells 10, lookup 1. The run overlapped builds
   and is diagnostic rather than a controlled timing comparison. Its compiler
@@ -176,3 +386,47 @@ No timings from concurrent-build runs will be presented as controlled speedups.
   checks passed; nine protocol goldens passed after restoring three missing
   already-shipped effects to the ordered declaration assertion. Facade/harness
   all-target consumer checks also passed.
+
+### Final integration and typed host boundary
+
+- `f13d8943f`, `5bc4c1bb3`: actor request JSON, retained tool-result Text, and
+  command Job payloads use typed managed mounts. Payload bytes no longer enter
+  generated Haskell source or its cache key. The request carrier is private and
+  retired after preparation; leases preserve closures that captured an older
+  request. Text and strict Job retain the authentic Text descriptor with one
+  lightweight `Value.String` companion in the same compiler request/artifact;
+  the companion receives no handle, root, or source-visible binding.
+- `ba0ebc4d7`, `b0c946e38`: worker protocol v12 carries a closed compiler-issued
+  JSON/Text/Job authority. JSON and Job require byte-authenticated shipped
+  sources in the active home unit; Text comes from GHC's selected installed
+  package. JSON validates the complete Value layout and selected Text field;
+  Job validates its sole strict selected-Text field. Rust rejects absent,
+  foreign, or mismatched authority before table merge or program installation.
+  A fresh independent review accepted the repaired gate.
+- `5d7cfb786`: fixed bridge, actor, and harness constructors resolve only by
+  compiler-qualified identity and representation arity. Primitive decoding is
+  guarded by the canonical constructor, Rust `Result` maps only to Haskell
+  `Either`, and the obsolete resilient-name fallback and its tests are deleted.
+- `6f12d8157`: a second programmatic dependency sweep removed eight dead Cargo
+  edges and one lockfile package. Remaining machete reports are derive/build
+  script inputs with verified consumers.
+
+Passed integration checks: `just quick` (722 tests); `just fixtures-check`
+(812 projection/validation/admission/compilation cases, 705 executable cases,
+zero failures, all structural cohorts, seven embedded artifacts); bridge suite
+(70); typed JSON/Text/Job carrier execution; A-to-B captured-input retention;
+tiny-nursery rejection/reuse; worker v12/retired-v11 protocol checks; and the
+focused harness/actor authority cases. `cargo check --workspace --all-targets`
+and `cabal build all` compiled every Rust and Haskell target. Rust formatting
+and `git diff --check` passed.
+
+Resolved failures: two stale six-field/error-category unit tests were updated
+to the new typed contract; the first carrier execution test exposed optimized-
+away Text metadata and led to the one-request companion; the first fixture run
+found a stale oracle fingerprint after `Job` changed from `newtype` to strict
+`data`, and regeneration changed only that fingerprint before the full rerun
+passed. Intermediate test failures are not counted as passed coverage.
+
+Unrun: the approximately two-hour `just verify`, by repository policy. No
+controlled actor-spec activation/reload timing or isolated per-carrier native
+byte measurement was claimed.
