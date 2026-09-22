@@ -527,9 +527,27 @@ authority clearing; its stale provenance comment was corrected in
 executions passed, with 104 intentionally non-closed and three without finite
 observations; all 280 reached comparisons passed; all seven registered schema
 14 artifacts passed their producer check. `just quick` passed 726 tests with
-one ignored, and supported Cargo all-target compilation passed. Matched workload
-measurements and the final post-audit revision are recorded after the required
-second pass; `just verify` remains intentionally unrun by repository policy.
+one ignored, and supported Cargo all-target compilation passed. `just verify`
+remains intentionally unrun by repository policy.
+
+The frozen matched workload completed both ignored measurement tests. Notebook
+request counts stayed structural-equivalent (2 activation, 3 per one-statement
+cell, 8 per six-statement cell, 1 lookup), while the final 13-program snapshot
+fell from 14,299 to 12,113 native functions, 4,970,777 to 4,476,101 native code
+bytes, and 1,688 to 1,545 persistent roots; live old bytes fell from 10,752 to
+10,536. Wall results were mixed (recurring one-statement cells 1,438/860 ms
+versus 689/711 ms; six-statement cells 2,473/3,540 ms versus 2,866/2,910 ms),
+so no latency speedup is claimed. Compiler phase totals were likewise higher in
+the final notebook run (33,998 versus 27,527 ms) and are retained as diagnostic
+evidence, not attributed savings.
+
+The formerly blocked real actor workload now passes twice. Each activation made
+two compiler requests; unchanged reload made one; edited reload made two.
+Observed wall times were 3,363/3,843 ms, 760/734 ms, and 2,948/1,686 ms. At
+activation, native structure fell from the only usable baseline point by 7,110
+to 6,345 functions, 2,458,774 to 2,255,683 bytes, and 1,171 to 1,147 persistent
+roots. The baseline failed immediately after activation on the old `I#` nominal
+mismatch, so reload timing has no baseline comparison.
 
 ### Second-pass audit
 
