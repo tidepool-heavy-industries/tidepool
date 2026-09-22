@@ -1341,8 +1341,8 @@ verifyRetainedImportProjection = do
 -- above already covers for the NOINLINE-pragma stand-in):
 --
 --   * retained set empty at compile time -> today's plain-GHC behavior:
---     both bindings are recovered locally (their exact occurrence names
---     appear as recovered tops), and neither is declared a 'GlobalDecl'.
+--     the static value is recovered, while the function can be optimized
+--     into its consumer; neither is declared a 'GlobalDecl'.
 --   * retained set populated at compile time -> the pass withholds both
 --     unfoldings before GHC's simplifier ever runs, so 'consumerResult'
 --     keeps plain, unexpanded 'Var' references to both -- exactly the shape
@@ -1387,8 +1387,8 @@ verifyRetainedImportProjectionExposed = do
       groupItems (NonRecursive item) = [item]
       groupItems (Recursive items) = items
   -- Compiled with the pass gated OFF (empty retained set): plain GHC
-  -- behavior -- both bindings are recovered locally, and neither is
-  -- declared as a global.
+  -- behavior -- the static value is recovered, the function is optimized
+  -- into its consumer, and neither is declared as a global.
   baselineModules <- runPipelineSelectedRetaining PreparedStg Set.empty
     (fixtureDir </> "ImportConsumerExposed.hs") [fixtureDir]
   case projectPreparedTarget (contextFor Map.empty) (pprModules baselineModules) of
@@ -1398,9 +1398,9 @@ verifyRetainedImportProjectionExposed = do
       unless (Set.member "producerValue" (recoveredOccurrences program))
         (ioError (userError
           "retained-import-exposed baseline omitted producerValue's recovered body"))
-      unless (Set.member "producerFn" (recoveredOccurrences program))
+      unless (not (Set.member "producerFn" (recoveredOccurrences program)))
         (ioError (userError
-          "retained-import-exposed baseline omitted producerFn's recovered body"))
+          "retained-import-exposed baseline unexpectedly retained producerFn's body"))
       unless (all ((/= producerValueId) . globalIdentity) (programGlobals program))
         (ioError (userError
           "retained-import-exposed baseline declared producerValue a global"))
