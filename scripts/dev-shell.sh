@@ -2,6 +2,8 @@
 # Select the environment from committed inputs, never from mounted build trees.
 set -euo pipefail
 
+bash scripts/codex-source-preflight.sh
+
 shell=default
 if [[ ${1:-} == --exomonad ]]; then
   shell=exomonad
