@@ -57,9 +57,11 @@ import Tidepool.Effects.Core
 
 -- Configuration is ordinary Haskell on purpose: a workspace can tune these
 -- values and reload its spec without changing a runtime protocol.
-jevTriggerTokens, sectionTokens, recentConversationTokens, selectedOutputTokens, maximumScoredTokens :: Int
+jevTriggerTokens, sectionTokens, commandTokens, purposeTokens, recentConversationTokens, selectedOutputTokens, maximumScoredTokens :: Int
 jevTriggerTokens = 100
 sectionTokens = 512
+commandTokens = 2048
+purposeTokens = 1024
 recentConversationTokens = 4096
 selectedOutputTokens = 2048
 maximumScoredTokens = 262144
@@ -287,9 +289,9 @@ scoreBatch command purpose recent rows = do
         J.rawState
           ( String
               ( "command: "
-                  <> maybe "(subsequent observation)" id command
+                  <> maybe "(subsequent observation)" (scalarPrefix commandTokens) command
                   <> "\nintent: "
-                  <> maybe "(unspecified)" id purpose
+                  <> maybe "(unspecified)" (scalarPrefix purposeTokens) purpose
                   <> "\nrecent conversation:\n"
                   <> recent
               )
@@ -334,57 +336,58 @@ renderRaw observed frozen sections =
 
 renderFallback :: Cmd.PresentedObservation -> Snapshot -> Text -> [Section] -> Text
 renderFallback observed frozen failure sections =
-  let chosen = takeWithin (selectedOutputTokens * 4) (max 0 (Cmd.presentedByteBudget observed - 1536)) sections
-   in boundBytes (Cmd.presentedByteBudget observed) $
+  let prefix =
         statusHeading observed
           <> "\nJev unavailable; bounded raw output follows ("
-          <> failure
+          <> takeUtf8 256 failure
           <> ").\n"
-          <> renderMarked chosen
-          <> recoveryIfOmitted frozen sections chosen
+      render chosen = prefix <> renderMarked chosen <> recoveryIfOmitted frozen sections chosen
+      chosen = takeWithin (selectedOutputTokens * 4) (Cmd.presentedByteBudget observed) render sections
+   in render chosen
 
 renderSelected :: Cmd.PresentedObservation -> Snapshot -> [Ranked] -> Text
 renderSelected observed frozen ranked =
   let allSections = map (\(Ranked section' _) -> section') ranked
       orderedByRank = sortBy (flip (comparing rankKey)) ranked
-      selected =
-        takeRanked
-          (selectedOutputTokens * 4)
-          (max 0 (Cmd.presentedByteBudget observed - 1536))
-          (filter (sectionScored . rankedSection) orderedByRank)
-      original = sortBy (comparing sectionId) selected
-   in boundBytes (Cmd.presentedByteBudget observed) $
+      render chosen =
         statusHeading observed
           <> "\n"
-          <> renderMarked original
-          <> recoveryIfOmitted frozen allSections original
+          <> renderMarked (sortBy (comparing sectionId) chosen)
           <> unscoredNotice ranked
+          <> recoveryIfOmitted frozen allSections chosen
+      selected = takeRanked
+        (selectedOutputTokens * 4)
+        (Cmd.presentedByteBudget observed)
+        render
+        (filter (sectionScored . rankedSection) orderedByRank)
+      original = sortBy (comparing sectionId) selected
+   in render original
   where
     rankKey (Ranked section' score) = (score, negateId (sectionId section'))
     negateId (SectionId value) = negate value
     rankedSection (Ranked section' _) = section'
 
-takeRanked :: Int -> Int -> [Ranked] -> [Section]
-takeRanked scalarBudget byteBudget = go scalarBudget byteBudget []
+takeRanked :: Int -> Int -> ([Section] -> Text) -> [Ranked] -> [Section]
+takeRanked scalarBudget byteBudget render = go scalarBudget []
   where
-    go _ _ kept [] = reverse kept
-    go scalars bytes kept (Ranked candidate _ : rest)
-      | costScalars <= scalars && costBytes <= bytes = go (scalars - costScalars) (bytes - costBytes) (candidate : kept) rest
-      | otherwise = go scalars bytes kept rest
+    go _ kept [] = reverse kept
+    go scalars kept (Ranked candidate _ : rest)
+      | costScalars <= scalars && utf8Bytes (render tentative) <= byteBudget = go (scalars - costScalars) (candidate : kept) rest
+      | otherwise = go scalars kept rest
       where
-        rendered = renderMarked [candidate]
+        tentative = reverse (candidate : kept)
         costScalars = T.length (sectionText candidate)
-        costBytes = utf8Bytes rendered
 
-takeWithin :: Int -> Int -> [Section] -> [Section]
-takeWithin scalarBudget byteBudget = go scalarBudget byteBudget
+takeWithin :: Int -> Int -> ([Section] -> Text) -> [Section] -> [Section]
+takeWithin scalarBudget byteBudget render = go scalarBudget []
   where
-    go _ _ [] = []
-    go scalars bytes (candidate : rest)
-      | T.length (sectionText candidate) <= scalars && utf8Bytes rendered <= bytes = candidate : go (scalars - T.length (sectionText candidate)) (bytes - utf8Bytes rendered) rest
-      | otherwise = []
+    go _ kept [] = reverse kept
+    go scalars kept (candidate : rest)
+      | costScalars <= scalars && utf8Bytes (render tentative) <= byteBudget = go (scalars - costScalars) (candidate : kept) rest
+      | otherwise = reverse kept
       where
-        rendered = renderMarked [candidate]
+        tentative = reverse (candidate : kept)
+        costScalars = T.length (sectionText candidate)
 
 renderMarked :: [Section] -> Text
 renderMarked = T.concat . map render
@@ -465,6 +468,7 @@ sectionPage frozen ident = do
         Right value
           | Cmd.outputLossy (Cmd.pageDetails value) -> Left (SnapshotDecodingLoss (sectionStream found) (sectionStart found))
           | Cmd.outputStart (Cmd.pageDetails value) /= sectionStart found || Cmd.outputLostBytes (Cmd.pageDetails value) /= 0 -> Left (SnapshotExpired (sectionStream found) (sectionStart found))
+          | Cmd.outputEnd (Cmd.pageDetails value) /= sectionEnd found -> Left (SnapshotExpired (sectionStream found) (Cmd.outputEnd (Cmd.pageDetails value)))
           | otherwise -> Right value
 
 findSection :: SectionId -> [Section] -> Maybe Section
@@ -501,10 +505,8 @@ chunksOf :: Int -> [a] -> [[a]]
 chunksOf _ [] = []
 chunksOf size values = let (front, rest) = splitAt size values in front : chunksOf size rest
 
-boundBytes :: Int -> Text -> Text
-boundBytes limit text
-  | utf8Bytes text <= limit = text
-  | otherwise = takeUtf8 limit text
+scalarPrefix :: Int -> Text -> Text
+scalarPrefix tokens = T.take (tokens * 4)
 
 takeUtf8 :: Int -> Text -> Text
 takeUtf8 budget = T.pack . go budget . T.unpack

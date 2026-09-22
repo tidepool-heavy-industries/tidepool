@@ -439,20 +439,29 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     )
     .await;
     let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let command = format!(
+        "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic; # {}COMMAND-TAIL",
+        "x".repeat(9000)
+    );
+    let intent = format!(
+        "retain the decisive diagnostic; {}INTENT-TAIL",
+        "y".repeat(5000)
+    );
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
-            policy.as_ref(),
+            invoked_policy.as_ref(),
             "bash",
             serde_json::json!({
-                "cmd": "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic",
+                "cmd": command,
                 "workdir": null,
                 "environment": null,
                 "memory_mib": null,
                 "tty": null,
                 "stdin": null,
                 "yield_time_ms": 30000,
-                "max_output_bytes": 32768,
-                "intent": "retain the decisive diagnostic"
+                "max_output_bytes": 2048,
+                "intent": intent
             }),
         )
         .await
@@ -480,6 +489,14 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         "recovery missing: {output}"
     );
     assert!(
+        output.len() <= 2048,
+        "selected output exceeded its byte budget"
+    );
+    assert!(
+        output.ends_with("Project.Shell.section snap (Project.Shell.SectionId N)."),
+        "recovery footer was truncated: {output}"
+    );
+    assert!(
         !output.lines().any(|line| line == "background-600"),
         "a low-ranked section exceeded the selection budget: {output}"
     );
@@ -494,7 +511,35 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         requests[0]["state"]
     );
     assert_eq!(commands.executions(), 1, "selection must not re-execute");
+    let state = requests[0]["state"].as_str().expect("Jev state text");
+    assert!(
+        !state.contains("COMMAND-TAIL"),
+        "command tail escaped its prompt bound"
+    );
+    assert!(
+        !state.contains("INTENT-TAIL"),
+        "intent tail escaped its prompt bound"
+    );
     drop(requests);
+
+    commands.shorten_slice_read(3);
+    let binding = response["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("bash installs its retained job binding");
+    let short_page = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        &format!(
+            "Project.Shell.sectionPage (Project.Shell.snapshot {binding} {} {}) (Project.Shell.SectionId 1)",
+            command_output.len(),
+            "ESSENTIAL-diagnostic\n".len()
+        ),
+    )
+    .await
+    .to_string();
+    assert!(
+        short_page.contains("SnapshotExpired Stdout"),
+        "a short section reread must report snapshot loss: {short_page}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

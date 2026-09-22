@@ -20,6 +20,8 @@ pub(super) struct TestCommands {
     fail_close: std::sync::atomic::AtomicBool,
     output_entered: tokio::sync::Notify,
     hold_output: watch::Sender<bool>,
+    slice_reads: std::sync::atomic::AtomicUsize,
+    short_slice_read: std::sync::atomic::AtomicUsize,
 }
 impl TestCommands {
     pub(super) fn completed(stdout: &str) -> Arc<Self> {
@@ -56,7 +58,16 @@ impl TestCommands {
             fail_close: false.into(),
             output_entered: tokio::sync::Notify::new(),
             hold_output: watch::channel(false).0,
+            slice_reads: 0.into(),
+            short_slice_read: 0.into(),
         })
+    }
+
+    pub(super) fn shorten_slice_read(&self, read: usize) {
+        self.slice_reads
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.short_slice_read
+            .store(read, std::sync::atomic::Ordering::Release);
     }
 }
 impl CommandBackend for TestCommands {
@@ -137,7 +148,22 @@ impl CommandBackend for TestCommands {
                 CommandStream::Stderr => test_page(&self.stderr.lock()),
             };
             let (offset, limit) = match position {
-                CommandPosition::OutputSlice(offset, bytes) => (offset, bytes as usize),
+                CommandPosition::OutputSlice(offset, bytes) => {
+                    let read = self
+                        .slice_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                        + 1;
+                    let limit = if read
+                        == self
+                            .short_slice_read
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        (bytes as usize).saturating_sub(1)
+                    } else {
+                        bytes as usize
+                    };
+                    (offset, limit)
+                }
                 CommandPosition::OutputOffset(offset) => (offset, 65536),
                 CommandPosition::OutputBeginning => (0, 65536),
                 CommandPosition::OutputTail => (page.end.saturating_sub(65536), 65536),
