@@ -34,6 +34,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust, listToMaybe)
 import GHC.Core.TyCo.FVs (tyCoVarsOfTypes, tyConsOfType)
 import GHC.Core.TyCo.Subst (emptySubst, extendTvSubst)
+import GHC.Core.TyCo.Tidy (tidyOpenType)
 import GHC.Core.Type (getTyVar_maybe, splitTyConApp_maybe, substTy)
 import GHC.Tc.Solver (tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
@@ -62,9 +63,16 @@ import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
 import GHC.Types.FieldLabel (flLabel, flSelector)
 import GHC.Types.Var (varName)
+import GHC.Types.Var.Env (emptyTidyEnv)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitFunTys, tcSplitSigmaTy)
-import GHC.Utils.Outputable (Outputable, defaultSDocContext, ppr, renderWithContext)
+import GHC.Utils.Outputable
+  ( Outputable,
+    defaultSDocContext,
+    ppr,
+    renderWithContext,
+    sdocSuppressUniques,
+  )
 import Tidepool.ExtractRequest
   ( InspectionProvenance (..), InspectionRequest (..), StructuredInspection (..),
     StructuredNameNamespace (..), StructuredNameScope (..)
@@ -464,7 +472,7 @@ searchTypeMatchesWithContext context rdrEnv queryBinder query = do
         { typeMatchName = spelling,
           typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe name,
           typeMatchSignature =
-            renderWithContext defaultSDocContext (ppr candidate),
+            renderType candidate,
           typeMatchQuality = quality,
           typeMatchAvailability = availability,
           typeMatchReferences = typeReferences candidate
@@ -505,7 +513,7 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
          in case Map.lookup binder inspectionProbes of
               Just identifier -> do
                 availability <- liftIO $ signatureAvailability context (idType identifier)
-                let display = renderWithContext defaultSDocContext (ppr (idType identifier))
+                let display = renderType (idType identifier)
                 pure (typeIndex + 1, results ++ [InspectionType expression display availability])
               Nothing -> missing binder
       InspectNameInfo query -> do
@@ -676,8 +684,13 @@ typeForThing thing = case thing of
   ACoAxiom _ -> Nothing
 
 describeType :: Type -> TypeExpression
-describeType ty = TypeExpression (render ty) (map (render . varName) variables) (map render constraints)
+describeType original =
+  TypeExpression
+    (renderUser ty)
+    (map (renderUser . varName) variables)
+    (map renderUser constraints)
   where
+    ty = tidyInspectionType original
     (variables, constraints, _) = tcSplitSigmaTy ty
 
 identifierRefForThing :: TyThing -> IdentifierRef
@@ -892,6 +905,19 @@ thingKind thing = case thing of
 
 render :: Outputable value => value -> String
 render = renderWithContext defaultSDocContext . ppr
+
+-- Type variables may retain compiler allocation suffixes in the typechecked
+-- source. They are semantically irrelevant and vary when otherwise independent
+-- inspection probes share a module, so remove them before producing any
+-- user-facing type text.
+renderType :: Type -> String
+renderType = renderUser . tidyInspectionType
+
+renderUser :: Outputable value => value -> String
+renderUser = renderWithContext defaultSDocContext {sdocSuppressUniques = True} . ppr
+
+tidyInspectionType :: Type -> Type
+tidyInspectionType = tidyOpenType emptyTidyEnv
 
 -- | Private V6 batch receipt. The outer list is @['TPINSP006', results]@.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString

@@ -1643,7 +1643,7 @@ mod tests {
         assert!(matches!(
             &valid[0],
             InspectionResult::Type { expression, display, .. }
-                if expression == "id" && display.contains("->")
+                if expression == "id" && display == "a -> a"
         ));
         assert!(matches!(
             &valid[1],
@@ -1653,7 +1653,7 @@ mod tests {
         assert!(matches!(
             &valid[2],
             InspectionResult::Type { expression, display, .. }
-                if expression == "const" && display.contains("->")
+                if expression == "const" && display == "a -> b -> a"
         ));
 
         let invalid_queries = [
