@@ -35,6 +35,11 @@ nix build .#shoal
 
 There is no public binary cache yet, so the first build compiles everything,
 GHC-side and Rust-side, and takes a good while.
+The matched Codex package uses its `local` Cargo profile: no LTO, no debug
+information, and unoptimized code with release runtime semantics. This reduces
+compiler memory and build work; runtime throughput may be lower than a release
+build. An optimized distribution build remains available with
+`nix build ./vendor/codex#codex-rs-release`.
 The wrapper selects the matched extractor and client itself; it does not replace
 `codex` on your `PATH`.
 

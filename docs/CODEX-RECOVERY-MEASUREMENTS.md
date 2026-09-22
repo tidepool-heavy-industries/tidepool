@@ -12,7 +12,7 @@ matched pre-change baseline, so they do not establish speedups.
 | Resource status polling | 2,000 observations with no history, then with 100,000 retained terminal entries | 3,728 ns and 3,093 ns per observation respectively; 68,136 KiB RSS added by the retained records |
 | Retained output | Push 256 MiB in 64 KiB chunks through one stream ring | 25,742.6 MiB/s; 4 MiB retained and 252 MiB reported dropped |
 | Run storage status | 100 bounded walks over 8,000 eight-byte files | 8,001 entries and 64,000 file bytes observed; 6,066 microseconds per sample |
-| Matched release build | `nix build 'path:.#shoal-unwrapped' --no-link` from an uncached changed source | Approximately 15 minutes; Nix built the filtered Cargo vendor input and `shoal-unwrapped` |
+| Tidepool host release build (excludes a cold Codex build) | `nix build 'path:.#shoal-unwrapped' --no-link` from an uncached changed source | Approximately 15 minutes; Nix built the filtered Cargo vendor input and `shoal-unwrapped` |
 
 The resource polling result is the structural claim that matters: each poll
 walks active allocations and reads constant-time counters for historical,
@@ -39,3 +39,9 @@ activation on the repository's existing extractor nominal-identity error:
 13.948-second failing run is therefore not reported as a startup observation.
 The ignored measurement tests provide explicit commands for repeating the
 model-free portions at later integration boundaries.
+
+The Codex Nix package now defaults to the `local` Cargo profile instead of the
+LTO-enabled release profile. This removes whole-program optimization and debug
+information from local package and contract builds. The full CLI/TUI dependency
+graph is still compiled. This is a structural reduction in build work, not a
+measured speedup; the host build timing above does not measure Codex compilation.
