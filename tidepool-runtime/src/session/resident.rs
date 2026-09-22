@@ -39,6 +39,11 @@ enum ResidentResumeInput {
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     },
+    FramedHandleSources {
+        handle: ValueHandle,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<Box<dyn tidepool_bridge::ToHaskell + Send>>,
+    },
     Abort(String),
 }
 
@@ -2325,6 +2330,44 @@ where
         )
     }
 
+    /// Structurally build each owned prefix field directly into the framed
+    /// answer, then append the borrowed custody field. This keeps the prefix
+    /// out of a collected `HaskellValue` tree while preserving the existing
+    /// frame-consumption classification and borrowed-root lifetime.
+    pub fn resume_framed_custody_sources_classified<T>(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<T>,
+    ) -> Result<ResidentOutcome, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        let Some(handle) = custody.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let seed = hole.seed();
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => hole.id,
+            ResidentHole::Binding(hole) => hole.id,
+            ResidentHole::ProjectedBinding(hole) => hole.id,
+        };
+        self.reenter(
+            &cont_id,
+            ResidentResumeInput::FramedHandleSources {
+                handle,
+                constructor,
+                prefix: prefix
+                    .into_iter()
+                    .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
+                    .collect(),
+            },
+            seed,
+            Some(&custody.provenance),
+        )
+    }
+
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
     /// machine up (`run_with_sites`/`run_bind_with_sites`/`run_child`/
@@ -3735,6 +3778,17 @@ where
                     constructor,
                     prefix,
                 } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
+                ResidentResumeInput::FramedHandleSources {
+                    handle,
+                    constructor,
+                    prefix,
+                } => engine.resume_with_framed_handle_sources(
+                    frame_id,
+                    handle,
+                    constructor,
+                    &prefix,
+                    table,
+                ),
                 ResidentResumeInput::Abort(_) => {
                     unreachable!("Abort is handled before the frame is touched")
                 }

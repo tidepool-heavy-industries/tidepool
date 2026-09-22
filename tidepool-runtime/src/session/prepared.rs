@@ -1002,6 +1002,67 @@ fn build_structural_node(
     })
 }
 
+fn build_framed_structural_node(
+    prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
+    handle: PreparedHandle,
+    constructor: DataConId,
+    field_nodes: &[TypeNodeId],
+    table: &DataConTable,
+    site: u64,
+    root: TypeNodeId,
+    facts: &ProgramFacts,
+    builder: &mut ManagedBuilder<'_, '_>,
+) -> Result<ManagedNode, PreparedRuntimeError> {
+    let response_table = table.with_json_layout(facts.json_layout());
+    let mut visitor = StructuralAnswerVisitor {
+        site,
+        root,
+        facts,
+        builder,
+        frames: vec![StructuralFrame {
+            host_id: constructor,
+            expected: field_nodes
+                .iter()
+                .copied()
+                .map(StructuralExpected::Node)
+                .collect(),
+            fields: Vec::with_capacity(field_nodes.len()),
+            counts_depth: true,
+        }],
+        result: None,
+        failure: None,
+        depth: 1,
+    };
+    for field in prefix {
+        let visited = field.visit(&response_table, &mut visitor);
+        if let Some(error) = visitor.failure.take() {
+            return Err(error);
+        }
+        visited.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
+    }
+    if visitor.frames.len() != 1 {
+        return Err(PreparedRuntimeError::AnswerShape {
+            site,
+            detail: "a framed prefix left a constructor unfinished",
+        });
+    }
+    visitor
+        .frames
+        .last_mut()
+        .expect("the outer framed constructor remains open")
+        .fields
+        .push(ManagedField::Handle(handle));
+    let ended = visitor.end_constructor();
+    if let Some(error) = visitor.failure.take() {
+        return Err(error);
+    }
+    ended.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
+    visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
+        site,
+        detail: "the framed response emitted no managed answer root",
+    })
+}
+
 /// A deliberately small structural sink for values whose Haskell type is
 /// fixed by a compiler-produced binding interface. It does not make a
 /// `HaskellValue` tree: every completed child is immediately handed to the
@@ -2600,6 +2661,24 @@ impl PreparedEngine {
         prefix: Vec<HaskellValue>,
         table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let prefix = prefix
+            .into_iter()
+            .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
+            .collect::<Vec<_>>();
+        self.resume_with_framed_handle_sources(id, raw, constructor, &prefix, table)
+    }
+
+    /// [`Self::resume_with_framed_handle`] with each prefix field supplied as
+    /// an owned structural source. The borrowed final field remains outside
+    /// normal structural construction, under the framed-delivery contract.
+    pub fn resume_with_framed_handle_sources(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+        constructor: DataConId,
+        prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
+        table: &DataConTable,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let handle = self
             .machine
             .prepared_handle_of(raw)
@@ -2638,31 +2717,26 @@ impl PreparedEngine {
         if ctor_row.fields.len() != prefix.len() + 1 {
             return Err(PreparedRuntimeError::AnswerShape {
                 site,
-                detail: "the framed constructor's declared field count does not match the \
-                         supplied prefix plus the borrowed handle field",
+                detail: "the framed constructor's declared field count does not match the supplied prefix plus the borrowed handle field",
             });
         }
-        let field_nodes = ctor_row.fields[..prefix.len()].to_vec();
         if machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let mut builder = machine
             .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let mut fields = Vec::with_capacity(prefix.len() + 1);
-        for (field_node, field) in field_nodes.into_iter().zip(&prefix) {
-            let node = build_structural_node(field, table, site, field_node, owner, &mut builder)?;
-            fields.push(ManagedField::Node(node));
-        }
-        fields.push(ManagedField::Handle(handle));
-        for field in &mut fields {
-            if let ManagedField::Node(node) = field {
-                *field = ManagedField::Consume(*node);
-            }
-        }
-        let root = builder
-            .constructor(constructor, &fields)
-            .map_err(PreparedRuntimeError::Run)?;
+        let root = build_framed_structural_node(
+            prefix,
+            handle,
+            constructor,
+            &ctor_row.fields,
+            table,
+            site,
+            row.wire,
+            owner,
+            &mut builder,
+        )?;
         let built = builder
             .finish(realm, root)
             .map_err(PreparedRuntimeError::Run)?;
@@ -3803,6 +3877,16 @@ mod tests {
                 2,
                 vec![RuntimeRep::LiftedRef; 2],
             ),
+            mount_constructor(
+                "Fixture.Mount",
+                "Framed",
+                "Fixture.Mount",
+                "Framed",
+                903,
+                1,
+                1,
+                vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef],
+            ),
         ];
         wire.expressions.nodes[0] = ExprFrame::Construct {
             constructor: ConstructorId(0),
@@ -3871,15 +3955,37 @@ mod tests {
                 ],
             },
             TypeNode::Scalar(RuntimeRep::Int(64)),
+            TypeNode::Data {
+                family: {
+                    let mut family = testing::identity("Fixture.Mount", "Framed");
+                    family.namespace = "type".into();
+                    family
+                },
+                arguments: vec![],
+                rows: vec![CtorRow {
+                    constructor: ConstructorId(22),
+                    fields: vec![TypeNodeId(1), TypeNodeId(0)],
+                }],
+            },
         ];
-        wire.sites = vec![SiteRow {
-            site: 7,
-            origin: "Fixture.Mount.json_reply".into(),
-            ordinal: 0,
-            delivery: SiteDelivery::HostAnswer,
-            wire: TypeNodeId(0),
-            inputs: vec![],
-        }];
+        wire.sites = vec![
+            SiteRow {
+                site: 7,
+                origin: "Fixture.Mount.json_reply".into(),
+                ordinal: 0,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(0),
+                inputs: vec![],
+            },
+            SiteRow {
+                site: 8,
+                origin: "Fixture.Mount.framed_reply".into(),
+                ordinal: 1,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(2),
+                inputs: vec![],
+            },
+        ];
         wire.json_layout = Some(JsonLayout {
             object: ConstructorId(1),
             array: ConstructorId(2),
@@ -3929,6 +4035,7 @@ mod tests {
             (160, "Text", 3, Some("Data.Text.Internal.Text")),
             (170, ":", 2, Some("GHC.Types.:")),
             (171, "[]", 0, Some("GHC.Types.[]")),
+            (903, "Framed", 2, Some("Fixture.Mount.Framed")),
         ] {
             table
                 .insert_checked(mount_table_row(id, name, arity, qualified_name))
@@ -4056,6 +4163,108 @@ mod tests {
             HaskellValue::Con(DataConId(100), _)
         ));
         assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 0);
+    }
+
+    #[test]
+    fn framed_structural_prefix_rejects_without_consuming_then_retries() {
+        struct RawInt(i64);
+        impl tidepool_bridge::sealed::ToHaskellSealed for RawInt {}
+        impl ToHaskell for RawInt {
+            fn visit(
+                &self,
+                _table: &DataConTable,
+                visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+            ) -> Result<(), BridgeError> {
+                visitor.literal(Literal::LitInt(self.0))
+            }
+        }
+
+        let (mut engine, program) =
+            PreparedEngine::bootstrap(json_mount_program()).expect("bootstrap framed fixture");
+        let table = json_mount_table();
+        let make_null = |engine: &mut PreparedEngine| {
+            let mut builder = engine
+                .machine
+                .managed_builder()
+                .expect("framed fixture opens a managed builder");
+            let root = builder
+                .constructor(DataConId(105), &[])
+                .expect("fixture Null constructor is declared");
+            builder
+                .finish(RealmId::ROOT, root)
+                .expect("fixture value is retained")
+        };
+        let continuation = make_null(&mut engine);
+        let held = make_null(&mut engine);
+        let id = engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        owner: program,
+                        site: 8,
+                        runner: program,
+                        resume_entry: ValueId(1),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .expect("fixture continuation parks");
+        let roots_before = engine.persistent_roots_count();
+        let handles_before = engine.handle_count();
+
+        let error = match engine.resume_with_framed_handle_sources(
+            id,
+            held.raw(),
+            DataConId(903),
+            &[],
+            &table,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing prefix must be rejected"),
+        };
+        assert!(matches!(error, PreparedRuntimeError::AnswerShape { .. }));
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.persistent_roots_count(), roots_before);
+        assert_eq!(engine.handle_count(), handles_before);
+
+        let wrong: Vec<Box<dyn ToHaskell + Send>> = vec![Box::new("not an Int".to_owned())];
+        let error = match engine.resume_with_framed_handle_sources(
+            id,
+            held.raw(),
+            DataConId(903),
+            &wrong,
+            &table,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("wrong prefix shape must be rejected"),
+        };
+        assert!(matches!(error, PreparedRuntimeError::AnswerRejected { .. }));
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.persistent_roots_count(), roots_before);
+        assert_eq!(engine.handle_count(), handles_before);
+
+        let prefix: Vec<Box<dyn ToHaskell + Send>> = vec![Box::new(RawInt(37))];
+        let resumed = engine
+            .resume_with_framed_handle_sources(id, held.raw(), DataConId(903), &prefix, &table)
+            .expect("valid prefix retries the exact parked frame");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("framed fixture returns a settled Done value")
+        };
+        assert!(matches!(
+            engine.observe(program, value).expect("observe framed reply"),
+            HaskellValue::Con(DataConId(903), ref fields)
+                if matches!(fields.as_slice(), [HaskellValue::Lit(Literal::LitInt(37)), HaskellValue::Con(DataConId(105), nested)] if nested.is_empty())
+        ));
+        assert!(engine.release(value));
+        assert!(engine.release(held));
         assert_eq!(engine.parked_count(), 0);
     }
 

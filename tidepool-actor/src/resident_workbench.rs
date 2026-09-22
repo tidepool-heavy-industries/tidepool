@@ -779,302 +779,6 @@ pub(crate) struct CleanupReceiptProjection {
     pub complete: bool,
 }
 
-fn usage_observation_value(
-    table: &DataConTable,
-    sample: Option<&crate::ProviderUsageSample>,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let value = sample
-        .map(|sample| {
-            actor_context_constructor(
-                table,
-                "ProviderUsageObservation",
-                vec![
-                    sample.observation_id.to_value(table)?,
-                    sample.source_timestamp.to_value(table)?,
-                    sample.cached_input_tokens.to_value(table)?,
-                    sample.uncached_input_tokens.to_value(table)?,
-                ],
-            )
-        })
-        .transpose()?;
-    Ok(value.to_value(table)?)
-}
-
-fn usage_summary_value(
-    table: &DataConTable,
-    summary: Option<&tidepool_model::ProviderUsageSummary>,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope};
-    let value = summary
-        .map(|summary| {
-            let scope = match &summary.scope {
-                ProviderUsageScope::Thread(thread) => {
-                    actor_context_constructor(table, "UsageThread", vec![thread.to_value(table)?])?
-                }
-                ProviderUsageScope::Turn { thread, turn } => actor_context_constructor(
-                    table,
-                    "UsageTurn",
-                    vec![thread.to_value(table)?, turn.to_value(table)?],
-                )?,
-            };
-            let uncached_input_tokens = summary
-                .usage
-                .input_tokens
-                .checked_sub(summary.usage.cached_input_tokens)
-                .ok_or_else(|| {
-                    BridgeError::UnsupportedType("cached input tokens exceed input tokens".into())
-                })?;
-            actor_context_constructor(
-                table,
-                "ProviderUsageSummary",
-                vec![
-                    scope,
-                    actor_context_constructor(
-                        table,
-                        match summary.completeness {
-                            ProviderUsageCompleteness::Partial => "UsagePartial",
-                            ProviderUsageCompleteness::Complete => "UsageComplete",
-                        },
-                        Vec::new(),
-                    )?,
-                    summary.observations.to_value(table)?,
-                    summary.usage.cached_input_tokens.to_value(table)?,
-                    uncached_input_tokens.to_value(table)?,
-                    summary.usage.output_tokens.to_value(table)?,
-                    summary.usage.reasoning_output_tokens.to_value(table)?,
-                    summary.usage.total_tokens.to_value(table)?,
-                ],
-            )
-        })
-        .transpose()?;
-    Ok(value.to_value(table)?)
-}
-
-fn agent_roster_value(
-    table: &DataConTable,
-    entry: AgentRosterProjection,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let (health_name, health_fields) =
-        match entry.runtime.provider_turn.as_ref().map(|turn| &turn.state) {
-            None => ("ProviderUnknown", vec![]),
-            Some(tidepool_model::ProviderTurnState::Active) => ("ProviderActive", vec![]),
-            Some(tidepool_model::ProviderTurnState::Succeeded) => ("ProviderSucceeded", vec![]),
-            Some(tidepool_model::ProviderTurnState::Interrupted) => ("ProviderInterrupted", vec![]),
-            Some(tidepool_model::ProviderTurnState::Failed(failure)) => {
-                let (name, fields) = match failure {
-                    tidepool_model::ProviderFailure::RequestRejected => ("RequestRejected", vec![]),
-                    tidepool_model::ProviderFailure::TransportFailed => ("TransportFailed", vec![]),
-                    tidepool_model::ProviderFailure::Other(detail) => {
-                        ("OtherProviderFailure", vec![detail.to_value(table)?])
-                    }
-                };
-                (
-                    "ProviderFailed",
-                    vec![actor_context_constructor(table, name, fields)?],
-                )
-            }
-        };
-    let health = actor_context_constructor(table, health_name, health_fields)?;
-    let disposition = if entry.terminal.is_none() {
-        Some(actor_context_constructor(
-            table,
-            entry
-                .runtime
-                .disposition(!entry.requests.0.is_empty() || !entry.requests.1.is_empty())
-                .constructor_name(),
-            vec![],
-        )?)
-    } else {
-        None
-    };
-    let usage = entry.runtime.latest_provider_usage();
-    let supervisor = entry.descriptor.supervisor_parent();
-    let creator = entry.descriptor.creator();
-    let context_parent = entry.descriptor.context_parent();
-    let cache_boundary = usage
-        .map(|sample| {
-            actor_context_constructor(
-                table,
-                match sample.cache_boundary {
-                    crate::CacheBoundaryReason::Fresh => "CacheFresh",
-                    crate::CacheBoundaryReason::ForkedPrefix => "CacheForkedPrefix",
-                    crate::CacheBoundaryReason::ReattachedThread => "CacheReattachedThread",
-                    crate::CacheBoundaryReason::ProviderUnknown => "CacheProviderUnknown",
-                },
-                Vec::new(),
-            )
-        })
-        .transpose()?;
-    let state = match entry.terminal {
-        None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
-        Some(terminal) => match terminal.kind {
-            crate::ActorExitKind::Completed => {
-                actor_context_constructor(table, "RosterStopped", Vec::new())?
-            }
-            crate::ActorExitKind::Failed => actor_context_constructor(
-                table,
-                "RosterFailed",
-                vec![terminal.summary.to_value(table)?],
-            )?,
-            crate::ActorExitKind::Cancelled => actor_context_constructor(
-                table,
-                "RosterCancelled",
-                vec![terminal.summary.to_value(table)?],
-            )?,
-        },
-    };
-    let role = match entry.descriptor.effective_role().role() {
-        crate::ActorRole::Root => "ContextRoot",
-        crate::ActorRole::Research => "ContextResearch",
-        crate::ActorRole::Coding => "ContextCoding",
-        crate::ActorRole::Scaffolding => "ContextScaffolding",
-        crate::ActorRole::Integration => "ContextIntegration",
-        crate::ActorRole::Inherited => "ContextInherited",
-    };
-    let workbench_posture = match &entry.runtime.workbench_posture {
-        crate::ActorWorkbenchPosture::Idle => {
-            actor_context_constructor(table, "WorkbenchIdle", Vec::new())?
-        }
-        crate::ActorWorkbenchPosture::RunningUnit {
-            input_unit_index,
-            total,
-        } => actor_context_constructor(
-            table,
-            "WorkbenchRunningUnit",
-            vec![
-                workbench_int(*input_unit_index)?.to_value(table)?,
-                workbench_int(*total)?.to_value(table)?,
-            ],
-        )?,
-        crate::ActorWorkbenchPosture::AwaitingEffect {
-            input_unit_index,
-            total,
-            effect,
-        } => actor_context_constructor(
-            table,
-            "WorkbenchAwaitingEffect",
-            vec![
-                workbench_int(*input_unit_index)?.to_value(table)?,
-                workbench_int(*total)?.to_value(table)?,
-                effect.to_value(table)?,
-            ],
-        )?,
-        crate::ActorWorkbenchPosture::TerminalTransfer { transfer } => {
-            let transfer = actor_context_constructor(
-                table,
-                match transfer {
-                    crate::ActorWorkbenchTransfer::Reply => "WorkbenchReplyTransfer",
-                    crate::ActorWorkbenchTransfer::CancellationAcknowledgement => {
-                        "WorkbenchCancellationTransfer"
-                    }
-                },
-                Vec::new(),
-            )?;
-            actor_context_constructor(table, "WorkbenchTerminalTransfer", vec![transfer])?
-        }
-        crate::ActorWorkbenchPosture::Failed => {
-            actor_context_constructor(table, "WorkbenchFailed", Vec::new())?
-        }
-    };
-    Ok(actor_context_constructor(
-        table,
-        "AgentRosterEntry",
-        vec![
-            actor_int(entry.actor.id.0)?.to_value(table)?,
-            actor_int(entry.actor.incarnation.0)?.to_value(table)?,
-            entry.descriptor.label().to_owned().to_value(table)?,
-            entry
-                .runtime
-                .requested_model
-                .as_deref()
-                .or(entry.descriptor.model_name())
-                .map(str::to_owned)
-                .to_value(table)?,
-            entry.runtime.confirmed_model.to_value(table)?,
-            actor_int(entry.received.0)?.to_value(table)?,
-            actor_int(entry.received.1)?.to_value(table)?,
-            entry
-                .runtime
-                .compactions
-                .map(actor_int)
-                .transpose()?
-                .to_value(table)?,
-            creator
-                .map(|actor| actor_int(actor.id.0))
-                .transpose()?
-                .to_value(table)?,
-            creator
-                .map(|actor| actor_int(actor.incarnation.0))
-                .transpose()?
-                .to_value(table)?,
-            supervisor
-                .map(|actor| actor_int(actor.id.0))
-                .transpose()?
-                .to_value(table)?,
-            supervisor
-                .map(|actor| actor_int(actor.incarnation.0))
-                .transpose()?
-                .to_value(table)?,
-            context_parent
-                .map(|actor| actor_int(actor.id.0))
-                .transpose()?
-                .to_value(table)?,
-            context_parent
-                .map(|actor| actor_int(actor.incarnation.0))
-                .transpose()?
-                .to_value(table)?,
-            state,
-            health,
-            entry
-                .runtime
-                .provider_turn
-                .as_ref()
-                .map(|turn| turn.turn.clone())
-                .to_value(table)?,
-            entry.runtime.provider_observation_stale.to_value(table)?,
-            disposition.to_value(table)?,
-            entry
-                .requests
-                .0
-                .iter()
-                .map(|id| actor_int(id.0))
-                .collect::<Result<Vec<_>, _>>()?
-                .to_value(table)?,
-            entry
-                .requests
-                .1
-                .iter()
-                .map(|id| actor_int(id.0))
-                .collect::<Result<Vec<_>, _>>()?
-                .to_value(table)?,
-            actor_context_constructor(table, role, Vec::new())?,
-            entry.bound_worktree.to_value(table)?,
-            entry
-                .descriptor
-                .fork_group()
-                .map(|group| actor_int(group.0))
-                .transpose()?
-                .to_value(table)?,
-            actor_int(entry.descriptor.placement().lexical_scope.0)?.to_value(table)?,
-            entry.runtime.provider_thread.to_value(table)?,
-            entry.runtime.provider_parent_thread.to_value(table)?,
-            usage_observation_value(table, entry.runtime.first_provider_usage.as_ref())?,
-            usage_observation_value(table, usage)?,
-            usage_summary_value(table, entry.runtime.provider_usage_summary.as_ref())?,
-            usage_summary_value(table, entry.runtime.latest_turn_usage_summary.as_ref())?,
-            cache_boundary.to_value(table)?,
-            actor_int(entry.runtime.event_watermark)?.to_value(table)?,
-            workbench_posture,
-            // The host already observes when this actor launched; a supervisor
-            // that has to derive "+4m50s" from prose cannot subtract it from a
-            // settlement time. This is the value that lets a parent compute a
-            // child's real elapsed time, which the notification prose does not
-            // carry — that prose is measured against the reader's own launch.
-            entry.runtime.launched_at_unix_ms.to_value(table)?,
-        ],
-    )?)
-}
-
 fn visit_named(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
@@ -1183,6 +887,73 @@ enum ProgressAnswer {
     Pending,
     Closed,
     Rejected(crate::ReplyError),
+}
+
+enum LifecycleAnswer {
+    Live,
+    Paused(String),
+    Exited(crate::ActorTerminal),
+}
+
+struct ForkCleanupAnswer(Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>);
+
+impl tidepool_bridge::sealed::ToHaskellSealed for ForkCleanupAnswer {}
+impl ToHaskell for ForkCleanupAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match &self.0 {
+            Ok(crate::ForkGroupCleanupOutcome::Cleaned) => {
+                visit_core(table, visitor, "ForkGroupCleaned", 0, |_| Ok(()))
+            }
+            Ok(crate::ForkGroupCleanupOutcome::Active(actors)) => {
+                visit_core(table, visitor, "ForkGroupStillActive", 1, |visitor| {
+                    actors
+                        .iter()
+                        .map(|actor| {
+                            Ok((
+                                actor_haskell_int(actor.id.0, "actor id")?,
+                                actor_haskell_int(actor.incarnation.0, "actor incarnation")?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, BridgeError>>()?
+                        .visit(table, visitor)
+                })
+            }
+            Err(error) => visit_core(table, visitor, "ForkGroupCleanupRejected", 1, |visitor| {
+                error.to_string().visit(table, visitor)
+            }),
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for LifecycleAnswer {}
+impl ToHaskell for LifecycleAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        match self {
+            Self::Live => visit_core(table, visitor, "ActorLive", 0, |_| Ok(())),
+            Self::Paused(detail) => visit_core(table, visitor, "ActorPaused", 1, |visitor| {
+                detail.visit(table, visitor)
+            }),
+            Self::Exited(terminal) => visit_core(
+                table,
+                visitor,
+                match terminal.kind {
+                    crate::ActorExitKind::Completed => "ActorFinished",
+                    crate::ActorExitKind::Failed => "ActorFailed",
+                    crate::ActorExitKind::Cancelled => "ActorCancelled",
+                },
+                1,
+                |visitor| terminal.summary.visit(table, visitor),
+            ),
+        }
+    }
 }
 
 impl tidepool_bridge::sealed::ToHaskellSealed for ProgressAnswer {}
@@ -1428,6 +1199,450 @@ impl ToHaskell for CleanupReceiptProjection {
             self.plan.visit(table, visitor)?;
             self.steps.visit(table, visitor)?;
             self.complete.visit(table, visitor)
+        })
+    }
+}
+
+fn visit_usage_observation(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    sample: Option<&crate::ProviderUsageSample>,
+) -> Result<(), BridgeError> {
+    match sample {
+        None => Option::<i64>::None.visit(table, visitor),
+        Some(sample) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
+            visit_core(table, visitor, "ProviderUsageObservation", 4, |visitor| {
+                sample.observation_id.visit(table, visitor)?;
+                sample.source_timestamp.visit(table, visitor)?;
+                sample.cached_input_tokens.visit(table, visitor)?;
+                sample.uncached_input_tokens.visit(table, visitor)
+            })
+        }),
+    }
+}
+
+fn visit_usage_summary(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    summary: Option<&tidepool_model::ProviderUsageSummary>,
+) -> Result<(), BridgeError> {
+    use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope};
+    match summary {
+        None => Option::<i64>::None.visit(table, visitor),
+        Some(summary) => {
+            if summary.usage.cached_input_tokens > summary.usage.input_tokens {
+                return Err(BridgeError::UnsupportedType(
+                    "cached input tokens exceed input tokens".into(),
+                ));
+            }
+            let uncached = summary
+                .usage
+                .input_tokens
+                .checked_sub(summary.usage.cached_input_tokens)
+                .ok_or_else(|| {
+                    BridgeError::UnsupportedType("cached input tokens exceed input tokens".into())
+                })?;
+            visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
+                visit_core(table, visitor, "ProviderUsageSummary", 7, |visitor| {
+                    match &summary.scope {
+                        ProviderUsageScope::Thread(thread) => {
+                            visit_core(table, visitor, "UsageThread", 1, |visitor| {
+                                thread.visit(table, visitor)
+                            })?
+                        }
+                        ProviderUsageScope::Turn { thread, turn } => {
+                            visit_core(table, visitor, "UsageTurn", 2, |visitor| {
+                                thread.visit(table, visitor)?;
+                                turn.visit(table, visitor)
+                            })?
+                        }
+                    }
+                    visit_core(
+                        table,
+                        visitor,
+                        match summary.completeness {
+                            ProviderUsageCompleteness::Partial => "UsagePartial",
+                            ProviderUsageCompleteness::Complete => "UsageComplete",
+                        },
+                        0,
+                        |_| Ok(()),
+                    )?;
+                    summary.observations.visit(table, visitor)?;
+                    summary.usage.cached_input_tokens.visit(table, visitor)?;
+                    uncached.visit(table, visitor)?;
+                    summary.usage.output_tokens.visit(table, visitor)?;
+                    summary
+                        .usage
+                        .reasoning_output_tokens
+                        .visit(table, visitor)?;
+                    summary.usage.total_tokens.visit(table, visitor)
+                })
+            })
+        }
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for AgentRosterProjection {}
+impl ToHaskell for AgentRosterProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let role = match self.descriptor.effective_role().role() {
+            crate::ActorRole::Root => "ContextRoot",
+            crate::ActorRole::Research => "ContextResearch",
+            crate::ActorRole::Coding => "ContextCoding",
+            crate::ActorRole::Scaffolding => "ContextScaffolding",
+            crate::ActorRole::Integration => "ContextIntegration",
+            crate::ActorRole::Inherited => "ContextInherited",
+        };
+        visit_core(table, visitor, "AgentRosterEntry", 35, |visitor| {
+            actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
+            actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
+                .visit(table, visitor)?;
+            self.descriptor.label().to_owned().visit(table, visitor)?;
+            self.runtime
+                .requested_model
+                .as_deref()
+                .or(self.descriptor.model_name())
+                .map(str::to_owned)
+                .visit(table, visitor)?;
+            self.runtime.confirmed_model.visit(table, visitor)?;
+            actor_haskell_int(self.received.0, "received count")?.visit(table, visitor)?;
+            actor_haskell_int(self.received.1, "received count")?.visit(table, visitor)?;
+            self.runtime
+                .compactions
+                .map(|x| actor_haskell_int(x, "compaction count"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .creator()
+                .map(|x| actor_haskell_int(x.id.0, "creator id"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .creator()
+                .map(|x| actor_haskell_int(x.incarnation.0, "creator incarnation"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .supervisor_parent()
+                .map(|x| actor_haskell_int(x.id.0, "supervisor id"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .supervisor_parent()
+                .map(|x| actor_haskell_int(x.incarnation.0, "supervisor incarnation"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .context_parent()
+                .map(|x| actor_haskell_int(x.id.0, "context parent id"))
+                .transpose()?
+                .visit(table, visitor)?;
+            self.descriptor
+                .context_parent()
+                .map(|x| actor_haskell_int(x.incarnation.0, "context parent incarnation"))
+                .transpose()?
+                .visit(table, visitor)?;
+            match &self.terminal {
+                None => visit_core(table, visitor, "RosterRunning", 0, |_| Ok(()))?,
+                Some(t) => match t.kind {
+                    crate::ActorExitKind::Completed => {
+                        visit_core(table, visitor, "RosterStopped", 0, |_| Ok(()))?
+                    }
+                    crate::ActorExitKind::Failed => {
+                        visit_core(table, visitor, "RosterFailed", 1, |v| {
+                            t.summary.visit(table, v)
+                        })?
+                    }
+                    crate::ActorExitKind::Cancelled => {
+                        visit_core(table, visitor, "RosterCancelled", 1, |v| {
+                            t.summary.visit(table, v)
+                        })?
+                    }
+                },
+            }
+            match self.runtime.provider_turn.as_ref().map(|t| &t.state) {
+                None => visit_core(table, visitor, "ProviderUnknown", 0, |_| Ok(()))?,
+                Some(tidepool_model::ProviderTurnState::Active) => {
+                    visit_core(table, visitor, "ProviderActive", 0, |_| Ok(()))?
+                }
+                Some(tidepool_model::ProviderTurnState::Succeeded) => {
+                    visit_core(table, visitor, "ProviderSucceeded", 0, |_| Ok(()))?
+                }
+                Some(tidepool_model::ProviderTurnState::Interrupted) => {
+                    visit_core(table, visitor, "ProviderInterrupted", 0, |_| Ok(()))?
+                }
+                Some(tidepool_model::ProviderTurnState::Failed(f)) => {
+                    visit_core(table, visitor, "ProviderFailed", 1, |v| match f {
+                        tidepool_model::ProviderFailure::RequestRejected => {
+                            visit_core(table, v, "RequestRejected", 0, |_| Ok(()))
+                        }
+                        tidepool_model::ProviderFailure::TransportFailed => {
+                            visit_core(table, v, "TransportFailed", 0, |_| Ok(()))
+                        }
+                        tidepool_model::ProviderFailure::Other(d) => {
+                            visit_core(table, v, "OtherProviderFailure", 1, |v| d.visit(table, v))
+                        }
+                    })?
+                }
+            }
+            self.runtime
+                .provider_turn
+                .as_ref()
+                .map(|turn| turn.turn.clone())
+                .visit(table, visitor)?;
+            self.runtime
+                .provider_observation_stale
+                .visit(table, visitor)?;
+            match self.terminal {
+                None => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |v| {
+                    visit_core(
+                        table,
+                        v,
+                        self.runtime
+                            .disposition(!self.requests.0.is_empty() || !self.requests.1.is_empty())
+                            .constructor_name(),
+                        0,
+                        |_| Ok(()),
+                    )
+                })?,
+                Some(_) => Option::<i64>::None.visit(table, visitor)?,
+            }
+            self.requests
+                .0
+                .iter()
+                .map(|x| actor_haskell_int(x.0, "request id"))
+                .collect::<Result<Vec<_>, _>>()?
+                .visit(table, visitor)?;
+            self.requests
+                .1
+                .iter()
+                .map(|x| actor_haskell_int(x.0, "request id"))
+                .collect::<Result<Vec<_>, _>>()?
+                .visit(table, visitor)?;
+            visit_core(table, visitor, role, 0, |_| Ok(()))?;
+            self.bound_worktree.visit(table, visitor)?;
+            self.descriptor
+                .fork_group()
+                .map(|x| actor_haskell_int(x.0, "fork group id"))
+                .transpose()?
+                .visit(table, visitor)?;
+            actor_haskell_int(self.descriptor.placement().lexical_scope.0, "lexical scope")?
+                .visit(table, visitor)?;
+            self.runtime.provider_thread.visit(table, visitor)?;
+            self.runtime.provider_parent_thread.visit(table, visitor)?;
+            visit_usage_observation(table, visitor, self.runtime.first_provider_usage.as_ref())?;
+            visit_usage_observation(table, visitor, self.runtime.latest_provider_usage())?;
+            visit_usage_summary(table, visitor, self.runtime.provider_usage_summary.as_ref())?;
+            visit_usage_summary(
+                table,
+                visitor,
+                self.runtime.latest_turn_usage_summary.as_ref(),
+            )?;
+            match self.runtime.latest_provider_usage() {
+                None => Option::<i64>::None.visit(table, visitor)?,
+                Some(s) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |v| {
+                    visit_core(
+                        table,
+                        v,
+                        match s.cache_boundary {
+                            crate::CacheBoundaryReason::Fresh => "CacheFresh",
+                            crate::CacheBoundaryReason::ForkedPrefix => "CacheForkedPrefix",
+                            crate::CacheBoundaryReason::ReattachedThread => "CacheReattachedThread",
+                            crate::CacheBoundaryReason::ProviderUnknown => "CacheProviderUnknown",
+                        },
+                        0,
+                        |_| Ok(()),
+                    )
+                })?,
+            }
+            actor_haskell_int(self.runtime.event_watermark, "event watermark")?
+                .visit(table, visitor)?;
+            visit_workbench_posture(table, visitor, &self.runtime.workbench_posture)?;
+            self.runtime.launched_at_unix_ms.visit(table, visitor)
+        })
+    }
+}
+
+fn visit_workbench_posture(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    posture: &crate::ActorWorkbenchPosture,
+) -> Result<(), BridgeError> {
+    match posture {
+        crate::ActorWorkbenchPosture::Idle => {
+            visit_core(table, visitor, "WorkbenchIdle", 0, |_| Ok(()))
+        }
+        crate::ActorWorkbenchPosture::RunningUnit {
+            input_unit_index,
+            total,
+        } => visit_core(table, visitor, "WorkbenchRunningUnit", 2, |v| {
+            i64::try_from(*input_unit_index)
+                .map_err(|_| {
+                    BridgeError::UnsupportedType(
+                        "workbench input-unit coordinate exceeds Haskell Int".into(),
+                    )
+                })?
+                .visit(table, v)?;
+            i64::try_from(*total)
+                .map_err(|_| {
+                    BridgeError::UnsupportedType(
+                        "workbench input-unit coordinate exceeds Haskell Int".into(),
+                    )
+                })?
+                .visit(table, v)
+        }),
+        crate::ActorWorkbenchPosture::AwaitingEffect {
+            input_unit_index,
+            total,
+            effect,
+        } => visit_core(table, visitor, "WorkbenchAwaitingEffect", 3, |v| {
+            i64::try_from(*input_unit_index)
+                .map_err(|_| {
+                    BridgeError::UnsupportedType(
+                        "workbench input-unit coordinate exceeds Haskell Int".into(),
+                    )
+                })?
+                .visit(table, v)?;
+            i64::try_from(*total)
+                .map_err(|_| {
+                    BridgeError::UnsupportedType(
+                        "workbench input-unit coordinate exceeds Haskell Int".into(),
+                    )
+                })?
+                .visit(table, v)?;
+            effect.visit(table, v)
+        }),
+        crate::ActorWorkbenchPosture::TerminalTransfer { transfer } => {
+            visit_core(table, visitor, "WorkbenchTerminalTransfer", 1, |v| {
+                visit_core(
+                    table,
+                    v,
+                    match transfer {
+                        crate::ActorWorkbenchTransfer::Reply => "WorkbenchReplyTransfer",
+                        crate::ActorWorkbenchTransfer::CancellationAcknowledgement => {
+                            "WorkbenchCancellationTransfer"
+                        }
+                    },
+                    0,
+                    |_| Ok(()),
+                )
+            })
+        }
+        crate::ActorWorkbenchPosture::Failed => {
+            visit_core(table, visitor, "WorkbenchFailed", 0, |_| Ok(()))
+        }
+    }
+}
+
+struct ActorContextProjection {
+    context: crate::ActorSessionContext,
+    descriptor: crate::ActorDescriptor,
+    bound_worktree: Option<String>,
+    runtime: crate::ActorRuntimeObservation,
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for ActorContextProjection {}
+impl ToHaskell for ActorContextProjection {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let role = match self.descriptor.effective_role().role() {
+            crate::ActorRole::Root => "ContextRoot",
+            crate::ActorRole::Research => "ContextResearch",
+            crate::ActorRole::Coding => "ContextCoding",
+            crate::ActorRole::Scaffolding => "ContextScaffolding",
+            crate::ActorRole::Integration => "ContextIntegration",
+            crate::ActorRole::Inherited => "ContextInherited",
+        };
+        let tools = match self.descriptor.effective_role().native_tools() {
+            crate::NativeToolClass::InspectionOnly => "NativeInspectionOnly",
+            crate::NativeToolClass::Coding => "NativeCoding",
+            crate::NativeToolClass::Integration => "NativeIntegration",
+            crate::NativeToolClass::Inherited => "NativeInherited",
+        };
+        let workspace = match self.descriptor.effective_role().workspace() {
+            crate::WorkspaceAccess::None => "WorkspaceNone",
+            crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
+            crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
+        };
+        visit_core(table, visitor, "ActorContextInfo", 24, |v| {
+            actor_haskell_int(self.context.actor.id.0, "actor id")?.visit(table, v)?;
+            actor_haskell_int(self.context.actor.incarnation.0, "actor incarnation")?
+                .visit(table, v)?;
+            self.descriptor
+                .context_parent()
+                .map(|x| actor_haskell_int(x.id.0, "context parent id"))
+                .transpose()?
+                .visit(table, v)?;
+            self.descriptor
+                .context_parent()
+                .map(|x| actor_haskell_int(x.incarnation.0, "context parent incarnation"))
+                .transpose()?
+                .visit(table, v)?;
+            self.descriptor.label().to_owned().visit(table, v)?;
+            visit_core(table, v, role, 0, |_| Ok(()))?;
+            self.descriptor
+                .effective_role()
+                .haskell_effects_type()
+                .visit(table, v)?;
+            visit_core(table, v, tools, 0, |_| Ok(()))?;
+            visit_core(table, v, workspace, 0, |_| Ok(()))?;
+            self.bound_worktree.visit(table, v)?;
+            self.descriptor
+                .fork_group()
+                .map(|x| actor_haskell_int(x.0, "fork group id"))
+                .transpose()?
+                .visit(table, v)?;
+            actor_haskell_int(self.context.placement.lexical_scope.0, "lexical scope")?
+                .visit(table, v)?;
+            match &self.runtime.activation_kind {
+                crate::ActorActivationKind::RootStarted => {
+                    visit_core(table, v, "ActivationRootStarted", 0, |_| Ok(()))?
+                }
+                crate::ActorActivationKind::RequestActivated {
+                    request,
+                    activation_sequence,
+                } => visit_core(table, v, "ActivationRequest", 2, |v| {
+                    actor_haskell_int(request.0, "request id")?.visit(table, v)?;
+                    actor_haskell_int(*activation_sequence, "activation sequence")?.visit(table, v)
+                })?,
+                crate::ActorActivationKind::EventsActivated { inbox_sequences } => {
+                    visit_core(table, v, "ActivationEvents", 1, |v| {
+                        inbox_sequences
+                            .iter()
+                            .copied()
+                            .map(|x| actor_haskell_int(x, "inbox sequence"))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .visit(table, v)
+                    })?
+                }
+            }
+            actor_haskell_int(self.runtime.event_watermark, "event watermark")?.visit(table, v)?;
+            self.runtime.provider_thread.visit(table, v)?;
+            self.runtime.provider_parent_thread.visit(table, v)?;
+            visit_usage_observation(table, v, self.runtime.first_provider_usage.as_ref())?;
+            visit_usage_observation(table, v, self.runtime.latest_provider_usage())?;
+            visit_usage_summary(table, v, self.runtime.provider_usage_summary.as_ref())?;
+            visit_usage_summary(table, v, self.runtime.latest_turn_usage_summary.as_ref())?;
+            i64::from(self.descriptor.effective_role().descendants().maximum_depth)
+                .visit(table, v)?;
+            self.descriptor
+                .effective_role()
+                .descendants()
+                .maximum_active_children
+                .map(i64::from)
+                .visit(table, v)?;
+            self.descriptor
+                .effective_role()
+                .prompt_profile()
+                .to_owned()
+                .visit(table, v)
         })
     }
 }
@@ -3290,9 +3505,7 @@ where
             .with_machine(context, move |session, context, _| {
                 let current_view = actor_compile_view(session, context, &source, &[])?;
                 let current = structured_provenance(&current_view, &source, query.scope.clone());
-                let table = session.data_con_table();
-                let answer =
-                    structured_introspection_answer(table, kind, inspected, &provenance, &current)?;
+                let answer = structured_introspection_answer(kind, inspected, provenance, current);
                 session
                     .resume_classified(hole, answer)
                     .map_err(classify_resumption)
@@ -4854,23 +5067,15 @@ where
             SourceEvent::Lifecycle(event) => {
                 self.access
                     .with_machine(context.clone(), move |session, _, _| {
-                        let table = session.data_con_table();
-                        let (name, fields) = match event {
-                            crate::ActorLifecycle::Live => ("ActorLive", vec![]),
+                        let value = match event {
+                            crate::ActorLifecycle::Live => LifecycleAnswer::Live,
                             crate::ActorLifecycle::Paused(detail) => {
-                                ("ActorPaused", vec![detail.to_value(table)?])
+                                LifecycleAnswer::Paused(detail)
                             }
                             crate::ActorLifecycle::Exited(terminal) => {
-                                let name = match terminal.kind {
-                                    crate::ActorExitKind::Completed => "ActorFinished",
-                                    crate::ActorExitKind::Failed => "ActorFailed",
-                                    crate::ActorExitKind::Cancelled => "ActorCancelled",
-                                };
-                                (name, vec![terminal.summary.to_value(table)?])
+                                LifecycleAnswer::Exited(terminal)
                             }
                         };
-                        let value =
-                            qualified_constructor(table, "Tidepool.Effects.Core", name, fields)?;
                         session
                             .resume_classified(hole, value)
                             .map_err(classify_resumption)
@@ -5124,105 +5329,14 @@ where
         bound_worktree: Option<String>,
         runtime: crate::ActorRuntimeObservation,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let answer = ActorContextProjection {
+            context: context.clone(),
+            descriptor,
+            bound_worktree,
+            runtime,
+        };
         self.access
-            .with_machine(context, move |session, context, _| {
-                let table = session.data_con_table();
-                let role = match descriptor.effective_role().role() {
-                    crate::ActorRole::Root => "ContextRoot",
-                    crate::ActorRole::Research => "ContextResearch",
-                    crate::ActorRole::Coding => "ContextCoding",
-                    crate::ActorRole::Scaffolding => "ContextScaffolding",
-                    crate::ActorRole::Integration => "ContextIntegration",
-                    crate::ActorRole::Inherited => "ContextInherited",
-                };
-                let native_tools = match descriptor.effective_role().native_tools() {
-                    crate::NativeToolClass::InspectionOnly => "NativeInspectionOnly",
-                    crate::NativeToolClass::Coding => "NativeCoding",
-                    crate::NativeToolClass::Integration => "NativeIntegration",
-                    crate::NativeToolClass::Inherited => "NativeInherited",
-                };
-                let workspace = match descriptor.effective_role().workspace() {
-                    crate::WorkspaceAccess::None => "WorkspaceNone",
-                    crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
-                    crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
-                };
-                let parent = descriptor.context_parent();
-                let descendants = descriptor.effective_role().descendants();
-                let usage = runtime.latest_provider_usage();
-                let activation_kind = match &runtime.activation_kind {
-                    crate::ActorActivationKind::RootStarted => {
-                        actor_context_constructor(table, "ActivationRootStarted", Vec::new())?
-                    }
-                    crate::ActorActivationKind::RequestActivated {
-                        request,
-                        activation_sequence,
-                    } => actor_context_constructor(
-                        table,
-                        "ActivationRequest",
-                        vec![
-                            actor_int(request.0)?.to_value(table)?,
-                            actor_int(*activation_sequence)?.to_value(table)?,
-                        ],
-                    )?,
-                    crate::ActorActivationKind::EventsActivated { inbox_sequences } => {
-                        actor_context_constructor(
-                            table,
-                            "ActivationEvents",
-                            vec![inbox_sequences
-                                .iter()
-                                .copied()
-                                .map(actor_int)
-                                .collect::<Result<Vec<_>, _>>()?
-                                .to_value(table)?],
-                        )?
-                    }
-                };
-                let fields = vec![
-                    actor_int(context.actor.id.0)?.to_value(table)?,
-                    actor_int(context.actor.incarnation.0)?.to_value(table)?,
-                    parent
-                        .map(|actor| actor_int(actor.id.0))
-                        .transpose()?
-                        .to_value(table)?,
-                    parent
-                        .map(|actor| actor_int(actor.incarnation.0))
-                        .transpose()?
-                        .to_value(table)?,
-                    descriptor.label().to_owned().to_value(table)?,
-                    actor_context_constructor(table, role, Vec::new())?,
-                    descriptor
-                        .effective_role()
-                        .haskell_effects_type()
-                        .to_value(table)?,
-                    actor_context_constructor(table, native_tools, Vec::new())?,
-                    actor_context_constructor(table, workspace, Vec::new())?,
-                    bound_worktree.to_value(table)?,
-                    descriptor
-                        .fork_group()
-                        .map(|group| actor_int(group.0))
-                        .transpose()?
-                        .to_value(table)?,
-                    actor_int(context.placement.lexical_scope.0)?.to_value(table)?,
-                    activation_kind,
-                    actor_int(runtime.event_watermark)?.to_value(table)?,
-                    runtime.provider_thread.to_value(table)?,
-                    runtime.provider_parent_thread.to_value(table)?,
-                    usage_observation_value(table, runtime.first_provider_usage.as_ref())?,
-                    usage_observation_value(table, usage)?,
-                    usage_summary_value(table, runtime.provider_usage_summary.as_ref())?,
-                    usage_summary_value(table, runtime.latest_turn_usage_summary.as_ref())?,
-                    i64::from(descendants.maximum_depth).to_value(table)?,
-                    descendants
-                        .maximum_active_children
-                        .map(i64::from)
-                        .to_value(table)?,
-                    descriptor
-                        .effective_role()
-                        .prompt_profile()
-                        .to_owned()
-                        .to_value(table)?,
-                ];
-                let answer = actor_context_constructor(table, "ActorContextInfo", fields)?;
+            .with_machine(context, move |session, _, _| {
                 session
                     .resume_classified(hole, answer)
                     .map_err(classify_resumption)
@@ -5238,13 +5352,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let entries = roster
-                    .into_iter()
-                    .map(|entry| agent_roster_value(table, entry))
-                    .collect::<Result<Vec<_>, _>>()?;
                 session
-                    .resume_classified(hole, entries)
+                    .resume_classified(hole, roster)
                     .map_err(classify_resumption)
             })
             .await
@@ -5258,17 +5367,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let answer = roster
-                    .map(|roster| {
-                        roster
-                            .into_iter()
-                            .map(|entry| agent_roster_value(table, entry))
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .transpose()?;
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, roster)
                     .map_err(classify_resumption)
             })
             .await
@@ -5282,11 +5382,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = observation
-                    .map(|entry| agent_roster_value(session.data_con_table(), entry))
-                    .transpose()?;
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, observation)
                     .map_err(classify_resumption)
             })
             .await
@@ -5300,30 +5397,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let (name, fields) = match outcome {
-                    AgentForgetProjection::Forgotten => ("AgentForgotten", Vec::new()),
-                    AgentForgetProjection::Running => ("AgentForgetRunning", Vec::new()),
-                    AgentForgetProjection::Unavailable => ("AgentForgetUnavailable", Vec::new()),
-                    AgentForgetProjection::Retained { requests, watches } => (
-                        "AgentForgetRetained",
-                        vec![
-                            requests
-                                .into_iter()
-                                .map(|request| actor_int(request.0))
-                                .collect::<Result<Vec<_>, _>>()?
-                                .to_value(table)?,
-                            watches
-                                .into_iter()
-                                .map(|watch| actor_int(watch.0))
-                                .collect::<Result<Vec<_>, _>>()?
-                                .to_value(table)?,
-                        ],
-                    ),
-                };
-                let answer = actor_context_constructor(table, name, fields)?;
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, outcome)
                     .map_err(classify_resumption)
             })
             .await
@@ -5539,9 +5614,9 @@ where
                                 "progress revision exceeds Haskell Int".into(),
                             )
                         })?;
-                        let prefix = vec![revision.to_value(table)?];
+                        let prefix = vec![revision];
                         return session
-                            .resume_framed_custody_classified(
+                            .resume_framed_custody_sources_classified(
                                 hole,
                                 &snapshot.value,
                                 constructor,
@@ -6000,27 +6075,8 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table();
-                let (name, fields) = match outcome {
-                    Ok(crate::ForkGroupCleanupOutcome::Cleaned) => ("ForkGroupCleaned", Vec::new()),
-                    Ok(crate::ForkGroupCleanupOutcome::Active(actors)) => (
-                        "ForkGroupStillActive",
-                        vec![actors
-                            .into_iter()
-                            .map(|actor| {
-                                Ok((actor_int(actor.id.0)?, actor_int(actor.incarnation.0)?))
-                            })
-                            .collect::<Result<Vec<_>, ResidentActorWorkbenchError>>()?
-                            .to_value(table)?],
-                    ),
-                    Err(error) => (
-                        "ForkGroupCleanupRejected",
-                        vec![error.to_string().to_value(table)?],
-                    ),
-                };
-                let answer = actor_context_constructor(table, name, fields)?;
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, ForkCleanupAnswer(outcome))
                     .map_err(classify_resumption)
             })
             .await
@@ -6033,407 +6089,324 @@ fn source_request_id(value: i64) -> Result<crate::RequestId, ResidentActorWorkbe
         .map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))
 }
 
-fn actor_int(value: u64) -> Result<i64, ResidentActorWorkbenchError> {
-    i64::try_from(value).map_err(|_| {
-        ResidentActorWorkbenchError::ActorProtocol(
-            "runtime actor identity exceeds Haskell Int".into(),
-        )
-    })
-}
-
-fn workbench_int(value: usize) -> Result<i64, ResidentActorWorkbenchError> {
-    i64::try_from(value).map_err(|_| {
-        ResidentActorWorkbenchError::ActorProtocol(
-            "workbench input-unit coordinate exceeds Haskell Int".into(),
-        )
-    })
-}
-
-fn actor_context_constructor(
+fn visit_introspection_scope(
     table: &DataConTable,
-    name: &str,
-    fields: Vec<HaskellValue>,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    qualified_constructor(table, "Tidepool.Effects.Core", name, fields)
-}
-
-fn qualified_constructor(
-    table: &DataConTable,
-    module: &str,
-    name: &str,
-    fields: Vec<HaskellValue>,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    let qualified = format!("{module}.{name}");
-    let constructor = table
-        .get_by_qualified_name(&qualified)
-        .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
-    Ok(HaskellValue::Con(constructor, fields))
-}
-
-fn introspection_constructor(
-    table: &DataConTable,
-    name: &str,
-    fields: Vec<HaskellValue>,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    actor_context_constructor(table, name, fields)
-}
-
-fn either_constructor(
-    table: &DataConTable,
-    right: bool,
-    field: HaskellValue,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    let (name, qualified) = if right {
-        ("Right", "Data.Either.Right")
-    } else {
-        ("Left", "Data.Either.Left")
-    };
-    let constructor = tidepool_bridge::get_qualified(table, qualified, 1)
-        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(name.into()))?;
-    Ok(HaskellValue::Con(constructor, vec![field]))
-}
-
-fn introspection_scope_value(
-    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     scope: &tidepool_runtime::session::NameScope,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
+) -> Result<(), BridgeError> {
     use tidepool_runtime::session::NameScope;
-    Ok(match scope {
-        NameScope::Current => introspection_constructor(table, "CurrentScope", vec![])?,
+    match scope {
+        NameScope::Current => visit_core(table, visitor, "CurrentScope", 0, |_| Ok(())),
         NameScope::PublicModule(module) => {
-            introspection_constructor(table, "PublicModule", vec![module.clone().to_value(table)?])?
+            visit_core(table, visitor, "PublicModule", 1, |visitor| {
+                module.visit(table, visitor)
+            })
         }
+    }
+}
+
+fn visit_introspection_query(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    query: &tidepool_runtime::session::NameQuery,
+) -> Result<(), BridgeError> {
+    use tidepool_runtime::session::NameNamespace;
+    visit_core(table, visitor, "NameQuery", 3, |visitor| {
+        visit_introspection_scope(table, visitor, &query.scope)?;
+        visit_core(
+            table,
+            visitor,
+            match query.namespace {
+                NameNamespace::Any => "AnyName",
+                NameNamespace::Value => "ValueName",
+                NameNamespace::Type => "TypeName",
+                NameNamespace::Constructor => "ConstructorName",
+            },
+            0,
+            |_| Ok(()),
+        )?;
+        query.name.visit(table, visitor)
     })
 }
 
-fn introspection_query_value(
+fn visit_introspection_identifier(
     table: &DataConTable,
-    query: &tidepool_runtime::session::NameQuery,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    use tidepool_runtime::session::NameNamespace;
-    let namespace = introspection_constructor(
-        table,
-        match query.namespace {
-            NameNamespace::Any => "AnyName",
-            NameNamespace::Value => "ValueName",
-            NameNamespace::Type => "TypeName",
-            NameNamespace::Constructor => "ConstructorName",
-        },
-        vec![],
-    )?;
-    Ok(introspection_constructor(
-        table,
-        "NameQuery",
-        vec![
-            introspection_scope_value(table, &query.scope)?,
-            namespace,
-            query.name.clone().to_value(table)?,
-        ],
-    )?)
-}
-
-fn introspection_identifier_value(
-    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     identifier: &tidepool_runtime::session::IdentifierRef,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
+) -> Result<(), BridgeError> {
     use tidepool_runtime::session::IdentifierNamespace;
-    let namespace = introspection_constructor(
-        table,
-        match identifier.namespace {
-            IdentifierNamespace::Value => "ValueIdentifier",
-            IdentifierNamespace::Type => "TypeIdentifier",
-            IdentifierNamespace::Constructor => "ConstructorIdentifier",
-            IdentifierNamespace::Field => "FieldIdentifier",
-        },
-        vec![],
-    )?;
-    Ok(introspection_constructor(
-        table,
-        "IdentifierRef",
-        vec![
-            identifier.module.clone().to_value(table)?,
-            identifier.name.clone().to_value(table)?,
-            namespace,
-        ],
-    )?)
+    visit_core(table, visitor, "IdentifierRef", 3, |visitor| {
+        identifier.module.visit(table, visitor)?;
+        identifier.name.visit(table, visitor)?;
+        visit_core(
+            table,
+            visitor,
+            match identifier.namespace {
+                IdentifierNamespace::Value => "ValueIdentifier",
+                IdentifierNamespace::Type => "TypeIdentifier",
+                IdentifierNamespace::Constructor => "ConstructorIdentifier",
+                IdentifierNamespace::Field => "FieldIdentifier",
+            },
+            0,
+            |_| Ok(()),
+        )
+    })
 }
 
-fn introspection_type_expression_value(
+fn visit_introspection_type_expression(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     ty: &tidepool_runtime::session::TypeExpression,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "TypeExpression",
-        vec![
-            ty.canonical.clone().to_value(table)?,
-            ty.variables.clone().to_value(table)?,
-            ty.constraints.clone().to_value(table)?,
-        ],
-    )?)
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "TypeExpression", 3, |visitor| {
+        ty.canonical.visit(table, visitor)?;
+        ty.variables.visit(table, visitor)?;
+        ty.constraints.visit(table, visitor)
+    })
 }
 
-fn introspection_provenance_value(
+fn visit_introspection_provenance(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     provenance: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "ScopeProvenance",
-        vec![
-            introspection_scope_value(table, &provenance.scope)?,
-            actor_int(provenance.generation)?.to_value(table)?,
-            provenance.fingerprint.clone().to_value(table)?,
-        ],
-    )?)
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "ScopeProvenance", 3, |visitor| {
+        visit_introspection_scope(table, visitor, &provenance.scope)?;
+        actor_haskell_int(provenance.generation, "scope generation")?.visit(table, visitor)?;
+        provenance.fingerprint.visit(table, visitor)
+    })
 }
 
-fn introspection_field_value(
+fn visit_introspection_field(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     field: &tidepool_runtime::session::FieldInfo,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "FieldInfo",
-        vec![
-            field.name.clone().to_value(table)?,
-            introspection_type_expression_value(table, &field.ty)?,
-        ],
-    )?)
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "FieldInfo", 2, |visitor| {
+        field.name.visit(table, visitor)?;
+        visit_introspection_type_expression(table, visitor, &field.ty)
+    })
 }
 
-fn introspection_constructor_value(
+fn visit_structural_list<T>(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    values: &[T],
+    mut visit_value: impl FnMut(&T, &mut dyn HaskellVisitor) -> Result<(), BridgeError>,
+) -> Result<(), BridgeError> {
+    let nil = tidepool_bridge::get_qualified(table, "GHC.Types.[]", 0)
+        .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
+    let cons = tidepool_bridge::get_qualified(table, "GHC.Types.:", 2)
+        .ok_or_else(|| BridgeError::UnknownDataConName(":".into()))?;
+    for value in values {
+        visitor.begin_constructor(cons, 2)?;
+        visit_value(value, visitor)?;
+    }
+    visitor.begin_constructor(nil, 0)?;
+    visitor.end_constructor()?;
+    for _ in values {
+        visitor.end_constructor()?;
+    }
+    Ok(())
+}
+
+fn visit_introspection_constructor(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     constructor: &tidepool_runtime::session::ConstructorInfo,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let arguments = constructor
-        .arguments
-        .iter()
-        .map(|ty| introspection_type_expression_value(table, ty))
-        .collect::<Result<Vec<_>, _>>()?;
-    let fields = constructor
-        .fields
-        .iter()
-        .map(|field| introspection_field_value(table, field))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(introspection_constructor(
-        table,
-        "ConstructorInfo",
-        vec![
-            introspection_identifier_value(table, &constructor.identifier)?,
-            introspection_type_expression_value(table, &constructor.ty)?,
-            core_list(table, arguments)?,
-            core_list(table, fields)?,
-        ],
-    )?)
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "ConstructorInfo", 4, |visitor| {
+        visit_introspection_identifier(table, visitor, &constructor.identifier)?;
+        visit_introspection_type_expression(table, visitor, &constructor.ty)?;
+        visit_structural_list(table, visitor, &constructor.arguments, |ty, visitor| {
+            visit_introspection_type_expression(table, visitor, ty)
+        })?;
+        visit_structural_list(table, visitor, &constructor.fields, |field, visitor| {
+            visit_introspection_field(table, visitor, field)
+        })
+    })
 }
 
-fn introspection_declaration_value(
+fn visit_introspection_declaration(
     table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
     declaration: &tidepool_runtime::session::DeclarationInfo,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
+) -> Result<(), BridgeError> {
     use tidepool_runtime::session::DeclarationInfo;
-    let (name, fields) = match declaration {
-        DeclarationInfo::Value(ty) => (
-            "ValueDeclaration",
-            vec![introspection_type_expression_value(table, ty)?],
-        ),
+    match declaration {
+        DeclarationInfo::Value(ty) => {
+            visit_core(table, visitor, "ValueDeclaration", 1, |visitor| {
+                visit_introspection_type_expression(table, visitor, ty)
+            })
+        }
         DeclarationInfo::Data {
             parameters,
             constructors,
-        } => (
-            "DataDeclaration",
-            vec![
-                parameters.clone().to_value(table)?,
-                core_list(
-                    table,
-                    constructors
-                        .iter()
-                        .map(|constructor| introspection_constructor_value(table, constructor))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )?,
-            ],
-        ),
+        } => visit_core(table, visitor, "DataDeclaration", 2, |visitor| {
+            parameters.visit(table, visitor)?;
+            visit_structural_list(table, visitor, constructors, |constructor, visitor| {
+                visit_introspection_constructor(table, visitor, constructor)
+            })
+        }),
         DeclarationInfo::Newtype {
             parameters,
             constructor,
-        } => (
-            "NewtypeDeclaration",
-            vec![
-                parameters.clone().to_value(table)?,
-                introspection_constructor_value(table, constructor)?,
-            ],
-        ),
-        DeclarationInfo::TypeSynonym { parameters, body } => (
-            "TypeSynonymDeclaration",
-            vec![
-                parameters.clone().to_value(table)?,
-                introspection_type_expression_value(table, body)?,
-            ],
-        ),
+        } => visit_core(table, visitor, "NewtypeDeclaration", 2, |visitor| {
+            parameters.visit(table, visitor)?;
+            visit_introspection_constructor(table, visitor, constructor)
+        }),
+        DeclarationInfo::TypeSynonym { parameters, body } => {
+            visit_core(table, visitor, "TypeSynonymDeclaration", 2, |visitor| {
+                parameters.visit(table, visitor)?;
+                visit_introspection_type_expression(table, visitor, body)
+            })
+        }
         DeclarationInfo::Class {
             parameters,
             superclasses,
             methods,
-        } => {
-            let superclasses = superclasses
-                .iter()
-                .map(|ty| introspection_type_expression_value(table, ty))
-                .collect::<Result<Vec<_>, _>>()?;
-            let methods = methods
-                .iter()
-                .map(|method| {
-                    Ok::<_, ResidentActorWorkbenchError>(introspection_constructor(
-                        table,
-                        "ClassMethodInfo",
-                        vec![
-                            introspection_identifier_value(table, &method.identifier)?,
-                            introspection_type_expression_value(table, &method.ty)?,
-                        ],
-                    )?)
+        } => visit_core(table, visitor, "ClassDeclaration", 3, |visitor| {
+            parameters.visit(table, visitor)?;
+            visit_structural_list(table, visitor, superclasses, |ty, visitor| {
+                visit_introspection_type_expression(table, visitor, ty)
+            })?;
+            visit_structural_list(table, visitor, methods, |method, visitor| {
+                visit_core(table, visitor, "ClassMethodInfo", 2, |visitor| {
+                    visit_introspection_identifier(table, visitor, &method.identifier)?;
+                    visit_introspection_type_expression(table, visitor, &method.ty)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            (
-                "ClassDeclaration",
-                vec![
-                    parameters.clone().to_value(table)?,
-                    core_list(table, superclasses)?,
-                    core_list(table, methods)?,
-                ],
-            )
-        }
+            })
+        }),
         DeclarationInfo::Constructor {
             parent,
             constructor,
-        } => (
-            "ConstructorDeclaration",
-            vec![
-                introspection_identifier_value(table, parent)?,
-                introspection_constructor_value(table, constructor)?,
-            ],
-        ),
-        DeclarationInfo::RecordSelector { parent, ty } => (
-            "RecordSelectorDeclaration",
-            vec![
-                introspection_identifier_value(table, parent)?,
-                introspection_type_expression_value(table, ty)?,
-            ],
-        ),
-    };
-    Ok(introspection_constructor(table, name, fields)?)
-}
-
-fn introspection_info_value(
-    table: &DataConTable,
-    info: &tidepool_runtime::session::IdentifierInfo,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    let parent = info
-        .parent
-        .as_ref()
-        .map(|parent| introspection_identifier_value(table, parent))
-        .transpose()?
-        .to_value(table)?;
-    Ok(introspection_constructor(
-        table,
-        "IdentifierInfo",
-        vec![
-            introspection_identifier_value(table, &info.identifier)?,
-            introspection_declaration_value(table, &info.declaration)?,
-            parent,
-            introspection_provenance_value(table, &info.provenance)?,
-        ],
-    )?)
-}
-
-fn introspection_type_value(
-    table: &DataConTable,
-    info: &tidepool_runtime::session::TypeInfo,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "TypeInfo",
-        vec![
-            introspection_identifier_value(table, &info.identifier)?,
-            introspection_type_expression_value(table, &info.expression)?,
-            introspection_provenance_value(table, &info.provenance)?,
-        ],
-    )?)
-}
-
-fn introspection_query_error_value(
-    table: &DataConTable,
-    error: &tidepool_runtime::session::QueryError,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    use tidepool_runtime::session::QueryError;
-    let (name, fields) = match error {
-        QueryError::Unknown(query) => (
-            "UnknownIdentifier",
-            vec![introspection_query_value(table, query)?],
-        ),
-        QueryError::Ambiguous(query, candidates) => (
-            "AmbiguousIdentifier",
-            vec![
-                introspection_query_value(table, query)?,
-                core_list(
-                    table,
-                    candidates
-                        .iter()
-                        .map(|candidate| introspection_identifier_value(table, candidate))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )?,
-            ],
-        ),
-        QueryError::UnknownModule(module) => {
-            ("UnknownModule", vec![module.clone().to_value(table)?])
+        } => visit_core(table, visitor, "ConstructorDeclaration", 2, |visitor| {
+            visit_introspection_identifier(table, visitor, parent)?;
+            visit_introspection_constructor(table, visitor, constructor)
+        }),
+        DeclarationInfo::RecordSelector { parent, ty } => {
+            visit_core(table, visitor, "RecordSelectorDeclaration", 2, |visitor| {
+                visit_introspection_identifier(table, visitor, parent)?;
+                visit_introspection_type_expression(table, visitor, ty)
+            })
         }
-        QueryError::Unsupported(detail) => (
-            "UnsupportedDeclaration",
-            vec![detail.clone().to_value(table)?],
-        ),
-    };
-    Ok(introspection_constructor(table, name, fields)?)
+    }
 }
 
-fn introspection_compiler_error_value(
+fn visit_optional_identifier(
     table: &DataConTable,
-    detail: impl Into<String>,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "CompilerUnavailable",
-        vec![detail.into().to_value(table)?],
-    )?)
+    visitor: &mut dyn HaskellVisitor,
+    identifier: Option<&tidepool_runtime::session::IdentifierRef>,
+) -> Result<(), BridgeError> {
+    match identifier {
+        Some(identifier) => visit_named(table, visitor, "GHC.Maybe", "Just", 1, |visitor| {
+            visit_introspection_identifier(table, visitor, identifier)
+        }),
+        None => visit_named(table, visitor, "GHC.Maybe", "Nothing", 0, |_| Ok(())),
+    }
 }
 
-fn introspection_scope_changed_value(
+fn visit_introspection_info(
     table: &DataConTable,
-    before: &tidepool_runtime::session::ScopeProvenance,
-    after: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
-    Ok(introspection_constructor(
-        table,
-        "ScopeChanged",
-        vec![
-            introspection_provenance_value(table, before)?,
-            introspection_provenance_value(table, after)?,
-        ],
-    )?)
+    visitor: &mut dyn HaskellVisitor,
+    info: &tidepool_runtime::session::IdentifierInfo,
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "IdentifierInfo", 4, |visitor| {
+        visit_introspection_identifier(table, visitor, &info.identifier)?;
+        visit_introspection_declaration(table, visitor, &info.declaration)?;
+        visit_optional_identifier(table, visitor, info.parent.as_ref())?;
+        visit_introspection_provenance(table, visitor, &info.provenance)
+    })
 }
 
-fn core_list(
+fn visit_introspection_type(
     table: &DataConTable,
-    values: Vec<HaskellValue>,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    let nil = tidepool_bridge::get_qualified(table, "GHC.Types.[]", 0)
-        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName("[]".into()))?;
-    let cons = tidepool_bridge::get_qualified(table, "GHC.Types.:", 2)
-        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(":".into()))?;
-    Ok(values
-        .into_iter()
-        .rev()
-        .fold(HaskellValue::Con(nil, Vec::new()), |tail, head| {
-            HaskellValue::Con(cons, vec![head, tail])
-        }))
+    visitor: &mut dyn HaskellVisitor,
+    info: &tidepool_runtime::session::TypeInfo,
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "TypeInfo", 3, |visitor| {
+        visit_introspection_identifier(table, visitor, &info.identifier)?;
+        visit_introspection_type_expression(table, visitor, &info.expression)?;
+        visit_introspection_provenance(table, visitor, &info.provenance)
+    })
+}
+
+fn visit_introspection_query_error(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    error: &tidepool_runtime::session::QueryError,
+) -> Result<(), BridgeError> {
+    use tidepool_runtime::session::QueryError;
+    match error {
+        QueryError::Unknown(query) => {
+            visit_core(table, visitor, "UnknownIdentifier", 1, |visitor| {
+                visit_introspection_query(table, visitor, query)
+            })
+        }
+        QueryError::Ambiguous(query, candidates) => {
+            visit_core(table, visitor, "AmbiguousIdentifier", 2, |visitor| {
+                visit_introspection_query(table, visitor, query)?;
+                visit_structural_list(table, visitor, candidates, |candidate, visitor| {
+                    visit_introspection_identifier(table, visitor, candidate)
+                })
+            })
+        }
+        QueryError::UnknownModule(module) => {
+            visit_core(table, visitor, "UnknownModule", 1, |visitor| {
+                module.visit(table, visitor)
+            })
+        }
+        QueryError::Unsupported(detail) => {
+            visit_core(table, visitor, "UnsupportedDeclaration", 1, |visitor| {
+                detail.visit(table, visitor)
+            })
+        }
+    }
+}
+
+enum StructuredIntrospectionAnswer {
+    ScopeChanged {
+        before: tidepool_runtime::session::ScopeProvenance,
+        after: tidepool_runtime::session::ScopeProvenance,
+    },
+    Info(tidepool_runtime::session::IdentifierInfo),
+    Type(tidepool_runtime::session::TypeInfo),
+    QueryError(tidepool_runtime::session::QueryError),
+    CompilerUnavailable(String),
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for StructuredIntrospectionAnswer {}
+impl ToHaskell for StructuredIntrospectionAnswer {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let right = matches!(self, Self::Info(_) | Self::Type(_));
+        visit_named(
+            table,
+            visitor,
+            "Data.Either",
+            if right { "Right" } else { "Left" },
+            1,
+            |visitor| match self {
+                Self::ScopeChanged { before, after } => {
+                    visit_core(table, visitor, "ScopeChanged", 2, |visitor| {
+                        visit_introspection_provenance(table, visitor, before)?;
+                        visit_introspection_provenance(table, visitor, after)
+                    })
+                }
+                Self::Info(info) => visit_introspection_info(table, visitor, info),
+                Self::Type(info) => visit_introspection_type(table, visitor, info),
+                Self::QueryError(error) => visit_introspection_query_error(table, visitor, error),
+                Self::CompilerUnavailable(detail) => {
+                    visit_core(table, visitor, "CompilerUnavailable", 1, |visitor| {
+                        detail.visit(table, visitor)
+                    })
+                }
+            },
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -7439,53 +7412,39 @@ fn inspect_compile_view(
 }
 
 fn structured_introspection_answer(
-    table: &DataConTable,
     kind: StructuredInspectionKind,
     inspected: Result<tidepool_runtime::session::InspectionResult, String>,
-    provenance: &tidepool_runtime::session::ScopeProvenance,
-    current: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<HaskellValue, ResidentActorWorkbenchError> {
+    provenance: tidepool_runtime::session::ScopeProvenance,
+    current: tidepool_runtime::session::ScopeProvenance,
+) -> StructuredIntrospectionAnswer {
     if current != provenance {
-        let error = introspection_scope_changed_value(table, provenance, current)?;
-        return Ok(either_constructor(table, false, error)?);
+        return StructuredIntrospectionAnswer::ScopeChanged {
+            before: provenance,
+            after: current,
+        };
     }
-    Ok(match (kind, inspected) {
+    match (kind, inspected) {
         (
             StructuredInspectionKind::Info,
             Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
-        ) => either_constructor(table, true, introspection_info_value(table, &info)?)?,
+        ) => StructuredIntrospectionAnswer::Info(*info),
         (
             StructuredInspectionKind::Type,
             Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
-        ) => either_constructor(table, true, introspection_type_value(table, &info)?)?,
+        ) => StructuredIntrospectionAnswer::Type(info),
         (
             _,
             Ok(
                 tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
                 | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
             ),
-        ) => either_constructor(
-            table,
-            false,
-            introspection_query_error_value(table, &error)?,
-        )?,
-        (_, Ok(result)) => either_constructor(
-            table,
-            false,
-            introspection_compiler_error_value(
-                table,
-                format!(
-                    "unexpected structured inspection result: {}",
-                    result.render()
-                ),
-            )?,
-        )?,
-        (_, Err(detail)) => either_constructor(
-            table,
-            false,
-            introspection_compiler_error_value(table, detail)?,
-        )?,
-    })
+        ) => StructuredIntrospectionAnswer::QueryError(error),
+        (_, Ok(result)) => StructuredIntrospectionAnswer::CompilerUnavailable(format!(
+            "unexpected structured inspection result: {}",
+            result.render()
+        )),
+        (_, Err(detail)) => StructuredIntrospectionAnswer::CompilerUnavailable(detail),
+    }
 }
 
 fn structured_provenance(
@@ -7774,17 +7733,128 @@ mod request_tests {
     }
 
     #[test]
+    fn agent_forget_projection_collects_nested_retained_ids_and_rejects_overflow() {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut table = tidepool_test_data::standard_datacon_table();
+        for (id, name, arity) in [(120, "AgentForgetRetained", 2), (121, "AgentForgotten", 0)] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                type_name: String::new(),
+            });
+        }
+        let answer = AgentForgetProjection::Retained {
+            requests: vec![crate::RequestId(7), crate::RequestId(9)],
+            watches: vec![crate::WatchId(11)],
+        }
+        .to_value(&table)
+        .unwrap();
+        assert!(matches!(
+            answer,
+            HaskellValue::Con(DataConId(120), ref fields) if fields.len() == 2
+        ));
+        assert!(matches!(
+            AgentForgetProjection::Forgotten.to_value(&table).unwrap(),
+            HaskellValue::Con(DataConId(121), ref fields) if fields.is_empty()
+        ));
+
+        let error = AgentForgetProjection::Retained {
+            requests: vec![crate::RequestId(u64::MAX)],
+            watches: Vec::new(),
+        }
+        .to_value(&table)
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::UnsupportedType(_)));
+    }
+
+    #[test]
+    fn usage_projection_rejects_inconsistent_provider_totals_before_publication() {
+        struct Sink;
+        impl HaskellVisitor for Sink {
+            fn begin_constructor(
+                &mut self,
+                _id: tidepool_repr::DataConId,
+                _fields: usize,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn end_constructor(&mut self) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn literal(&mut self, _literal: tidepool_repr::Literal) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn byte_array(&mut self, _bytes: Vec<u8>) -> Result<(), BridgeError> {
+                Ok(())
+            }
+        }
+
+        let summary = tidepool_model::ProviderUsageSummary {
+            scope: tidepool_model::ProviderUsageScope::Thread("thread".into()),
+            completeness: tidepool_model::ProviderUsageCompleteness::Complete,
+            observations: 1,
+            usage: tidepool_model::TokenUsage {
+                input_tokens: 2,
+                cached_input_tokens: 3,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+                total_tokens: 2,
+            },
+        };
+        let error = visit_usage_summary(&DataConTable::new(), &mut Sink, Some(&summary))
+            .expect_err("cached tokens cannot exceed total input tokens");
+        assert!(matches!(
+            error,
+            BridgeError::UnsupportedType(ref detail)
+                if detail == "cached input tokens exceed input tokens"
+        ));
+    }
+
+    #[test]
+    fn collected_introspection_projection_rejects_missing_nominal_constructor() {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut table = tidepool_test_data::standard_datacon_table();
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "Left".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: Vec::new(),
+            qualified_name: Some("Data.Either.Left".into()),
+            type_name: String::new(),
+        });
+        let provenance = current_provenance(1, "same");
+        let error = structured_introspection_answer(
+            StructuredInspectionKind::Info,
+            Err("compiler unavailable".into()),
+            provenance.clone(),
+            provenance,
+        )
+        .to_value(&table)
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BridgeError::UnknownDataConName(ref name)
+                if name == "Tidepool.Effects.Core.CompilerUnavailable"
+        ));
+    }
+
+    #[test]
     fn structured_introspection_compiler_failure_is_a_typed_left() {
         use tidepool_repr::DataConId;
         let table = introspection_error_table();
         let provenance = current_provenance(7, "same");
         let answer = structured_introspection_answer(
-            &table,
             StructuredInspectionKind::Info,
             Err("ghc unavailable".into()),
-            &provenance,
-            &provenance,
+            provenance.clone(),
+            provenance,
         )
+        .to_value(&table)
         .unwrap();
         assert!(matches!(
             answer,
@@ -7800,12 +7870,12 @@ mod request_tests {
         let before = current_provenance(7, "before");
         let after = current_provenance(8, "after");
         let answer = structured_introspection_answer(
-            &table,
             StructuredInspectionKind::Type,
             Err("compiler result must be discarded".into()),
-            &before,
-            &after,
+            before,
+            after,
         )
+        .to_value(&table)
         .unwrap();
         assert!(matches!(
             answer,
