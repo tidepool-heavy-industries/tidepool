@@ -144,6 +144,10 @@ pub struct NixLock;
 impl FlakeLock for NixLock {
     fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let nix = super::workspace::nix_bin();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "one-shot nix flake lock, like a git one-shot; not a long-lived child"
+        )]
         let report = std::process::Command::new(&nix)
             .arg("--extra-experimental-features")
             .arg("nix-command flakes")

@@ -578,26 +578,27 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         "a low-ranked section exceeded the selection budget: {output}"
     );
 
-    let requests = backend.requests.lock();
-    assert!(!requests.is_empty(), "long output must invoke Jev");
-    assert!(
-        requests[0]["state"]
-            .as_str()
-            .is_some_and(|state| state.contains("for i in $(seq 1 900)")),
-        "command absent from Jev state: {}",
-        requests[0]["state"]
-    );
-    assert_eq!(commands.executions(), 1, "selection must not re-execute");
-    let state = requests[0]["state"].as_str().expect("Jev state text");
-    assert!(
-        !state.contains("COMMAND-TAIL"),
-        "command tail escaped its prompt bound"
-    );
-    assert!(
-        !state.contains("INTENT-TAIL"),
-        "intent tail escaped its prompt bound"
-    );
-    drop(requests);
+    {
+        let requests = backend.requests.lock();
+        assert!(!requests.is_empty(), "long output must invoke Jev");
+        assert!(
+            requests[0]["state"]
+                .as_str()
+                .is_some_and(|state| state.contains("for i in $(seq 1 900)")),
+            "command absent from Jev state: {}",
+            requests[0]["state"]
+        );
+        assert_eq!(commands.executions(), 1, "selection must not re-execute");
+        let state = requests[0]["state"].as_str().expect("Jev state text");
+        assert!(
+            !state.contains("COMMAND-TAIL"),
+            "command tail escaped its prompt bound"
+        );
+        assert!(
+            !state.contains("INTENT-TAIL"),
+            "intent tail escaped its prompt bound"
+        );
+    }
 
     commands.shorten_slice_read(3);
     let binding = response["items"][0]["installedBindings"][0]
@@ -651,11 +652,13 @@ async fn jev_choice_round_trips_through_the_host_backend() {
     assert_eq!(result["status"], "committed", "{result}");
     let items = result["items"].as_array().unwrap();
     assert_eq!(items.last().unwrap()["output"], "12", "{result}");
-    let requests = backend.requests.lock();
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(request["model"], "jev-latest", "{request}");
-    assert_eq!(request["questions"]["value"]["type"], "choice", "{request}");
+    {
+        let requests = backend.requests.lock();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request["model"], "jev-latest", "{request}");
+        assert_eq!(request["questions"]["value"]["type"], "choice", "{request}");
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -694,17 +697,18 @@ either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) an
         "Choice answer did not reach the selected branch: {choice}"
     );
 
-    let requests = backend.requests.lock();
-    assert_eq!(requests.len(), 2, "both cells should ask the fake backend");
-    assert_eq!(
-        requests[0]["questions"]["q"]["type"], "score",
-        "{requests:?}"
-    );
-    assert_eq!(
-        requests[1]["questions"]["value"]["type"], "choice",
-        "{requests:?}"
-    );
-    drop(requests);
+    {
+        let requests = backend.requests.lock();
+        assert_eq!(requests.len(), 2, "both cells should ask the fake backend");
+        assert_eq!(
+            requests[0]["questions"]["q"]["type"], "score",
+            "{requests:?}"
+        );
+        assert_eq!(
+            requests[1]["questions"]["value"]["type"], "choice",
+            "{requests:?}"
+        );
+    }
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -798,21 +802,22 @@ either (T.pack . show) (const "answered") answer :: Text"##,
         .unwrap()
         .to_owned();
     assert!(output.contains("no Jev endpoint is configured"), "{result}");
-    let requests = backend.requests.lock();
-    assert_eq!(requests.len(), 1);
-    let questions = &requests[0]["questions"];
-    assert!(
-        questions.get("enough").is_some(),
-        "enough missing: {questions}"
-    );
-    let per_file = questions
-        .as_object()
-        .unwrap()
-        .keys()
-        .filter(|k| k.starts_with("worth_reading."))
-        .count();
-    assert_eq!(per_file, 2, "one question per previewed file: {questions}");
-    drop(requests);
+    {
+        let requests = backend.requests.lock();
+        assert_eq!(requests.len(), 1);
+        let questions = &requests[0]["questions"];
+        assert!(
+            questions.get("enough").is_some(),
+            "enough missing: {questions}"
+        );
+        let per_file = questions
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("worth_reading."))
+            .count();
+        assert_eq!(per_file, 2, "one question per previewed file: {questions}");
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

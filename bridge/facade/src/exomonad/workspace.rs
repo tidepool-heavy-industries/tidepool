@@ -451,6 +451,10 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
     }
     let base = workspace.join(".exomonad");
     let nix = nix_bin();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "one-shot nix flake archive, like a git one-shot; not a long-lived child"
+    )]
     let mut command = std::process::Command::new(&nix);
     command
         .arg("--extra-experimental-features")
@@ -674,6 +678,10 @@ fn capture_tree(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::disallowed_methods,
+        reason = "test: launches short-lived git one-shots to build fixture repositories"
+    )]
     use super::*;
 
     #[test]

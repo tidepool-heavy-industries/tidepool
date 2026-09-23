@@ -568,6 +568,10 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
                 args: std::env::args().skip(1).collect(),
             },
         ));
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "exec() replaces this process image; there is no child to route through the launcher"
+        )]
         return Err(std::process::Command::new(command.program)
             .args(command.args)
             .exec()
@@ -865,6 +869,7 @@ pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error:
         return Err(runtime_error("invalid Exomonad run identity"));
     }
     let unit = format!("exomonad-host-{run_id}.service");
+    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl stop, waited on directly via .status()")]
     let status = tokio::process::Command::new("systemctl")
         .args(["--user", "stop", &unit])
         .status()
@@ -1013,6 +1018,10 @@ async fn retain_packaged_interactive_agent_from(
     let runtime = workspace.join(".exomonad/runtime");
     std::fs::create_dir_all(&runtime)?;
     let link = runtime.join("interactive-agent");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(launcher): route through exomonad-node process_scope/host_command; for now this is a timeout-bounded, immediately-`.wait()`-ed probe with kill_on_drop(true) as its own supervision"
+    )]
     let mut child = tokio::process::Command::new(&nix_store)
         .arg("--realise")
         .arg(&target)
@@ -1528,6 +1537,10 @@ async fn preflight(
 
     let interactive_agent = exomonad_agent::resolve_native_interactive_agent().await?;
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: Bubblewrap capability check, timeout-bounded and immediately .wait()-ed"
+    )]
     let mut boundary = tokio::process::Command::new(exomonad_node::BUBBLEWRAP_PROGRAM);
     boundary
         .args(["--bind", "/", "/", "--ro-bind"])
@@ -1999,6 +2012,10 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::disallowed_methods,
+        reason = "test: launches short-lived process fixtures (a disposable runner, git one-shots) directly"
+    )]
     #[test]
     fn selected_runner_survives_disposable_target_removal() {
         let directory = tempfile::tempdir().unwrap();

@@ -462,7 +462,7 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     let output = File::create(fixture.tree.cwd().join("scope.log")).unwrap();
     let (send, receive) = tokio::sync::oneshot::channel::<()>();
     drop(receive); // BEFORE spawn, and therefore before any pin.
-    let worker = tokio::task::spawn_blocking(move || {
+    let worker = tidepool_runtime::spawn_blocking_in_span(move || {
         spawn_into(slot, prepared, ServiceEnvironment::default(), output).unwrap();
         assert!(send.send(()).is_err()); // Stored in row before lost notification.
     });
@@ -477,7 +477,7 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     };
     let (send, receive) = tokio::sync::oneshot::channel();
     drop(receive);
-    tokio::task::spawn_blocking(move || {
+    tidepool_runtime::spawn_blocking_in_span(move || {
         let status = stop_slot(&slot, deadline()).unwrap();
         assert!(send.send(status).is_err());
     })
@@ -749,7 +749,7 @@ async fn scoped_custody_production_handoff_recovers_completed_and_timed_out_flee
         let output = File::create(fixture.tree.cwd().join("scope.log")).unwrap();
         let (notice, receive) = tokio::sync::oneshot::channel::<()>();
         drop(receive); // No pin has occurred and the receiver is already gone.
-        tokio::task::spawn_blocking(move || {
+        tidepool_runtime::spawn_blocking_in_span(move || {
             spawn_into(slot, prepared, ServiceEnvironment::default(), output).unwrap();
             assert!(notice.send(()).is_err());
         })

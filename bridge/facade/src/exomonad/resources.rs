@@ -29,6 +29,7 @@ pub(super) async fn connect(
     // One startup owner; this guard is not held during command admission.
     lock.lock()?;
     let socket = directory.join("resources.sock");
+    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl is-active, waited on directly via .status()")]
     let active = tokio::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", UNIT])
         .status()
@@ -39,6 +40,15 @@ pub(super) async fn connect(
             &policy_file,
             toml::to_string(&policy)?.as_bytes(),
         )?;
+        // `systemd-run` transfers ownership of the launched unit to systemd
+        // itself (KillMode=process, Restart=on-failure above); this process
+        // never holds the long-lived child, only the short-lived launcher
+        // that hands it off, so there is no handle to route through our
+        // own process launcher.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "systemd-run hands the long-lived unit off to systemd; this process only runs the short-lived launcher"
+        )]
         let status = tokio::process::Command::new("systemd-run")
             .args([
                 "--user",
@@ -93,6 +103,7 @@ pub(super) async fn connect(
 }
 
 async fn verify_service_slice(slice: &exomonad_node::systemd_slice::SystemdSlice) -> Result<()> {
+    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl show, waited on directly via .output()")]
     let output = tokio::process::Command::new("systemctl")
         .args(["--user", "show", UNIT, "--property=ControlGroup", "--value"])
         .output()

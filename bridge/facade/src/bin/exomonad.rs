@@ -208,6 +208,10 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::CommandExt;
         let slice = exomonad_node::systemd_slice::SystemdSlice::try_from(slice)?;
         slice.current_membership()?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "exec() replaces this process image; there is no child to route through the launcher"
+        )]
         return Err(std::process::Command::new(&command[0])
             .args(&command[1..])
             .exec()
