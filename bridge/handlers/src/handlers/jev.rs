@@ -38,7 +38,7 @@ impl Default for JevConfig {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum JevFailure {
-    #[error("Jev is not configured: no TYPESAFE_API_KEY in env or secrets dir")]
+    #[error("Jev is not configured: set TYPESAFE_API_KEY or provide ~/.config/typesafe/api-key")]
     Unconfigured,
     #[error("Jev call budget exhausted")]
     CallCap,
@@ -55,7 +55,8 @@ pub enum JevFailure {
 }
 
 /// Resolves `TYPESAFE_API_KEY`: process env first (non-empty), else
-/// `secrets_dir()/TYPESAFE_API_KEY` (trimmed, non-empty), else `None`. Never
+/// `secrets_dir()/TYPESAFE_API_KEY`, then `~/.config/typesafe/api-key`
+/// (trimmed, non-empty), else `None`. Never
 /// writes to the process environment.
 fn resolve_key() -> Option<String> {
     if let Ok(key) = std::env::var("TYPESAFE_API_KEY") {
@@ -63,14 +64,19 @@ fn resolve_key() -> Option<String> {
             return Some(key);
         }
     }
-    let path = tidepool_toolchain::paths::secrets_dir().join("TYPESAFE_API_KEY");
-    let contents = std::fs::read_to_string(path).ok()?;
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    let primary = tidepool_toolchain::paths::secrets_dir().join("TYPESAFE_API_KEY");
+    let fallback = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".config/typesafe/api-key"));
+    read_key_files(std::iter::once(primary).chain(fallback))
+}
+
+fn read_key_files(paths: impl IntoIterator<Item = std::path::PathBuf>) -> Option<String> {
+    paths.into_iter().find_map(|path| {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let trimmed = contents.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn bearer(key: &str) -> HeaderValue {
@@ -234,6 +240,20 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn key_files_fall_back_and_preserve_priority() {
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("primary");
+        let fallback = directory.path().join("fallback");
+        std::fs::write(&fallback, " fallback-test-key\n").unwrap();
+        let resolve = || read_key_files([primary.clone(), fallback.clone()]);
+        assert_eq!(resolve().as_deref(), Some("fallback-test-key"));
+        std::fs::write(&primary, " \n").unwrap();
+        assert_eq!(resolve().as_deref(), Some("fallback-test-key"));
+        std::fs::write(&primary, "primary-test-key\n").unwrap();
+        assert_eq!(resolve().as_deref(), Some("primary-test-key"));
+    }
 
     /// Serves one canned HTTP/1.1 response on a local ephemeral port and
     /// returns (url, join-handle capturing the raw request bytes received).
