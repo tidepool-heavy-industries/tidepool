@@ -18,6 +18,12 @@
 //! disk yet. Waiting for the flip to discover a formatting drift in them would
 //! discover it at exactly the wrong moment.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test tooling: shells out to rustup/rustc to locate rustfmt and invokes rustfmt \
+              itself as a short-lived formatting child, not a long-lived child needing the launcher"
+)]
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
