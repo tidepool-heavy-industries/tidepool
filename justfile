@@ -120,6 +120,13 @@ exomonad-build:
 exomonad-init *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"
 
+# Run any Exomonad subcommand with this checkout's matched tools, for example:
+#   just exomonad-run -- new ~/dev/some-repo
+#   just exomonad-run -- check --workspace ~/dev/some-repo
+[positional-arguments]
+exomonad-run *args:
+    {{ exomonad_nix }} exomonad/scripts/exomonad-run.sh "$@"
+
 # Build Exomonad from this checkout and run it against the independent console
 # repository. Extra arguments are forwarded to `exomonad init`.
 [positional-arguments]

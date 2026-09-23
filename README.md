@@ -290,10 +290,13 @@ Detach with `Ctrl-b d`, or use `--no-attach` and the printed connection
 information. Model and Jev calls use your accounts.
 
 From a development checkout of this repository, without a Nix build,
-`just exomonad-init -- --workspace /path/to/repo` builds the matched tools
-incrementally and starts the same run against that repository after its
-`exomonad new`; `just exomonad-harness` is that recipe aimed at
-`~/dev/exomonad-harness`.
+`just exomonad-run -- new /path/to/repo`, `just exomonad-run -- check
+--workspace /path/to/repo` and `just exomonad-init -- --workspace
+/path/to/repo` build the matched tools incrementally and run the same three
+steps against that repository; `just exomonad-harness` is the last of them
+aimed at `~/dev/exomonad-harness`. Run the binary through these recipes
+rather than bare, so it uses the extractor built beside it and not one
+installed on `PATH`.
 
 For a first task, ask the agent to investigate a real repository issue,
 retain its evidence, and save a useful investigation function. Then ask it
