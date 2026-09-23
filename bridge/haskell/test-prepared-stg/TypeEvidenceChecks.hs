@@ -2,6 +2,7 @@ module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
 import Control.Monad (unless)
 import Data.Bits ((.&.))
+import Data.List (isSuffixOf)
 import Data.Text qualified as Text
 import System.FilePath ((</>))
 import Tidepool.ExecutionProjection (ProjectionError)
@@ -19,6 +20,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
   let target = directory </> "TypeEvidence.hs"
   readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs" >>= writeFile target
   result <- runPipelineSelected PreparedStg target [directory]
+  secondResult <- runPipelineSelected PreparedStg target [directory]
   let program entry = either
         (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
       answer entry = do
@@ -102,6 +104,18 @@ runTypeEvidenceChecks directory project projectWithAux = do
   profileWire <- program "profileWitness"
   assert (null (programVerbSites profileWire))
     "an effect-list witness acquired a synthetic reply site"
+  firstPoly <- either (ioError . userError . show) pure (project result "polyChoice")
+  secondPoly <- either (ioError . userError . show) pure (project secondResult "polyChoice")
+  let polyEvidence wire =
+        [ (row, nodeAt wire (siteWire row))
+        | row <- programSites wire
+        , ":|" `isSuffixOf` Text.unpack (siteOrigin row)
+        ]
+  assert (not (null (polyEvidence firstPoly)))
+    "the polymorphic choice constructor did not receive its synthetic reply row"
+  assert (polyEvidence firstPoly == polyEvidence secondPoly)
+    ("independent compiles produced different polymorphic reply evidence: "
+      ++ show (polyEvidence firstPoly, polyEvidence secondPoly))
   progressWire <- program "progressRequest"
   progressNode <- verbAnswer progressWire "ObserveProgress"
   case progressNode of

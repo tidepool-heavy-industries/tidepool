@@ -42,7 +42,7 @@ import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
-import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
+import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
@@ -288,7 +288,9 @@ siteType listAnswer ty = SiteType rendered
     rendered = T.pack (if listAnswer then "[" ++ base ++ "]" else base)
 
 renderType :: Type -> String
-renderType = renderWithContext defaultSDocContext . ppr
+renderType = renderWithContext stableContext . ppr
+  where
+    stableContext = defaultSDocContext { sdocSuppressUniques = True }
 
 replyDeclaration :: Type -> Maybe T.Text
 replyDeclaration ty = case splitTyConApp_maybe ty of
@@ -337,6 +339,13 @@ syntheticSiteId identity =
 -- type policy refuses.
 -- Indices of other kinds, such as an effect-profile witness's effect list,
 -- are not reply values and must not acquire host-answer sites.
+-- | A reachable constructor with a lifted, nominal final result argument may
+-- carry synthetic answer evidence even when it is not itself an effect
+-- request (for example, an alternatives constructor). This keeps the table
+-- independent of a closed effect registry: runtime dispatch only uses the
+-- constructor identity of an actual request. Polymorphic parts of the index
+-- remain explicitly unconstructible in the type graph, and their diagnostic
+-- rendering must therefore be stable across compiler sessions.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)

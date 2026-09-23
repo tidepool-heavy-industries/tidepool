@@ -24,6 +24,10 @@ data Progress progress
   | ProgressUpdate progress
   | ProgressClosed
 
+data Alts f xs where
+  (:|) :: Alts f a -> Alts f rest -> Alts f (Either a rest)
+infixr 5 :|
+
 data EffectProfile (protocol :: Type -> Type) (effects :: [Type -> Type]) where
   ReadOnly :: EffectProfile protocol '[protocol, Maybe]
 
@@ -98,6 +102,9 @@ progressRequest = ObserveProgress
 
 functionRequest :: Console (Int -> Int)
 functionRequest = FunctionReply
+
+polyChoice :: Alts f (Either a b)
+polyChoice = undefined :| undefined
 
 unrelated :: Int
 unrelated = 42
