@@ -1020,6 +1020,34 @@ fn registry_open_refuses_a_root_inside_a_working_tree() {
     }
 }
 
+/// A git failure that is NOT "no repository here" — a corrupt `.git` — must
+/// REFUSE the nesting check, not silently read it as "safe, nothing to nest
+/// inside". Fail-open here would let the never-dirty-the-source invariant
+/// skip itself on any git malfunction, not just a genuine absence of a
+/// repository.
+#[test]
+fn registry_open_refuses_a_root_it_cannot_even_check_for_nesting() {
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let root = base.path().join("corrupt-git-root");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    // A `.git` that exists but is not a valid gitfile pointer or repository
+    // directory — `git rev-parse` fails with "invalid gitfile format", not
+    // with "not a git repository", so this must NOT be read as "clean, no
+    // nesting" the way a genuine non-repository is.
+    std::fs::write(root.join(".git"), "not a real gitfile pointer\n").expect("write garbage .git");
+
+    match WorktreeRegistry::open(&root) {
+        Err(WorktreeError::GitFailure(receipt)) => {
+            assert!(
+                receipt.cwd.ends_with("corrupt-git-root"),
+                "the refusal names the offending path: {}",
+                receipt.cwd.display()
+            );
+        }
+        other => panic!("expected GitFailure naming the corrupt path, got {other:?}"),
+    }
+}
+
 /// The binding table enforces isolation from IN-MEMORY rows, so exactly one
 /// live table may own a root — a second owner could see "unbound" and bind
 /// the same worktree to a second agent. A second `open` (same process or, via

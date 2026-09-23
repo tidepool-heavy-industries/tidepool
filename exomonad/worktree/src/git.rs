@@ -529,11 +529,39 @@ pub mod inspect {
     }
 
     /// Absolute path of the working tree root for `cwd`.
+    ///
+    /// A genuine non-repository is [`WorktreeError::NotARepository`] — a
+    /// caller like the nesting guard reads that as "nothing to nest inside,
+    /// safe to proceed". Any OTHER git failure (a corrupt `.git`, a
+    /// permission error, anything `rev-parse` chokes on for a reason other
+    /// than "there is no repository here") stays [`WorktreeError::GitFailure`]
+    /// so it cannot be misread the same way — see [`is_not_a_repository`].
     pub fn work_tree(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
-        let out = git
-            .run(cwd, &["rev-parse", "--show-toplevel"])
-            .map_err(|_| WorktreeError::NotARepository(cwd.to_path_buf()))?;
+        let out = git.run(cwd, &["rev-parse", "--show-toplevel"]).map_err(
+            |failure| {
+                if is_not_a_repository(&failure) {
+                    WorktreeError::NotARepository(cwd.to_path_buf())
+                } else {
+                    WorktreeError::GitFailure(failure)
+                }
+            },
+        )?;
         Ok(PathBuf::from(out.trimmed()))
+    }
+
+    /// Whether a failed `rev-parse` reports "no repository here" rather than
+    /// some other git failure.
+    ///
+    /// Classified by git's own stable message text, never by exit code alone:
+    /// a corrupt `.git` (e.g. an invalid gitfile pointer, or a `.git` that is
+    /// a plain file with garbage content) also exits 128, and reading that as
+    /// "not a repository" is exactly the fail-open bug this exists to close —
+    /// it would make the never-dirty-the-source nesting guard skip itself on
+    /// any git malfunction, not just a genuine absence of a repository. The
+    /// message is locale-stable because [`GitCli::run_output`] pins
+    /// `LC_ALL=C` on every invocation.
+    fn is_not_a_repository(failure: &GitFailureReceipt) -> bool {
+        failure.stderr.contains("fatal: not a git repository")
     }
 
     /// Absolute path of the shared Git metadata used by `cwd`.

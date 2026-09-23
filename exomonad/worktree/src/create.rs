@@ -1008,16 +1008,25 @@ impl WorktreeManager {
         // worktree_root that resolves inside a git working tree (same check +
         // error as `WorktreeRegistry::open` — git walks UP from the root, so
         // the managed worktrees materialized BELOW this root never trip it).
+        //
+        // A git failure that is NOT "no repository here" is refused rather
+        // than skipped — a corrupt `.git` or a permission error must not
+        // silently read as "safe, nothing to nest inside" (see
+        // `git::inspect::work_tree`'s docs).
         if let Ok(canonical_root) = self.worktree_root.canonicalize() {
-            if let Ok(toplevel) = inspect::work_tree(&self.git, &canonical_root) {
-                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
-                    if canonical_root.starts_with(&canonical_toplevel) {
-                        return Err(WorktreeError::InvalidRegistryRoot {
-                            root: canonical_root,
-                            inside: canonical_toplevel,
-                        });
+            match inspect::work_tree(&self.git, &canonical_root) {
+                Ok(toplevel) => {
+                    if let Ok(canonical_toplevel) = toplevel.canonicalize() {
+                        if canonical_root.starts_with(&canonical_toplevel) {
+                            return Err(WorktreeError::InvalidRegistryRoot {
+                                root: canonical_root,
+                                inside: canonical_toplevel,
+                            });
+                        }
                     }
                 }
+                Err(WorktreeError::NotARepository(_)) => {}
+                Err(other) => return Err(other),
             }
         }
         Ok(())

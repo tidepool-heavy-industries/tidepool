@@ -144,16 +144,22 @@ impl WorktreeRegistry {
         fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
         let canonical_root = root.canonicalize().map_err(|e| storage_failure(&root, e))?;
 
+        // A git failure that is NOT "no repository here" is refused rather
+        // than skipped — see `git::inspect::work_tree`'s docs.
         let git = GitCli::new();
-        if let Ok(toplevel) = inspect::work_tree(&git, &canonical_root) {
-            if let Ok(canonical_toplevel) = toplevel.canonicalize() {
-                if canonical_root.starts_with(&canonical_toplevel) {
-                    return Err(WorktreeError::InvalidRegistryRoot {
-                        root: canonical_root,
-                        inside: canonical_toplevel,
-                    });
+        match inspect::work_tree(&git, &canonical_root) {
+            Ok(toplevel) => {
+                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
+                    if canonical_root.starts_with(&canonical_toplevel) {
+                        return Err(WorktreeError::InvalidRegistryRoot {
+                            root: canonical_root,
+                            inside: canonical_toplevel,
+                        });
+                    }
                 }
             }
+            Err(WorktreeError::NotARepository(_)) => {}
+            Err(other) => return Err(other),
         }
 
         let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
