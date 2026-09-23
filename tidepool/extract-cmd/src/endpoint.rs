@@ -4,7 +4,9 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+#[cfg(test)]
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
@@ -192,8 +194,12 @@ impl DirectEndpoint {
         drop(self.stdin.take());
         drop(self.stdout.take());
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.kill() {
+                tracing::warn!(%error, "failed to kill aborted direct-mode compiler worker");
+            }
+            if let Err(error) = child.wait() {
+                tracing::warn!(%error, "failed to reap aborted direct-mode compiler worker");
+            }
         }
     }
 
@@ -267,11 +273,15 @@ fn cancel_target(target: Option<CancellationTarget>) {
                 // The Child remains unreaped in its owning DirectEndpoint,
                 // so its PID cannot be reused before that owner observes the
                 // cancellation and waits it.
-                let _ = child.kill();
+                if let Err(error) = child.kill() {
+                    tracing::warn!(%error, "failed to kill cancelled direct-mode compiler worker");
+                }
             }
         }
         Some(CancellationTarget::Daemon(stream)) => {
-            let _ = stream.shutdown(Shutdown::Both);
+            // best-effort: the daemon connection may already be closed by
+            // the peer or by a concurrent cancellation.
+            stream.shutdown(Shutdown::Both).ok();
         }
         None => {}
     }
@@ -294,11 +304,21 @@ fn wait_for_owned_child(child: &Arc<Mutex<Child>>) {
         if finished {
             return;
         }
+        // Sync context: this poll loop bounds a Drop-reachable path, which
+        // cannot be async.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "sync poll loop reachable from Drop, which cannot await"
+        )]
         std::thread::sleep(Duration::from_millis(10));
     }
     if let Ok(mut child) = child.lock() {
-        let _ = child.kill();
-        let _ = child.try_wait();
+        if let Err(error) = child.kill() {
+            tracing::warn!(%error, "failed to kill unresponsive direct-mode compiler worker");
+        }
+        if let Err(error) = child.try_wait() {
+            tracing::warn!(%error, "failed to reap unresponsive direct-mode compiler worker");
+        }
     }
 }
 
@@ -341,7 +361,7 @@ impl CompilerEndpoint {
     }
 
     fn bind_launch(spec: LaunchSpec) -> Result<Self, SpawnError> {
-        let mut command = Command::new(&spec.program);
+        let mut command = process::command(&spec.program);
         command
             .args(&spec.prefix)
             .arg(BOUND_ENDPOINT_FLAG)
@@ -630,7 +650,9 @@ impl Drop for TransactionScopeGuard {
                 .and_then(|state| state.transaction)
         });
         if let Some(transaction) = transaction {
-            let _ = transaction.finish();
+            if let Err(error) = transaction.finish() {
+                tracing::warn!(%error, "compiler transaction did not close cleanly on scope exit");
+            }
         }
     }
 }
@@ -783,7 +805,9 @@ impl CompilerTransaction {
                 }
                 TransactionTransport::Daemon { stream, socket } => {
                     if self.failed {
-                        let _ = stream.shutdown(Shutdown::Both);
+                        // best-effort: the transaction already failed; the
+                        // peer may already have closed its end.
+                        stream.shutdown(Shutdown::Both).ok();
                         Ok(())
                     } else {
                         daemon::end_transaction(stream).map_err(|error| {
@@ -805,7 +829,9 @@ impl CompilerTransaction {
 
 impl Drop for CompilerTransaction {
     fn drop(&mut self) {
-        let _ = self.close();
+        if let Err(error) = self.close() {
+            tracing::warn!(%error, "compiler transaction did not close cleanly on drop");
+        }
     }
 }
 
@@ -847,6 +873,10 @@ mod tests {
 
     #[test]
     fn cancellation_interrupts_only_the_owned_direct_child() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: throwaway child to test cancellation, not a production launch site"
+        )]
         let child = Arc::new(Mutex::new(Command::new("sleep").arg("30").spawn().unwrap()));
         let cancellation = CompilerTransactionCancellation::new();
         cancellation.arm(CancellationTarget::Direct(Arc::clone(&child)));
@@ -872,6 +902,10 @@ mod tests {
         // A child that never exits on its own (nothing closes its stdio,
         // nothing sends it a signal) must not wedge whoever is waiting on
         // it — `wait_for_owned_child` is reachable from `Drop`.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: throwaway unresponsive child, not a production launch site"
+        )]
         let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
         let started = Instant::now();
         wait_for_owned_child(&child);
@@ -891,6 +925,10 @@ mod tests {
                 Instant::now() < reap_deadline,
                 "the deadline branch did not kill and reap the child"
             );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync poll loop waiting for the child to be reaped"
+            )]
             std::thread::sleep(Duration::from_millis(10));
         };
         assert!(!status.success());

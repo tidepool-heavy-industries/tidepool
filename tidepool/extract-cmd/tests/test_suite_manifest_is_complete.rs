@@ -19,6 +19,10 @@ fn test_suite_manifest_is_complete() {
         .parent()
         .expect("Tidepool source root is inside the workspace")
         .to_path_buf();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: runs a validator script and exits, not a long-lived child"
+    )]
     let output = Command::new(root.join("scripts/test-suite-check.sh"))
         .current_dir(&root)
         .output()

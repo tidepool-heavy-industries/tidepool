@@ -85,7 +85,7 @@ pub fn reset_extract_spawn_count() {
 /// [`extract_spawn_count`]. Callers interpret the returned banner according to
 /// their own frontend/worker compatibility policy.
 pub fn probe_binary(path: &Path) -> std::io::Result<Output> {
-    std::process::Command::new(path)
+    process::command(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .output()
@@ -829,7 +829,8 @@ mod tests {
 
         // Set-but-unreadable is a hard error, NEVER a fall-through to PATH.
         let missing = dir.join("nope");
-        let _ = std::fs::remove_file(&missing);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&missing).ok();
         std::env::set_var("TIDEPOOL_EXTRACT", &missing);
         let err = resolve_bin().unwrap_err();
         assert_eq!(err.path(), missing.as_path());
@@ -984,7 +985,8 @@ mod tests {
 
         // Never bound by anything — connecting must fail with NotFound.
         let dead_sock = dir.join("dead.sock");
-        let _ = std::fs::remove_file(&dead_sock);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&dead_sock).ok();
 
         std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", &dead_sock);
         reset_extract_spawn_count();

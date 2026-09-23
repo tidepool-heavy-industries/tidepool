@@ -21,6 +21,19 @@ unsafe extern "C" {
     fn prctl(option: std::os::raw::c_int, ...) -> std::os::raw::c_int;
 }
 
+/// Construct a `Command` for a long-lived extractor child. This is the one
+/// allowed `std::process::Command::new` call in the crate; every other site
+/// routes through it instead of constructing its own. Callers still arm the
+/// parent-death contract themselves with [`child_dies_with_parent`] once the
+/// command is otherwise configured.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "launcher: the crate's single allowed Command::new call (tidepool/extract-cmd/src/process.rs)"
+)]
+pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    Command::new(program)
+}
+
 pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -120,8 +133,13 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
-        let _ = std::fs::remove_file(&pid_file);
+        // best-effort: test cleanup of a temp path from a prior run.
+        std::fs::remove_file(&pid_file).ok();
 
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: re-execs this test binary as a parent-death helper, not a production launch site"
+        )]
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("process::tests::parent_death_helper")
             .arg("--exact")
@@ -143,13 +161,18 @@ mod tests {
         let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(5);
         while proc_entry.exists() && Instant::now() < deadline {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync poll loop waiting for the helper child to exit"
+            )]
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             !proc_entry.exists(),
             "child {pid} survived after its configured parent exited"
         );
-        let _ = std::fs::remove_file(pid_file);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(pid_file).ok();
     }
 
     #[test]
@@ -162,6 +185,10 @@ mod tests {
             return;
         }
         let pid_file = std::env::var_os(PID_FILE_ENV).expect("helper pid file is required");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: throwaway helper child, exercises child_dies_with_parent directly"
+        )]
         let mut command = Command::new("sleep");
         command
             .arg("30")

@@ -215,7 +215,7 @@ impl PreparedWorker {
         // this path before applying close-on-exec, so an atomic replacement of
         // the worker path cannot change which bytes execute.
         let executable = format!("/proc/self/fd/{}", self.file.as_raw_fd());
-        let mut command = Command::new(executable);
+        let mut command = crate::process::command(executable);
         command.env("TIDEPOOL_GHC_LIBDIR", &self.ghc_libdir);
         command
     }
@@ -251,6 +251,10 @@ fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
     if let Some(value) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
         return Ok(value);
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: `ghc --print-libdir` exits immediately and is not a long-lived child"
+    )]
     let output = Command::new("ghc")
         .arg("--print-libdir")
         .stdin(Stdio::null())
@@ -471,7 +475,8 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let dir = std::env::temp_dir().join(format!("tp-exit-reject-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path from a prior run.
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("daemon.sock");
         let stamp = dir.join("stamp");
@@ -500,6 +505,7 @@ mod tests {
                 break binding;
             }
             assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon to become ready")]
             std::thread::sleep(Duration::from_millis(10));
         };
         // An unreadable stamp makes the acceptance fence itself fail.
@@ -562,6 +568,7 @@ mod tests {
                 break binding;
             }
             assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon to become ready")]
             std::thread::sleep(Duration::from_millis(10));
         };
         for _ in 0..2 {
@@ -670,6 +677,10 @@ fn main() {{
             ),
         )
         .unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
         let rustc = std::process::Command::new("rustc")
             .arg(source_path)
             .arg("-o")
@@ -746,6 +757,10 @@ fn main() {
 "#,
         )
         .unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
@@ -795,6 +810,10 @@ fn main() {
 "#,
         )
         .unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")

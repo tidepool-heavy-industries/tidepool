@@ -81,7 +81,8 @@ fn unique_scratch_dir(name: &str) -> PathBuf {
         "tp-extract-cmd-daemon-it-{name}-{}",
         std::process::id()
     ));
-    let _ = fs::remove_dir_all(&dir);
+    // best-effort: cleanup of a temp path from a prior run.
+    fs::remove_dir_all(&dir).ok();
     fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
@@ -101,9 +102,14 @@ struct DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_file(&self.socket);
+        if let Err(error) = self.child.kill() {
+            eprintln!("daemon_integration: failed to kill test daemon process: {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            eprintln!("daemon_integration: failed to reap test daemon process: {error}");
+        }
+        // best-effort: cleanup of a temp socket path.
+        fs::remove_file(&self.socket).ok();
     }
 }
 
@@ -116,7 +122,12 @@ impl Drop for DaemonHandle {
 /// rather than fail loud over an environment/toolchain-freshness problem
 /// this test cannot fix.
 fn spawn_daemon(bin: &Path, socket: &Path, extra_args: &[&str]) -> Option<DaemonHandle> {
-    let _ = fs::remove_file(socket);
+    // best-effort: cleanup of a stale socket path from a prior run.
+    fs::remove_file(socket).ok();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "integration test: launches the extract binary under test directly, exercising its own --daemon process boundary, not a call this crate's launcher owns"
+    )]
     let mut cmd = Command::new(bin);
     cmd.arg("--daemon").arg("--socket").arg(socket);
     for a in extra_args {
@@ -147,10 +158,18 @@ fn spawn_daemon(bin: &Path, socket: &Path, extra_args: &[&str]) -> Option<Daemon
                 socket.display(),
                 timeout
             );
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.kill() {
+                eprintln!("daemon_integration: failed to kill unready test daemon process: {error}");
+            }
+            if let Err(error) = child.wait() {
+                eprintln!("daemon_integration: failed to reap unready test daemon process: {error}");
+            }
             return None;
         }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: sync poll loop waiting for the daemon socket to appear"
+        )]
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -296,7 +315,8 @@ fn daemon_integration() {
     check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
 
     drop(daemon);
-    let _ = fs::remove_dir_all(&dir);
+    // best-effort: test cleanup of a temp path.
+    fs::remove_dir_all(&dir).ok();
 
     check_e_rotation_then_fallback(&bin, &lib);
     check_i_persistent_rotation_keeps_serving(&bin, &lib);
@@ -1042,7 +1062,8 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
     );
 
     let Some(daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1"]) else {
-        let _ = fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+    fs::remove_dir_all(&dir).ok();
         return;
     };
 
@@ -1063,6 +1084,10 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
             start.elapsed() < Duration::from_secs(15),
             "daemon did not exit after draining rotation clients within 15s"
         );
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: sync poll loop waiting for the daemon to exit after rotation"
+        )]
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -1078,7 +1103,8 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let _ = fs::remove_dir_all(&dir);
+    // best-effort: test cleanup of a temp path.
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// A persistent daemon rotates only its GHC worker, retaining the protocol
@@ -1094,7 +1120,8 @@ fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
 
     let Some(mut daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1", "--persistent"])
     else {
-        let _ = fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+    fs::remove_dir_all(&dir).ok();
         return;
     };
 
@@ -1114,7 +1141,8 @@ fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
     }
 
     drop(daemon);
-    let _ = fs::remove_dir_all(&dir);
+    // best-effort: test cleanup of a temp path.
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// Bind a daemon-routed endpoint through `socket` and return its identity.

@@ -675,8 +675,8 @@ fn service_transaction(
         return Ok(ConnectionOutcome::Continue);
     }
     if transaction && orderly_end {
-        let _ = connection.write_all(&[ACCEPTED]);
-        let _ = connection.flush();
+        log_send_failure(run_id, "transaction accepted", connection.write_all(&[ACCEPTED]));
+        log_send_failure(run_id, "transaction accepted flush", connection.flush());
     }
     drop(connection);
     let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
@@ -772,13 +772,13 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(&producer);
                 response.extend_from_slice(&epoch);
-                let _ = connection.write_all(&response);
+                log_send_failure(run_id, "preflight response", connection.write_all(&response));
                 continue;
             }
             if &kind == STOP {
                 tracing::info!(run_id, "compiler daemon stopping on request");
-                let _ = connection.write_all(&[STOP_ACK]);
-                let _ = connection.flush();
+                log_send_failure(run_id, "stop ack", connection.write_all(&[STOP_ACK]));
+                log_send_failure(run_id, "stop ack flush", connection.flush());
                 socket.retire()?;
                 break;
             }
@@ -788,25 +788,25 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     Err(_) => continue,
                 };
                 if expected_epoch != epoch {
-                    let _ = write_rejected(&mut connection, "daemon boot epoch changed");
+                    log_reject_failure(run_id, "stale epoch (transaction)", write_rejected(&mut connection, "daemon boot epoch changed"));
                     continue;
                 }
                 match stamp_changed(config, &boot_stamp) {
                     Ok(false) => {}
                     Ok(true) => {
-                        let _ = write_rejected(&mut connection, "watched deployment changed");
+                        log_reject_failure(run_id, "deployment changed (transaction)", write_rejected(&mut connection, "watched deployment changed"));
                         socket.retire()?;
                         break;
                     }
                     Err(error) => {
-                        let _ = write_rejected(&mut connection, "daemon stopping");
+                        log_reject_failure(run_id, "daemon stopping (transaction)", write_rejected(&mut connection, "daemon stopping"));
                         return Err(error);
                     }
                 }
                 if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                     continue;
                 }
-                let _ = connection.set_read_timeout(Some(IO_TIMEOUT));
+                log_send_failure(run_id, "transaction read timeout", connection.set_read_timeout(Some(IO_TIMEOUT)));
                 let outcome = service_transaction(
                     connection,
                     &mut worker,
@@ -870,14 +870,14 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             };
             if expected_epoch != epoch {
                 tracing::warn!(run_id, "rejected compiler request for stale daemon epoch");
-                let _ = write_rejected(&mut connection, "daemon boot epoch changed");
+                log_reject_failure(run_id, "stale epoch (request)", write_rejected(&mut connection, "daemon boot epoch changed"));
                 continue;
             }
             let (cwd, argv) = match read_request(&mut connection) {
                 Ok(request) => request,
                 Err(_) => {
                     tracing::warn!(run_id, "rejected malformed compiler request");
-                    let _ = write_rejected(&mut connection, "invalid compiler request");
+                    log_reject_failure(run_id, "malformed request", write_rejected(&mut connection, "invalid compiler request"));
                     continue;
                 }
             };
@@ -885,7 +885,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 Ok(argv) => argv,
                 Err(_) => {
                     tracing::warn!(run_id, "rejected invalid typed compiler request");
-                    let _ = write_rejected(&mut connection, "invalid typed worker request");
+                    log_reject_failure(run_id, "invalid typed request", write_rejected(&mut connection, "invalid typed worker request"));
                     continue;
                 }
             };
@@ -895,19 +895,19 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             match stamp_changed(config, &boot_stamp) {
                 Ok(false) => {}
                 Ok(true) => {
-                    let _ = write_rejected(&mut connection, "watched deployment changed");
+                    log_reject_failure(run_id, "deployment changed (request)", write_rejected(&mut connection, "watched deployment changed"));
                     socket.retire()?;
                     break;
                 }
                 Err(error) => {
-                    let _ = write_rejected(&mut connection, "daemon stopping");
+                    log_reject_failure(run_id, "daemon stopping (request)", write_rejected(&mut connection, "daemon stopping"));
                     return Err(error);
                 }
             }
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                 continue;
             }
-            let _ = connection.set_read_timeout(Some(IO_TIMEOUT));
+            log_send_failure(run_id, "request read timeout", connection.set_read_timeout(Some(IO_TIMEOUT)));
             let mut first_request = Some((cwd, worker_argv));
             let outcome = service_transaction(
                 connection,
@@ -1147,7 +1147,10 @@ impl OwnedSocket {
                 if kind_read && &kind == REQUEST {
                     let mut epoch = [0; 32];
                     if reader.read_exact(&mut epoch).is_ok() {
-                        let _ = read_request(&mut reader);
+                        // best-effort: draining the request during rotation only
+                        // to advance past it; this connection is being rejected
+                        // either way and the parsed request is discarded.
+                        read_request(&mut reader).ok();
                     }
                 }
                 kind_read && &kind == PREFLIGHT
@@ -1155,7 +1158,8 @@ impl OwnedSocket {
             // A request, complete or partial, never infers its settlement
             // from a closed connection. A preflight has nothing to settle.
             if !preflight {
-                let _ = write_rejected(&mut connection, "daemon rotating");
+                // best-effort: the peer may already be gone during rotation drain.
+                write_rejected(&mut connection, "daemon rotating").ok();
             }
         }
         Ok(())
@@ -1183,7 +1187,9 @@ impl Read for DeadlineReader<'_> {
 
 impl Drop for OwnedSocket {
     fn drop(&mut self) {
-        let _ = self.unlink();
+        // best-effort: Drop cannot propagate errors; a socket path already
+        // gone (e.g. `retire` already unlinked it) is not a failure to report.
+        self.unlink().ok();
     }
 }
 
@@ -1255,6 +1261,23 @@ fn write_rejected(stream: &mut impl Write, message: &str) -> Result<(), Frontend
     push_frame(&mut response, message.as_bytes());
     stream.write_all(&response).map_err(FrontendError::Io)?;
     stream.flush().map_err(FrontendError::Io)
+}
+
+/// Best-effort connection write: the caller already decided to drop this
+/// connection (retire, continue, or break) regardless of the outcome, so a
+/// failure cannot change control flow. It usually means the peer hung up
+/// first; log it for diagnosis rather than discarding it silently.
+fn log_send_failure(run_id: &str, context: &str, result: io::Result<()>) {
+    if let Err(error) = result {
+        tracing::debug!(run_id, %error, context, "daemon connection write failed");
+    }
+}
+
+/// As [`log_send_failure`], for the typed rejection-write path.
+fn log_reject_failure(run_id: &str, context: &str, result: Result<(), FrontendError>) {
+    if let Err(error) = result {
+        tracing::debug!(run_id, %error, context, "daemon rejection write failed");
+    }
 }
 
 fn daemon_frontend_error(error: DaemonError) -> FrontendError {
@@ -1427,7 +1450,9 @@ impl Worker {
         let result = std::thread::scope(|scope| {
             let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
             scope.spawn(move || {
-                let _ = completed_tx.send(self.request(cwd, argv));
+                // best-effort: the receiver may already have returned via the
+                // deadline or disconnect branch below and dropped its end.
+                completed_tx.send(self.request(cwd, argv)).ok();
             });
             loop {
                 match completed_rx.recv_timeout(Duration::from_millis(50)) {
@@ -1441,7 +1466,9 @@ impl Worker {
                 }
                 let elapsed = started.elapsed();
                 if elapsed >= deadline {
-                    let _ = crate::process::kill_process(pid);
+                    if let Err(error) = crate::process::kill_process(pid) {
+                        tracing::warn!(pid, %error, "failed to kill deadline-exceeded compiler worker");
+                    }
                     tracing::warn!(
                         cwd = %cwd.display(),
                         elapsed_secs = elapsed.as_secs(),
@@ -1453,14 +1480,16 @@ impl Worker {
                     // own result is discarded in favor of a deadline error
                     // that names the bound, matching the disconnect branch's
                     // own definite report below.
-                    let _ = completed_rx.recv();
+                    completed_rx.recv().ok();
                     return Err(FrontendError::Daemon(format!(
                         "compiler worker exceeded its {}s request deadline and was killed",
                         deadline.as_secs()
                     )));
                 }
                 if peer_disconnected(connection) {
-                    let _ = crate::process::kill_process(pid);
+                    if let Err(error) = crate::process::kill_process(pid) {
+                        tracing::warn!(pid, %error, "failed to kill compiler worker after client disconnect");
+                    }
                     return completed_rx.recv().unwrap_or_else(|_| {
                         Err(FrontendError::Daemon(
                             "compiler worker stopped after client disconnect".to_owned(),
@@ -1493,15 +1522,23 @@ impl Worker {
 
     fn abort(&mut self) {
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = self.child.kill() {
+            tracing::warn!(%error, "failed to kill aborted compiler worker");
+        }
+        if let Err(error) = self.child.wait() {
+            tracing::warn!(%error, "failed to reap aborted compiler worker");
+        }
     }
 
     pub(crate) fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if let Err(error) = self.child.kill() {
+                tracing::warn!(%error, "failed to kill compiler worker during shutdown");
+            }
+            if let Err(error) = self.child.wait() {
+                tracing::warn!(%error, "failed to reap compiler worker during shutdown");
+            }
         }
     }
 }
@@ -1570,7 +1607,8 @@ mod tests {
         assert!(UnixStream::connect(&path).is_ok());
         drop(replacement);
         assert!(!path.exists());
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1582,7 +1620,8 @@ mod tests {
         assert!(UnixStream::connect(&path).is_ok());
         drop(owner);
         assert!(!path.exists());
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1597,7 +1636,8 @@ mod tests {
         );
         drop(starting_peer);
         fs::remove_file(&path).unwrap();
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1608,7 +1648,8 @@ mod tests {
         assert!(UnixStream::connect(&path).is_ok());
         drop(live);
         fs::remove_file(&path).unwrap();
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1630,7 +1671,8 @@ mod tests {
             matches!(&error, DaemonError::NotAccepted(message) if message == "daemon rotating"),
             "{error}"
         );
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1649,7 +1691,8 @@ mod tests {
         server.join().unwrap();
         assert!(!error.is_not_accepted(), "{error}");
         assert!(!error.was_accepted(), "{error}");
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -1678,7 +1721,8 @@ mod tests {
         socket.retire().unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [REJECTED]);
-        let _ = fs::remove_file(endpoint_lock_path(&path));
+        // best-effort: test cleanup of a temp path.
+        fs::remove_file(endpoint_lock_path(&path)).ok();
     }
 
     #[test]
@@ -2073,7 +2117,8 @@ tidepool-target phase=desugar module=Execute\n",
         use std::os::unix::net::UnixListener;
 
         let socket = test_socket("preflight");
-        let _ = std::fs::remove_file(&socket);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&socket).ok();
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
@@ -2094,7 +2139,8 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn transaction_carries_ordered_requests_and_waits_for_close_acknowledgement() {
         let socket = test_socket("transaction");
-        let _ = std::fs::remove_file(&socket);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&socket).ok();
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
@@ -2134,6 +2180,7 @@ tidepool-target phase=desugar module=Execute\n",
 
     #[test]
     fn transaction_disconnect_interrupts_an_inflight_worker_request() {
+        #[allow(clippy::disallowed_methods, reason = "test fixture: fakes a stuck compiler worker, not a production launch site")]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .stdin(Stdio::piped())
@@ -2169,7 +2216,8 @@ tidepool-target phase=desugar module=Execute\n",
         use std::os::unix::net::UnixListener;
 
         let socket = test_socket("reject");
-        let _ = std::fs::remove_file(&socket);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&socket).ok();
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
@@ -2189,7 +2237,8 @@ tidepool-target phase=desugar module=Execute\n",
         use std::os::unix::net::UnixListener;
 
         let socket = test_socket("accepted-close");
-        let _ = std::fs::remove_file(&socket);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&socket).ok();
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
@@ -2226,7 +2275,8 @@ tidepool-target phase=desugar module=Execute\n",
         // the path in its own, unrelated fd table) — so the fake worker is
         // a tiny Rust program, compiled once here with `rustc`.
         let dir = std::env::temp_dir().join(format!("tp-request-deadline-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("daemon.sock");
         let stamp = dir.join("stamp");
@@ -2284,6 +2334,7 @@ fn main() {{
         )
         .unwrap();
         let worker_bin = dir.join("fake-worker");
+        #[allow(clippy::disallowed_methods, reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site")]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
@@ -2313,6 +2364,7 @@ fn main() {{
                 Instant::now() < ready_deadline,
                 "daemon did not become ready"
             );
+            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
             std::thread::sleep(Duration::from_millis(10));
         };
 
@@ -2338,7 +2390,8 @@ fn main() {{
         std::fs::write(&stamp, b"changed").unwrap();
         assert!(preflight(&socket).is_err());
         assert_eq!(server.join().unwrap().unwrap(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2351,7 +2404,8 @@ fn main() {{
         // finish rather than interrupt it — the accept loop only reads a
         // queued connection once the current one is fully serviced.
         let dir = std::env::temp_dir().join(format!("tp-stop-drain-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("daemon.sock");
         let stamp = dir.join("stamp");
@@ -2398,6 +2452,7 @@ fn main() {{
         )
         .unwrap();
         let worker_bin = dir.join("fake-worker");
+        #[allow(clippy::disallowed_methods, reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site")]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
@@ -2427,6 +2482,7 @@ fn main() {{
                 Instant::now() < ready_deadline,
                 "daemon did not become ready"
             );
+            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
             std::thread::sleep(Duration::from_millis(10));
         };
 
@@ -2452,6 +2508,7 @@ fn main() {{
                 Instant::now() < dispatched_deadline,
                 "the in-flight request was never dispatched to the worker"
             );
+            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
             std::thread::sleep(Duration::from_millis(5));
         }
 
@@ -2491,7 +2548,8 @@ fn main() {{
         let error = queued_result.unwrap_err();
         assert!(error.is_not_accepted(), "{error}");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

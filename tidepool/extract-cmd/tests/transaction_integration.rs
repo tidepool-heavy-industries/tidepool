@@ -26,7 +26,8 @@ impl Drop for TestEnvironment {
             Some(value) => std::env::set_var("TIDEPOOL_MEMO_TRACE", value),
             None => std::env::remove_var("TIDEPOOL_MEMO_TRACE"),
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&self.dir).ok();
     }
 }
 
@@ -42,7 +43,8 @@ fn direct_transaction_executes_multiple_compiler_requests() {
         "tidepool-compiler-transaction-{}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    // best-effort: test cleanup of a temp path from a prior run.
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("Expr.hs");
     std::fs::write(
@@ -137,7 +139,8 @@ fn memo_trace_flag_adds_diagnostics_without_changing_compiled_output() {
         return;
     }
     let dir = std::env::temp_dir().join(format!("tidepool-memo-trace-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    // best-effort: test cleanup of a temp path from a prior run.
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("Expr.hs");
     std::fs::write(
