@@ -21,7 +21,13 @@ where
     R: Send + 'static,
 {
     let span = Span::current();
-    tokio::task::spawn_blocking(move || span.in_scope(f))
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this is the one sanctioned call site the disallowed-methods reason points to"
+    )]
+    {
+        tokio::task::spawn_blocking(move || span.in_scope(f))
+    }
 }
 
 #[cfg(test)]
@@ -39,7 +45,9 @@ mod tests {
     #[tokio::test]
     async fn carries_the_calling_span_into_the_blocking_closure() {
         let registry = tracing_subscriber::registry();
-        let _ = tracing::subscriber::set_global_default(registry);
+        // best-effort: another test in the process may have already installed
+        // the global subscriber; that's fine, this test only needs one present.
+        drop(tracing::subscriber::set_global_default(registry));
 
         let span = tracing::span!(Level::INFO, "compile_request", actor = "probe");
         let _entered = span.enter();

@@ -49,9 +49,9 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
         .collect()
 }
 
-/// Cross-thread owned handle for one completed bind root. The root never moves
-/// independently: it remains inside the session while that session is stowed,
-/// and is taken only after the session returns to its owning thread.
+// Cross-thread owned handle for one completed bind root. The root never moves
+// independently: it remains inside the session while that session is stowed,
+// and is taken only after the session returns to its owning thread.
 // ---------------------------------------------------------------------------
 // The shared session core
 // ---------------------------------------------------------------------------
@@ -198,15 +198,13 @@ impl PersistentSession {
             if !safe_to_release {
                 continue;
             }
-            match (&entry.value, self.machine.as_mut()) {
-                // A prepared binding's root IS its adopted handle: releasing
-                // the handle deregisters the root.
-                (BoundValue { handle, .. }, Some(engine)) => {
-                    if engine.release(*handle) {
-                        released += 1;
-                    }
+            // A prepared binding's root IS its adopted handle: releasing
+            // the handle deregisters the root.
+            if let (BoundValue { handle, .. }, Some(engine)) = (&entry.value, self.machine.as_mut())
+            {
+                if engine.release(*handle) {
+                    released += 1;
                 }
-                _ => {}
             }
         }
         released
@@ -1012,7 +1010,6 @@ impl PersistentSession {
                 let BoundValue { handle, .. } = entry.value;
                 engine.release(handle);
             }
-            return;
         }
     }
 

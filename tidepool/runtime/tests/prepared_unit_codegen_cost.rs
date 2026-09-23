@@ -75,14 +75,18 @@ fn install_stage_trace() {
     let filter = tracing_subscriber::EnvFilter::new(
         "warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info",
     );
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .without_time()
-                .with_target(true),
-        )
-        .try_init();
+    // best-effort: a prior test in the process may already own the global
+    // subscriber; this one is then simply not installed.
+    drop(
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_target(true),
+            )
+            .try_init(),
+    );
 }
 
 /// Group a turn's prepared tops by defining unit and module, so the shape of

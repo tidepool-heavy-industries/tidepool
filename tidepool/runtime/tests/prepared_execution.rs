@@ -415,6 +415,10 @@ fn caller_result_matches_ghc_for_boxed_unboxed_and_join_forwarding() {
         .parent()
         .unwrap();
     let source = root.join("bridge/haskell/test-prepared-stg/RepPoly.hs");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous oracle probe in a test, not a long-lived child"
+    )]
     let oracle = std::process::Command::new("ghc")
         .arg(&source)
         .args(["-e", "print [RepPoly.result, RepPoly.joined]"])
@@ -948,8 +952,8 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries(
 ) {
     let prepared = &fixture.prepared;
 
-    let program_top = freer_resume_top(&prepared, "program");
-    let resume_int_top = freer_resume_top(&prepared, "resumeInt");
+    let program_top = freer_resume_top(prepared, "program");
+    let resume_int_top = freer_resume_top(prepared, "resumeInt");
 
     let resume_int_signature = match &resume_int_top.binding.rhs {
         tidepool_repr::execution_schema::HeapRhs::Function { signature, .. } => {

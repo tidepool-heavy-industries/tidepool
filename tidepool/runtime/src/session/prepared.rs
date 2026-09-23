@@ -1002,6 +1002,11 @@ fn build_structural_node(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal helper with one call site; the parameters are the disjoint framed-answer \
+              build context (payload, target constructor, and lookup tables), not a natural struct"
+)]
 fn build_framed_structural_node(
     prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
     handle: PreparedHandle,
@@ -1046,6 +1051,7 @@ fn build_framed_structural_node(
             detail: "a framed prefix left a constructor unfinished",
         });
     }
+    #[allow(clippy::expect_used, reason = "checked above: frames.len() == 1")]
     visitor
         .frames
         .last_mut()
@@ -3598,6 +3604,11 @@ mod tests {
         .expect("the same binding now satisfies required_evaluated");
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test fixture builder; each argument is an independent field of the constructor \
+                  under test, not a natural grouping"
+    )]
     fn mount_constructor(
         module: &str,
         occurrence: &str,

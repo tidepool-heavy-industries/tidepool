@@ -958,7 +958,13 @@ impl SessionLib {
             Err(error) => {
                 self.log.turns.pop();
                 let gen_path = self.root.join(rendered.module.relative_hs_path());
-                let _ = std::fs::remove_file(&gen_path);
+                if let Err(err) = std::fs::remove_file(&gen_path) {
+                    tracing::warn!(
+                        ?err,
+                        path = %gen_path.display(),
+                        "failed to delete poisoned generated module after validation failure"
+                    );
+                }
                 self.restore_tip(scope, tip_before);
                 return Err(error);
             }

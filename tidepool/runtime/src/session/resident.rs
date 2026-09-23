@@ -807,6 +807,7 @@ pub(crate) enum SettlePlan {
 /// a completed value is prepared under `plan`, a suspension is parked under
 /// `park`. The invocation's resource-scope cancellation flag governs the run and any forcing
 /// observation.
+#[allow(clippy::too_many_arguments)]
 fn settle_prepared<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
     program: ProgramId,
@@ -839,6 +840,7 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
 /// arm of [`ResidentSession::run_rooted_entry_borrowed`]. `entry` is a bare
 /// machine handle; BORROWED throughout (never released on any path,
 /// success or failure).
+#[allow(clippy::too_many_arguments)]
 fn settle_rooted_entry<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
     entry: ValueHandle,
@@ -870,6 +872,7 @@ fn settle_rooted_entry<H: DispatchEffect<O>, O>(
 /// [`settle_rooted_entry`], but applying one rooted value to another through
 /// `__applyValue` — the prepared-route arm of
 /// [`ResidentSession::run_rooted_application`]. Both handles are BORROWED.
+#[allow(clippy::too_many_arguments)]
 fn settle_rooted_application<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
     function: ValueHandle,
@@ -941,7 +944,13 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 Err(error) => {
                     let constructor = request_constructor(&parked.request, table);
                     // The frame cannot be re-entered by anyone else: release it.
-                    let _ = engine.abort_parked(parked.id);
+                    if let Err(abort_error) = engine.abort_parked(parked.id) {
+                        tracing::warn!(
+                            ?abort_error,
+                            id = ?parked.id,
+                            "failed to abort parked frame after handler error"
+                        );
+                    }
                     return Err(PreparedRuntimeError::Handler {
                         constructor,
                         detail: error.to_string(),
@@ -961,7 +970,13 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 // A refusal before the take leaves the frame parked; a
                 // handled request has no other owner, so drop it here rather
                 // than leak it. A failure after the take already consumed it.
-                let _ = engine.abort_parked(parked.id);
+                if let Err(abort_error) = engine.abort_parked(parked.id) {
+                    tracing::warn!(
+                        ?abort_error,
+                        id = ?parked.id,
+                        "failed to abort parked frame after resume refusal"
+                    );
+                }
                 return Err(error);
             }
         };
@@ -2249,9 +2264,7 @@ where
                 "host binding mount produced a handle with no hosting program".into(),
             ))));
         };
-        if let Err(error) = self.bind_prepared(program, scope, gen, &[(binder, handle)]) {
-            return Err(error);
-        }
+        self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
         self.binding_provenance
             .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
         Ok(())
@@ -3856,6 +3869,11 @@ where
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "this test module sits next to the host-binding-authority code it covers; the \
+              suspension-seam impl and eval-thread types below it belong at module end"
+)]
 mod host_binding_authority_tests {
     use super::*;
     use crate::NominalHead;

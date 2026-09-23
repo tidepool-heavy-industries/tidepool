@@ -1742,7 +1742,7 @@ mod tests {
         command
             .output_dir(temp.path())
             .inspect_out(&output)
-            .includes(&[temp.path()])
+            .includes([temp.path()])
             .session_root(temp.path())
             .input(&source)
             .inspect_type("even'");

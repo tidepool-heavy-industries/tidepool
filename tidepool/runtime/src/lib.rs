@@ -320,7 +320,9 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
             let constructor = request_constructor(&request, table);
             // No handler claimed it and there is no resume path in a
             // one-shot run: release the parked frame rather than leak it.
-            let _ = engine.abort_parked(id);
+            if let Err(err) = engine.abort_parked(id) {
+                tracing::warn!(?err, ?id, "failed to abort parked frame for unhandled effect");
+            }
             Err(RuntimeError::Jit(EffectError::UnhandledEffect {
                 constructor,
             }))
