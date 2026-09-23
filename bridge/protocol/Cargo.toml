@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-protocol"
 version.workspace = true
 edition.workspace = true
@@ -27,3 +28,7 @@ insta = "1"
 [[bin]]
 name = "tidepool-protocol-gen"
 path = "src/bin/tidepool-protocol-gen.rs"
+
+[[test]]
+name = "protocol"
+path = "tests/suites/protocol.rs"
