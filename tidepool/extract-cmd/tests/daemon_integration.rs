@@ -354,11 +354,11 @@ fn check_a_byte_identical_transport(bin: &Path, dir: &Path, lib: &Path, socket: 
         "diagnostics JSON must match between transports"
     );
 
-    let daemon_cbor = fs::read(dir.join("out-a-daemon/result.cbor")).unwrap();
-    let direct_cbor = fs::read(dir.join("out-a-direct/result.cbor")).unwrap();
+    let daemon_cbor = fs::read(dir.join("out-a-daemon/result.prepared.cbor")).unwrap();
+    let direct_cbor = fs::read(dir.join("out-a-direct/result.prepared.cbor")).unwrap();
     assert_eq!(
         daemon_cbor, direct_cbor,
-        "result.cbor must be byte-identical"
+        "result.prepared.cbor must be byte-identical"
     );
 
     let daemon_meta = fs::read(dir.join("out-a-daemon/meta.cbor")).unwrap();
@@ -457,7 +457,13 @@ fn check_c_isolation_across_session_roots(bin: &Path, dir: &Path, lib: &Path, so
             "reference turn ({label}) should succeed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        fs::read(dir.join(format!("out-c-{label}-ref/result.cbor"))).unwrap()
+        // A resident turn's compile target is always the fixed prepared
+        // scaffold binder (`preparedScaffoldTargetName`/`PREPARED_SCAFFOLD_TARGET`
+        // == "__prepared"), never the CLI's own `--targets` flag —
+        // `runTurnMode` (bridge/haskell/app/Main.hs) hardcodes
+        // `[preparedScaffoldTargetName]`, and `writePreparedArtifacts` names
+        // the file after it: `<target>.prepared.cbor`.
+        fs::read(dir.join(format!("out-c-{label}-ref/__prepared.prepared.cbor"))).unwrap()
     };
 
     let cbor_a = reference(&root_a, "A", "x + 1");
@@ -507,7 +513,11 @@ fn check_d_relative_target_and_distinct_cwd(bin: &Path, dir: &Path, lib: &Path, 
         "relative-path compile under a distinct client cwd should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(sub.join("out-d/result.cbor").is_file());
+    // `writePreparedArtifacts` (bridge/haskell/app/Main.hs) names every
+    // compiled artifact `<target>.prepared.cbor`, target-based `--targets`
+    // compiles included — never the bare `<target>.cbor` this assertion used
+    // to check.
+    assert!(sub.join("out-d/result.prepared.cbor").is_file());
 }
 
 /// A warm daemon must key resolved module guts by the request's include roots,
@@ -606,11 +616,11 @@ fn check_f_module_memo_follows_include_roots(bin: &Path, dir: &Path, lib: &Path,
         second_daemon_out.stdout, second_direct_out.stdout,
         "diagnostics JSON must match between the warm-daemon-served second request and a direct spawn"
     );
-    let daemon_cbor = fs::read(dir.join("out-f-wide-daemon/result.cbor")).unwrap();
-    let direct_cbor = fs::read(dir.join("out-f-wide-direct/result.cbor")).unwrap();
+    let daemon_cbor = fs::read(dir.join("out-f-wide-daemon/result.prepared.cbor")).unwrap();
+    let direct_cbor = fs::read(dir.join("out-f-wide-direct/result.prepared.cbor")).unwrap();
     assert_eq!(
         daemon_cbor, direct_cbor,
-        "result.cbor must be byte-identical — spawnSpec (40+2=42) must be the ACTUAL binding \
+        "result.prepared.cbor must be byte-identical — spawnSpec (40+2=42) must be the ACTUAL binding \
          resolved from this request's own include dir, not a stale memo entry"
     );
 }
@@ -809,11 +819,14 @@ fn check_g_shim_dependent_module_warm_second_request(
         b_daemon_out.stdout, b_direct_out.stdout,
         "diagnostics JSON must match between the warm-daemon-served request B and a direct spawn"
     );
-    let daemon_cbor = fs::read(dir.join("out-g-b-daemon/result.cbor")).unwrap();
-    let direct_cbor = fs::read(dir.join("out-g-b-direct/result.cbor")).unwrap();
+    // See check_c's `reference` closure for why this is `__prepared.prepared.cbor`
+    // rather than `result.cbor` — a resident turn's compile target is always
+    // the fixed prepared scaffold binder.
+    let daemon_cbor = fs::read(dir.join("out-g-b-daemon/__prepared.prepared.cbor")).unwrap();
+    let direct_cbor = fs::read(dir.join("out-g-b-direct/__prepared.prepared.cbor")).unwrap();
     assert_eq!(
         daemon_cbor, direct_cbor,
-        "result.cbor must be byte-identical — request B's own Pinned/companionVal must be what \
+        "__prepared.prepared.cbor must be byte-identical — request B's own Pinned/companionVal must be what \
          actually compiles, not a stale request-A Tidepool.Companion memo entry"
     );
     assert_eq!(
