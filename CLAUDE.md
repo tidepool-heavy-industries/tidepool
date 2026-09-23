@@ -68,8 +68,11 @@ just verify
 ```
 
 `just daemon-start` keeps one compile daemon warm across test runs; battery,
-suite, and check runs reuse it automatically. Stop and restart it after
-rebuilding the extractor or the Haskell worker. Leave the host cargo config's
+suite, and check runs reuse it automatically while its producer matches the
+current extractor and worker; after a rebuild they start their own daemon
+instead, so a restart only restores warmth. Other agents and test runs share
+the persistent daemon: restart it once, at a quiet point, never per parcel.
+Leave the host cargo config's
 incremental compilation on (no `CARGO_INCREMENTAL=0`) and cap jobs to fit
 beside a 10 GiB GHC worker.
 
