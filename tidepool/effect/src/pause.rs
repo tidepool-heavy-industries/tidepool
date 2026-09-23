@@ -290,8 +290,9 @@ mod tests {
     fn pause_gate_abort_consumed_then_next_checkpoint_ok() {
         let gate = PauseGate::new();
         gate.request_abort("first abort".into());
-        let _ = gate.checkpoint(); // consumes the abort
-                                   // Gate is now Run again — next checkpoint should succeed.
+        // best-effort: this checkpoint's only job is to consume the abort.
+        gate.checkpoint().ok();
+        // Gate is now Run again — next checkpoint should succeed.
         let lease = gate
             .checkpoint()
             .expect("second checkpoint ok after abort consumed");
