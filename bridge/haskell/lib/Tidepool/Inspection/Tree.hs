@@ -6,6 +6,7 @@ module Tidepool.Inspection.Tree
   ( DisplayTree (..)
   , renderTree
   , treeParts
+  , literalText
   , precedenceParens
   ) where
 
@@ -19,7 +20,13 @@ data DisplayTree
   = TextLeaf Text
   | StringLeaf String
   | Concat [DisplayTree]
+  | Group [DisplayTree]
+  | LineBreak
   | LegacyLeaf (Int -> (Text, Bool))
+
+-- | Quote text using Haskell string-literal escapes.
+literalText :: Text -> DisplayTree
+literalText = StringLeaf . show . T.unpack
 
 -- | Render at most the requested characters, retaining the actual remaining
 -- tree. The last flag reports detail omitted by a legacy custom renderer.
@@ -31,6 +38,12 @@ renderTree allowance tree = go (max 0 allowance) [] False [tree]
       (T.concat (reverse pieces), Just (Concat pending), unavailable)
     go left pieces unavailable (node : rest) = case node of
       Concat children -> go left pieces unavailable (children ++ rest)
+      Group children ->
+        let layout = if flatLength (maxLineWidth + 1) children <= maxLineWidth
+              then flatten children
+              else children
+        in go left pieces unavailable (layout ++ rest)
+      LineBreak -> go (left - 1) ("\n" : pieces) unavailable rest
       TextLeaf value ->
         let (prefix, suffix) = T.splitAt left value
             remaining = if T.null suffix then rest else TextLeaf suffix : rest
@@ -45,6 +58,29 @@ renderTree allowance tree = go (max 0 allowance) [] False [tree]
         in go (left - T.length prefix) (prefix : pieces)
              (unavailable || omitted || not (T.null excess)) rest
 
+maxLineWidth :: Int
+maxLineWidth = 80
+
+flatLength :: Int -> [DisplayTree] -> Int
+flatLength limit = go 0
+  where
+    go count _ | count >= limit = count
+    go count [] = count
+    go count (tree : rest) = case tree of
+      TextLeaf value -> go (count + min (limit - count) (T.length value)) rest
+      StringLeaf value -> go (count + length (take (limit - count) value)) rest
+      Concat children -> go count (children ++ rest)
+      Group children -> go count (children ++ rest)
+      LineBreak -> go (count + 1) rest
+      LegacyLeaf _ -> limit
+
+flatten :: [DisplayTree] -> [DisplayTree]
+flatten = concatMap $ \tree -> case tree of
+  LineBreak -> [TextLeaf " "]
+  Group children -> flatten children
+  Concat children -> [Concat (flatten children)]
+  other -> [other]
+
 -- | GHC's 'showParen' for a constructor application rendered at a
 -- 'showsPrec' precedence: parenthesized only above application precedence.
 precedenceParens :: Int -> DisplayTree -> DisplayTree
@@ -53,7 +89,7 @@ precedenceParens precedence tree
   | otherwise = tree
 
 treeParts :: Text -> Text -> [DisplayTree] -> DisplayTree
-treeParts opening closing children = Concat
+treeParts opening closing children = Group
   [ TextLeaf opening
   , Concat (separate children)
   , TextLeaf closing
@@ -62,4 +98,4 @@ treeParts opening closing children = Concat
     separate [] = []
     separate (value : rest) = value : following rest
     following [] = []
-    following (value : rest) = TextLeaf ",\n" : value : following rest
+    following (value : rest) = TextLeaf "," : LineBreak : value : following rest

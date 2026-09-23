@@ -30,7 +30,6 @@ module Tidepool.Inspection
 where
 
 import Control.Monad.Freer (Eff, Member, send)
-import Data.Char (isSpace)
 import GHC.Records (HasField (getField))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -104,14 +103,13 @@ instance {-# OVERLAPPABLE #-} (Show a) => Display a where
         prefix = take (limit + 1) (show value)
      in (Text.pack (take limit prefix), length prefix > limit)
 
--- | Text renders literally; as an argument, text that is not one word is
--- parenthesized so it cannot read as further arguments.
+-- | Text renders as a quoted, escaped string literal.
 instance Display Text where
-  displayTree = TextLeaf
-  displayTreePrec precedence value
-    | Text.null value || Text.any isSpace value = precedenceParens precedence (TextLeaf value)
-    | otherwise = TextLeaf value
-  displayWith = renderText
+  displayTree = literalText
+  displayTreePrec _ = literalText
+  displayWith budget value =
+    let (rendered, remaining, unavailable) = renderTree budget (literalText value)
+    in (rendered, maybe False (const True) remaining || unavailable)
 
 -- | A 'String' is text, and renders as 'Text' does. Without this the list
 -- instance answers for @[Char]@ and the result of 'show' displays as a list of
@@ -178,12 +176,8 @@ instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplayWithout keys = displayWithout keys 512
 
 instance WorkbenchDisplay Text where
-  workbenchDisplay value =
-    let prefix = Text.take 513 value
-     in (Text.take 512 prefix, Text.length prefix > 512)
-  workbenchActivationDisplay limit value =
-    let prefix = Text.take (limit + 1) value
-     in (Text.take limit prefix, Text.length prefix > limit)
+  workbenchDisplay = displayWith 512
+  workbenchActivationDisplay limit = displayWith limit
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
@@ -196,7 +190,7 @@ instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
   inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value) (displayTree value)
 
 instance FullDisplay Text where
-  inspectFull value = FullInspection (\_ budget -> renderText budget value) (TextLeaf value)
+  inspectFull value = FullInspection (\_ budget -> displayWith budget value) (literalText value)
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
