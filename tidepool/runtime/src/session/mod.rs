@@ -662,40 +662,6 @@ impl SessionLib {
         live
     }
 
-    /// Names of every type/class introduced across declaration turns. Hidden
-    /// from the Prelude/Library/effect-verb imports (alongside
-    /// [`Self::decl_value_names`]) so a session `data Foo`/`class Foo` shadows a
-    /// same-named library type instead of becoming an ambiguous occurrence
-    /// (e.g. a session `data Hit` vs the `Library` `Hit`).
-    /// `decl_type_names() == decl_type_names_in(ScopeId::ROOT)`.
-    #[must_use]
-    pub fn decl_type_names(&self) -> Vec<&str> {
-        self.decl_type_names_in(ScopeId::ROOT)
-    }
-
-    /// [`Self::decl_type_names`], but walking only `scope`'s own parent
-    /// chain — a sibling scope's same-named type never shadows this one.
-    #[must_use]
-    pub fn decl_type_names_in(&self, scope: ScopeId) -> Vec<&str> {
-        // Latest-wins with retraction: a name removed by a later retraction turn
-        // (its binding migrated to the persistent binding store) is no longer a
-        // persistent declaration environment type, so it drops out.
-        let mut live: Vec<&str> = Vec::new();
-        for g in self.log.chain_from_root(self.scope_tip(scope)) {
-            let turn = &self.log.turns[(g.0 - 1) as usize];
-            for r in &turn.retracts {
-                live.retain(|n| *n != r.as_str());
-            }
-            for item in &turn.items {
-                if let ExportItem::Type { name, .. } | ExportItem::Class { name, .. } = item {
-                    live.retain(|n| *n != name.as_str());
-                    live.push(name.as_str());
-                }
-            }
-        }
-        live
-    }
-
     /// The currently in-scope declaration heads paired with the generation of
     /// their latest defining turn — the persistent declaration environment half of the live
     /// `tidepool://session/bindings` resource snapshot. Latest-wins across turns.
@@ -1475,77 +1441,6 @@ mod tests {
                 "import qualified Data.Map.Strict as Map"
             ]
         );
-    }
-
-    /// `decl_type_names` must honor retraction the same way `decl_value_names`
-    /// does: a `data Hit` the session later retracts must drop out, freeing the
-    /// name so a same-named Prelude/Library type is reachable again.
-    #[test]
-    fn decl_type_names_drops_a_retracted_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.push_turn_in(
-            ScopeId::ROOT,
-            DeclTurn {
-                normalized: Default::default(),
-                external_imports: SourceImports::new(),
-                sources: vec!["data Hit = Hit".into()],
-                workbench_imports: SourceImports::new(),
-                items: vec![ExportItem::Type {
-                    name: "Hit".into(),
-                    cons: vec!["Hit".into()],
-                }],
-                value_types: BTreeMap::new(),
-                retracts: Vec::new(),
-                parent: None,
-            },
-        );
-        lib.push_turn_in(
-            ScopeId::ROOT,
-            DeclTurn {
-                normalized: Default::default(),
-                external_imports: SourceImports::new(),
-                sources: Vec::new(),
-                workbench_imports: SourceImports::new(),
-                items: Vec::new(),
-                value_types: BTreeMap::new(),
-                retracts: vec!["Hit".into()],
-                parent: None,
-            },
-        );
-
-        assert!(
-            !lib.decl_type_names().contains(&"Hit"),
-            "a retracted session type must no longer hide the library name"
-        );
-    }
-
-    /// The positive counterpart: a type the session never retracted stays
-    /// visible in `decl_type_names`.
-    #[test]
-    fn decl_type_names_keeps_an_unretracted_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.push_turn_in(
-            ScopeId::ROOT,
-            DeclTurn {
-                normalized: Default::default(),
-                external_imports: SourceImports::new(),
-                sources: vec!["data Hit = Hit".into()],
-                workbench_imports: SourceImports::new(),
-                items: vec![ExportItem::Type {
-                    name: "Hit".into(),
-                    cons: vec!["Hit".into()],
-                }],
-                value_types: BTreeMap::new(),
-                retracts: Vec::new(),
-                parent: None,
-            },
-        );
-
-        assert!(lib.decl_type_names().contains(&"Hit"));
     }
 
     fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {
