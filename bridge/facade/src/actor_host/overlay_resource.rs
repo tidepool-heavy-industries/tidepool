@@ -10,6 +10,8 @@ use exomonad_node::{
 };
 use parking_lot::Mutex;
 
+use super::PROCESS_OPERATION_TIMEOUT;
+
 #[derive(Debug)]
 pub(super) struct OverlayResourceLease {
     storage: Arc<OverlayStorage>,
@@ -26,6 +28,20 @@ pub(super) struct OverlayResourceLease {
 /// Publication is exclusive, but readers of completed generations need not
 /// wait for a native request or mount transition. Both access paths share the
 /// resource owner's single published-snapshot cell.
+///
+/// `publication` and `latest` are deliberately two cells, not one state
+/// machine: `publication` guards exclusive, possibly slow, async-await
+/// access to the owned `OverlayResourceLease` (mount, publish, retire), while
+/// `latest` is a cheap synchronous cache of the most recent readable
+/// snapshot that must stay lock-free for readers who only want
+/// `latest_snapshot()` and never touch the resource itself. `latest` here is
+/// the exact same `Arc<Mutex<..>>` cell as `OverlayResourceLease::latest`
+/// (cloned in `new`, below), not an independent copy, so the two can never
+/// disagree; every write to it happens with the `publication` lock held
+/// (`import_source`, `settle_rotation`, `compact_snapshot`, `retire`), and
+/// merging it into `publication`'s guard would force every snapshot read to
+/// contend on that exclusive, potentially long-held lock, which is exactly
+/// the contention this split exists to avoid.
 #[derive(Clone)]
 pub(super) struct SharedOverlayResource {
     pub(super) publication: Arc<tokio::sync::Mutex<Option<OverlayResourceLease>>>,
@@ -484,9 +500,12 @@ impl OverlayResourceLease {
             .with_overlay_view(self.layers(), &upper, &work, &view)
             .map_err(io::Error::other)?
             .with_read_only_project();
+        // Bound how long compaction waits for the read-only merged view used
+        // to stage the compacted copy; reuses the shared process-operation
+        // deadline rather than a bespoke one for the same kind of wait.
         let namespace = boundary.prepare_view(
             exomonad_node::BUBBLEWRAP_PROGRAM,
-            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
         )?;
         let visible = namespace.retained_view_path(&view)?;
         let original = source_manifest(visible.as_path(), &[])?;
@@ -886,6 +905,11 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Child, ChildStdout, Command, Stdio};
 
+    /// Deadline for preparing the child-source view in
+    /// `source_publication_preserves_the_independent_build_mount`; short
+    /// because the test view has nothing to wait on but its own mount.
+    const CHILD_VIEW_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     #[tokio::test]
     async fn retired_parent_layers_survive_children_then_are_reclaimed() {
         let directory = tempfile::tempdir().unwrap();
@@ -1109,7 +1133,7 @@ mod tests {
         let child = boundary
             .prepare_view(
                 "bwrap",
-                std::time::Instant::now() + std::time::Duration::from_secs(10),
+                std::time::Instant::now() + CHILD_VIEW_PREPARE_TIMEOUT,
             )
             .unwrap();
         assert_eq!(
