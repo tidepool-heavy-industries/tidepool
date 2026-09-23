@@ -58,7 +58,12 @@ pub enum SrReloadOutcome {
     /// The revision that was active, the revision now active, and the
     /// modules whose source differs between them. Later cells compile
     /// against the new one.
-    ReloadPublished(SrRevision, SrRevision, Vec<String>, SrWorkspaceCommitOutcome),
+    ReloadPublished(
+        SrRevision,
+        SrRevision,
+        Vec<String>,
+        SrWorkspaceCommitOutcome,
+    ),
     /// The affected module graph did not typecheck. The first revision
     /// is the one still active — unchanged — the second names the
     /// snapshot that failed, and the text carries its diagnostics. The

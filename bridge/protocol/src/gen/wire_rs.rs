@@ -19,7 +19,7 @@
 //! - Every [`crate::types::TypeShape::Identity`] gets a FALLIBLE boundary
 //!   constructor. The rule: decode once at the edge, typed everywhere after.
 
-use super::{header, index_body, module_name as effect_module_name, GeneratedFile};
+use super::{header, index_body, module_name as effect_module_name, render_variant, GeneratedFile};
 use crate::hs::HsType;
 use crate::schema::{
     Effect, IdentityPayload, TypeDef, TypeShape, Validation, VariantFields, WireDerive,
@@ -272,13 +272,10 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
                     out.push_str(&format!("    #[haskell(module = \"{module}\")]\n"));
                 }
                 match &v.fields {
-                    VariantFields::Positional(fields) if fields.is_empty() => {
-                        out.push_str(&format!("    {},\n", v.ctor));
-                    }
                     VariantFields::Positional(fields) => {
                         let types: Vec<String> =
                             fields.iter().map(|field| rust_type(e, field)).collect();
-                        out.push_str(&format!("    {}({}),\n", v.ctor, types.join(", ")));
+                        out.push_str(&render_variant(v.ctor, &types));
                     }
                     VariantFields::Named(fields) => {
                         out.push_str(&format!("    {} {{\n", v.ctor));
