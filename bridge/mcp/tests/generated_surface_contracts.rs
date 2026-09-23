@@ -207,7 +207,12 @@ fn generated_module_does_not_redefine_the_relocated_event_helpers() {
         "headChanged ::",
         "(<|>) ::",
         "pumpEff ::",
-        "drainSubscription ::",
+        // `drainSubscription`'s signature now wraps its `Member RepoEvent`
+        // constraint onto its own line (see the `subscribe`/`unsubscribe`
+        // split in 045231f64), so the pinned literal follows its exact
+        // multi-line shape rather than the single-line form the other
+        // relocated names still use.
+        "drainSubscription\n  :: Member",
         "withHandler ::",
         "eventIdOf ::",
         "firstMatch ::",
