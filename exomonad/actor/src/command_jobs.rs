@@ -19,6 +19,76 @@ const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CompletionSink = dyn Fn(CommandResult) -> bool + Send + Sync;
 
+/// Every backend call reachable from inside an actor's one active turn goes
+/// through this wrapper, so a raw, unbounded call on the backend is not
+/// expressible from `Shared` or `JobActor`: both hold only a `BoundedBackend`.
+/// `control`, `output`, `read`, and `cleanup` are bounded by
+/// `BACKEND_CALL_TIMEOUT` and map an expired call to the same error/cleanup
+/// variants the two already-bounded call sites used before this wrapper
+/// existed. `execute` is the one exception: it is the long-running command
+/// future itself, legitimately unbounded, and passes straight through.
+struct BoundedBackend(Arc<dyn CommandBackend>);
+
+impl BoundedBackend {
+    fn execute<'a>(
+        &'a self,
+        id: &'a str,
+        spec: CommandSpec,
+        phase: watch::Sender<CommandStatus>,
+    ) -> BoxFuture<'a, CommandResult> {
+        self.0.execute(id, spec, phase)
+    }
+
+    async fn control(&self, id: &str, operation: CommandControl) -> Result<(), CommandError> {
+        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.control(id, operation))
+            .await
+            .unwrap_or_else(|_| {
+                Err(CommandError::CommandUnavailable(format!(
+                    "command control was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                )))
+            })
+    }
+
+    async fn output(&self, id: &str, bytes: usize) -> Result<CommandOutput, CommandError> {
+        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.output(id, bytes))
+            .await
+            .unwrap_or_else(|_| {
+                Err(CommandError::CommandUnavailable(format!(
+                    "command output was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                )))
+            })
+    }
+
+    async fn read(
+        &self,
+        id: &str,
+        stream: CommandStream,
+        position: CommandPosition,
+    ) -> Result<CommandPage, CommandError> {
+        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.read(id, stream, position))
+            .await
+            .unwrap_or_else(|_| {
+                Err(CommandError::CommandUnavailable(format!(
+                    "command read was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                )))
+            })
+    }
+
+    /// `Err` carries the same `CommandCleanupUnknown` sentinel `Shared::cleanup`
+    /// used to return directly on timeout; it lets that caller keep leaving
+    /// phase untouched on an unconfirmed call (so the next poll retries the
+    /// backend) while still centralizing the bound and the mapping here.
+    async fn cleanup(&self, id: &str) -> Result<CommandCleanup, CommandCleanup> {
+        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.cleanup(id))
+            .await
+            .map_err(|_| {
+                CommandCleanup::CommandCleanupUnknown(format!(
+                    "cleanup was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                ))
+            })
+    }
+}
+
 /// Native execution remains in the owning TUI; these operations carry no shell launcher.
 pub trait CommandBackend: Send + Sync + 'static {
     fn execute<'a>(
@@ -83,7 +153,7 @@ impl CommandBackendRequest {
 struct Shared {
     owner: ActorRef,
     phase: watch::Sender<CommandStatus>,
-    backend: Mutex<Option<Arc<dyn CommandBackend>>>,
+    backend: Mutex<Option<Arc<BoundedBackend>>>,
     input: Mutex<CommandInput>,
     sinks: Mutex<Vec<std::sync::Weak<CompletionSink>>>,
     observers: Mutex<HashMap<ActorRef, usize>>,
@@ -159,14 +229,12 @@ impl Shared {
         let Some(backend) = backend else {
             return result.cleanup;
         };
-        let Ok(cleanup) = tokio::time::timeout(BACKEND_CALL_TIMEOUT, backend.cleanup(id)).await
-        else {
+        let cleanup = match backend.cleanup(id).await {
+            Ok(cleanup) => cleanup,
             // Unconfirmed within the bound: leave phase untouched so the next
             // poll retries the backend instead of latching an unconfirmed
             // cleanup into settled state.
-            return CommandCleanup::CommandCleanupUnknown(format!(
-                "cleanup was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
-            ));
+            Err(cleanup) => return cleanup,
         };
         self.phase.send_modify(|phase| {
             if let CommandStatus::CommandFinished(result) = phase {
@@ -798,6 +866,7 @@ impl Actor for JobActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JobMessage::BackendReady(Ok(backend)) => {
+                let backend = Arc::new(BoundedBackend(backend));
                 *state.shared.backend.lock() = Some(backend.clone());
                 #[expect(
                     clippy::expect_used,
@@ -840,17 +909,9 @@ impl Actor for JobActor {
                     if let Some(backend) = backend {
                         // Cancellation must bypass stdin backpressure. The backend
                         // accepts intent here; execution observes and settles it.
-                        let result = match tokio::time::timeout(
-                            BACKEND_CALL_TIMEOUT,
-                            backend.control(&state.id, CommandControl::Cancel),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(CommandError::CommandUnavailable(format!(
-                                "cancel was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
-                            ))),
-                        };
+                        // `BoundedBackend::control` bounds and maps an unresponsive
+                        // backend on its own.
+                        let result = backend.control(&state.id, CommandControl::Cancel).await;
                         let _ = reply.send(result);
                     } else {
                         state.execution.abort();
@@ -1004,5 +1065,91 @@ mod validation_tests {
                 "diagnostics must not echo command data"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_backend_tests {
+    use super::*;
+    use crate::ActorId;
+
+    /// Every method but `execute` never resolves; `cleanup` is the one this
+    /// test exercises, standing in for any backend that stops responding.
+    struct HangingBackend;
+
+    impl CommandBackend for HangingBackend {
+        fn execute<'a>(
+            &'a self,
+            _id: &'a str,
+            _spec: CommandSpec,
+            _phase: watch::Sender<CommandStatus>,
+        ) -> BoxFuture<'a, CommandResult> {
+            Box::pin(std::future::pending())
+        }
+        fn control<'a>(
+            &'a self,
+            _id: &'a str,
+            _operation: CommandControl,
+        ) -> BoxFuture<'a, Result<(), CommandError>> {
+            Box::pin(std::future::pending())
+        }
+        fn output<'a>(
+            &'a self,
+            _id: &'a str,
+            _bytes: usize,
+        ) -> BoxFuture<'a, Result<CommandOutput, CommandError>> {
+            Box::pin(std::future::pending())
+        }
+        fn read<'a>(
+            &'a self,
+            _id: &'a str,
+            _stream: CommandStream,
+            _position: CommandPosition,
+        ) -> BoxFuture<'a, Result<CommandPage, CommandError>> {
+            Box::pin(std::future::pending())
+        }
+        fn cleanup<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, CommandCleanup> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn finished_shared_with_hanging_backend() -> Shared {
+        Shared {
+            owner: ActorRef::first(ActorId(1)),
+            phase: watch::channel(CommandStatus::CommandFinished(CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                // Anything but `CommandClean` so `Shared::cleanup` does not
+                // short-circuit before reaching the backend.
+                cleanup: CommandCleanup::CommandRetained,
+            }))
+            .0,
+            backend: Mutex::new(Some(Arc::new(BoundedBackend(Arc::new(HangingBackend))))),
+            input: Mutex::new(CommandInput::ClosedInput),
+            sinks: Mutex::new(Vec::new()),
+            observers: Mutex::new(Default::default()),
+            displayed: Mutex::new(Default::default()),
+        }
+    }
+
+    /// `Shared::cleanup` is reached from `status`, the retire cleanup closure,
+    /// and the `Cancel`-after-finished branch of `CommandJobs::control` — all
+    /// inside an actor's one active turn. It calls the backend only through
+    /// `BoundedBackend`, so a backend whose `cleanup` never resolves must not
+    /// hang any of those callers: the call returns within `BACKEND_CALL_TIMEOUT`
+    /// with an unconfirmed cleanup instead of blocking forever.
+    #[tokio::test(start_paused = true)]
+    async fn shared_cleanup_is_bounded_when_the_backend_never_confirms() {
+        let shared = finished_shared_with_hanging_backend();
+        let started = tokio::time::Instant::now();
+        let cleanup = shared.cleanup("job-under-test").await;
+        assert!(
+            matches!(cleanup, CommandCleanup::CommandCleanupUnknown(_)),
+            "{cleanup:?}"
+        );
+        assert_eq!(
+            started.elapsed(),
+            BACKEND_CALL_TIMEOUT,
+            "a paused clock should advance exactly to the bound, not hang past it"
+        );
     }
 }
