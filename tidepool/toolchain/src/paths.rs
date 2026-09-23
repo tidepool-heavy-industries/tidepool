@@ -345,7 +345,8 @@ mod tests {
 
         std::env::remove_var("TIDEPOOL_TEST_DUMMY_API_KEY");
         std::env::remove_var("TIDEPOOL_TEST_PRESET_API_KEY");
-        let _ = std::fs::remove_dir_all(&dir);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -367,8 +368,10 @@ mod tests {
             find_project_root(&orphan),
             find_project_root(&std::env::temp_dir())
         );
-        let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::remove_dir_all(&orphan);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&tmp).ok();
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&orphan).ok();
     }
 
     /// A caller with its own marker (Exomonad's `.exomonad/`) must not be confused
@@ -402,6 +405,7 @@ mod tests {
             Some(nested.clone())
         );
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

@@ -153,6 +153,10 @@ impl DevelopmentExtractPair {
                 path
             }
             None => {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "short synchronous probe: `cabal list-bin` exits immediately and is not a long-lived child"
+                )]
                 let output = Command::new("cabal")
                     .args(["list-bin", "tidepool-extract-bin"])
                     .current_dir(repo_root.join("haskell"))

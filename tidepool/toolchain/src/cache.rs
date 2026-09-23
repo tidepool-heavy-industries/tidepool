@@ -88,7 +88,8 @@ pub fn source_roots_identity(domain: &[u8], roots: &[PathBuf]) -> String {
 fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
+        // best-effort: `fmt::Write` on a `String` cannot fail.
+        write!(out, "{byte:02x}").ok();
         out
     })
 }
@@ -405,7 +406,9 @@ pub(crate) fn artifacts_store(
     if fs::create_dir_all(&dir).is_err() || !evidence.valid(source) {
         return;
     }
-    let _ = tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle);
+    // best-effort: name says it all; a failed cache write just means the
+    // next compile misses this memo entry.
+    tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle).ok();
 }
 
 #[cfg(test)]
