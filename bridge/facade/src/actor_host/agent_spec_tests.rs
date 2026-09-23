@@ -950,26 +950,25 @@ fn commit(workspace: &Path, message: &str) {
 }
 
 async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResidentInstallation {
-    tokio::time::timeout(Duration::from_secs(180), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
-                    campaign.authority.install_grant(
-                        child.actor.identity().into(),
-                        worktree_grant(child.effective_role.role()),
-                    );
-                    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-                    return *child;
-                }
+    let child = campaign
+        .next_deployment(
+            "child admission",
+            Duration::from_secs(180),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(*child),
                 LocalResidentDeployment::Retired { actor, terminal } => {
                     panic!("{actor:?} retired: {terminal:?}")
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("child admission")
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    child
 }
 
 // ---------------------------------------------------------------------------

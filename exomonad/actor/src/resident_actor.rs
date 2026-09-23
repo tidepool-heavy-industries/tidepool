@@ -123,6 +123,27 @@ pub enum LocalResidentDeployment {
     ReleaseAwait(Arc<ReleaseAwait>),
 }
 
+impl LocalResidentDeployment {
+    /// The variant name, for diagnostics that must say what arrived.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::CommandBackend(_) => "CommandBackend",
+            Self::NotificationSend(_) => "NotificationSend",
+            Self::NotificationPoll(_) => "NotificationPoll",
+            Self::PolicyInstalled(_) => "PolicyInstalled",
+            Self::SessionReady { .. } => "SessionReady",
+            Self::RequestUpdate { .. } => "RequestUpdate",
+            Self::ChildExited { .. } => "ChildExited",
+            Self::WatchChanged { .. } => "WatchChanged",
+            Self::SettlementChanged { .. } => "SettlementChanged",
+            Self::RequestCancellation { .. } => "RequestCancellation",
+            Self::Retired { .. } => "Retired",
+            Self::ReleaseAwait(_) => "ReleaseAwait",
+        }
+    }
+}
+
 /// One supervisor's wait for a stopped actor's release receipt. The host
 /// answers at most once; a dropped request answers nobody.
 pub struct ReleaseAwait {

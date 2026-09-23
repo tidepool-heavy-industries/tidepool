@@ -814,8 +814,9 @@ trust_level = "trusted"
         exomonad_agent::native_interactive_agent_from_parts(native, "command acceptance".into())
             .unwrap(),
     );
+    let mut deployments = campaign.take_deployments();
     let backend_task = tokio::spawn(async move {
-        while let Some(deployment) = campaign.deployments.recv().await {
+        while let Some(deployment) = deployments.recv().await {
             if let LocalResidentDeployment::CommandBackend(request) = deployment {
                 assert_eq!(request.owner, actor);
                 let thread = exomonad_agent::read_interactive_binding(&binding_path)

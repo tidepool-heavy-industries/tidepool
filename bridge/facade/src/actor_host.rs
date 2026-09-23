@@ -6573,22 +6573,23 @@ mod tests {
             dispatch_haskell_script(root.as_ref(), include_str!("actor_host/roster_setup.hs"))
                 .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let children = tokio::time::timeout(Duration::from_secs(30), async {
-            let mut children = Vec::new();
-            while children.len() < 2 {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::PolicyInstalled(child)) => children.push(child),
-                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
-                        panic!("{actor:?}: {terminal:?}")
-                    }
-                    Some(_) => {}
-                    None => panic!("deployment channel closed"),
-                }
-            }
-            children
-        })
-        .await
-        .unwrap();
+        let mut children = Vec::new();
+        while children.len() < 2 {
+            let child = campaign
+                .next_deployment(
+                    "roster child admission",
+                    Duration::from_secs(30),
+                    |event| match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                        LocalResidentDeployment::Retired { actor, terminal } => {
+                            panic!("{actor:?}: {terminal:?}")
+                        }
+                        other => Err(other),
+                    },
+                )
+                .await;
+            children.push(child);
+        }
         for policy in
             std::iter::once(root.as_ref()).chain(children.iter().map(|child| child.policy.as_ref()))
         {
@@ -6645,15 +6646,18 @@ mod tests {
         let mut first = tokio::spawn(policy.dispatch_boxed(request.clone()));
         let mut effects = 0;
         let notification = tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                tokio::select! {
-                    result = &mut first => panic!("effect was not dispatched: {result:?}"),
-                    event = campaign.deployments.recv() => {
-                        if let Some(LocalResidentDeployment::NotificationSend(command)) = event {
-                            effects += 1;
-                            break command;
-                        }
-                    }
+            tokio::select! {
+                result = &mut first => panic!("effect was not dispatched: {result:?}"),
+                command = campaign.next_deployment(
+                    "recovery notification",
+                    Duration::from_secs(60),
+                    |event| match event {
+                        LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                        other => Err(other),
+                    },
+                ) => {
+                    effects += 1;
+                    command
                 }
             }
         })
@@ -6678,7 +6682,7 @@ mod tests {
             })
             .await
             .unwrap();
-        campaign.hosted.await.unwrap();
+        (&mut campaign.hosted).await.unwrap();
         let (successor, task) = campaign
             .forest
             .recover_program_root(
@@ -6706,11 +6710,16 @@ mod tests {
             loop {
                 tokio::select! {
                     result = &mut retry => break result.unwrap().unwrap(),
-                    event = campaign.deployments.recv() => {
-                        if let Some(LocalResidentDeployment::NotificationSend(command)) = event {
-                            effects += 1;
-                            command.admitted("recovery-test-inbox".into(), effects);
-                        }
+                    command = campaign.next_deployment(
+                        "recovery replay notification",
+                        Duration::from_secs(60),
+                        |event| match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            other => Err(other),
+                        },
+                    ) => {
+                        effects += 1;
+                        command.admitted("recovery-test-inbox".into(), effects);
                     }
                 }
             }
@@ -6732,7 +6741,7 @@ mod tests {
 
     #[tokio::test]
     async fn forest_operator_survives_model_root_recovery() {
-        let campaign = test_campaign::TestCampaign::start().await;
+        let mut campaign = test_campaign::TestCampaign::start().await;
         let operator = campaign
             .forest
             .new_workbench("operator".into(), exomonad_actor::EffectiveRole::root())
@@ -6781,18 +6790,16 @@ mod tests {
             tidepool_runtime::session::WorkbenchRunStatus::Committed,
             "{requested:?}"
         );
-        let mut deployments = campaign.deployments;
-        let child = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if let Some(LocalResidentDeployment::PolicyInstalled(child)) =
-                    deployments.recv().await
-                {
-                    break child;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let child = campaign
+            .next_deployment(
+                "operator child admission",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(child.supervisor_parent, Some(operator.identity()));
         assert_eq!(child.context_parent, None);
         assert_eq!(
@@ -6873,13 +6880,16 @@ mod tests {
             dispatch_haskell_script(root.as_ref(), include_str!("actor_host/source_setup.hs"))
                 .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child = loop {
-            if let Some(LocalResidentDeployment::PolicyInstalled(child)) =
-                campaign.deployments.recv().await
-            {
-                break child;
-            }
-        };
+        let child = campaign
+            .next_deployment(
+                "source child admission",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    other => Err(other),
+                },
+            )
+            .await;
         let first = dispatch_haskell_script(
             child.policy.as_ref(),
             "reportProgress (ProgressNote 1 (+ sessionInput))",
@@ -6935,23 +6945,26 @@ mod tests {
             dispatch_haskell_script(root.as_ref(), include_str!("actor_host/progress_setup.hs"))
                 .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child = tokio::time::timeout(Duration::from_secs(30), async {
-            let mut child = None;
-            loop {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                        child = Some(installation)
-                    }
-                    Some(LocalResidentDeployment::SessionReady { .. }) => {
-                        return child.expect("child policy installed before request")
-                    }
-                    Some(_) => {}
-                    None => panic!("deployment channel closed"),
-                }
-            }
-        })
-        .await
-        .expect("progress request activation");
+        let child = campaign
+            .next_deployment(
+                "progress child policy installation",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                    other => Err(other),
+                },
+            )
+            .await;
+        campaign
+            .next_deployment(
+                "progress request activation",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                    other => Err(other),
+                },
+            )
+            .await;
         let first = dispatch_haskell_script(
             child.policy.as_ref(),
             "reportProgress (ProgressNote 1 (+ sessionInput))",
@@ -7008,41 +7021,45 @@ mod tests {
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child = tokio::time::timeout(Duration::from_secs(30), async {
-            let mut child = None;
-            loop {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                        child = Some(installation)
-                    }
-                    Some(LocalResidentDeployment::SessionReady { .. }) => return child.unwrap(),
-                    Some(_) => {}
-                    None => panic!("deployment channel closed"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let child = campaign
+            .next_deployment(
+                "request-update child policy installation",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                    other => Err(other),
+                },
+            )
+            .await;
+        campaign
+            .next_deployment(
+                "request-update session readiness",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                    other => Err(other),
+                },
+            )
+            .await;
         let failed = dispatch_haskell_script(
             root.as_ref(),
             "Right failedClarification <- updateRequest answer \"Private baseline clarification\"",
         )
         .await;
         assert_eq!(failed["status"], "committed", "{failed:?}");
-        let failed_delivery = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::RequestUpdate { delivery }) => return delivery,
-                    Some(LocalResidentDeployment::SessionReady { .. }) => {
+        let failed_delivery = campaign
+            .next_deployment(
+                "failed clarification request update",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::RequestUpdate { delivery } => Ok(delivery),
+                    LocalResidentDeployment::SessionReady { .. } => {
                         panic!("update queued another assignment")
                     }
-                    Some(_) => {}
-                    None => panic!("deployment channel closed"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+                    other => Err(other),
+                },
+            )
+            .await;
         let presentation = failed_delivery.begin().unwrap();
         let key = presentation.key().to_owned();
         let log = tempfile::NamedTempFile::new().unwrap();
@@ -7095,20 +7112,19 @@ mod tests {
             queued.to_string().contains("Right UpdateQueued"),
             "{queued:?}"
         );
-        let delivery = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::RequestUpdate { delivery }) => return delivery,
-                    Some(LocalResidentDeployment::SessionReady { .. }) => {
+        let delivery = campaign
+            .next_deployment(
+                "clarification request update",
+                Duration::from_secs(30),
+                |event| match event {
+                    LocalResidentDeployment::RequestUpdate { delivery } => Ok(delivery),
+                    LocalResidentDeployment::SessionReady { .. } => {
                         panic!("update queued another assignment")
                     }
-                    Some(_) => {}
-                    None => panic!("deployment channel closed"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+                    other => Err(other),
+                },
+            )
+            .await;
         let presentation = delivery.begin().unwrap();
         assert!(presentation.message().contains("Tabs must be clickable"));
         let rejected = dispatch_haskell_script(
@@ -9083,24 +9099,26 @@ mod tests {
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child =
-            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                LocalResidentDeployment::PolicyInstalled(child) => child,
-                _ => panic!("expected recipient policy"),
-            };
-        let activation =
-            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                LocalResidentDeployment::SessionReady { activation } => activation,
-                _ => panic!("expected original request activation"),
-            };
+        let child = campaign
+            .next_deployment(
+                "recipient policy",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    other => Err(other),
+                },
+            )
+            .await;
+        let activation = campaign
+            .next_deployment(
+                "original request activation",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(activation.id.actor(), child.actor.identity());
         let directory = tempfile::tempdir().unwrap();
         // Distinct fresh hierarchies exercise both strict directory owners at
@@ -9119,15 +9137,16 @@ mod tests {
             )
             .await
         });
-        let command =
-            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                LocalResidentDeployment::NotificationSend(command) => command,
-                _ => panic!("notification fabricated another activation"),
-            };
+        let command = campaign
+            .next_deployment(
+                "notification send",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(command.owner(), campaign.actor.identity());
         assert_eq!(command.target(), child.actor.identity());
         admit_notification(&command, inbox_key.into(), &inbox);
@@ -9137,15 +9156,16 @@ mod tests {
         let poll = tokio::spawn(async move {
             dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
         });
-        let poll_command =
-            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                LocalResidentDeployment::NotificationPoll(command) => command,
-                _ => panic!("poll fabricated another activation"),
-            };
+        let poll_command = campaign
+            .next_deployment(
+                "notification poll",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::NotificationPoll(command) => Ok(command),
+                    other => Err(other),
+                },
+            )
+            .await;
         let result =
             observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox);
         assert_eq!(result, Ok(exomonad_actor::NotificationState::Accepted));
@@ -9233,9 +9253,9 @@ mod tests {
             unchanged.to_string().contains("original assignment"),
             "{unchanged:?}"
         );
-        assert!(
-            campaign.deployments.try_recv().is_err(),
-            "notification created an assignment/wake obligation"
+        campaign.assert_no_deployment(
+            "notification created an assignment/wake obligation",
+            |_| true,
         );
         let reply =
             dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
@@ -9247,28 +9267,25 @@ mod tests {
             answer.to_string().contains("original assignment"),
             "{answer:?}"
         );
-        let settlement =
-            tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        match settlement {
-            LocalResidentDeployment::SettlementChanged { notification } => {
-                assert_eq!(
-                    notification.owner,
-                    campaign.root_installation.actor.identity()
-                );
-                assert_eq!(notification.label, "notification-original");
-                assert_eq!(
-                    notification.transition,
-                    exomonad_actor::SettlementTransition::Ready
-                );
-            }
-            event => panic!(
-                "expected owner settlement notification, got {:?}",
-                std::mem::discriminant(&event)
-            ),
-        }
+        let owner_actor = campaign.root_installation.actor.identity();
+        campaign
+            .next_deployment(
+                "owner settlement notification",
+                Duration::from_secs(120),
+                move |event| match event {
+                    LocalResidentDeployment::SettlementChanged { notification } => {
+                        assert_eq!(notification.owner, owner_actor);
+                        assert_eq!(notification.label, "notification-original");
+                        assert_eq!(
+                            notification.transition,
+                            exomonad_actor::SettlementTransition::Ready
+                        );
+                        Ok(())
+                    }
+                    other => Err(other),
+                },
+            )
+            .await;
         let root_reply = dispatch_lookup(root.as_ref(), &["respond"]).await;
         assert!(
             root_reply.to_string().to_lowercase().contains("no match"),
@@ -9280,17 +9297,16 @@ mod tests {
         )
         .await;
         assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
-        let idle = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
-            LocalResidentDeployment::PolicyInstalled(child) => child,
-            event => panic!(
-                "expected never-assigned recipient policy, got {:?}",
-                std::mem::discriminant(&event)
-            ),
-        };
+        let idle = campaign
+            .next_deployment(
+                "never-assigned recipient policy",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    other => Err(other),
+                },
+            )
+            .await;
         let policy = root.clone();
         let idle_send = tokio::spawn(async move {
             dispatch_haskell_script(
@@ -9299,15 +9315,16 @@ mod tests {
             )
             .await
         });
-        let command =
-            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                LocalResidentDeployment::NotificationSend(command) => command,
-                _ => panic!("idle notification fabricated request activation"),
-            };
+        let command = campaign
+            .next_deployment(
+                "idle notification send",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(command.target(), idle.actor.identity());
         let idle_directory = tempfile::tempdir().unwrap();
         let idle_inbox = ActorInbox::open(
@@ -9334,10 +9351,7 @@ mod tests {
                 "idle recipient gained {name}: {absent:?}"
             );
         }
-        assert!(
-            campaign.deployments.try_recv().is_err(),
-            "idle admission fabricated an activation"
-        );
+        campaign.assert_no_deployment("idle admission fabricated an activation", |_| true);
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }
@@ -9421,17 +9435,16 @@ mod tests {
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let notice = tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                if let LocalResidentDeployment::NotificationSend(command) =
-                    campaign.deployments.recv().await.unwrap()
-                {
-                    break command;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let notice = campaign
+            .next_deployment(
+                "nested-handler failure notice",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(notice.target(), campaign.actor.identity());
         assert!(notice.message().contains("nested-handler-probe"));
         let available =
@@ -9439,10 +9452,7 @@ mod tests {
                 .await;
         assert_eq!(available["status"], "committed", "{available:?}");
         assert_eq!(available["items"][0]["output"], "7", "{available:?}");
-        assert!(
-            campaign.deployments.try_recv().is_err(),
-            "duplicate failure notice"
-        );
+        campaign.assert_no_deployment("duplicate failure notice", |_| true);
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }
@@ -9517,17 +9527,16 @@ mod tests {
             !failed.to_string().contains("preview unavailable"),
             "{failed:?}"
         );
-        let notice = tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                if let LocalResidentDeployment::NotificationSend(command) =
-                    campaign.deployments.recv().await.unwrap()
-                {
-                    break command;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let notice = campaign
+            .next_deployment(
+                "stateful-handler failure notice",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(notice.target(), campaign.actor.identity());
         assert!(
             notice.message().contains("handler-probe"),
@@ -9553,10 +9562,7 @@ mod tests {
             !queued.to_string().contains("preview unavailable"),
             "{queued:?}"
         );
-        assert!(
-            campaign.deployments.try_recv().is_err(),
-            "duplicate failure notice"
-        );
+        campaign.assert_no_deployment("duplicate failure notice", |_| true);
         let repaired = dispatch_haskell_script(
             root.as_ref(),
             include_str!("actor_host/stateful_replacement.hs"),
@@ -9583,14 +9589,17 @@ mod tests {
             let run = dispatch_haskell_script(root.as_ref(), source);
             tokio::pin!(run);
             let result = tokio::time::timeout(Duration::from_secs(180), async {
-                loop {
-                    tokio::select! {
-                        result = &mut run => break result,
-                        deployment = campaign.deployments.recv() => {
-                            if let Some(LocalResidentDeployment::NotificationSend(command)) = deployment {
-                                panic!("stage {stage}: {}", command.message());
-                            }
-                        }
+                tokio::select! {
+                    result = &mut run => result,
+                    command = campaign.next_deployment(
+                        "lifecycle notification",
+                        Duration::from_secs(180),
+                        |event| match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            other => Err(other),
+                        },
+                    ) => {
+                        panic!("stage {stage}: {}", command.message());
                     }
                 }
             }).await.expect("lifecycle fixture stage did not settle");
@@ -9698,11 +9707,17 @@ mod tests {
                         }
                         launched = Some(result);
                     }
-                    event = campaign.deployments.recv() => match event.unwrap() {
-                        LocalResidentDeployment::NotificationSend(command) => break command,
-                        LocalResidentDeployment::PolicyInstalled(_) => panic!("Haskell sender acquired a model session"),
-                        _ => {}
-                    }
+                    command = campaign.next_deployment(
+                        "haskell sender notification",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            LocalResidentDeployment::PolicyInstalled(_) => {
+                                panic!("Haskell sender acquired a model session")
+                            }
+                            other => Err(other),
+                        },
+                    ) => break command,
                 }
             }
         })
@@ -10109,6 +10124,8 @@ mod tests {
                 .collect()
         }
 
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let mut deployments = campaign.take_deployments();
         let test_campaign::TestCampaign {
             _repository,
             _runtime,
@@ -10118,10 +10135,9 @@ mod tests {
             authority,
             actor,
             hosted,
-            mut deployments,
             root_installation,
             ..
-        } = test_campaign::TestCampaign::start().await;
+        } = campaign;
 
         let inspected = dispatch_lookup(
             root_installation.policy.as_ref(),

@@ -9,9 +9,11 @@ async fn research_child(
     exomonad_actor::LocalResidentInstallation,
     Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
 ) {
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
+    let child = campaign
+        .next_deployment(
+            "research child admission",
+            Duration::from_secs(120),
+            |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => {
                     let role = &child.effective_role;
                     assert_eq!(role.role(), exomonad_actor::ActorRole::Research);
@@ -23,46 +25,46 @@ async fn research_child(
                         role.native_tools(),
                         exomonad_actor::NativeToolClass::InspectionOnly
                     );
-                    campaign
-                        .authority
-                        .install_grant(child.actor.identity().into(), worktree_grant(role.role()));
-                    let worktree = campaign
-                        .worktrees
-                        .lookup(&exomonad_worktree::WorktreeId::from_raw(
-                            &child.launch_worktrees[0],
-                        ))
-                        .unwrap()
-                        .unwrap();
-                    let principal = WorktreePrincipal::exact_actor(
-                        &runtime_namespace(campaign.session_root.path()),
-                        child.actor.identity().id.0,
-                        child.actor.identity().incarnation.0,
-                    );
-                    assert_eq!(
-                        campaign
-                            .bindings
-                            .lock()
-                            .current(worktree.id())
-                            .unwrap()
-                            .agent(),
-                        &principal
-                    );
-                    let binding = child
-                        .worktree_custody
-                        .clone()
-                        .expect("bootstrap installed custody");
-                    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-                    return (*child, binding);
+                    Ok(*child)
                 }
                 LocalResidentDeployment::Retired { actor, terminal } => {
                     panic!("{actor:?} retired: {terminal:?}")
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("research child admission")
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    let worktree = campaign
+        .worktrees
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
+            &child.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    let principal = WorktreePrincipal::exact_actor(
+        &runtime_namespace(campaign.session_root.path()),
+        child.actor.identity().id.0,
+        child.actor.identity().incarnation.0,
+    );
+    assert_eq!(
+        campaign
+            .bindings
+            .lock()
+            .current(worktree.id())
+            .unwrap()
+            .agent(),
+        &principal
+    );
+    let binding = child
+        .worktree_custody
+        .clone()
+        .expect("bootstrap installed custody");
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    (child, binding)
 }
 
 #[tokio::test]
@@ -161,12 +163,9 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
         "True",
         "{preview:?}"
     );
-    while let Ok(event) = campaign.deployments.try_recv() {
-        assert!(
-            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-            "preview spawned a child"
-        );
-    }
+    campaign.assert_no_deployment("preview spawned a child", |event| {
+        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
+    });
     let launch = tokio::spawn(async move {
         dispatch_haskell_script(
             root.as_ref(),

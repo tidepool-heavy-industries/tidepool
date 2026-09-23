@@ -37,29 +37,133 @@ pub(super) struct TestCampaign {
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub hosted: tokio::task::JoinHandle<()>,
-    pub deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    /// Deployments scanned by [`Self::next_deployment`] that did not match
+    /// what the caller was awaiting. Parked here, in arrival order, rather
+    /// than dropped, so a later call can still find them.
+    pending: std::collections::VecDeque<LocalResidentDeployment>,
     pub root_installation: exomonad_actor::LocalResidentInstallation,
 }
 
 impl TestCampaign {
-    pub async fn await_watch_ready(&mut self) {
-        tokio::time::timeout(Duration::from_secs(10), async {
+    /// Await the next deployment matching `pick`, scanning previously parked
+    /// deployments first (in arrival order) so legitimate interleaving with
+    /// other deployment kinds never loses one. A deployment `pick` rejects
+    /// is parked, never dropped, so a later call can still consume it.
+    ///
+    /// Panics naming `what` and the kinds still parked if the channel closes
+    /// or `timeout` elapses first.
+    pub async fn next_deployment<T>(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
+    ) -> T {
+        self.next_deployment_opt(timeout, pick).await.unwrap_or_else(|| {
+            panic!(
+                "{what}: timed out or the deployment channel closed; still pending: {:?}",
+                self.pending_kinds()
+            )
+        })
+    }
+
+    /// As [`Self::next_deployment`], but `None` on timeout or channel close
+    /// instead of panicking — for callers that treat "nothing matched in
+    /// time" as a legitimate outcome (e.g. asserting silence).
+    pub async fn next_deployment_opt<T>(
+        &mut self,
+        timeout: Duration,
+        mut pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
+    ) -> Option<T> {
+        let mut rescan = std::collections::VecDeque::new();
+        while let Some(event) = self.pending.pop_front() {
+            match pick(event) {
+                Ok(value) => {
+                    self.pending.extend(rescan);
+                    return Some(value);
+                }
+                Err(event) => rescan.push_back(event),
+            }
+        }
+        self.pending = rescan;
+        tokio::time::timeout(timeout, async {
             loop {
                 match self.deployments.recv().await {
-                    Some(LocalResidentDeployment::WatchChanged { notification })
-                        if notification.owner == self.actor.identity()
-                            && notification.transition
-                                == exomonad_actor::WatchTransition::Ready =>
-                    {
-                        return;
-                    }
-                    Some(_) => {}
-                    None => panic!("deployment channel closed before watch readiness"),
+                    Some(event) => match pick(event) {
+                        Ok(value) => return Some(value),
+                        Err(event) => self.pending.push_back(event),
+                    },
+                    None => return None,
                 }
             }
         })
         .await
-        .expect("watch readiness timed out");
+        .unwrap_or(None)
+    }
+
+    /// Assert that no parked or currently-buffered deployment matches
+    /// `pick`. Draining leaves every non-matching deployment parked, never
+    /// dropped.
+    pub fn assert_no_deployment(&mut self, what: &str, mut pick: impl FnMut(&LocalResidentDeployment) -> bool) {
+        if let Some(event) = self.pending.iter().find(|event| pick(event)) {
+            panic!("{what}: already parked a matching deployment: {}", event.kind());
+        }
+        while let Ok(event) = self.deployments.try_recv() {
+            if pick(&event) {
+                panic!("{what}: published {}", event.kind());
+            }
+            self.pending.push_back(event);
+        }
+    }
+
+    /// Drain every deployment parked or currently buffered, in arrival
+    /// order, for assertions over everything published so far. Nothing is
+    /// awaited: this never blocks on a deployment that has not arrived yet.
+    pub fn drain_ready(&mut self) -> Vec<LocalResidentDeployment> {
+        let mut drained: Vec<_> = self.pending.drain(..).collect();
+        while let Ok(event) = self.deployments.try_recv() {
+            drained.push(event);
+        }
+        drained
+    }
+
+    /// Kinds of every deployment currently parked, for diagnostics.
+    pub fn pending_kinds(&self) -> Vec<&'static str> {
+        self.pending.iter().map(LocalResidentDeployment::kind).collect()
+    }
+
+    /// Take exclusive, permanent ownership of the deployment channel away
+    /// from this campaign, for a caller that will drain it itself for the
+    /// rest of the test (e.g. a background command-backend responder
+    /// spawned for the test's duration). `next_deployment` and friends must
+    /// not be called on this campaign again afterward.
+    pub fn take_deployments(
+        &mut self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment> {
+        assert!(
+            self.pending.is_empty(),
+            "deployments already parked: {:?}; drain them before detaching the channel",
+            self.pending_kinds()
+        );
+        std::mem::replace(&mut self.deployments, tokio::sync::mpsc::unbounded_channel().1)
+    }
+
+    pub async fn await_watch_ready(&mut self) {
+        let owner = self.actor.identity();
+        self.next_deployment(
+            "watch readiness",
+            Duration::from_secs(10),
+            move |event| match event {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.owner == owner
+                        && notification.transition == exomonad_actor::WatchTransition::Ready =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await
     }
 
     pub async fn start() -> Self {
@@ -157,6 +261,7 @@ impl TestCampaign {
             program,
             hosted,
             deployments,
+            pending: std::collections::VecDeque::new(),
             root_installation,
         }
     }

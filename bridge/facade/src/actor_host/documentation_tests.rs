@@ -295,31 +295,27 @@ async fn notebook_display_cell_display_is_child_local_but_parent_capture_remains
         include_str!("notebook_display_child_unfold.hs"),
     )
     .await;
-    let child = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    return installation;
-                }
-                Some(_) => {}
-                None => panic!("deployment channel closed"),
-            }
-        }
-    })
-    .await
-    .expect("child policy installation timed out");
+    let child = campaign
+        .next_deployment(
+            "child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
     let _binding = open_test_fork(&campaign, &child);
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::SessionReady { .. }) => return,
-                Some(_) => {}
-                None => panic!("deployment channel closed"),
-            }
-        }
-    })
-    .await
-    .expect("child session did not become ready");
+    campaign
+        .next_deployment(
+            "child session readiness",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
     committed(
         child.policy.as_ref(),
         "initialPageText () = cellDisplay.text\nsetProbe = Set.size (Set.fromList [1 :: Int, 2])",
@@ -602,25 +598,30 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
         "response <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text))\n",
     )
     .await;
-    let child = tokio::time::timeout(Duration::from_secs(120), async {
-        let mut child = None;
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    child = Some(installation)
-                }
-                Some(LocalResidentDeployment::SessionReady { activation })
+    let child = campaign
+        .next_deployment(
+            "notebook reply child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "notebook reply request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
                     if activation.message.contains("notebook-reply") =>
                 {
-                    return child.expect("policy installed before request activation");
+                    Ok(())
                 }
-                Some(_) => {}
-                None => panic!("deployment channel closed"),
-            }
-        }
-    })
-    .await
-    .expect("notebook reply request activation");
+                other => Err(other),
+            },
+        )
+        .await;
 
     let reply = dispatch_haskell_script(
         child.policy.as_ref(),
@@ -749,12 +750,10 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
             .contains("InvalidKebabName \\\"Bad Label\\\""),
         "{invalid_unfold}"
     );
-    while let Ok(event) = campaign.deployments.try_recv() {
-        assert!(
-            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-            "an invalid later branch launched an earlier child"
-        );
-    }
+    campaign.assert_no_deployment(
+        "an invalid later branch launched an earlier child",
+        |event| matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
+    );
 
     committed(
         root.as_ref(),
@@ -823,26 +822,30 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
     let mut guide_examples = examples(guide);
     committed(root.as_ref(), guide_examples.next().unwrap()).await;
-    let mut binding = None;
-    let child = tokio::time::timeout(Duration::from_secs(120), async {
-        let mut child = None;
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    binding = Some(open_test_fork(&campaign, &installation));
-                    child = Some(installation);
-                }
-                Some(LocalResidentDeployment::SessionReady { activation }) => {
+    let child = campaign
+        .next_deployment(
+            "guide example child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    let _binding = open_test_fork(&campaign, &child);
+    campaign
+        .next_deployment(
+            "guide example session readiness",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation } => {
                     assert!(activation.message.contains("Remove the stale path"));
-                    return child.unwrap();
+                    Ok(())
                 }
-                Some(_) => {}
-                None => panic!("deployment stream closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     let pending = committed(root.as_ref(), "state <- pollWatch ready\ninspectFull state").await;
     assert_eq!(pending["items"][1]["output"], "WatchPending");
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
@@ -968,26 +971,31 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
         .collect();
     assert_eq!(snippets.len(), 1, "one complete documented progress setup");
     committed(root.as_ref(), snippets[0]).await;
-    let child = tokio::time::timeout(Duration::from_secs(120), async {
-        let mut child = None;
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    child = Some(installation)
-                }
-                Some(LocalResidentDeployment::SessionReady { activation }) => {
+    let child = campaign
+        .next_deployment(
+            "documented progress child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "documented progress request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation } => {
                     assert!(activation
                         .message
                         .contains("Publish cumulative findings; then return your final report."));
-                    return child.expect("policy installed before request activation");
+                    Ok(())
                 }
-                Some(_) => {}
-                None => panic!("deployment channel closed"),
-            }
-        }
-    })
-    .await
-    .expect("documented progress request activation");
+                other => Err(other),
+            },
+        )
+        .await;
     // Exercise the real resident actor path, without a model/provider execution claim.
     committed(child.policy.as_ref(), "reportProgress [\"finding\"]").await;
     campaign.await_watch_ready().await;
@@ -1063,24 +1071,24 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         ),
     ] {
         committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
-        let activation = tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                match campaign.deployments.recv().await {
-                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                        child = Some(installation)
+        let activation = campaign
+            .next_deployment(
+                "preview activation",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(installation) => {
+                        child = Some((*installation).clone());
+                        Err(LocalResidentDeployment::PolicyInstalled(installation))
                     }
-                    Some(LocalResidentDeployment::SessionReady { activation })
+                    LocalResidentDeployment::SessionReady { activation }
                         if activation.message.contains(label) =>
                     {
-                        break activation
+                        Ok(activation)
                     }
-                    Some(_) => {}
-                    None => panic!("deployment stream closed"),
-                }
-            }
-        })
-        .await
-        .expect("preview activation");
+                    other => Err(other),
+                },
+            )
+            .await;
         assert!(activation
             .message
             .contains("`reportProgress` is unavailable"));
@@ -1149,21 +1157,26 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     committed(root.as_ref(), include_str!("quiet_observation_setup.hs")).await;
-    let child = tokio::time::timeout(Duration::from_secs(60), async {
-        let mut child = None;
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    child = Some(installation)
-                }
-                Some(LocalResidentDeployment::SessionReady { .. }) => return child.unwrap(),
-                Some(_) => {}
-                None => panic!("deployment stream closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let child = campaign
+        .next_deployment(
+            "quiet observation child policy installation",
+            Duration::from_secs(60),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "quiet observation session readiness",
+            Duration::from_secs(60),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
@@ -1261,12 +1274,9 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
         .await
         .unwrap();
     assert_eq!(result["status"], "committed", "{result:?}");
-    while let Ok(event) = campaign.deployments.try_recv() {
-        assert!(!matches!(
-            event,
-            LocalResidentDeployment::PolicyInstalled(_)
-        ));
-    }
+    campaign.assert_no_deployment("no child before reattachment", |event| {
+        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
+    });
     root.reattach_boxed().await.unwrap();
     assert!(matches!(
         root.reconcile_workbench_boxed(boundary.clone())
@@ -1279,25 +1289,27 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
 
     let mut children = Vec::new();
     while children.len() < 2 {
-        let event = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-            .await
-            .expect("recovered fork startup timed out")
-            .expect("deployment channel closed");
-        if let LocalResidentDeployment::PolicyInstalled(child) = event {
-            assert_eq!(child.fork_boundary.as_ref(), Some(&boundary));
-            children.push(child);
-        }
+        let child = campaign
+            .next_deployment(
+                "recovered fork startup",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    other => Err(other),
+                },
+            )
+            .await;
+        assert_eq!(child.fork_boundary.as_ref(), Some(&boundary));
+        children.push(child);
     }
     for child in &children {
         let inherited = committed(child.policy.as_ref(), "sessionInput").await;
         assert!(inherited["items"][0]["output"].as_str().is_some());
     }
-    while let Ok(event) = campaign.deployments.try_recv() {
-        assert!(
-            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-            "exactly two children belong to the recovered unfold"
-        );
-    }
+    campaign.assert_no_deployment(
+        "exactly two children belong to the recovered unfold",
+        |event| matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1365,12 +1377,9 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         },
         "{result:?}"
     );
-    while let Ok(event) = campaign.deployments.try_recv() {
-        assert!(
-            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-            "child started before tool completion"
-        );
-    }
+    campaign.assert_no_deployment("child started before tool completion", |event| {
+        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
+    });
     let completion = tidepool_runtime::session::WorkbenchForkBoundary {
         thread_id: "actor-host-vertical".into(),
         call_id,
@@ -1382,18 +1391,29 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     let mut bindings = Vec::new();
     let mut fork_boundary = None;
     let mut activation_messages = Vec::new();
+    enum Collected {
+        Child(Box<exomonad_actor::LocalResidentInstallation>),
+        Activation(exomonad_actor::ResidentActivation),
+    }
     while children.len() < expected_children {
-        let event = tokio::time::timeout(Duration::from_secs(120), async {
-            campaign
-                .deployments
-                .recv()
-                .await
-                .expect("deployment channel closed")
-        })
-        .await
-        .expect("child deployment timed out");
-        match event {
-            LocalResidentDeployment::PolicyInstalled(child) => {
+        let collected = campaign
+            .next_deployment(
+                "child deployment",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(Collected::Child(child)),
+                    LocalResidentDeployment::Retired { actor, terminal } => {
+                        panic!("{actor:?} retired: {terminal:?}")
+                    }
+                    LocalResidentDeployment::SessionReady { activation } => {
+                        Ok(Collected::Activation(activation))
+                    }
+                    other => Err(other),
+                },
+            )
+            .await;
+        match collected {
+            Collected::Child(child) => {
                 let expected_effort = child
                     .label
                     .ends_with("/consumer-tests")
@@ -1416,51 +1436,49 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
                 bindings.push(open_test_fork(&campaign, &child));
                 children.push(child);
             }
-            LocalResidentDeployment::Retired { actor, terminal } => {
-                panic!("{actor:?} retired: {terminal:?}")
-            }
-            LocalResidentDeployment::SessionReady { activation } => {
-                activation_messages.push(activation)
-            }
-            _ => {}
+            Collected::Activation(activation) => activation_messages.push(activation),
         }
     }
     let mut presented = std::collections::HashSet::new();
     while presented.len() < children.len() {
-        let event = if let Some(activation) = activation_messages.pop() {
-            LocalResidentDeployment::SessionReady { activation }
+        let activation = if let Some(activation) = activation_messages.pop() {
+            activation
         } else {
-            tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+            campaign
+                .next_deployment(
+                    "request activation",
+                    Duration::from_secs(120),
+                    |event| match event {
+                        LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                        other => Err(other),
+                    },
+                )
                 .await
-                .expect("request activation timed out")
-                .expect("deployment channel closed")
         };
-        if let LocalResidentDeployment::SessionReady { activation } = event {
-            let Some(child) = children
-                .iter()
-                .find(|child| child.actor.identity() == activation.id.actor())
-            else {
-                continue;
-            };
+        let Some(child) = children
+            .iter()
+            .find(|child| child.actor.identity() == activation.id.actor())
+        else {
+            continue;
+        };
+        assert!(
+            !activation.message.contains("rendering unavailable"),
+            "{}",
+            activation.message
+        );
+        if !rich_response && child.label.ends_with("/domain") {
             assert!(
-                !activation.message.contains("rendering unavailable"),
+                activation.message.contains("sessionInput :: Int`):\n\n7"),
                 "{}",
                 activation.message
             );
-            if !rich_response && child.label.ends_with("/domain") {
-                assert!(
-                    activation.message.contains("sessionInput :: Int`):\n\n7"),
-                    "{}",
-                    activation.message
-                );
-                assert!(
-                    activation.message.contains("data Report"),
-                    "{}",
-                    activation.message
-                );
-            }
-            presented.insert(activation.id.actor());
+            assert!(
+                activation.message.contains("data Report"),
+                "{}",
+                activation.message
+            );
         }
+        presented.insert(activation.id.actor());
     }
     committed(
         root.as_ref(),
@@ -1590,21 +1608,33 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
     committed(root.as_ref(), include_str!("fixtures/model_context.hs")).await;
     let mut children = Vec::new();
     let mut bindings = Vec::new();
-    tokio::time::timeout(Duration::from_secs(120), async {
+    {
+        enum Arrival {
+            Child(Box<exomonad_actor::LocalResidentInstallation>),
+            Ready,
+        }
         let mut ready = 0;
         while ready != 2 {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
+            let arrival = campaign
+                .next_deployment(
+                    "model-context child admission",
+                    Duration::from_secs(120),
+                    |event| match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => Ok(Arrival::Child(child)),
+                        LocalResidentDeployment::SessionReady { .. } => Ok(Arrival::Ready),
+                        other => Err(other),
+                    },
+                )
+                .await;
+            match arrival {
+                Arrival::Child(child) => {
                     bindings.push(open_test_fork(&campaign, &child));
                     children.push(child);
                 }
-                LocalResidentDeployment::SessionReady { .. } => ready += 1,
-                _ => {}
+                Arrival::Ready => ready += 1,
             }
         }
-    })
-    .await
-    .unwrap();
+    }
     for child in &children {
         assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
@@ -1632,21 +1662,33 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     committed(root.as_ref(), include_str!("fixtures/route.hs")).await;
     let mut children = Vec::new();
     let mut bindings = Vec::new();
-    tokio::time::timeout(Duration::from_secs(120), async {
+    {
+        enum Arrival {
+            Child(Box<exomonad_actor::LocalResidentInstallation>),
+            Ready,
+        }
         let mut ready = 0;
         while ready != 2 {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
+            let arrival = campaign
+                .next_deployment(
+                    "route child admission",
+                    Duration::from_secs(120),
+                    |event| match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => Ok(Arrival::Child(child)),
+                        LocalResidentDeployment::SessionReady { .. } => Ok(Arrival::Ready),
+                        other => Err(other),
+                    },
+                )
+                .await;
+            match arrival {
+                Arrival::Child(child) => {
                     bindings.push(open_test_fork(&campaign, &child));
                     children.push(child);
                 }
-                LocalResidentDeployment::SessionReady { .. } => ready += 1,
-                _ => {}
+                Arrival::Ready => ready += 1,
             }
         }
-    })
-    .await
-    .unwrap();
+    }
     let consumer = children
         .iter()
         .find(|child| child.label.ends_with("/consumer"))
@@ -1657,49 +1699,72 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         .unwrap();
     dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput").await;
-    let reviewer = tokio::time::timeout(Duration::from_secs(120), async {
+    let reviewer = {
+        enum ReviewArrival {
+            Child(Box<exomonad_actor::LocalResidentInstallation>),
+            Ready { message: String },
+            RouteFailure { detail: String },
+        }
+        let owner = campaign.actor.identity();
         let mut reviewer = None;
         let mut forwarded = false;
         let mut review_ready = false;
         let mut failure_notified = false;
         loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
+            let arrival = campaign
+                .next_deployment(
+                    "reviewer admission/activation",
+                    Duration::from_secs(120),
+                    |event| match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => {
+                            Ok(ReviewArrival::Child(child))
+                        }
+                        LocalResidentDeployment::SessionReady { activation } => {
+                            Ok(ReviewArrival::Ready {
+                                message: activation.message,
+                            })
+                        }
+                        LocalResidentDeployment::WatchChanged { notification }
+                            if notification.owner == owner =>
+                        {
+                            let exomonad_actor::WatchTransition::RouteFailed { detail } =
+                                notification.transition
+                            else {
+                                panic!("successful route woke a model: {notification:?}");
+                            };
+                            Ok(ReviewArrival::RouteFailure { detail })
+                        }
+                        other => Err(other),
+                    },
+                )
+                .await;
+            match arrival {
+                ReviewArrival::Child(child) => {
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
                     bindings.push(open_test_fork(&campaign, &child));
                     reviewer = Some(child);
                 }
-                LocalResidentDeployment::SessionReady { activation } => {
-                    if activation.message.contains("review-candidate") {
+                ReviewArrival::Ready { message } => {
+                    if message.contains("review-candidate") {
                         forwarded = true;
                     } else {
                         review_ready = true;
                     }
                 }
-                LocalResidentDeployment::WatchChanged { notification }
-                    if notification.owner == campaign.actor.identity() =>
-                {
-                    let exomonad_actor::WatchTransition::RouteFailed { detail } =
-                        notification.transition
-                    else {
-                        panic!("successful route woke a model: {notification:?}");
-                    };
+                ReviewArrival::RouteFailure { detail } => {
                     assert!(detail.contains("deliberate route failure"), "{detail}");
                     assert!(!failure_notified, "route failure notified twice");
                     failure_notified = true;
                 }
-                _ => {}
             }
             if forwarded && review_ready && failure_notified {
-                if let Some(reviewer) = reviewer {
+                if let Some(reviewer) = reviewer.take() {
                     break reviewer;
                 }
             }
         }
-    })
-    .await
-    .unwrap();
+    };
     let review = dispatch_haskell_script(reviewer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(review["status"], "replied", "{review}");
     let state = committed(root.as_ref(), "pollRoute forwarding\npollRoute broken").await;
@@ -1926,38 +1991,53 @@ async fn next_project_activation(
     Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
     exomonad_actor::ResidentActivation,
 ) {
-    tokio::time::timeout(Duration::from_secs(120), async {
-        let mut worker = None;
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
-                    let binding = open_test_fork(campaign, &child);
-                    worker = Some((child, binding));
-                }
-                LocalResidentDeployment::SessionReady { activation }
-                    if worker.as_ref().is_some_and(|(child, _)| {
-                        child.actor.identity() == activation.id.actor()
-                    }) =>
-                {
-                    let (installation, custody) = worker.unwrap();
-                    return (*installation, custody, activation);
-                }
-                LocalResidentDeployment::WatchChanged { notification } => {
-                    if let exomonad_actor::WatchTransition::RouteFailed { detail } =
-                        notification.transition
-                    {
-                        panic!("route failed while awaiting worker admission: {detail}");
+    enum WorkerArrival {
+        Child(Box<exomonad_actor::LocalResidentInstallation>),
+        Ready(exomonad_actor::ResidentActivation),
+    }
+    let mut worker: Option<Box<exomonad_actor::LocalResidentInstallation>> = None;
+    loop {
+        let arrival = campaign
+            .next_deployment(
+                "worker admission/activation",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => {
+                        Ok(WorkerArrival::Child(child))
                     }
-                }
-                LocalResidentDeployment::Retired { actor, terminal } => {
-                    panic!("actor {actor:?} retired while awaiting worker admission: {terminal:?}");
-                }
-                _ => {}
+                    LocalResidentDeployment::SessionReady { activation }
+                        if worker.as_ref().is_some_and(|child| {
+                            child.actor.identity() == activation.id.actor()
+                        }) =>
+                    {
+                        Ok(WorkerArrival::Ready(activation))
+                    }
+                    LocalResidentDeployment::WatchChanged { notification } => {
+                        if let exomonad_actor::WatchTransition::RouteFailed { detail } =
+                            &notification.transition
+                        {
+                            panic!("route failed while awaiting worker admission: {detail}");
+                        }
+                        Err(LocalResidentDeployment::WatchChanged { notification })
+                    }
+                    LocalResidentDeployment::Retired { actor, terminal } => {
+                        panic!(
+                            "actor {actor:?} retired while awaiting worker admission: {terminal:?}"
+                        );
+                    }
+                    other => Err(other),
+                },
+            )
+            .await;
+        match arrival {
+            WorkerArrival::Child(child) => worker = Some(child),
+            WorkerArrival::Ready(activation) => {
+                let child = worker.take().unwrap();
+                let binding = open_test_fork(campaign, &child);
+                return (*child, binding, activation);
             }
         }
-    })
-    .await
-    .unwrap()
+    }
 }
 
 #[tokio::test]
@@ -2112,19 +2192,21 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
     committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if let Some(LocalResidentDeployment::SessionReady { activation }) =
-                campaign.deployments.recv().await
-            {
-                if activation.id.actor() == worker.actor.identity() {
-                    break;
+    let worker_actor = worker.actor.identity();
+    campaign
+        .next_deployment(
+            "peer-followup request activation",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == worker_actor =>
+                {
+                    Ok(())
                 }
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     let result = dispatch_haskell_script(
         worker.policy.as_ref(),
         "respond (sessionInput <> \" accepted\" :: Text)",
@@ -2283,19 +2365,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(pending["items"][1]["output"], "ReplyOpen", "{pending}");
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if let Some(LocalResidentDeployment::SessionReady { activation }) =
-                campaign.deployments.recv().await
-            {
-                if activation.id.actor() == implementer.actor.identity() {
-                    break activation;
+    let implementer_actor = implementer.actor.identity();
+    campaign
+        .next_deployment(
+            "repair request activation",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == implementer_actor =>
+                {
+                    Ok(())
                 }
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     let repair_packet = committed(
         implementer.policy.as_ref(),
         "inspectFull (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
@@ -2392,19 +2476,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         include_str!("../../../../.exomonad/workspace/checks/project_plan_incorporation.hs"),
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if let Some(LocalResidentDeployment::SessionReady { activation }) =
-                campaign.deployments.recv().await
-            {
-                if activation.id.actor() == implementer.actor.identity() {
-                    break;
+    let implementer_actor = implementer.actor.identity();
+    campaign
+        .next_deployment(
+            "incorporation request activation",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == implementer_actor =>
+                {
+                    Ok(())
                 }
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     let offered = committed(
         implementer.policy.as_ref(),
         "inspectFull (incorporationAmendment sessionInput)",
@@ -2464,19 +2550,19 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
-    let delivery = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::RequestUpdate { delivery } => break delivery,
+    let delivery = campaign
+        .next_deployment(
+            "decision request update",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::RequestUpdate { delivery } => Ok(delivery),
                 LocalResidentDeployment::SessionReady { activation } => {
                     panic!("decision queued a new obligation: {:?}", activation.id)
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     let presentation = delivery.begin().unwrap();
     assert!(presentation
         .message()
@@ -2791,16 +2877,20 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )
     .await;
     assert!(again.to_string().contains("Repair"), "{again}");
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
+    let reviewer_actor = reviewer.actor.identity();
+    let lead_actor = lead.actor.identity();
+    campaign
+        .next_deployment(
+            "repair review activation",
+            Duration::from_secs(120),
+            move |event| match event {
                 LocalResidentDeployment::SessionReady { activation }
-                    if activation.id.actor() == reviewer.actor.identity() =>
+                    if activation.id.actor() == reviewer_actor =>
                 {
-                    break
+                    Ok(())
                 }
                 LocalResidentDeployment::SessionReady { activation }
-                    if activation.id.actor() == lead.actor.identity() =>
+                    if activation.id.actor() == lead_actor =>
                 {
                     panic!("repair was queued behind the lead's pending delivery: {activation:?}");
                 }
@@ -2810,12 +2900,10 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
                         child.label
                     );
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     exomonad_worktree::GitCli::new()
         .run(review_tree.cwd(), &["merge", "--ff-only", revised.as_str()])
         .unwrap();
@@ -3115,32 +3203,42 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     .await;
     let root = campaign.root_installation.policy.clone();
     committed(root.as_ref(), include_str!("work_notification.hs")).await;
-    let source = match campaign.deployments.recv().await.unwrap() {
-        LocalResidentDeployment::PolicyInstalled(source) => source,
-        _ => panic!("expected the progress source"),
-    };
-    match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        LocalResidentDeployment::SessionReady { .. } => {}
-        _ => panic!("expected the source request activation"),
-    }
+    let source = campaign
+        .next_deployment(
+            "the progress source",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(source) => Ok(source),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "the source request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
     let publisher = source.policy.clone();
     let publication = tokio::spawn(async move {
         committed(publisher.as_ref(),
             "reportProgress (WorkProgress [] [Question \"decision\" (DesignQuestion \"plans/test.md\" (GitOid \"candidate\") \"choose the boundary\" [] [] [])])"
         ).await
     });
-    let message = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        LocalResidentDeployment::NotificationSend(message) => message,
-        _ => panic!("expected the router's native message"),
-    };
+    let message = campaign
+        .next_deployment(
+            "the router's native message",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::NotificationSend(message) => Ok(message),
+                other => Err(other),
+            },
+        )
+        .await;
     let sender = message.owner();
     assert_ne!(sender, campaign.actor.identity());
     assert_eq!(message.target(), campaign.actor.identity());
@@ -3168,14 +3266,16 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
         )
         .await
     });
-    let poll = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        LocalResidentDeployment::NotificationPoll(poll) => poll,
-        _ => panic!("expected a receipt query without another message"),
-    };
+    let poll = campaign
+        .next_deployment(
+            "a receipt query without another message",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::NotificationPoll(poll) => Ok(poll),
+                other => Err(other),
+            },
+        )
+        .await;
     assert_eq!(poll.owner(), sender);
     let observed = observe_notification_receipt(&poll, campaign.actor.identity(), key, &inbox);
     assert_eq!(observed, Ok(exomonad_actor::NotificationState::Accepted));

@@ -241,19 +241,21 @@ impl DelayedCustody {
 // Keep activation observations rather than consuming them while waiting for attachment:
 // attachment is earlier than RunRequest's initial worktreeHead.
 async fn custody_activation(
-    deployments: &mut mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    campaign: &mut test_campaign::TestCampaign,
 ) -> exomonad_actor::ResidentActivation {
-    tokio::time::timeout(Duration::from_secs(120), async {
-        match deployments.recv().await.expect("deployment stream") {
-            LocalResidentDeployment::SessionReady { activation } => activation,
-            LocalResidentDeployment::Retired { actor, terminal } => {
-                panic!("{actor:?} retired before activation: {terminal:?}")
-            }
-            _ => panic!("unexpected event before activation"),
-        }
-    })
-    .await
-    .expect("exact request activation")
+    campaign
+        .next_deployment(
+            "exact request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    panic!("{actor:?} retired before activation: {terminal:?}")
+                }
+                other => Err(other),
+            },
+        )
+        .await
 }
 
 // Exhaustive diagnostics keep new deployment variants visible to this regression.
@@ -342,18 +344,24 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                 actor.incarnation.0,
             ))
             .is_none());
-        assert!(
-            campaign.deployments.try_recv().is_err(),
-            "publication before custody"
-        );
+        campaign.assert_no_deployment("publication before custody", |_| true);
         release.send(()).unwrap();
-        let child = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let LocalResidentDeployment::PolicyInstalled(child) = child else {
-            panic!("expected attachment");
-        };
+        let child = campaign
+            .next_deployment(
+                "sibling attachment",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                    LocalResidentDeployment::ChildExited { notice } => {
+                        panic!("expected attachment, got ChildExited: {notice:?}")
+                    }
+                    LocalResidentDeployment::Retired { actor, terminal } => {
+                        panic!("expected attachment, got Retired {actor}: {terminal:?}")
+                    }
+                    other => Err(other),
+                },
+            )
+            .await;
         assert_eq!(child.actor.identity(), actor);
         assert!(child.worktree_custody.is_some());
         campaign
@@ -362,7 +370,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         installed.push(child);
     }
     // Neither child can run before the whole fork boundary is acknowledged.
-    assert!(campaign.deployments.try_recv().is_err());
+    campaign.assert_no_deployment("fork boundary not yet acknowledged", |_| true);
     for child in &installed {
         child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     }
@@ -377,7 +385,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     assert_ne!(installed[0].launch_worktrees, installed[1].launch_worktrees);
     let mut seen = [false; 2];
     for _ in 0..2 {
-        let activation = custody_activation(&mut campaign.deployments).await;
+        let activation = custody_activation(&mut campaign).await;
         let index = installed
             .iter()
             .position(|child| child.actor.identity() == activation.id.actor())
@@ -448,18 +456,18 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
             actor.incarnation.0,
         ))
         .is_none());
-    assert!(
-        campaign.deployments.try_recv().is_err(),
-        "nested publication before custody"
-    );
+    campaign.assert_no_deployment("nested publication before custody", |_| true);
     release.send(()).unwrap();
-    let child = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let LocalResidentDeployment::PolicyInstalled(leaf) = child else {
-        panic!("expected nested attachment");
-    };
+    let leaf = campaign
+        .next_deployment(
+            "nested attachment",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(leaf) => Ok(leaf),
+                other => Err(other),
+            },
+        )
+        .await;
     assert_eq!(leaf.actor.identity(), actor);
     assert_eq!(leaf.context_parent, Some(installed[0].actor.identity()));
     campaign
@@ -483,7 +491,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .unwrap()
         .unwrap();
     assert_eq!(result["status"], "committed", "{result:?}");
-    let activation = custody_activation(&mut campaign.deployments).await;
+    let activation = custody_activation(&mut campaign).await;
     assert_eq!(activation.id.actor(), leaf.actor.identity());
     custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
     let watch = tests::dispatch_haskell_script(
@@ -496,24 +504,25 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         tests::dispatch_haskell_script(leaf.policy.as_ref(), "respond (sessionInput :: Text)")
             .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
-    let event = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
-        .await
-        .expect("leaf reply watch timeout")
-        .expect("deployment stream");
-    match event {
-        LocalResidentDeployment::WatchChanged { notification } => {
-            assert_eq!(notification.owner, installed[0].actor.identity());
-            assert_eq!(notification.label, "custody-leaf-ready");
-            assert_eq!(
-                notification.transition,
-                exomonad_actor::WatchTransition::Ready
-            );
-        }
-        event => panic!(
-            "unexpected event before shutdown: {}",
-            custody_event_description(&event)
-        ),
-    }
+    let owner = installed[0].actor.identity();
+    campaign
+        .next_deployment(
+            "leaf reply watch",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.owner == owner && notification.label == "custody-leaf-ready" =>
+                {
+                    assert_eq!(
+                        notification.transition,
+                        exomonad_actor::WatchTransition::Ready
+                    );
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
     let reply = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
         include_str!("custody_nested_reply.hs"),
@@ -537,7 +546,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         3
     );
     // No lifecycle event is expected while these three applications are live.
-    if let Ok(event) = campaign.deployments.try_recv() {
+    if let Some(event) = campaign.drain_ready().into_iter().next() {
         panic!(
             "unexpected event before shutdown: {}",
             custody_event_description(&event)
@@ -571,14 +580,14 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         })
         .collect();
     campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    (&mut campaign.hosted).await.unwrap();
     // Shutdown joins linked cleanup before publishing the root terminal. Collect
     // by exact identity: neither retirement order nor ChildExited delivery order
     // is a contract (a shutting-down owner's mailbox may not consume the notice).
     let mut retired = std::collections::HashMap::new();
     let mut child_exits = std::collections::HashMap::new();
     let mut settlement_notices = std::collections::HashSet::new();
-    while let Ok(event) = campaign.deployments.try_recv() {
+    for event in campaign.drain_ready() {
         match event {
             LocalResidentDeployment::Retired { actor, terminal } => {
                 assert_eq!(
@@ -695,22 +704,22 @@ async fn custody_install_failure_prevents_provider_publication() {
     // The enclosing tool committed before deferred child bootstrap ran.
     assert_eq!(result["status"], "committed", "{result:?}");
     drop(installing);
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
+    campaign
+        .next_deployment(
+            "custody-failure retirement",
+            Duration::from_secs(120),
+            move |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => panic!(
                     "provider published despite custody failure: {:?}",
                     child.actor.identity()
                 ),
                 LocalResidentDeployment::Retired { actor: retired, .. } if retired == actor => {
-                    break
+                    Ok(())
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     assert!(campaign
         .bindings
         .lock()
@@ -789,8 +798,8 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
         "{result:?}"
     );
     campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    while let Ok(event) = campaign.deployments.try_recv() {
+    (&mut campaign.hosted).await.unwrap();
+    for event in campaign.drain_ready() {
         if let LocalResidentDeployment::PolicyInstalled(child) = event {
             panic!(
                 "provider published for cancelled bootstrap: {:?}",
@@ -881,9 +890,11 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
     release.send(()).unwrap();
     let result = launched.await.unwrap();
     assert_eq!(result["status"], "committed", "{result:?}");
-    let failed = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
+    let failed = campaign
+        .next_deployment(
+            "bootstrap-failure retirement",
+            Duration::from_secs(120),
+            |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => panic!(
                     "provider published after bootstrap error: {:?}",
                     child.actor.identity()
@@ -896,14 +907,12 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
                             .contains("intentional Haskell bootstrap failure"),
                         "{terminal:?}"
                     );
-                    break actor;
+                    Ok(actor)
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
+                other => Err(other),
+            },
+        )
+        .await;
     assert_eq!(failed, installing_actor);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

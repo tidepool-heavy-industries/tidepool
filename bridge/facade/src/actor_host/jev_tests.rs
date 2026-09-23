@@ -1271,26 +1271,25 @@ fn watchdog_child_script(label: &str) -> String {
 async fn next_watchdog_child(
     campaign: &mut TestCampaign,
 ) -> exomonad_actor::LocalResidentInstallation {
-    tokio::time::timeout(Duration::from_secs(180), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::PolicyInstalled(child) => {
-                    campaign.authority.install_grant(
-                        child.actor.identity().into(),
-                        worktree_grant(child.effective_role.role()),
-                    );
-                    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-                    return *child;
-                }
+    let child = campaign
+        .next_deployment(
+            "watchdog child admission",
+            Duration::from_secs(180),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(*child),
                 LocalResidentDeployment::Retired { actor, terminal } => {
                     panic!("{actor:?} retired: {terminal:?}")
                 }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("child admission")
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    child
 }
 
 async fn watchdog_probe(policy: &dyn exomonad_actor::ResidentToolEndpoint, topic: &str) -> String {
@@ -1303,78 +1302,28 @@ async fn watchdog_probe(policy: &dyn exomonad_actor::ResidentToolEndpoint, topic
 /// `ChildExited`, …) shares this campaign's one deployment channel with a
 /// watchdog's `NotificationSend`, and the two interleave in whatever order
 /// the resident host happens to schedule them. Waits up to `budget` for the
-/// next `NotificationSend` specifically, discarding any other event seen
-/// along the way; `None` means no `NotificationSend` arrived inside the
-/// budget (used to assert silence).
+/// next `NotificationSend` specifically; any other event seen along the way
+/// is parked on the campaign, not dropped, so a later wait can still find
+/// it. `None` means no `NotificationSend` arrived inside the budget (used to
+/// assert silence).
 async fn next_notification_send(
     campaign: &mut TestCampaign,
     budget: Duration,
 ) -> Result<Arc<exomonad_actor::NotificationSend>, String> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut last_other = None;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(match last_other {
-                Some(kind) => {
-                    format!("no NotificationSend within the budget; last other event: {kind}")
-                }
-                None => "no event at all within the budget".to_string(),
-            });
-        }
-        match tokio::time::timeout(remaining, campaign.deployments.recv()).await {
-            Ok(Some(LocalResidentDeployment::NotificationSend(command))) => return Ok(command),
-            Ok(Some(other)) => {
-                last_other = Some(debug_deployment_kind(&other));
-                continue;
+    campaign
+        .next_deployment_opt(budget, |event| match event {
+            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+            other => Err(other),
+        })
+        .await
+        .ok_or_else(|| {
+            let pending = campaign.pending_kinds();
+            if pending.is_empty() {
+                "no event at all within the budget".to_string()
+            } else {
+                format!("no NotificationSend within the budget; still pending: {pending:?}")
             }
-            Ok(None) | Err(_) => {
-                return Err(match last_other {
-                    Some(kind) => {
-                        format!("no NotificationSend within the budget; last other event: {kind}")
-                    }
-                    None => "no event at all within the budget".to_string(),
-                });
-            }
-        }
-    }
-}
-
-/// Diagnostic description of a deployment event kind, for panic messages.
-fn debug_deployment_kind(event: &LocalResidentDeployment) -> String {
-    match event {
-        LocalResidentDeployment::PolicyInstalled(child) => {
-            format!("PolicyInstalled {:?}", child.actor.identity())
-        }
-        LocalResidentDeployment::SessionReady { activation } => {
-            format!("SessionReady {activation:?}")
-        }
-        LocalResidentDeployment::NotificationSend(_) => "NotificationSend".into(),
-        LocalResidentDeployment::CommandBackend(_) => "CommandBackend".into(),
-        LocalResidentDeployment::NotificationPoll(_) => "NotificationPoll".into(),
-        LocalResidentDeployment::RequestUpdate { .. } => "RequestUpdate".into(),
-        LocalResidentDeployment::ChildExited { notice } => format!(
-            "ChildExited owner={:?} child={:?} terminal={:?}",
-            notice.owner,
-            notice.child.identity(),
-            notice.terminal
-        ),
-        LocalResidentDeployment::WatchChanged { notification } => {
-            format!("WatchChanged {notification:?}")
-        }
-        LocalResidentDeployment::SettlementChanged { notification } => {
-            format!("SettlementChanged {notification:?}")
-        }
-        LocalResidentDeployment::RequestCancellation { notification } => {
-            format!("RequestCancellation {notification:?}")
-        }
-        LocalResidentDeployment::Retired { actor, terminal } => {
-            format!("Retired {actor:?} {terminal:?}")
-        }
-        LocalResidentDeployment::ReleaseAwait(release) => {
-            format!("ReleaseAwait {:?}", release.actor)
-        }
-    }
+        })
 }
 
 #[tokio::test]
