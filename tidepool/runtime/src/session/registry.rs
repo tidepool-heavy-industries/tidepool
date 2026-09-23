@@ -64,8 +64,8 @@ pub enum CheckoutError<H> {
     #[error("session {session}: {label}")]
     Terminal { session: SessionId, label: String },
     /// This id WAS a session, but it was retired (removed from the registry
-    /// with a known cause — [`SessionRegistry::remove_because`] or
-    /// [`SessionRegistry::settle_retire_because`]) rather than never having
+    /// with a known cause — [`SessionRegistry::remove`] or
+    /// [`SessionRegistry::settle_retire`]) rather than never having
     /// existed. Distinguished from [`Self::Unknown`] so the reader — often a
     /// coding model driving a resident session — can tell a lost machine
     /// from a typo'd id: the reason names what happened instead of leaving
@@ -288,23 +288,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// the returned slot is dropped). The get-unstuck / teardown path. A
     /// checkout still outstanding for `id` finds its epoch stale on
     /// settlement and drops its machine instead of resurrecting this entry.
-    pub fn remove(&self, id: SessionId) -> Option<Slot<M, H>> {
-        let removed = self.slots.lock().remove(&id).map(|e| e.slot);
-        if removed.is_some() {
-            self.availability_for(id).changed.notify_waiters();
-        }
-        removed
-    }
-
-    /// [`Self::remove`], with a known cause recorded in the tombstone ring —
-    /// a subsequent checkout against `id` reports
-    /// [`CheckoutError::Retired`] naming `reason` instead of the bare
-    /// [`CheckoutError::Unknown`] a plain [`Self::remove`] leaves behind. Use
-    /// this whenever the caller actually knows why the session is going away
-    /// (a machine fault, an operator teardown with a stated cause); reserve
-    /// [`Self::remove`] for paths with no reason worth keeping (e.g. a
-    /// caller that immediately reinstalls under the same id).
-    pub fn remove_because(&self, id: SessionId, reason: impl Into<String>) -> Option<Slot<M, H>> {
+    /// `reason` is recorded in the tombstone ring, so a later checkout against
+    /// `id` reports [`CheckoutError::Retired`] naming it.
+    pub fn remove(&self, id: SessionId, reason: impl Into<String>) -> Option<Slot<M, H>> {
         let removed = self.slots.lock().remove(&id).map(|e| e.slot);
         if removed.is_some() {
             self.tombstone(id, reason.into());
@@ -762,23 +748,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// `Wedged` placeholder visible (e.g. an abort that unexpectedly
     /// re-suspended, with no caller left waiting on that hole). Same epoch
     /// guard as every other settlement: a stale receipt (the entry was
-    /// already replaced or removed) removes nothing.
-    pub fn settle_retire(&self, receipt: CheckoutReceipt) {
-        let id = receipt.session_id();
-        let epoch = receipt.into_epoch();
-        let mut slots = self.slots.lock();
-        if slots.get(&id).is_some_and(|e| e.epoch == epoch) {
-            slots.remove(&id);
-        }
-        drop(slots);
-        self.availability_for(id).changed.notify_waiters();
-    }
-
-    /// [`Self::settle_retire`], with a known cause recorded in the
-    /// tombstone ring — see [`Self::remove_because`]. Use this whenever the
-    /// turn that is retiring itself knows WHY (a machine fault, an
-    /// integrity failure) rather than merely that it is not resuming.
-    pub fn settle_retire_because(&self, receipt: CheckoutReceipt, reason: impl Into<String>) {
+    /// already replaced or removed) removes nothing. `reason` is recorded in
+    /// the tombstone ring for later checkouts (see [`Self::remove`]).
+    pub fn settle_retire(&self, receipt: CheckoutReceipt, reason: impl Into<String>) {
         let id = receipt.session_id();
         let epoch = receipt.into_epoch();
         let mut slots = self.slots.lock();
@@ -895,9 +867,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
     /// CURRENT one (nothing replaced it since checkout), clears `current`
     /// too, so the next `install` succeeds instead of finding a phantom
     /// entry a stale `current` still points at.
-    pub fn settle_retire(&self, receipt: CheckoutReceipt) {
+    pub fn settle_retire(&self, receipt: CheckoutReceipt, reason: impl Into<String>) {
         let id = receipt.session_id();
-        self.registry.settle_retire(receipt);
+        self.registry.settle_retire(receipt, reason);
         let mut current = self.current.lock();
         if *current == Some(id) {
             *current = None;
@@ -907,9 +879,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
     /// Remove the current entry wholesale (drops the machine and, with it,
     /// any stowed continuation). A turn still checked out finds its epoch
     /// stale on settlement.
-    pub fn remove(&self) {
+    pub fn remove(&self, reason: impl Into<String>) {
         if let Some(id) = self.current.lock().take() {
-            self.registry.remove(id);
+            self.registry.remove(id, reason);
         }
     }
 }
@@ -987,7 +959,7 @@ mod tests {
                     registry.peek(id, |machine| machine.as_ptr() as usize),
                     Some(original)
                 );
-                assert!(registry.remove(id).is_some());
+                assert!(registry.remove(id, "test teardown").is_some());
             })
             .unwrap()
             .join()
@@ -1070,7 +1042,7 @@ mod tests {
         let co = reg.checkout_run(id).expect("idle -> run");
         let (machine, receipt) = co.into_parts();
         drop(machine);
-        reg.settle_retire_because(receipt, "machine became unavailable after a runtime fault");
+        reg.settle_retire(receipt, "machine became unavailable after a runtime fault");
 
         assert_eq!(
             err(reg.checkout_run(id)),
@@ -1082,11 +1054,11 @@ mod tests {
     }
 
     #[test]
-    fn remove_because_also_tombstones_the_reason() {
+    fn remove_tombstones_the_reason() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(51);
         reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
-        reg.remove_because(id, "operator teardown: environment reset");
+        reg.remove(id, "operator teardown: environment reset");
 
         assert_eq!(
             err(reg.checkout_run(id)),
@@ -1095,16 +1067,6 @@ mod tests {
                 reason: "operator teardown: environment reset".to_string(),
             }
         );
-    }
-
-    #[test]
-    fn plain_remove_and_settle_retire_leave_no_reason() {
-        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
-        let id = SessionId(52);
-        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
-        reg.remove(id);
-
-        assert_eq!(err(reg.checkout_run(id)), CheckoutError::Unknown(id));
     }
 
     #[test]
@@ -1121,13 +1083,13 @@ mod tests {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let first = SessionId(1000);
         reg.insert_idle(first, Box::new(FakeMachine { turns: 0 }));
-        reg.remove_because(first, "the first retirement, about to age out");
+        reg.remove(first, "the first retirement, about to age out");
 
         // Fill the ring past its bound with fresh retirements.
         for offset in 1..=TOMBSTONE_CAPACITY {
             let id = SessionId(1000 + offset as u64);
             reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
-            reg.remove_because(id, format!("retirement {offset}"));
+            reg.remove(id, format!("retirement {offset}"));
         }
 
         // The oldest tombstone (`first`) has been evicted: back to Unknown.
@@ -1191,7 +1153,7 @@ mod tests {
 
         // The entry is removed while `co` is still outstanding (e.g. a
         // concurrent terminate/reset).
-        reg.remove(id);
+        reg.remove(id, "test teardown");
         assert!(reg.peek(id, |_| ()).is_none());
 
         // The stale checkout's restore must not bring it back.
@@ -1212,7 +1174,7 @@ mod tests {
         reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
         let stale = reg.checkout_run(id).expect("idle -> run");
 
-        reg.remove(id);
+        reg.remove(id, "test teardown");
         reg.insert_idle(id, Box::new(FakeMachine { turns: 2 }));
 
         stale.restore_suspended(Vec::new());
@@ -1255,11 +1217,11 @@ mod tests {
 
         // A stale receipt from BEFORE a remove+reinstall must not resurrect
         // or clobber — same epoch guard as a borrowed `Checkout`.
-        reg.remove(id);
+        reg.remove(id, "test teardown");
         reg.insert_idle(id, Box::new(FakeMachine { turns: 9 }));
         let stale_co = reg.checkout_run(id).expect("fresh entry checkoutable");
         let (stale_machine, stale_receipt) = stale_co.into_parts();
-        reg.remove(id);
+        reg.remove(id, "test teardown");
         reg.insert_idle(id, Box::new(FakeMachine { turns: 99 }));
         reg.settle_suspended(stale_receipt, stale_machine, Vec::new());
         let mut co = reg.checkout_run(id).expect("the fresh entry survives");
@@ -1281,7 +1243,7 @@ mod tests {
         ));
         assert_eq!(reg.label(id), Some("wedged (a turn timed out)".to_string()));
 
-        reg.remove(id);
+        reg.remove(id, "test teardown");
         reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         assert!(is_idle(&reg, id), "reinstalling reclaims the slot");
     }
@@ -1461,7 +1423,7 @@ mod tests {
         let co = slot.checkout_run().expect("checkout the installed machine");
         co.restore_suspended(Vec::new());
 
-        slot.remove();
+        slot.remove("test teardown");
         assert!(slot.current_id().is_none());
         assert!(matches!(err(slot.checkout_run()), CheckoutError::NoSession));
     }
@@ -1477,7 +1439,7 @@ mod tests {
             .expect("install");
         let stale = slot.checkout_run().expect("checkout");
 
-        slot.remove();
+        slot.remove("test teardown");
         slot.install(SessionId(2), FakeMachine { turns: 2 })
             .expect("fresh install");
 

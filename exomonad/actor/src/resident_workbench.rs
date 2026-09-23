@@ -2542,7 +2542,7 @@ where
                                        (no further detail was reported)"
                                 .to_string(),
                         };
-                        machines.settle_retire_because(receipt, reason);
+                        machines.settle_retire(receipt, reason);
                         return outcome;
                     }
 
@@ -2562,7 +2562,7 @@ where
                         .map(|s| (*s).to_string())
                         .or_else(|| payload.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "unknown panic payload".to_string());
-                    machines.settle_retire_because(
+                    machines.settle_retire(
                         receipt,
                         format!("machine became unavailable: a resident turn panicked ({message})"),
                     );

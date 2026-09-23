@@ -755,7 +755,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // Tear the session down fully: nothing is left to resume.
-    slot.settle_retire(receipt);
+    slot.settle_retire(receipt, "test retirement");
     assert_eq!(
         slot.current_id(),
         None,
