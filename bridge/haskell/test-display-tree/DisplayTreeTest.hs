@@ -18,6 +18,7 @@ main = do
   compactCompoundValuesStayOnOneLine
   wideCompoundValuesBreakOnlyWhenNeeded
   textUsesEscapedStringLiterals
+  topLevelTextKeepsLineBreaks
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -47,6 +48,15 @@ textUsesEscapedStringLiterals :: IO ()
 textUsesEscapedStringLiterals =
   assertEqual "quotes, backslashes and newlines are escaped"
     "\"a\\\"b\\\\c\\nd\"" (renderAll 64 (literalText "a\"b\\c\nd"))
+
+topLevelTextKeepsLineBreaks :: IO ()
+topLevelTextKeepsLineBreaks = do
+  assertEqual "standalone text is raw" ("first\nsecond", False)
+    (renderText 64 "first\nsecond")
+  assertEqual "standalone text remains bounded" ("first", True)
+    (renderText 5 "first\nsecond")
+  assertEqual "text nested in a pair is quoted" "(\"first\\nsecond\", 1)"
+    (renderAll 64 (treeParts "(" ")" [literalText "first\nsecond", TextLeaf "1"]))
 
 punctuationAndChildrenRespectBudget :: IO ()
 punctuationAndChildrenRespectBudget = do

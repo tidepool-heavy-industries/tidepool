@@ -7,6 +7,7 @@ module Tidepool.Inspection.Tree
   , renderTree
   , treeParts
   , literalText
+  , renderText
   , precedenceParens
   ) where
 
@@ -27,6 +28,13 @@ data DisplayTree
 -- | Quote text using Haskell string-literal escapes.
 literalText :: Text -> DisplayTree
 literalText = StringLeaf . show . T.unpack
+
+-- | A standalone text result is presented as text; structured values use
+-- 'literalText' for their elements and fields.
+renderText :: Int -> Text -> (Text, Bool)
+renderText budget value =
+  let (prefix, suffix) = T.splitAt (max 0 budget) value
+  in (prefix, not (T.null suffix))
 
 -- | Render at most the requested characters, retaining the actual remaining
 -- tree. The last flag reports detail omitted by a legacy custom renderer.

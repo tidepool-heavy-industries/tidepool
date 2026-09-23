@@ -85,11 +85,6 @@ class Display a where
   displayWithout :: [Text] -> Int -> a -> (Text, Bool)
   displayWithout _ = displayWith
 
-renderText :: Int -> Text -> (Text, Bool)
-renderText budget value =
-  let (prefix, suffix) = Text.splitAt (max 0 budget) value
-  in (prefix, not (Text.null suffix))
-
 -- | One constructor applied to arguments, each rendered as an application argument.
 application :: Int -> Text -> [DisplayTree] -> DisplayTree
 application precedence constructor arguments =
@@ -176,8 +171,8 @@ instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplayWithout keys = displayWithout keys 512
 
 instance WorkbenchDisplay Text where
-  workbenchDisplay = displayWith 512
-  workbenchActivationDisplay limit = displayWith limit
+  workbenchDisplay = renderText 512
+  workbenchActivationDisplay limit = renderText limit
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
@@ -190,7 +185,7 @@ instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
   inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value) (displayTree value)
 
 instance FullDisplay Text where
-  inspectFull value = FullInspection (\_ budget -> displayWith budget value) (literalText value)
+  inspectFull value = FullInspection (\_ budget -> renderText budget value) (literalText value)
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
