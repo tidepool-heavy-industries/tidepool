@@ -3531,7 +3531,7 @@ fn degraded_cleanup_receipt_preserves_each_component_without_becoming_fleet_fail
     let rendered = receipt.render();
     assert!(rendered.contains("Process: pane already unavailable"));
     assert!(rendered.contains("WorktreeBinding: binding journal unavailable"));
-    assert!(rendered.contains("permanent host and sibling actors remain available"));
+    assert!(rendered.contains("The host and sibling actors are unaffected."));
 }
 
 #[test]
