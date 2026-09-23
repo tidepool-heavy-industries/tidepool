@@ -164,6 +164,10 @@ pub(super) fn recognize_encode(identity: &OperationIdentity, signature: &Signatu
         && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef])
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one Cranelift codegen call site threading builder/pipeline/vmctx plus the JSON parse layout inputs; grouping further would just move the same data into an ad hoc struct"
+)]
 pub(super) fn emit_parse_json(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
@@ -1252,7 +1256,9 @@ impl JsonEncoder<'_, '_> {
         loop {
             if let Err(error) = cycle.inspect(&mut self.builder.core, self.builder.machine, field) {
                 if owned_current {
-                    let _ = self.builder.release_node(field.0);
+                    if let Err(release_error) = self.builder.release_node(field.0) {
+                        tracing::warn!(%release_error, "JSON list encode: failed to release owned node while unwinding an error");
+                    }
                 }
                 return Err(error.into());
             }
@@ -1287,7 +1293,9 @@ impl JsonEncoder<'_, '_> {
             let value = self.write_value(head.0, head.1, depth, out);
             let value = self.finish_nodes(value, std::iter::once(head.0));
             if let Err(error) = value {
-                let _ = self.builder.release_node(tail.0);
+                if let Err(release_error) = self.builder.release_node(tail.0) {
+                    tracing::warn!(%release_error, "JSON list encode: failed to release the tail node while unwinding an error");
+                }
                 return Err(error);
             }
             field = tail;
@@ -1315,7 +1323,9 @@ impl JsonEncoder<'_, '_> {
                             Ok(expanded) => expanded,
                             Err(error) => {
                                 if owned {
-                                    let _ = self.builder.release_node(node.0);
+                                    if let Err(release_error) = self.builder.release_node(node.0) {
+                                        tracing::warn!(%release_error, "JSON map encode: failed to release owned node while unwinding an error");
+                                    }
                                 }
                                 return Err(error);
                             }
@@ -1332,7 +1342,9 @@ impl JsonEncoder<'_, '_> {
                                 fields.into_iter().map(|field| field.0),
                             );
                             if owned {
-                                let _ = self.builder.release_node(node.0);
+                                if let Err(release_error) = self.builder.release_node(node.0) {
+                                    tracing::warn!(%release_error, "JSON map encode: failed to release owned node after a shape mismatch");
+                                }
                             }
                             return result;
                         }
@@ -1342,7 +1354,9 @@ impl JsonEncoder<'_, '_> {
                                 fields.into_iter().map(|field| field.0),
                             );
                             if owned {
-                                let _ = self.builder.release_node(node.0);
+                                if let Err(release_error) = self.builder.release_node(node.0) {
+                                    tracing::warn!(%release_error, "JSON map encode: failed to release owned node after a black-hole node");
+                                }
                             }
                             return result;
                         }
@@ -1388,11 +1402,17 @@ impl JsonEncoder<'_, '_> {
             for action in actions {
                 match action {
                     MapAction::Enter((node, _), true) | MapAction::Leave(node, true) => {
-                        let _ = self.builder.release_node(node);
+                        if let Err(release_error) = self.builder.release_node(node) {
+                            tracing::warn!(%release_error, "JSON map encode: failed to release owned node while unwinding a failed encode");
+                        }
                     }
                     MapAction::Emit(key, value) => {
-                        let _ = self.builder.release_node(key.0);
-                        let _ = self.builder.release_node(value.0);
+                        if let Err(release_error) = self.builder.release_node(key.0) {
+                            tracing::warn!(%release_error, "JSON map encode: failed to release the pending key node while unwinding a failed encode");
+                        }
+                        if let Err(release_error) = self.builder.release_node(value.0) {
+                            tracing::warn!(%release_error, "JSON map encode: failed to release the pending value node while unwinding a failed encode");
+                        }
                     }
                     _ => {}
                 }

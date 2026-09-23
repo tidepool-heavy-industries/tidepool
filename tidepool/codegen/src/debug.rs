@@ -295,9 +295,9 @@ pub fn init_logging() {
         } else {
             builder.parse_filters(&filter);
         }
-        // try_init: don't panic if a logger is already installed (e.g. a test
-        // harness or another crate set one first).
-        let _ = builder.try_init();
+        // best-effort: try_init, so don't panic if a logger is already
+        // installed (e.g. a test harness or another crate set one first).
+        builder.try_init().ok();
     });
 }
 

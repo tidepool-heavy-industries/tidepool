@@ -1544,6 +1544,10 @@ mod tests {
     #[test]
     fn observes_deep_constructors_without_recursion_and_uses_owner_identity() {
         if std::env::var_os("TIDEPOOL_OBSERVE_CHILD").is_none() {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test fixture: re-execs this test binary itself to exercise a bounded stack, not a production launch site"
+            )]
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",

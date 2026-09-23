@@ -763,6 +763,10 @@ fn install_deep_static_chain(program: &mut CompiledProgram, depth: usize) {
 #[test]
 fn w5_a4_forcing_observation_20k_constructors_small_stack() {
     if std::env::var_os("TIDEPOOL_A4_DEEP_CHILD").is_none() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: re-execs this test binary itself to exercise a bounded stack, not a production launch site"
+        )]
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
