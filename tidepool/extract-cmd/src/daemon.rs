@@ -494,6 +494,160 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
     Ok(synthesize_output(code, stdout, stderr))
 }
 
+/// One step of a connection's request stream, as `service_transaction`'s
+/// caller supplies it: a real transaction reads a command byte off the wire
+/// each time; a plain request is a one-request transaction whose supplier
+/// yields its single already-parsed request and then an orderly end.
+enum RequestStep {
+    Request(std::path::PathBuf, Vec<OsString>),
+    End,
+    Malformed,
+}
+
+/// What `serve`'s accept loop does after a connection has been serviced.
+enum ConnectionOutcome {
+    Continue,
+    Retire,
+}
+
+/// Owns the pinned-worker portion of one connection's lifecycle: begin the
+/// worker transaction, serve one or more requests supplied by `next_request`,
+/// end the transaction, and apply failure replacement and RSS/served
+/// rotation. A plain (non-transaction) connection is served as a
+/// one-request transaction — `transaction` is false and `next_request`
+/// yields exactly one request — so both shapes share one lifecycle, one set
+/// of start/finish log records (`transaction` distinguishes them), and one
+/// rotation policy. `connection` is owned so a failure can close it
+/// immediately, before the worker is replaced: an accepted request stays
+/// indeterminate and must never be replayed.
+#[allow(clippy::too_many_arguments)]
+fn service_transaction(
+    mut connection: UnixStream,
+    worker: &mut Worker,
+    prepared: &PreparedWorker,
+    config: &DaemonConfig,
+    run_id: &str,
+    request_deadline: Duration,
+    rotate_after: u64,
+    rss_ceiling_mb: u64,
+    transaction: bool,
+    served: &mut u64,
+    followed_rotation: &mut bool,
+    mut next_request: impl FnMut(&mut UnixStream) -> RequestStep,
+) -> Result<ConnectionOutcome, FrontendError> {
+    let mut transaction_failed = worker.begin_transaction().err();
+    let mut orderly_end = false;
+    while transaction_failed.is_none() {
+        match next_request(&mut connection) {
+            RequestStep::End => {
+                orderly_end = true;
+                break;
+            }
+            RequestStep::Malformed => break,
+            RequestStep::Request(cwd, argv) => {
+                let compile_request = compile_request_correlation(&cwd, &argv);
+                let request_span = tracing::info_span!(
+                    "compile_request",
+                    run_id,
+                    %compile_request,
+                    followed_rotation = *followed_rotation,
+                    served = *served,
+                    transaction,
+                );
+                let _entered = request_span.enter();
+                *followed_rotation = false;
+                let started = Instant::now();
+                tracing::info!(run_id, %compile_request, "compiler request started");
+                tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
+                match worker.request_while_connected(&connection, &cwd, &argv, request_deadline) {
+                    Ok((code, stdout, stderr)) => {
+                        *served += 1;
+                        let elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        log_compile_timing(run_id, &compile_request, &stderr);
+                        let stderr = diagnostic_stderr(&stderr);
+                        tracing::info!(
+                            run_id,
+                            %compile_request,
+                            elapsed_ms,
+                            phase = "compiler_service",
+                            exit_code = code,
+                            transaction,
+                            "compiler request finished"
+                        );
+                        if write_response(&mut connection, code, &stdout, &stderr).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        tracing::error!(
+                            run_id,
+                            %compile_request,
+                            elapsed_ms,
+                            phase = "compiler_service",
+                            %error,
+                            transaction,
+                            "compiler request failed"
+                        );
+                        transaction_failed = Some(error);
+                    }
+                }
+            }
+        }
+    }
+    if transaction_failed.is_none() {
+        transaction_failed = worker.end_transaction().err();
+    }
+    if let Some(error) = transaction_failed {
+        tracing::error!(run_id, %error, transaction, "compiler transaction failed");
+        // The accepted request(s) stay indeterminate; do not replay them.
+        // Drop the connection before replacing the failed worker.
+        drop(connection);
+        worker.abort();
+        if !config.persistent {
+            return Err(error);
+        }
+        *worker = Worker::spawn(prepared)?;
+        *served = 0;
+        *followed_rotation = true;
+        return Ok(ConnectionOutcome::Continue);
+    }
+    if transaction && orderly_end {
+        let _ = connection.write_all(&[ACCEPTED]);
+        let _ = connection.flush();
+    }
+    drop(connection);
+    let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
+    if *served >= rotate_after || worker_rss > rss_ceiling_mb {
+        // Replacing the worker discards its module memo; the next request
+        // recompiles every library module.
+        tracing::info!(
+            run_id,
+            served = *served,
+            rotate_after,
+            worker_rss_mb = worker_rss,
+            rss_ceiling_mb,
+            transaction,
+            "replacing compiler worker"
+        );
+        if config.persistent {
+            // Long-lived composition roots keep the protocol endpoint stable
+            // while bounding GHC state. The worker executable is boot-pinned
+            // by `PreparedWorker`, so replacing only this child does not
+            // change the endpoint's producer.
+            worker.shutdown();
+            *worker = Worker::spawn(prepared)?;
+            *served = 0;
+            *followed_rotation = true;
+            return Ok(ConnectionOutcome::Continue);
+        }
+        return Ok(ConnectionOutcome::Retire);
+    }
+    Ok(ConnectionOutcome::Continue)
+}
+
 pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
     let epoch = boot_epoch()?;
@@ -586,113 +740,59 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     continue;
                 }
                 let _ = connection.set_read_timeout(Some(IO_TIMEOUT));
-                let mut transaction_failed = worker.begin_transaction().err();
-                let mut orderly_end = false;
-                while transaction_failed.is_none() {
-                    let mut command = [0u8; 1];
-                    if connection.read_exact(&mut command).is_err() {
-                        break;
-                    }
-                    match command[0] {
-                        TRANSACTION_END => {
-                            orderly_end = true;
-                            break;
+                let outcome = service_transaction(
+                    connection,
+                    &mut worker,
+                    &prepared,
+                    config,
+                    run_id,
+                    request_deadline,
+                    rotate_after,
+                    rss_ceiling_mb,
+                    true,
+                    &mut served,
+                    &mut followed_rotation,
+                    |connection| {
+                        let mut command = [0u8; 1];
+                        if connection.read_exact(&mut command).is_err() {
+                            return RequestStep::Malformed;
                         }
-                        TRANSACTION_REQUEST => {
-                            let (cwd, argv) = match read_request(&mut connection) {
-                                Ok(request) => request,
-                                Err(error) => {
-                                    tracing::warn!(run_id, %error, "compiler transaction request was malformed");
-                                    break;
-                                }
-                            };
-                            let worker_argv = match normalize_worker_argv(argv) {
-                                Ok(argv) => argv,
-                                Err(error) => {
-                                    tracing::warn!(run_id, %error, "compiler transaction request was invalid");
-                                    break;
-                                }
-                            };
-                            let compile_request = compile_request_correlation(&cwd, &worker_argv);
-                            let started = Instant::now();
-                            match worker.request_while_connected(
-                                &connection,
-                                &cwd,
-                                &worker_argv,
-                                request_deadline,
-                            ) {
-                                Ok((code, stdout, stderr)) => {
-                                    served += 1;
-                                    log_compile_timing(run_id, &compile_request, &stderr);
-                                    let stderr = diagnostic_stderr(&stderr);
-                                    tracing::info!(
-                                        run_id,
-                                        %compile_request,
-                                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                                        phase = "compiler_service",
-                                        exit_code = code,
-                                        transaction = true,
-                                        "compiler request finished"
-                                    );
-                                    if write_response(&mut connection, code, &stdout, &stderr)
-                                        .is_err()
-                                    {
-                                        break;
+                        match command[0] {
+                            TRANSACTION_END => RequestStep::End,
+                            TRANSACTION_REQUEST => {
+                                let (cwd, argv) = match read_request(connection) {
+                                    Ok(request) => request,
+                                    Err(error) => {
+                                        tracing::warn!(run_id, %error, "compiler transaction request was malformed");
+                                        return RequestStep::Malformed;
+                                    }
+                                };
+                                match normalize_worker_argv(argv) {
+                                    Ok(argv) => RequestStep::Request(cwd, argv),
+                                    Err(error) => {
+                                        tracing::warn!(run_id, %error, "compiler transaction request was invalid");
+                                        RequestStep::Malformed
                                     }
                                 }
-                                Err(error) => transaction_failed = Some(error),
+                            }
+                            other => {
+                                tracing::warn!(
+                                    run_id,
+                                    command = other,
+                                    "unknown compiler transaction command"
+                                );
+                                RequestStep::Malformed
                             }
                         }
-                        other => {
-                            tracing::warn!(
-                                run_id,
-                                command = other,
-                                "unknown compiler transaction command"
-                            );
-                            break;
-                        }
-                    }
-                }
-                if transaction_failed.is_none() {
-                    transaction_failed = worker.end_transaction().err();
-                }
-                if let Some(error) = transaction_failed {
-                    tracing::error!(run_id, %error, "compiler transaction failed");
-                    drop(connection);
-                    worker.abort();
-                    if !config.persistent {
-                        return Err(error);
-                    }
-                    worker = Worker::spawn(&prepared)?;
-                    served = 0;
-                    followed_rotation = true;
-                    continue;
-                }
-                if orderly_end {
-                    let _ = connection.write_all(&[ACCEPTED]);
-                    let _ = connection.flush();
-                }
-                let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
-                if served >= rotate_after || worker_rss > rss_ceiling_mb {
-                    tracing::info!(
-                        run_id,
-                        served,
-                        rotate_after,
-                        worker_rss_mb = worker_rss,
-                        rss_ceiling_mb,
-                        "replacing compiler worker after transaction"
-                    );
-                    if config.persistent {
-                        worker.shutdown();
-                        worker = Worker::spawn(&prepared)?;
-                        served = 0;
-                        followed_rotation = true;
-                    } else {
+                    },
+                )?;
+                match outcome {
+                    ConnectionOutcome::Continue => continue,
+                    ConnectionOutcome::Retire => {
                         socket.retire()?;
                         break;
                     }
                 }
-                continue;
             }
             if &kind != REQUEST {
                 continue;
@@ -740,95 +840,28 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                 continue;
             }
-            let compile_request = compile_request_correlation(&cwd, &worker_argv);
-            // The span's own close carries the duration; `followed_rotation`
-            // says this request paid for a worker that lost its module memo,
-            // so an outlier need not be lined up against a prior log line by
-            // timestamp.
-            let request_span = tracing::info_span!(
-                "compile_request",
+            let _ = connection.set_read_timeout(Some(IO_TIMEOUT));
+            let mut first_request = Some((cwd, worker_argv));
+            let outcome = service_transaction(
+                connection,
+                &mut worker,
+                &prepared,
+                config,
                 run_id,
-                %compile_request,
-                followed_rotation,
-                served,
-            );
-            let _entered = request_span.enter();
-            followed_rotation = false;
-            let started = Instant::now();
-            tracing::info!(run_id, %compile_request, "compiler request started");
-            tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
-            let response = worker
-                .begin_transaction()
-                .and_then(|()| {
-                    worker.request_while_connected(
-                        &connection,
-                        &cwd,
-                        &worker_argv,
-                        request_deadline,
-                    )
-                })
-                .and_then(|response| worker.end_transaction().map(|()| response));
-            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let (code, stdout, stderr) = match response {
-                Ok(response) => {
-                    tracing::info!(
-                        run_id,
-                        %compile_request,
-                        elapsed_ms,
-                        phase = "compiler_service",
-                        exit_code = response.0,
-                        "compiler request finished"
-                    );
-                    log_compile_timing(run_id, &compile_request, &response.2);
-                    (response.0, response.1, diagnostic_stderr(&response.2))
-                }
-                Err(error) => {
-                    tracing::error!(
-                        run_id,
-                        %compile_request,
-                        elapsed_ms,
-                        phase = "compiler_service",
-                        %error,
-                        "compiler request failed"
-                    );
-                    // The accepted request stays indeterminate; do not replay it.
-                    // Drop its connection before replacing the failed worker.
-                    drop(connection);
-                    worker.abort();
-                    if !config.persistent {
-                        return Err(error);
-                    }
-                    worker = Worker::spawn(&prepared)?;
-                    served = 0;
-                    followed_rotation = true;
-                    continue;
-                }
-            };
-            served += 1;
-            let _ = write_response(&mut connection, code, &stdout, &stderr);
-
-            let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
-            if served >= rotate_after || worker_rss > rss_ceiling_mb {
-                // Replacing the worker discards its module memo; the next
-                // request recompiles every library module.
-                tracing::info!(
-                    run_id,
-                    served,
-                    rotate_after,
-                    worker_rss_mb = worker_rss,
-                    rss_ceiling_mb,
-                    "replacing compiler worker"
-                );
-                if config.persistent {
-                    // Long-lived composition roots keep the protocol endpoint
-                    // stable while bounding GHC state. The worker executable
-                    // is boot-pinned by `PreparedWorker`, so replacing only
-                    // this child does not change the endpoint's producer.
-                    worker.shutdown();
-                    worker = Worker::spawn(&prepared)?;
-                    served = 0;
-                    followed_rotation = true;
-                } else {
+                request_deadline,
+                rotate_after,
+                rss_ceiling_mb,
+                false,
+                &mut served,
+                &mut followed_rotation,
+                |_connection| match first_request.take() {
+                    Some((cwd, argv)) => RequestStep::Request(cwd, argv),
+                    None => RequestStep::End,
+                },
+            )?;
+            match outcome {
+                ConnectionOutcome::Continue => continue,
+                ConnectionOutcome::Retire => {
                     socket.retire()?;
                     break;
                 }
