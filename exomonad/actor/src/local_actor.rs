@@ -905,6 +905,13 @@ where
             message = message.kind(),
         )
     )]
+    // Every `reply.send(..)` below is a oneshot back to an RPC-style caller
+    // (Call, Tool, Workbench, Drain, Shutdown, ...). A dropped receiver means
+    // the caller already gave up (timed out, was cancelled, or its own actor
+    // died) before this message finished processing; the state mutation this
+    // arm performs already happened, so losing the reply loses only the
+    // caller's *notification* of it, never the effect itself. `.ok()` is
+    // therefore best-effort throughout this handler.
     async fn handle(
         &self,
         myself: RactorRef<Self::Msg>,
@@ -948,9 +955,9 @@ where
         match message {
             KernelMessage::AbortReplacement { reply } => {
                 if !state.behavior.replacement_staged() {
-                    let _ = reply.send(Err(KernelBehaviorError {
+                    reply.send(Err(KernelBehaviorError {
                         detail: "actor is not a prepared replacement".into(),
-                    }));
+                    })).ok();
                     return Ok(());
                 }
                 let terminal = finish_actor(
@@ -973,7 +980,7 @@ where
                         detail: format!("prepared actor cleanup unconfirmed: {}", terminal.summary),
                     })
                 };
-                let _ = reply.send(result);
+                reply.send(result).ok();
             }
             KernelMessage::Replace { definition, reply } => {
                 if state.replacement.is_some() {
@@ -989,7 +996,7 @@ where
                             ),
                         },
                     };
-                    let _ = reply.send(Err(failure));
+                    reply.send(Err(failure)).ok();
                 } else {
                     match state.behavior.replace(&state.context, *definition).await {
                         Ok(successor) => {
@@ -1000,10 +1007,10 @@ where
                             })
                         }
                         Err(error) => {
-                            let _ = reply.send(Err(crate::KernelInvocationFailure::Rejected {
+                            reply.send(Err(crate::KernelInvocationFailure::Rejected {
                                 actor: state.context.identity,
                                 detail: error.detail,
-                            }));
+                            })).ok();
                         }
                     }
                 }
@@ -1028,10 +1035,10 @@ where
                     .commit_replacement(&state.context, &successor_context)
                 {
                     if let Some(reply) = pending.reply.take() {
-                        let _ = reply.send(Err(crate::KernelInvocationFailure::Failed {
+                        reply.send(Err(crate::KernelInvocationFailure::Failed {
                             actor: state.context.identity,
                             detail: error.detail,
-                        }));
+                        })).ok();
                     }
                     state.replacement = Some(pending);
                     return Ok(());
@@ -1090,10 +1097,10 @@ where
                 )
                 .await;
                 for reply in pending.shutdown_waiters {
-                    let _ = reply.send(terminal.clone());
+                    reply.send(terminal.clone()).ok();
                 }
                 if let Some(reply) = pending.reply {
-                    let _ = reply.send(Ok(pending.successor));
+                    reply.send(Ok(pending.successor)).ok();
                 }
                 return Ok(());
             }
@@ -1114,9 +1121,9 @@ where
             }
             KernelMessage::Drain { reply } => {
                 if state.replacement.is_some() {
-                    let _ = reply.send(Err(KernelBehaviorError {
+                    reply.send(Err(KernelBehaviorError {
                         detail: "actor replacement is in progress".into(),
-                    }));
+                    })).ok();
                     return Ok(());
                 }
                 let result = state.behavior.begin_drain().and_then(|()| {
@@ -1133,7 +1140,7 @@ where
                     state.drain = DrainState::Fencing;
                     Ok(())
                 });
-                let _ = reply.send(result);
+                reply.send(result).ok();
             }
             KernelMessage::DrainFence => {
                 state.drain = DrainState::Draining;
@@ -1153,9 +1160,9 @@ where
                     return Ok(());
                 }
                 state.hosted_admission = HostedAdmission::Sealed;
-                let _ = reply.send(crate::HostedWorkSeal {
+                reply.send(crate::HostedWorkSeal {
                     actor: state.context.identity,
-                });
+                }).ok();
             }
             KernelMessage::Cast { sender, request } => {
                 match state.behavior.cast(&state.context, sender, request).await {
@@ -1172,7 +1179,7 @@ where
                 reply,
             } => match ancestry.enter(state.context.identity) {
                 Err(error) => {
-                    let _ = reply.send(Err(error));
+                    reply.send(Err(error)).ok();
                 }
                 Ok(ancestry) => match state
                     .behavior
@@ -1181,38 +1188,38 @@ where
                 {
                     Ok(step) => {
                         settle_step(&myself, state, step, |value| {
-                            let _ = reply.send(Ok(value));
+                            reply.send(Ok(value)).ok();
                         })
                         .await;
                     }
                     Err(error) => {
                         let detail = error.to_string();
-                        let _ = reply.send(Err(KernelCallFailure::Handler {
+                        reply.send(Err(KernelCallFailure::Handler {
                             actor: state.context.identity,
                             detail: detail.clone(),
-                        }));
+                        })).ok();
                         fail_handler(&myself, state, format!("actor call failed: {detail}")).await;
                     }
                 },
             },
             KernelMessage::Tool { invocation, reply } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                    reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
-                    }));
+                    })).ok();
                     return Ok(());
                 }
 
                 match state.behavior.tool(&state.context, invocation).await {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
-                            let _ = reply.send(Ok(output));
+                            reply.send(Ok(output)).ok();
                         })
                         .await;
                     }
                     Err(error) => {
-                        let _ = reply.send(Err(error));
+                        reply.send(Err(error)).ok();
                     }
                 }
             }
@@ -1222,14 +1229,14 @@ where
                     .reconcile_workbench_boundary(&state.context, boundary)
                     .await
                     .unwrap_or(crate::WorkbenchBoundaryReconciliation::Pending);
-                let _ = reply.send(outcome);
+                reply.send(outcome).ok();
             }
             KernelMessage::ToolCompleted { boundary, reply } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                    reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted completion boundary is closed".into(),
-                    }));
+                    })).ok();
                     return Ok(());
                 }
                 let result = state
@@ -1241,7 +1248,7 @@ where
                         actor: state.context.identity,
                         detail: error.to_string(),
                     });
-                let _ = reply.send(result);
+                reply.send(result).ok();
             }
             KernelMessage::ReleaseFork { scope } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
@@ -1265,10 +1272,10 @@ where
                 reply,
             } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                    reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
-                    }));
+                    })).ok();
                     return Ok(());
                 }
 
@@ -1279,12 +1286,12 @@ where
                 {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
-                            let _ = reply.send(Ok(output));
+                            reply.send(Ok(output)).ok();
                         })
                         .await;
                     }
                     Err(error) => {
-                        let _ = reply.send(Err(error));
+                        reply.send(Err(error)).ok();
                     }
                 }
             }
@@ -1296,7 +1303,7 @@ where
                 let outcome = state
                     .behavior
                     .reconcile_workbench_cancellation(execution, invocation);
-                let _ = reply.send(outcome);
+                reply.send(outcome).ok();
             }
             KernelMessage::DrainMailbox => {
                 unreachable!("mailbox drain messages are normalized before dispatch")
@@ -1324,7 +1331,7 @@ where
                     .behavior
                     .external_application_failed(&state.context, failure)
                     .await;
-                let _ = reply.send(disposition);
+                reply.send(disposition).ok();
                 if disposition == ExternalFailureDisposition::Applied {
                     fail_actor(&myself, state, detail).await;
                 }
@@ -1335,7 +1342,7 @@ where
                     return Ok(());
                 }
                 let terminal = finish_actor(&myself, state, Disposition::Stop(terminal)).await;
-                let _ = reply.send(terminal);
+                reply.send(terminal).ok();
             }
         }
         if state.replacement.is_none()
@@ -3091,7 +3098,8 @@ mod tests {
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ));
         task.await.unwrap();
-        let _ = receiver.await;
+        // best-effort: draining the paired oneshot; its value isn't asserted here.
+        receiver.await.ok();
         assert!(
             actor.terminal().cleanup().is_none(),
             "forced terminal must not manufacture component proof"

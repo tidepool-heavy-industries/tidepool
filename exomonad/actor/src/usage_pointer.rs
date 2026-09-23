@@ -54,6 +54,10 @@ fn collect_sources(
         if entry.file_type()?.is_dir() {
             collect_sources(&path, root, out)?;
         } else {
+            #[allow(
+                clippy::expect_used,
+                reason = "path is reached only by recursing from root, so it is always under it"
+            )]
             let relative = path.strip_prefix(root).expect("path below root");
             let is_check = relative.starts_with("checks")
                 && path.extension().is_some_and(|extension| extension == "hs");

@@ -678,7 +678,7 @@ pub(crate) enum ResidentWorkbenchStep {
         reason: CommandObservationStop,
     },
     Running {
-        fragment: ResidentWorkbenchFragment,
+        fragment: Box<ResidentWorkbenchFragment>,
         outcome: Box<ResidentOutcome>,
     },
     Replied {
@@ -2778,7 +2778,15 @@ where
                 let (declarations, slots, dispatch) = match publication {
                     Ok(publication) => publication,
                     Err(error) => {
-                        let _ = session.abort(hole.cont_id(), "tool publication rejected".into());
+                        if let Err(abort_error) =
+                            session.abort(hole.cont_id(), "tool publication rejected".into())
+                        {
+                            tracing::warn!(
+                                hole = hole.cont_id(),
+                                %abort_error,
+                                "failed to abort parked hole after tool publication rejection"
+                            );
+                        }
                         return Err(error);
                     }
                 };
@@ -2790,10 +2798,16 @@ where
                     ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
                 ) {
                     if let ResidentOutcome::Suspended { hole, .. } = settled {
-                        let _ = session.abort(
+                        if let Err(abort_error) = session.abort(
                             hole.cont_id(),
                             "tool installer must finish after publication".into(),
-                        );
+                        ) {
+                            tracing::warn!(
+                                hole = hole.cont_id(),
+                                %abort_error,
+                                "failed to abort parked hole after tool installer overrun"
+                            );
+                        }
                     }
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "tool installer did not finish after publication".into(),
@@ -2851,8 +2865,15 @@ where
                 let answer = match input {
                     Ok(answer) => answer,
                     Err(error) => {
-                        let _ =
-                            session.abort(hole.cont_id(), "tool invocation input rejected".into());
+                        if let Err(abort_error) =
+                            session.abort(hole.cont_id(), "tool invocation input rejected".into())
+                        {
+                            tracing::warn!(
+                                hole = hole.cont_id(),
+                                %abort_error,
+                                "failed to abort parked hole after tool invocation input rejection"
+                            );
+                        }
                         return Err(error);
                     }
                 };
@@ -2917,8 +2938,15 @@ where
                 let answer = match input {
                     Ok(answer) => answer,
                     Err(error) => {
-                        let _ =
-                            session.abort(hole.cont_id(), "after-tool slot input rejected".into());
+                        if let Err(abort_error) =
+                            session.abort(hole.cont_id(), "after-tool slot input rejected".into())
+                        {
+                            tracing::warn!(
+                                hole = hole.cont_id(),
+                                %abort_error,
+                                "failed to abort parked hole after after-tool slot input rejection"
+                            );
+                        }
                         return Err(error);
                     }
                 };
@@ -2980,8 +3008,19 @@ where
                     else {
                         break;
                     };
-                    let _ = session.abort(&abandoned, reason.clone());
-                    aborted += 1;
+                    match session.abort(&abandoned, reason.clone()) {
+                        Ok(_) => aborted += 1,
+                        Err(error) => {
+                            // The hole stays parked; don't count it as
+                            // aborted or the caller believes cleanup happened
+                            // when it did not.
+                            tracing::warn!(
+                                hole = %abandoned,
+                                %error,
+                                "failed to abort a stray parked continuation"
+                            );
+                        }
+                    }
                 }
                 Ok(aborted)
             })
@@ -3096,8 +3135,15 @@ where
                     tidepool_repr::SessionVarId::from_extract(binder.var_id),
                 ) {
                     Ok(ResidentOutcome::Suspended { hole, .. }) => {
-                        let _ = session
-                            .abort(hole.cont_id(), "pure activation preview suspended".into());
+                        if let Err(abort_error) = session
+                            .abort(hole.cont_id(), "pure activation preview suspended".into())
+                        {
+                            tracing::warn!(
+                                hole = hole.cont_id(),
+                                %abort_error,
+                                "failed to abort parked hole after pure activation preview suspended"
+                            );
+                        }
                         Err(ResidentActorWorkbenchError::Inspection(
                             "pure activation preview suspended".into(),
                         ))
@@ -3877,11 +3923,15 @@ where
             {
                 if let [binder] = binders.as_slice() {
                     if binder.host_authority == Some(HostBindingAuthority::CommandJob) {
-                        let _ = session.tag_host_text_binding_in(
-                            context.placement.lexical_scope,
-                            binder,
-                            job.clone(),
-                        );
+                        // best-effort: see the comment above — a lost race
+                        // over the exact live entry is tolerated.
+                        session
+                            .tag_host_text_binding_in(
+                                context.placement.lexical_scope,
+                                binder,
+                                job.clone(),
+                            )
+                            .ok();
                     }
                 }
             }
@@ -3916,8 +3966,8 @@ where
                     type_modules,
                 } => {
                     match render_cell_observation(
-                        session, context, &source, &type_modules,
-                        &name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
+                        session, context, source, type_modules,
+                        name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
                         *presentation,
                     ) {
                         Ok(text) => text,
@@ -3973,7 +4023,7 @@ where
             fragment.output.extend(output);
             let _ = ResidentRequest::decode(&request, session.data_con_table())?;
             Ok(ResidentWorkbenchStep::Running {
-                fragment,
+                fragment: Box::new(fragment),
                 outcome: Box::new(ResidentOutcome::Suspended {
                     output: Vec::new(),
                     hole,
@@ -4061,6 +4111,7 @@ fn decode_activation_observation(
 /// binds the page before it forces metadata, then publishes the alias through
 /// its existing captured-alias path.  Thus a renderer failure still leaves the
 /// observation available without running the expression again.
+#[allow(clippy::too_many_arguments)]
 fn render_cell_observation<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6491,7 +6542,7 @@ enum StructuredIntrospectionAnswer {
         before: tidepool_runtime::session::ScopeProvenance,
         after: tidepool_runtime::session::ScopeProvenance,
     },
-    Info(tidepool_runtime::session::IdentifierInfo),
+    Info(Box<tidepool_runtime::session::IdentifierInfo>),
     Type(tidepool_runtime::session::TypeInfo),
     QueryError(tidepool_runtime::session::QueryError),
     CompilerUnavailable(String),
@@ -6672,6 +6723,7 @@ enum CompiledBlock {
     Rejected(tidepool_runtime::session::CompileRejection),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_cell_in_session<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6877,6 +6929,7 @@ where
 /// Compile one fresh, payload-independent value interface. Its binder is
 /// unique to this mount, so a later request cannot replace the global slot a
 /// previously compiled closure captured.
+#[allow(clippy::too_many_arguments)]
 fn compile_host_binding<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -7074,6 +7127,11 @@ where
         )
         .collect::<std::collections::BTreeSet<_>>();
     let generation = session.val_gen().0;
+    #[allow(
+        clippy::expect_used,
+        reason = "the ordinal range is infinite and `used` is a finite set, so some ordinal is \
+                  always free"
+    )]
     (0_u64..)
         .map(|ordinal| format!("__tidepool{category}{generation}_{ordinal}"))
         .find(|candidate| !used.contains(candidate))
@@ -7171,6 +7229,7 @@ fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
 /// `verdict` is `None` for authored source, whose shape only GHC can answer,
 /// and `Some` for a block this runtime generated (see
 /// [`generated_bind_verdict`]).
+#[allow(clippy::too_many_arguments)]
 fn compile_block<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -7550,7 +7609,7 @@ fn structured_introspection_answer(
         (
             StructuredInspectionKind::Info,
             Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Info(*info),
+        ) => StructuredIntrospectionAnswer::Info(info),
         (
             StructuredInspectionKind::Type,
             Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),

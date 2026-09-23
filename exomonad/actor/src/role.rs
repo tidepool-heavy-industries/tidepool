@@ -722,7 +722,8 @@ mod tests {
             root.preview_child(actor, None)
                 .expect("the root admits its own integrator");
         }
-        for role in [EffectiveRole::root()] {
+        {
+            let role = EffectiveRole::root();
             let actor = role.clone().with_effect_keys(router.clone());
             assert!(
                 actor.respects_role_ceiling(),

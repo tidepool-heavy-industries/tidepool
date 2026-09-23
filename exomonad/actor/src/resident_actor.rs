@@ -983,18 +983,20 @@ fn slice_cell_span(source: &str, span: &CellSourceSpan) -> Option<String> {
         return Some(line[start..end].iter().collect());
     }
     let mut out = String::new();
-    for line_index in start_line..=end_line {
-        let line: Vec<char> = lines[line_index].chars().collect();
-        if line_index == start_line {
+    let span_lines = &lines[start_line..=end_line];
+    let last = span_lines.len() - 1;
+    for (offset, raw_line) in span_lines.iter().enumerate() {
+        let line: Vec<char> = raw_line.chars().collect();
+        if offset == 0 {
             let start = span.start_column.saturating_sub(1).min(line.len());
             out.extend(&line[start..]);
-        } else if line_index == end_line {
+        } else if offset == last {
             let end = span.end_column.saturating_sub(1).min(line.len());
             out.extend(&line[..end]);
         } else {
-            out.push_str(lines[line_index]);
+            out.push_str(raw_line);
         }
-        if line_index != end_line {
+        if offset != last {
             out.push('\n');
         }
     }
@@ -1365,12 +1367,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             record.interactive_policy_installed = true;
         }
-        let _ = self
-            .environment
+        // best-effort: the deployment observer channel may have no listener
+        // (e.g. shut down); a missed PolicyInstalled event has no correctness
+        // effect since the policy flag above is already committed to state.
+        self.environment
             .deployments
             .send(LocalResidentDeployment::PolicyInstalled(Box::new(
                 installation,
-            )));
+            )))
+            .ok();
     }
 
     /// The actor whose native application services this actor's commands.
@@ -1427,10 +1432,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             record.terminal = Some(terminal.clone());
         }
         if self.environment.retired.lock().insert(actor) {
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::Retired { actor, terminal });
+                .send(LocalResidentDeployment::Retired { actor, terminal })
+                .ok();
         }
     }
 
@@ -1488,16 +1494,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             {
                 continue;
             }
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::WatchChanged { notification });
+                .send(LocalResidentDeployment::WatchChanged { notification })
+                .ok();
         }
         for notification in self.environment.requests.take_settlement_notifications() {
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::SettlementChanged { notification });
+                .send(LocalResidentDeployment::SettlementChanged { notification })
+                .ok();
         }
     }
 
@@ -1506,10 +1514,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         notification: Option<crate::RequestCancellationNotification>,
     ) {
         if let Some(notification) = notification {
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::RequestCancellation { notification });
+                .send(LocalResidentDeployment::RequestCancellation { notification })
+                .ok();
         }
     }
 
@@ -1982,11 +1991,16 @@ where
             tokio::time::sleep_until(deadline.due_monotonic()).await;
             let (cancellation, notifications) = requests.deadline_request(owner, request);
             for notification in notifications {
-                let _ = deployments.send(LocalResidentDeployment::WatchChanged { notification });
+                // best-effort: deployment observer channel may have no listener.
+                deployments
+                    .send(LocalResidentDeployment::WatchChanged { notification })
+                    .ok();
             }
             if let Some(notification) = cancellation {
-                let _ =
-                    deployments.send(LocalResidentDeployment::RequestCancellation { notification });
+                // best-effort: deployment observer channel may have no listener.
+                deployments
+                    .send(LocalResidentDeployment::RequestCancellation { notification })
+                    .ok();
             }
         });
     }
@@ -2059,12 +2073,18 @@ where
                     if let Ok(children) = self.environment.fork_groups.abort(group, context.actor) {
                         for child in children {
                             if let Some(child) = kernel.resolve(child) {
-                                let _ = child
+                                // A child already gone from a failed fork-group admission is
+                                // the common case here; log anything else so an actor that
+                                // refused shutdown does not silently linger.
+                                if let Err(error) = child
                                     .shutdown(ActorTerminal {
                                         kind: ActorExitKind::Cancelled,
                                         summary: "fork group admission failed".into(),
                                     })
-                                    .await;
+                                    .await
+                                {
+                                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                                }
                             }
                         }
                     }
@@ -3312,12 +3332,18 @@ where
                                 })?;
                             for child in children {
                                 if let Some(child) = kernel.resolve(child) {
-                                    let _ = child
+                                    // A child already gone from a failed fork-group admission is
+                                    // the common case here; log anything else so an actor that
+                                    // refused shutdown does not silently linger.
+                                    if let Err(error) = child
                                         .shutdown(ActorTerminal {
                                             kind: ActorExitKind::Cancelled,
                                             summary: "fork group admission failed".into(),
                                         })
-                                        .await;
+                                        .await
+                                    {
+                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                                    }
                                 }
                             }
                             return self
@@ -3368,12 +3394,18 @@ where
                 };
                 for child in children {
                     if let Some(child) = kernel.resolve(child) {
-                        let _ = child
+                        // A child already gone from a failed fork-group admission is
+                        // the common case here; log anything else so an actor that
+                        // refused shutdown does not silently linger.
+                        if let Err(error) = child
                             .shutdown(ActorTerminal {
                                 kind: ActorExitKind::Cancelled,
                                 summary: "fork group admission aborted".into(),
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                        }
                     }
                 }
                 self.environment
@@ -4190,10 +4222,11 @@ where
                 },
             );
             self.next_activation_sequence += 1;
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::SessionReady { activation });
+                .send(LocalResidentDeployment::SessionReady { activation })
+                .ok();
         }
         Ok(InteractivePark::Parked)
     }
@@ -4413,10 +4446,11 @@ where
         });
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {
-            let _ = self
-                .environment
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
                 .deployments
-                .send(LocalResidentDeployment::ChildExited { notice });
+                .send(LocalResidentDeployment::ChildExited { notice })
+                .ok();
         }
         Ok(())
     }
@@ -4444,7 +4478,7 @@ where
             if let Some(prepared) = self.prepared_workspace.take() {
                 let actor = context.actor;
                 self.worktree_custody = Some(
-                    tokio::task::spawn_blocking(move || prepared.install(actor))
+                    tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor))
                         .await
                         .map_err(ResidentActorWorkbenchError::Join)?
                         .map_err(|error| {
@@ -4467,7 +4501,7 @@ where
                     let worktree = worktree.clone();
                     let role = self.descriptor.effective_role().role();
                     self.worktree_custody = Some(
-                        tokio::task::spawn_blocking(move || {
+                        tidepool_runtime::spawn_blocking_in_span(move || {
                             admission.install_custody(actor, &worktree, role)
                         })
                         .await
@@ -5067,7 +5101,7 @@ where
                                         error,
                                     )
                                     .await?;
-                                fragment = next_fragment;
+                                fragment = *next_fragment;
                                 continue;
                             }
                             Err(error) => {
@@ -5127,7 +5161,7 @@ where
                                             error,
                                         )
                                         .await?;
-                                    fragment = next_fragment;
+                                    fragment = *next_fragment;
                                     continue;
                                 }
                                 Err(error) => {
@@ -5387,7 +5421,7 @@ where
                             };
                         }
                     }
-                    fragment = next_fragment;
+                    fragment = *next_fragment;
                 }
                 settled => return Ok(settled),
             }
@@ -5650,7 +5684,7 @@ where
                     kernel,
                     context,
                     workbench,
-                    fragment,
+                    *fragment,
                     *outcome,
                     WorkbenchUnitExecution {
                         execution: None,
@@ -6067,7 +6101,7 @@ where
                         kernel,
                         context,
                         &workbench,
-                        fragment,
+                        *fragment,
                         *outcome,
                         WorkbenchUnitExecution {
                             execution: execution.as_ref(),
@@ -6552,12 +6586,18 @@ where
     ) {
         for child in self.environment.fork_groups.abort_unpublished(owner) {
             if let Some(child) = kernel.resolve(child) {
-                let _ = child
+                // A child already gone from a failed fork-group admission is
+                // the common case here; log anything else so an actor that
+                // refused shutdown does not silently linger.
+                if let Err(error) = child
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: summary.into(),
                     })
-                    .await;
+                    .await
+                {
+                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                }
             }
         }
     }
@@ -6630,12 +6670,18 @@ where
             .abort_incomplete(owner, selected)
         {
             if let Some(child) = kernel.resolve(child) {
-                let _ = child
+                // A child already gone from a failed fork-group admission is
+                // the common case here; log anything else so an actor that
+                // refused shutdown does not silently linger.
+                if let Err(error) = child
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: summary.into(),
                     })
-                    .await;
+                    .await
+                {
+                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                }
             }
         }
     }
@@ -6916,13 +6962,19 @@ where
                 .abort_incomplete_at_boundary(context.actor, &boundary)
             {
                 if let Some(child) = kernel.resolve(child) {
-                    let _ = child
+                    // A child already gone from a failed fork-group admission is
+                    // the common case here; log anything else so an actor that
+                    // refused shutdown does not silently linger.
+                    if let Err(error) = child
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "fork admission stopped before interrupted tool settlement"
                                 .into(),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                    }
                 }
             }
             if let Some(reply) = reply {
@@ -6963,12 +7015,18 @@ where
                 .abort_incomplete_at_boundary(context.actor, &boundary)
             {
                 if let Some(child) = kernel.resolve(child) {
-                    let _ = child
+                    // A child already gone from a failed fork-group admission is
+                    // the common case here; log anything else so an actor that
+                    // refused shutdown does not silently linger.
+                    if let Err(error) = child
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "fork admission stopped before tool completion".into(),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                    }
                 }
             }
             let groups = self
@@ -7507,12 +7565,18 @@ where
                     .abort_selected_unpublished(context.actor, groups)
                 {
                     if let Some(child) = kernel.resolve(child) {
-                        let _ = child
+                        // A child already gone from a failed fork-group admission is
+                        // the common case here; log anything else so an actor that
+                        // refused shutdown does not silently linger.
+                        if let Err(error) = child
                             .shutdown(ActorTerminal {
                                 kind: ActorExitKind::Cancelled,
                                 summary: "route callback failed before publication".into(),
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                        }
                     }
                 }
             }
@@ -7780,10 +7844,11 @@ where
                     ),
                 );
             } else {
-                let _ = self
-                    .environment
+                // best-effort: deployment observer channel may have no listener.
+                self.environment
                     .deployments
-                    .send(LocalResidentDeployment::ChildExited { notice });
+                    .send(LocalResidentDeployment::ChildExited { notice })
+                    .ok();
             }
         })
     }

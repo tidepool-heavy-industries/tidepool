@@ -94,7 +94,8 @@ impl Actor for SupervisorProbe {
             SupervisionEvent::ActorFailed(_, _) => "failed",
             SupervisionEvent::ProcessGroupChanged(_) => return Ok(()),
         };
-        let _ = self.events.send(label);
+        // best-effort: the test's probe receiver may already have been dropped.
+        self.events.send(label).ok();
         Ok(())
     }
 }
@@ -281,7 +282,8 @@ impl Actor for ReplyProbe {
                 release.await.map_err(|_| "probe release dropped")?;
                 let receiver_was_dropped = reply.send(response).is_err();
                 drop(request);
-                let _ = done.send(receiver_was_dropped);
+                // best-effort: the test driver may already have moved on.
+                done.send(receiver_was_dropped).ok();
                 Ok(())
             }
         }

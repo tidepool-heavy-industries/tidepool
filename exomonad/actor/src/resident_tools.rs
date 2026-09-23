@@ -140,12 +140,17 @@ impl WorkbenchExecutionControl {
     }
 
     pub(crate) fn finish_sleep(&self) {
-        let _ = self.phase.compare_exchange(
-            WORKBENCH_EXPIRED,
-            WORKBENCH_IDLE,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        );
+        // best-effort CAS: only advance EXPIRED -> IDLE; if the phase moved
+        // elsewhere in the meantime (e.g. a concurrent cancellation) that
+        // transition owns the state instead, and this one is a no-op.
+        self.phase
+            .compare_exchange(
+                WORKBENCH_EXPIRED,
+                WORKBENCH_IDLE,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok();
     }
 
     pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {

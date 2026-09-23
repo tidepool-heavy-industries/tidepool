@@ -145,7 +145,9 @@ pub struct CommandBackendRequest {
 impl CommandBackendRequest {
     pub fn supply(&self, backend: BackendResult) {
         if let Some(reply) = self.reply.lock().take() {
-            let _ = reply.send(backend);
+            // best-effort: the caller awaiting the backend may have dropped
+            // its receiver (cancelled or already gone) before supply landed.
+            drop(reply.send(backend));
         }
     }
 }
@@ -403,7 +405,9 @@ impl CommandJobs {
                         if matches!(mode, crate::local_actor::ResourceCleanup::Retire) {
                             let backend = shared.backend.lock().clone();
                             if let Some(backend) = backend {
-                                let _ = backend.control(&id, CommandControl::Cancel).await;
+                                // best-effort: retiring a job whose backend may
+                                // have already exited; the cancel is advisory.
+                                drop(backend.control(&id, CommandControl::Cancel).await);
                             }
                         }
                         match shared.cleanup(&id).await {
@@ -820,7 +824,10 @@ impl JobState {
                     result
                 }
             };
-            let _ = myself.cast(JobMessage::ControlFinished(reply, result));
+            // best-effort: the job actor may already have stopped (e.g. the
+            // execution finished and retired it) before the control call
+            // completed; there is no one left to deliver the result to.
+            drop(myself.cast(JobMessage::ControlFinished(reply, result)));
         }));
     }
 }
@@ -846,7 +853,9 @@ impl Actor for JobActor {
                     "native deployment owner unavailable".into(),
                 ))
             });
-            let _ = myself.cast(JobMessage::BackendReady(backend));
+            // best-effort: the job actor may have stopped while the backend
+            // was resolving (cancellation, retirement); nothing to deliver to.
+            drop(myself.cast(JobMessage::BackendReady(backend)));
         });
         Ok(JobState {
             id,
@@ -879,7 +888,9 @@ impl Actor for JobActor {
                 state.execution = tokio::spawn(async move {
                     let result = backend.execute(&id, spec, shared.phase.clone()).await;
                     shared.complete(result);
-                    let _ = execution_actor.cast(JobMessage::Finished);
+                    // best-effort: the job actor may already be stopping
+                    // (e.g. cancelled concurrently) and have no mailbox left.
+                    drop(execution_actor.cast(JobMessage::Finished));
                 });
                 state.next_control(&myself);
             }
@@ -893,7 +904,9 @@ impl Actor for JobActor {
             JobMessage::Finished => myself.stop(None),
             JobMessage::ControlFinished(reply, result) => {
                 state.control.take();
-                let _ = reply.send(result);
+                // best-effort: the caller awaiting this control reply may
+                // have already dropped its receiver (timed out, cancelled).
+                drop(reply.send(result));
                 state.next_control(&myself);
             }
             JobMessage::Control(operation, reply) => {
@@ -912,14 +925,17 @@ impl Actor for JobActor {
                         // `BoundedBackend::control` bounds and maps an unresponsive
                         // backend on its own.
                         let result = backend.control(&state.id, CommandControl::Cancel).await;
-                        let _ = reply.send(result);
+                        // best-effort: the caller awaiting this reply may
+                        // have already dropped its receiver.
+                        drop(reply.send(result));
                     } else {
                         state.execution.abort();
                         state.shared.complete(CommandResult {
                             outcome: CommandOutcome::CommandCancelled,
                             cleanup: CommandCleanup::CommandClean,
                         });
-                        let _ = reply.send(Ok(()));
+                        // best-effort: same as above.
+                        drop(reply.send(Ok(())));
                         myself.stop(None);
                     }
                 } else {
@@ -947,13 +963,17 @@ impl Actor for JobActor {
         }
         let backend = state.shared.backend.lock().clone();
         if let Some(backend) = backend {
-            let _ = tokio::time::timeout(BACKEND_CALL_TIMEOUT, async {
-                backend.control(&state.id, CommandControl::Cancel).await?;
-                (&mut state.execution)
-                    .await
-                    .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
-            })
-            .await;
+            // best-effort: whether this lands or times out, the code below
+            // force-aborts execution and marks the result unconfirmed either way.
+            drop(
+                tokio::time::timeout(BACKEND_CALL_TIMEOUT, async {
+                    backend.control(&state.id, CommandControl::Cancel).await?;
+                    (&mut state.execution)
+                        .await
+                        .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
+                })
+                .await,
+            );
             state.execution.abort();
             state.shared.complete(unconfirmed(
                 "job owner retired before native cleanup was confirmed".into(),

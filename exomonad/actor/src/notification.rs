@@ -83,18 +83,23 @@ impl NotificationSend {
     /// A lost waiter does not undo publication and must not trigger replay.
     pub fn admitted(&self, inbox: String, sequence: u64) {
         if let Some(reply) = self.reply.lock().take() {
-            let _ = reply.send(Ok(NotificationReceipt {
-                owner: self.owner,
-                target: self.target,
-                inbox,
-                sequence,
-            }));
+            // best-effort: a lost waiter does not undo publication (see doc
+            // comment above) and the caller may already have stopped waiting.
+            reply
+                .send(Ok(NotificationReceipt {
+                    owner: self.owner,
+                    target: self.target,
+                    inbox,
+                    sequence,
+                }))
+                .ok();
         }
     }
 
     pub fn rejected(&self, error: NotificationError) {
         if let Some(reply) = self.reply.lock().take() {
-            let _ = reply.send(Err(error));
+            // best-effort: the waiter may already have stopped waiting.
+            reply.send(Err(error)).ok();
         }
     }
 }
@@ -115,7 +120,8 @@ impl NotificationPoll {
     }
     pub fn observed(&self, result: Result<NotificationState, NotificationError>) {
         if let Some(reply) = self.reply.lock().take() {
-            let _ = reply.send(result);
+            // best-effort: the poller may already have stopped waiting.
+            reply.send(result).ok();
         }
     }
 }
