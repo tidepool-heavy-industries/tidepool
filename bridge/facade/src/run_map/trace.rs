@@ -36,6 +36,8 @@ impl DurationSummary {
 #[derive(Debug, Serialize)]
 pub struct TraceSummary {
     pub host_tools: BTreeMap<String, DurationSummary>,
+    /// Named implementation phases. These overlap their parent tool spans.
+    pub phases: BTreeMap<String, DurationSummary>,
     pub compile_requests: DurationSummary,
     pub prepared_compiles: DurationSummary,
     pub jev_calls: DurationSummary,
@@ -60,6 +62,7 @@ impl Default for TraceSummary {
     fn default() -> Self {
         Self {
             host_tools: BTreeMap::new(),
+            phases: BTreeMap::new(),
             compile_requests: DurationSummary::default(),
             prepared_compiles: DurationSummary::default(),
             jev_calls: DurationSummary::default(),
@@ -278,6 +281,22 @@ fn class_label(raw: &str) -> Option<&str> {
     .then_some(raw)
 }
 
+fn known_phase(raw: &str) -> Option<&str> {
+    matches!(
+        raw,
+        "git_capture_wait"
+            | "git_capture"
+            | "build_snapshot"
+            | "compiler_request_admission"
+            | "compiler_response"
+            | "compiler_transaction_response"
+            | "compiler_preflight"
+            | "compiler_service"
+            | "compiler_transaction_admission"
+    )
+    .then_some(raw)
+}
+
 pub(super) fn read_trace(
     path: &Path,
     limits: Limits,
@@ -353,6 +372,21 @@ pub(super) fn read_trace(
         let target = record["target"].as_str().unwrap_or("");
         let span = &record["span"];
         let spans = record["spans"].as_array();
+        if let (Some(phase), Some(ms)) = (
+            fields["phase"].as_str().and_then(known_phase),
+            fields["elapsed_ms"].as_u64(),
+        ) {
+            summary.phases.entry(phase.into()).or_default().add(ms);
+            if let Some(id) = span["compile_request"].as_str().or_else(|| {
+                spans.and_then(|items| {
+                    items
+                        .iter()
+                        .find_map(|item| item["compile_request"].as_str())
+                })
+            }) {
+                summary.link("phase", id, ms, &source);
+            }
+        }
         match (target, message) {
             ("tidepool::host_dynamic_tools", "close") if span["name"] == "tool_call" => {
                 if let (Some(tool), Some(ms)) = (span["tool"].as_str(), elapsed_ms(fields)) {
@@ -469,6 +503,7 @@ mod tests {
             serde_json::json!({"timestamp":"2026-09-23T10:00:06.000Z","target":"exomonad_actor::resident_actor","fields":{"message":"typed refusal","refusal_kind":"reply_unauthorized"}}),
             serde_json::json!({"timestamp":"2026-09-23T10:00:07.000Z","target":"tidepool::actor_host","fields":{"message":"interactive application launched","actor":"ActorRef { id: ActorId(2), incarnation: Incarnation(1) }"}}),
             serde_json::json!({"timestamp":"2026-09-23T10:00:08.000Z","target":"tidepool::host_dynamic_tools","fields":{"message":"close","time.busy":"10s","time.idle":"0ms"},"span":{"name":"tool_call","tool":"bash"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:07.500Z","target":"tidepool_extract_cmd::daemon","fields":{"message":"compiler request finished","phase":"compiler_service","elapsed_ms":830,"worker_source":"secret"},"span":{"name":"compile_request","compile_request":"compile-1"}}),
         ];
         fs::write(
             &path,
@@ -488,6 +523,8 @@ mod tests {
             },
             &mut diagnostics,
         );
+        assert_eq!(summary.phases["compiler_service"].count, 1);
+        assert_eq!(summary.phases["compiler_service"].total_ms, 830);
         assert_eq!(summary.host_tools["haskell"].total_ms, 2000);
         assert_eq!(summary.compile_requests.total_ms, 122);
         assert_eq!(summary.prepared_compiles.count, 1);
@@ -495,10 +532,11 @@ mod tests {
         assert_eq!(summary.input_units["Rejected"], 1);
         assert_eq!(summary.typed_refusals["reply_unauthorized"], 1);
         assert_eq!(summary.unclassified_dispatch_failures, 1);
-        assert_eq!(summary.timing_links.len(), 3);
+        assert_eq!(summary.timing_links.len(), 4);
         assert_eq!(summary.timing_links[0].id, "call-1");
         assert_eq!(summary.timing_links[1].id, "compile-1");
         assert_eq!(summary.timing_links[2].id, "exec-1");
+        assert_eq!(summary.timing_links[3].id, "compile-1");
         assert!(summary.dispatch_failures.is_empty());
         assert!(summary.actor_lifecycle.contains_key("2@1"));
         assert!(!summary.host_tools.contains_key("bash"));

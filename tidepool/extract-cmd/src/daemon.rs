@@ -243,6 +243,7 @@ pub(crate) fn execute(
     cwd: &Path,
     argv: &[OsString],
 ) -> Result<Output, DaemonError> {
+    let admission_started = Instant::now();
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -267,9 +268,26 @@ pub(crate) fn execute(
     // A missing marker (including orderly EOF) does not prove the peer did
     // not accept. Only an explicit rejection permits rebinding after submission.
     let state = read_exact_or_crash(&mut stream, 1)?[0];
+    tracing::info!(
+        phase = "compiler_request_admission",
+        elapsed_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        accepted = state == ACCEPTED,
+        "compiler phase finished"
+    );
     match state {
-        ACCEPTED => decode_output(&mut stream)
-            .map_err(|error| DaemonError::AfterAcceptance(Box::new(error))),
+        ACCEPTED => {
+            let response_started = Instant::now();
+            let response = decode_output(&mut stream)
+                .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)));
+            tracing::info!(
+                phase = "compiler_response",
+                elapsed_ms =
+                    u64::try_from(response_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                success = response.is_ok(),
+                "compiler phase finished"
+            );
+            response
+        }
         REJECTED => {
             let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
             Err(DaemonError::NotAccepted(message))
@@ -312,6 +330,7 @@ pub(crate) fn execute_transaction_request(
     cwd: &Path,
     argv: &[OsString],
 ) -> Result<Output, DaemonError> {
+    let started = Instant::now();
     stream
         .write_all(&[TRANSACTION_REQUEST])
         .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
@@ -321,7 +340,15 @@ pub(crate) fn execute_transaction_request(
     stream
         .flush()
         .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-    decode_output(stream).map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))
+    let response =
+        decode_output(stream).map_err(|error| DaemonError::AfterAcceptance(Box::new(error)));
+    tracing::info!(
+        phase = "compiler_transaction_response",
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        success = response.is_ok(),
+        "compiler phase finished"
+    );
+    response
 }
 
 pub(crate) fn end_transaction(stream: &mut UnixStream) -> Result<(), DaemonError> {
@@ -353,6 +380,7 @@ fn explicit_rejection(stream: &mut UnixStream) -> Option<String> {
 }
 
 pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError> {
+    let started = Instant::now();
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -373,6 +401,11 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
     let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
         .map_err(|_| DaemonError::Crashed)?;
+    tracing::info!(
+        phase = "compiler_preflight",
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "compiler phase finished"
+    );
     Ok(DaemonBinding { producer, epoch })
 }
 
@@ -574,6 +607,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                                         run_id,
                                         %compile_request,
                                         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                                        phase = "compiler_service",
                                         exit_code = code,
                                         transaction = true,
                                         "compiler request finished"
@@ -712,6 +746,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                         run_id,
                         %compile_request,
                         elapsed_ms,
+                        phase = "compiler_service",
                         exit_code = response.0,
                         "compiler request finished"
                     );
@@ -723,6 +758,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                         run_id,
                         %compile_request,
                         elapsed_ms,
+                        phase = "compiler_service",
                         %error,
                         "compiler request failed"
                     );

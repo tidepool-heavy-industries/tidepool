@@ -433,8 +433,10 @@ impl CompilerEndpoint {
                 ));
             }
         };
-        tracing::debug!(
+        tracing::info!(
             transport = transport_name,
+            phase = "compiler_transaction_admission",
+            elapsed_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             queue_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "compiler transaction admitted"
         );

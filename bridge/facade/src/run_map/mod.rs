@@ -353,6 +353,12 @@ impl RunMap {
                 duration.count, duration.total_ms
             ));
         }
+        for (phase, duration) in &self.trace.phases {
+            output.push_str(&format!(
+                "\n    {phase}: {} recorded phases, elapsed {} ms (may overlap parent spans)",
+                duration.count, duration.total_ms
+            ));
+        }
         for (class, count) in &self.trace.dispatch_failures {
             output.push_str(&format!("\n    dispatch failure {class}: {count}"));
         }
