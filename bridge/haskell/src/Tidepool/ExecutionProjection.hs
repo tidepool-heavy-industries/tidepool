@@ -62,7 +62,7 @@ import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
-import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
@@ -748,7 +748,8 @@ lowerPreparedEvidence context modules = do
   (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
   (verbNodes, verbRows, verbSites) <-
-    lowerVerbEvidence (length moduleNodes + length auxNodes)
+    lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
+      (length moduleNodes + length auxNodes)
   let sites = moduleSites <> verbRows
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
@@ -852,19 +853,21 @@ auxiliaryRootTypeGraph context modules = do
         TypePolicy.emptyTypeGraphBuilder
   pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
--- | One synthetic 'HostAnswer' row per observed request constructor defined
--- by the generated effect universe with a closed reply index. The generated
--- module is the universal effect vocabulary shared by actor and MCP surfaces;
--- the installed row is enforced at runtime. Only the index is interned, since
--- the host constructs its answer from the wire type alone.
-lowerVerbEvidence :: Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerVerbEvidence base = do
+-- | Generated effect constructors and explicit KnownEffect instances both
+-- authorize synthetic host-answer rows. The latter include the handwritten
+-- Replies and Watches protocols; a nominal reply type alone is not authority
+-- (ordinary data constructors such as (:|) can have that shape too).
+lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerVerbEvidence effectRequestTypeIds base = do
   known <- gets constructors
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
-        , Just owner <- [nameModule_maybe (GHC.tyConName (dataConTyCon constructor))]
-        , moduleNameString (moduleName owner) == "Tidepool.Effects.Core"
+        , let family = GHC.tyConName (dataConTyCon constructor)
+        , let generated = maybe False
+                ((== "Tidepool.Effects.Core") . moduleNameString . moduleName)
+                (nameModule_maybe family)
+        , generated || getKey (nameUnique family) `Set.member` effectRequestTypeIds
         , Just index <- [requestReplyIndex constructor]
         , let symbol = nameSymbol "constructor" (dataConName constructor)
               qualified = symbolModule symbol <> "." <> symbolOccurrence symbol

@@ -131,7 +131,8 @@ import Tidepool.Timing
   , newTimingRequestIdentity )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
-  ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority )
+  ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority
+  , siteAuthorityEffectRequestTypeIds )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   (installRetainedUnfoldingsPlugin, retainedDefinedBy, scopeRetainedModuleGraph)
@@ -1135,7 +1136,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                     let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
                     in (known', known')
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
-                    (resolveSiteAuthority (mfHscEnv mf))
+                    (resolveSiteAuthority (mfHscEnv mf) (tcg_insts (mfTcGblEnv mf)))
                   (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
                     elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
                   let elaboration = PreparedElaboration
@@ -1145,6 +1146,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                         , peYieldSites = yieldSites
                         , pePreparedSites = preparedSites
                         , peTypeGraph = typeGraph
+                        , peEffectRequestTypeIds = siteAuthorityEffectRequestTypeIds siteAuthority
                         , peSiteRejections = rejections
                         }
                   Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration))

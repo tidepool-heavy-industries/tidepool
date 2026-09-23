@@ -3,6 +3,7 @@ module Tidepool.PreparedSites
   , PreparedSite(..)
   , SiteAuthority
   , resolveSiteAuthority
+  , siteAuthorityEffectRequestTypeIds
   , SiteRejection(..)
   , elaboratePreparedSites
   , lookupPreparedVerb
@@ -17,9 +18,12 @@ import Data.Bits ((.&.), (.|.), xor)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core
+import GHC.Core.Class (className)
+import GHC.Core.InstEnv (ClsInst, instEnvElts, is_cls, is_tys)
 import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
@@ -31,14 +35,14 @@ import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqF
 import GHC.Core.Type
   ( mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView
   , isLiftedTypeKind, typeKind )
-import GHC.Core.TyCon (TyCon, tyConArity)
+import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy)
-import GHC.Driver.Env (HscEnv, lookupType)
+import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
-import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName)
+import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
@@ -47,9 +51,13 @@ import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString)
+import GHC.Unit.Module.ModDetails (md_insts)
+import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
+import GHC.Types.Unique (getKey)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
@@ -63,19 +71,22 @@ data SiteAuthority = SiteAuthority
   { eitherTyCon :: Maybe TyCon
   , invocationExitTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
+  , effectRequestTypeIds :: Set.Set Word64
   }
 
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.
-resolveSiteAuthority :: HscEnv -> IO SiteAuthority
-resolveSiteAuthority env = do
+resolveSiteAuthority :: HscEnv -> [ClsInst] -> IO SiteAuthority
+resolveSiteAuthority env currentInstances = do
   eitherType <- exactTyCon "GHC.Internal.Data.Either" "Either"
   invocationExit <- exactTyCon "Tidepool.Effects.Core" "InvocationExit"
   responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
+  effectRequests <- knownEffectTypeIds
   pure SiteAuthority
     { eitherTyCon = eitherType
     , invocationExitTyCon = invocationExit
     , responseResultTyCon = responseResult
+    , effectRequestTypeIds = effectRequests
     }
  where
   -- Resolve the defining module's interface and ask its declaration loader
@@ -97,6 +108,38 @@ resolveSiteAuthority env = do
               Succeeded _ -> Nothing
               Failed _ -> Nothing
       _ -> pure Nothing
+
+  knownEffectTypeIds = do
+    found <- findImportedModule env (mkModuleName "Tidepool.Effects.Row") NoPkgQual
+    case found of
+      Found _ owner -> do
+        marker <- initIfaceLoad env (lookupOrig owner (mkTcOcc "KnownEffect"))
+        knownEffect <- lookupType env marker >>= \case
+          Just (ATyCon tycon) | isClassTyCon tycon -> pure True
+          Nothing -> do
+            imported <- initIfaceLoad env (importDecl marker)
+            pure $ case imported of
+              Succeeded (ATyCon tycon) -> isClassTyCon tycon
+              _ -> False
+          _ -> pure False
+        if not knownEffect then pure Set.empty else do
+          eps <- hscEPS env
+          let packageInstances = instEnvElts (eps_inst_env eps)
+              homeInstances = concatMap (instEnvElts . md_insts . hm_details)
+                (eltsHpt (hsc_HPT env))
+              effectInstances = filter
+                ((== marker) . className . is_cls)
+                (currentInstances <> homeInstances <> packageInstances)
+          pure $ Set.fromList
+            [ getKey (nameUnique (tyConName tycon))
+            | instance' <- effectInstances
+            , [effectType] <- [is_tys instance']
+            , Just (tycon, _) <- [splitTyConApp_maybe effectType]
+            ]
+      _ -> pure Set.empty
+
+siteAuthorityEffectRequestTypeIds :: SiteAuthority -> Set.Set Word64
+siteAuthorityEffectRequestTypeIds = effectRequestTypeIds
 
 data PreparedSite = PreparedSite
   { psOwner :: Id
@@ -331,9 +374,9 @@ syntheticSiteId identity =
   let Fingerprint high low = fingerprintString (T.unpack identity)
   in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
 
--- | The reply index of a generated effect request is the last argument of
+-- | The reply index of an authorized effect request is the last argument of
 -- its saturated result type (@Print :: Text -> Console ()@ gives @()@).
--- Projection admits only constructors defined in Tidepool.Effects.Core.
+-- Projection separately checks generated and KnownEffect type authority.
 -- Require a lifted, nominal outer constructor so a bare type variable or an
 -- effect-profile index cannot acquire a synthetic host-answer site. Fields
 -- inside an admitted index may remain unconstructible in the type graph.
