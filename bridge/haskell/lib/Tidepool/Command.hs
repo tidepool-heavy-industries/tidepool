@@ -104,7 +104,7 @@ import Tidepool.Inspection
     PageDisplay (..),
     WorkbenchDisplay (..),
     pageWithContinuation,
-    renderText,
+    rawText,
   )
 import Tidepool.QQ.Bash (bash)
 
@@ -480,7 +480,7 @@ instance Display Capture where
         remaining = max 0 (budget - T.length heading)
         (out, omittedOut) = captureDisplay "stdout" (remaining `div` 2) (capturedStdout capture)
         (err, omittedErr) = captureDisplay "stderr" (max 0 (remaining - T.length out)) (capturedStderr capture)
-        (text, clipped) = renderText budget (heading <> out <> err)
+        (text, clipped) = rawText budget (heading <> out <> err)
      in (text, omittedOut || omittedErr || clipped)
 
 instance Display StreamCapture where
@@ -498,27 +498,27 @@ captureDisplay stream budget capture =
       allowance = max 0 (budget - T.length header)
       (shown, omitted) =
         if T.length body <= allowance then (body, False) else (T.takeEnd allowance body, True)
-      (text, clipped) = renderText budget (header <> shown <> "\n")
+      (text, clipped) = rawText budget (header <> shown <> "\n")
    in (text, omitted || clipped)
 
 instance Display RunResult where
   displayTree Finished {commandResult = outcome, capturedOutput = captured} =
     Concat [TextLeaf (resultHeading outcome <> "\n"), displayTree captured]
   displayWithout keys budget result@Finished {completedJob = Job key, commandResult = outcome}
-    | key `elem` keys = renderText budget (resultHeading outcome <> " · output retained")
+    | key `elem` keys = rawText budget (resultHeading outcome <> " · output retained")
     | otherwise = displayWith budget result
   displayWith budget result = case result of
     Finished {commandResult = outcome, capturedOutput = captured} ->
       let heading = resultHeading outcome <> "\n"
           (body, omitted) = displayOutput (max 0 (budget - T.length heading)) captured
-          (text, clipped) = renderText budget (heading <> body)
+          (text, clipped) = rawText budget (heading <> body)
        in (text, omitted || clipped)
 
 instance Display OutputPage where
   displayTree OutputPage {pageStream = stream, pageDetails = details} =
     TextLeaf (outputHeading (T.pack (show stream)) details)
   displayWith budget OutputPage {pageStream = stream, pageDetails = details} =
-    renderText budget (outputHeading (T.pack (show stream)) details)
+    rawText budget (outputHeading (T.pack (show stream)) details)
 
 instance Display CommandOutput where
   displayTree captured =
@@ -530,7 +530,7 @@ instance Display CommandOutput where
 
 instance Display CommandPage where
   displayTree = TextLeaf . outputHeading "output"
-  displayWith budget = renderText budget . outputHeading "output"
+  displayWith budget = rawText budget . outputHeading "output"
 
 displayOutput :: Int -> CommandOutput -> (Text, Bool)
 displayOutput budget captured =
@@ -549,7 +549,7 @@ displayOutput budget captured =
             else
               let marker = outputMetadata stream details <> " · display tail; full capture retained\n"
                   allowance = max 0 (limit - T.length marker)
-                  (text, _) = renderText limit (marker <> T.takeEnd allowance (outputText details))
+                  (text, _) = rawText limit (marker <> T.takeEnd allowance (outputText details))
                in (text, True)
 
 resultHeading :: CommandResult -> Text
@@ -583,7 +583,7 @@ outputMetadata stream page =
     number = T.pack . show
 
 instance Display OutputIssue where
-  displayWith budget issue = renderText budget $ case issue of
+  displayWith budget issue = rawText budget $ case issue of
     IncompleteStdout retained ->
       "Command finished; this capture is incomplete. Awaiting again does not enlarge it. Use Cmd.readStdout with your existing job binding, or Cmd.job applied to your result; Cmd.output navigates retained output. Retention gaps are explicit. Job: " <> T.pack (show retained)
     StillRunning retained ->

@@ -168,7 +168,7 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     )
     .await;
     assert_eq!(
-        reloaded["items"][1]["output"], "[Project.Work]",
+        reloaded["items"][1]["output"], "[\"Project.Work\"]",
         "{reloaded}"
     );
 
@@ -326,7 +326,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     )
     .await;
     assert_eq!(
-        reloaded["items"][1]["output"], "[Project.Work]",
+        reloaded["items"][1]["output"], "[\"Project.Work\"]",
         "{reloaded}"
     );
 

@@ -9,7 +9,7 @@
 -- | Workbench presentation. Summaries describe observations, never acceptance.
 module Tidepool.Inspection
   ( Display (..),
-    renderText,
+    rawText,
     print,
     WorkbenchDisplay (..),
     FullInspection,
@@ -140,9 +140,9 @@ instance (Display a) => Display (Maybe a) where
   displayTree = displayTreePrec 0
   displayTreePrec _ Nothing = TextLeaf "Nothing"
   displayTreePrec precedence (Just value) = application precedence "Just" [displayTreePrec 11 value]
-  displayWithout _ budget Nothing = renderText budget "Nothing"
+  displayWithout _ budget Nothing = rawText budget "Nothing"
   displayWithout keys budget (Just value) = renderParts budget "Just " "" [\n -> displayWithout keys n value]
-  displayWith budget Nothing = renderText budget "Nothing"
+  displayWith budget Nothing = rawText budget "Nothing"
   displayWith budget (Just value) = renderParts budget "Just " "" [\n -> displayWith n value]
 
 instance (Display a, Display b) => Display (Either a b) where
@@ -172,7 +172,7 @@ instance (Display a, Display b, Display c) => Display (a, b, c) where
 renderParts :: Int -> Text -> Text -> [Int -> (Text, Bool)] -> (Text, Bool)
 renderParts budget opening closing values =
   let (body, omitted) = go (max 0 (budget - Text.length opening - Text.length closing)) [] values
-      (text, clipped) = renderText budget (opening <> body <> closing)
+      (text, clipped) = rawText budget (opening <> body <> closing)
    in (text, omitted || clipped)
   where
     go _ accumulated [] = (Text.concat (reverse accumulated), False)
@@ -190,8 +190,14 @@ instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplayWithout keys = displayWithout keys 512
 
 instance WorkbenchDisplay Text where
-  workbenchDisplay = renderText 512
-  workbenchActivationDisplay limit = renderText limit
+  workbenchDisplay = rawText 512
+  workbenchActivationDisplay limit = rawText limit
+
+-- | A top-level 'String' renders raw, mirroring 'Text'. Without this the
+-- 'Display'-derived {-# OVERLAPPABLE #-} instance answers instead and quotes it.
+instance WorkbenchDisplay [Char] where
+  workbenchDisplay = workbenchDisplay . Text.pack
+  workbenchActivationDisplay limit = workbenchActivationDisplay limit . Text.pack
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
@@ -204,7 +210,13 @@ instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
   inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value) (displayTree value)
 
 instance FullDisplay Text where
-  inspectFull value = FullInspection (\_ budget -> renderText budget value) (literalText value)
+  -- Both fields must agree: the retained tree backs paged/resumable display
+  -- (PageDisplay), the closure backs the bounded single-shot text. A
+  -- top-level Text value is raw either way; only nested Text is quoted.
+  inspectFull value = FullInspection (\_ budget -> rawText budget value) (TextLeaf value)
+
+instance FullDisplay [Char] where
+  inspectFull = inspectFull . Text.pack
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
@@ -288,6 +300,16 @@ instance {-# OVERLAPPABLE #-} Display a => PageDisplay effects a where
 
 instance PageDisplay effects FullInspection where
   displayPage budget (FullInspection _ tree) = pageWithContinuation budget tree Nothing
+
+-- | A top-level Text or String value pages as raw text, not a quoted literal:
+-- the generic instance above renders through 'displayTree', which is
+-- 'literalText' for 'Text' and is correct for text nested inside another
+-- value, but wrong for a bare top-level result.
+instance PageDisplay effects Text where
+  displayPage budget value = pageWithContinuation budget (TextLeaf value) Nothing
+
+instance PageDisplay effects [Char] where
+  displayPage budget value = displayPage budget (Text.pack value)
 
 instance PageDisplay effects (DisplayPage effects) where
   displayPage budget page =

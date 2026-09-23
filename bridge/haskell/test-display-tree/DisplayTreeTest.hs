@@ -19,6 +19,8 @@ main = do
   wideCompoundValuesBreakOnlyWhenNeeded
   textUsesEscapedStringLiterals
   topLevelTextKeepsLineBreaks
+  nonAsciiTextIsNotNumericallyEscaped
+  controlCharactersAreEscaped
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -51,12 +53,32 @@ textUsesEscapedStringLiterals =
 
 topLevelTextKeepsLineBreaks :: IO ()
 topLevelTextKeepsLineBreaks = do
+  -- Top-level String shares this same unquoted rendering: the 'WorkbenchDisplay'
+  -- and 'FullDisplay' [Char] instances convert to Text and call 'rawText'.
   assertEqual "standalone text is raw" ("first\nsecond", False)
-    (renderText 64 "first\nsecond")
+    (rawText 64 "first\nsecond")
   assertEqual "standalone text remains bounded" ("first", True)
-    (renderText 5 "first\nsecond")
+    (rawText 5 "first\nsecond")
   assertEqual "text nested in a pair is quoted" "(\"first\\nsecond\", 1)"
     (renderAll 64 (treeParts "(" ")" [literalText "first\nsecond", TextLeaf "1"]))
+
+nonAsciiTextIsNotNumericallyEscaped :: IO ()
+nonAsciiTextIsNotNumericallyEscaped = do
+  assertEqual "printable non-ASCII passes through literalText unescaped"
+    "\"\955-calculus\""
+    (renderAll 64 (literalText "\955-calculus"))
+  assertEqual "printable non-ASCII in a standalone value stays raw"
+    ("\955-calculus", False)
+    (rawText 64 "\955-calculus")
+
+controlCharactersAreEscaped :: IO ()
+controlCharactersAreEscaped = do
+  assertEqual "tabs are escaped in nested text"
+    "\"a\\tb\""
+    (renderAll 64 (literalText "a\tb"))
+  assertEqual "other control characters use a numeric escape"
+    "\"a\\x1;b\""
+    (renderAll 64 (literalText "a\x01\&b"))
 
 punctuationAndChildrenRespectBudget :: IO ()
 punctuationAndChildrenRespectBudget = do

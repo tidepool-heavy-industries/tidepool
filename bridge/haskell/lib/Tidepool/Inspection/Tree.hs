@@ -7,12 +7,13 @@ module Tidepool.Inspection.Tree
   , renderTree
   , treeParts
   , literalText
-  , renderText
+  , rawText
   , precedenceParens
   ) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import Numeric (showHex)
 import Prelude
 
 -- | Legacy renderers receive the remaining allowance. Their omitted detail
@@ -25,16 +26,27 @@ data DisplayTree
   | LineBreak
   | LegacyLeaf (Int -> (Text, Bool))
 
--- | Quote text using Haskell string-literal escapes.
+-- | Quote text with minimal escaping: only quotes, backslashes, and control
+-- characters are escaped. Printable non-ASCII (e.g. \955) passes through
+-- unescaped, unlike GHC's 'show', which numerically escapes it.
 literalText :: Text -> DisplayTree
-literalText = StringLeaf . show . T.unpack
+literalText value = TextLeaf (T.concat ["\"", T.concatMap escapeChar value, "\""])
+  where
+    escapeChar '"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar c
+      | c < ' ' || c == '\DEL' = T.pack ("\\x" <> showHex (fromEnum c) ";")
+      | otherwise = T.singleton c
 
--- | A standalone text result is presented as text; structured values use
--- 'literalText' for their elements and fields.
-renderText :: Int -> Text -> (Text, Bool)
-renderText budget value =
-  let (prefix, suffix) = T.splitAt (max 0 budget) value
-  in (prefix, not (T.null suffix))
+-- | A standalone text result is presented raw, bounded by the single tree
+-- renderer rather than a separate truncation algorithm.
+rawText :: Int -> Text -> (Text, Bool)
+rawText budget value =
+  let (rendered, remaining, unavailable) = renderTree budget (TextLeaf value)
+  in (rendered, maybe False (const True) remaining || unavailable)
 
 -- | Render at most the requested characters, retaining the actual remaining
 -- tree. The last flag reports detail omitted by a legacy custom renderer.
