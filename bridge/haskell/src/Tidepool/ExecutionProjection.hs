@@ -852,17 +852,19 @@ auxiliaryRootTypeGraph context modules = do
         TypePolicy.emptyTypeGraphBuilder
   pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
--- | One synthetic 'HostAnswer' row per interned constructor with a closed
--- reply index ('requestReplyIndex'), and the table naming it. Only the index
--- is interned; the row has no inputs, since the host answer is built from the
--- wire type alone. Membership in an effect row is deliberately not tested:
--- an unused row is inert, a missing one would refuse the request.
+-- | One synthetic 'HostAnswer' row per observed request constructor defined
+-- by the generated effect universe with a closed reply index. The generated
+-- module is the universal effect vocabulary shared by actor and MCP surfaces;
+-- the installed row is enforced at runtime. Only the index is interned, since
+-- the host constructs its answer from the wire type alone.
 lowerVerbEvidence :: Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
 lowerVerbEvidence base = do
   known <- gets constructors
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
+        , Just owner <- [nameModule_maybe (GHC.tyConName (dataConTyCon constructor))]
+        , moduleNameString (moduleName owner) == "Tidepool.Effects.Core"
         , Just index <- [requestReplyIndex constructor]
         , let symbol = nameSymbol "constructor" (dataConName constructor)
               qualified = symbolModule symbol <> "." <> symbolOccurrence symbol

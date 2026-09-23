@@ -42,7 +42,7 @@ import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
-import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
+import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
@@ -68,10 +68,15 @@ data SiteAuthority = SiteAuthority
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.
 resolveSiteAuthority :: HscEnv -> IO SiteAuthority
-resolveSiteAuthority env = SiteAuthority
-  <$> exactTyCon "GHC.Internal.Data.Either" "Either"
-  <*> exactTyCon "Tidepool.Effects.Core" "InvocationExit"
-  <*> exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
+resolveSiteAuthority env = do
+  eitherType <- exactTyCon "GHC.Internal.Data.Either" "Either"
+  invocationExit <- exactTyCon "Tidepool.Effects.Core" "InvocationExit"
+  responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
+  pure SiteAuthority
+    { eitherTyCon = eitherType
+    , invocationExitTyCon = invocationExit
+    , responseResultTyCon = responseResult
+    }
  where
   -- Resolve the defining module's interface and ask its declaration loader
   -- for the real TyCon. This follows neither re-export spellings nor names
@@ -288,7 +293,9 @@ siteType listAnswer ty = SiteType rendered
     rendered = T.pack (if listAnswer then "[" ++ base ++ "]" else base)
 
 renderType :: Type -> String
-renderType = renderWithContext defaultSDocContext . ppr
+renderType = renderWithContext stableContext . ppr
+  where
+    stableContext = defaultSDocContext { sdocSuppressUniques = True }
 
 replyDeclaration :: Type -> Maybe T.Text
 replyDeclaration ty = case splitTyConApp_maybe ty of
@@ -324,19 +331,12 @@ syntheticSiteId identity =
   let Fingerprint high low = fingerprintString (T.unpack identity)
   in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
 
--- | The reply index of a request constructor: the last argument of its
--- saturated original result type (@Print :: Text -> Console ()@ gives @()@).
--- A polymorphic index remains useful only when it has a normalized nominal
--- outer constructor. Its enclosing algebraic constructors are authenticated,
--- while the unresolved field remains an explicit unconstructible node. This
--- permits fieldless states such as @ProgressPending@ and @ProgressClosed@
--- without claiming a way to construct the polymorphic payload. A bare type
--- variable has no evidence: admitting it could replace a real dynamic site
--- with an unconstructible synthetic one. A nullary result type also has no
--- index. Only the index is interned; the request type itself is a GADT the
--- type policy refuses.
--- Indices of other kinds, such as an effect-profile witness's effect list,
--- are not reply values and must not acquire host-answer sites.
+-- | The reply index of a generated effect request is the last argument of
+-- its saturated result type (@Print :: Text -> Console ()@ gives @()@).
+-- Projection admits only constructors defined in Tidepool.Effects.Core.
+-- Require a lifted, nominal outer constructor so a bare type variable or an
+-- effect-profile index cannot acquire a synthetic host-answer site. Fields
+-- inside an admitted index may remain unconstructible in the type graph.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)

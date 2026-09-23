@@ -452,13 +452,9 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
     // directly -- confirmed by `execution_schema/validation.rs`'s own
     // `constructor()` lookup).
     //
-    // `verb_sites` deliberately casts a
-    // WIDE net -- "an extra row for a non-effect GADT costs one type-graph
-    // node ... breadth is the safer error" -- and in practice does pick up
-    // at least one non-effect constructor from this turn's own machinery
-    // (`GHC.Internal.Data.Typeable.Internal.TrType`, from the `@Value` type
-    // application some helpers need). Only the generated effects module's
-    // own constructors are this test's subject.
+    // Only constructors defined in the generated effects module may have
+    // synthetic host-answer rows. Every applied constructor from a declared
+    // effect family must have one, even if its reply type is unconstructible.
     let constructors = prepared.constructors();
     let mut verb_site: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let mut ignored_noise = Vec::new();
@@ -472,12 +468,31 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
             }
         }
     }
+    let effect_families: BTreeSet<&str> = decls
+        .iter()
+        .map(|decl| decl.type_name)
+        .filter(|family| *family != "Finalize")
+        .collect();
+    let missing_sites: Vec<String> = constructors
+        .iter()
+        .filter(|decl| {
+            decl.identity.module == EFFECTS_MODULE
+                && decl.family.module == EFFECTS_MODULE
+                && effect_families.contains(decl.family.occurrence.as_str())
+        })
+        .filter_map(|decl| {
+            let label = format!("{}.{}", decl.identity.module, decl.identity.occurrence);
+            (!verb_site.contains_key(&label)).then_some(label)
+        })
+        .collect();
+    assert!(
+        missing_sites.is_empty(),
+        "[{surface_name}] generated effect constructors applied by this turn lack synthetic reply rows: {missing_sites:?}"
+    );
     if !ignored_noise.is_empty() {
         eprintln!(
             "[{surface_name}] note: ignored {} verb_sites entry(ies) outside \
-             `{EFFECTS_MODULE}` (the projector's deliberately broad net, \
-             picking up incidental non-effect \
-             constructors this turn's own machinery touches): {ignored_noise:?}",
+             `{EFFECTS_MODULE}`: {ignored_noise:?}",
             ignored_noise.len()
         );
     }

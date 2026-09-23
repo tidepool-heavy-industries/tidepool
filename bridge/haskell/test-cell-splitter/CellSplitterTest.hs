@@ -787,6 +787,16 @@ prologuePlans flags = do
       assertEqual "pragma-only item is classified as prologue, not a definition" True
         (cellAnalysisPrologueOnly item)
     other -> fail ("pragma-only plan: " ++ show other)
+  pragmaBeforeExpression <- analyzeCellWithFlags flags checkTemplate
+    "{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}\n1 + 1\n"
+  case pragmaBeforeExpression of
+    Right (CellSourcePlan { cellPlanItems = [header, item] }) -> do
+      assertEqual "leading pragma is a prologue" True (cellAnalysisPrologueOnly header)
+      assertEqual "leading pragma preserves the expression" KExpr
+        (sbKind (cellAnalysisVerdict item))
+      assertEqual "expression source kind" [KExpr]
+        (map cellAnalysisSourceKind (cellAnalysisSourceItems item))
+    other -> fail ("leading pragma plan: " ++ show other)
   disabled <- analyzeCellWithFlags flags checkTemplate
     "{-# LANGUAGE NoQuasiQuotes #-}\nf = [bash|echo hello|]\n"
   case disabled of

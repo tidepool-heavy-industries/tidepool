@@ -570,6 +570,10 @@ pub(crate) struct ResidentWorkbenchFragment {
 }
 
 impl ResidentWorkbenchFragment {
+    pub(crate) fn summarizes_bound_commands(&self) -> bool {
+        matches!(&self.display, WorkbenchDisplay::Binding(_))
+    }
+
     pub(crate) fn retain_job_binding(&mut self, binding: String) {
         self.recovered_jobs.push(binding);
     }

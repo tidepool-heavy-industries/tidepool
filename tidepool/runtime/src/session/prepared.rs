@@ -4337,4 +4337,35 @@ mod tests {
         assert_eq!(engine.programs.len(), 2);
         assert!(!engine.sites.contains_key(&(SYNTHETIC_SITE_BIT | 6)));
     }
+
+    #[test]
+    fn alpha_stable_polymorphic_reply_evidence_installs_without_weakening_conflicts() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let site = SYNTHETIC_SITE_BIT | 7;
+        let stable = TypeNode::Unconstructible {
+            reason: "polymorphic".into(),
+            rendered: "a".into(),
+        };
+        let (mut engine, first) =
+            PreparedEngine::bootstrap(verb_program(site, stable.clone())).expect("bootstrap");
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let second = engine
+            .install(verb_program(site, stable), &bindings, &index)
+            .expect("alpha-stable polymorphic evidence is equivalent");
+        assert_ne!(first, second);
+
+        let different = TypeNode::Unconstructible {
+            reason: "polymorphic".into(),
+            rendered: "a_unique".into(),
+        };
+        let error = engine
+            .install(verb_program(site, different), &bindings, &index)
+            .expect_err("different type evidence must remain a conflict");
+        assert!(
+            matches!(error, PreparedRuntimeError::SiteConflict { owner, .. } if owner == first),
+            "expected SiteConflict, got {error:?}"
+        );
+        assert_eq!(engine.programs.len(), 2);
+    }
 }

@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -O1 #-}
@@ -8,7 +9,11 @@ module TypeEvidence where
 import Data.Text (Text)
 import Data.Kind (Type)
 import Numeric.Natural (Natural)
-import Tidepool.Effects.Core (runLLMTurn)
+import Tidepool.Effects.Core
+  ( AgentSession (AgentAttachWith), AgentTools (AgentToolsInstallWith), runLLMTurn )
+import Tidepool.Effects.Row (KnownEffect)
+
+instance KnownEffect Console
 
 newtype Identity a = Identity a
 newtype Wrap (f :: Type -> Type) a = Wrap (f a)
@@ -23,6 +28,10 @@ data Progress progress
   = ProgressPending
   | ProgressUpdate progress
   | ProgressClosed
+
+data Alts f xs where
+  (:|) :: Alts f a -> Alts f rest -> Alts f (Either a rest)
+infixr 5 :|
 
 data EffectProfile (protocol :: Type -> Type) (effects :: [Type -> Type]) where
   ReadOnly :: EffectProfile protocol '[protocol, Maybe]
@@ -96,8 +105,20 @@ echoRequest = Echo 1
 progressRequest :: Console (Progress Int)
 progressRequest = ObserveProgress
 
+agentAttachRequest :: AgentSession ()
+agentAttachRequest = AgentAttachWith Nothing
+
+agentToolsInstallRequest :: AgentTools ()
+agentToolsInstallRequest = AgentToolsInstallWith
+
 functionRequest :: Console (Int -> Int)
 functionRequest = FunctionReply
+
+polyChoice :: Alts f (Either a b)
+polyChoice = undefined :| undefined
+
+polyChoiceNested :: Alts f (Either (Maybe a) b)
+polyChoiceNested = undefined :| undefined
 
 unrelated :: Int
 unrelated = 42

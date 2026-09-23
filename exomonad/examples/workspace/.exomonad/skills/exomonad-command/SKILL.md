@@ -62,15 +62,18 @@ result <- Cmd.run [bash|git status --short|]
 let changed = T.lines <$> Cmd.stdout result
 ```
 
-Output appears automatically, including for a bound result. The result remains
-available as Haskell data; displaying it again does not execute the command.
+An unbound command statement shows its observation. A command result bound in a
+cell shows a compact job, exit-status and stream-byte summary; the complete
+observation remains available through the binding. Displaying or reading it
+again does not execute the command.
 Inside an effectful block, `print value` emits bounded `Display` output in execution
 order, including output before a later failure. It uses the existing Console effect;
 it is not Prelude's `Show`-based IO print. State-machine actors log this output without
 waking a model. Large values still need projections or explicit pages.
-Use `Cmd.quiet action` when only the data matters. Quiet is scoped to that action
-and does not hide a stopped computation or its recovery receipt. Nonzero process
-exits remain in the retained result even when routine presentation is quiet.
+Use `Cmd.quiet action` when an unbound command's observation is unnecessary, or
+when suppressing routine presentation inside a larger effectful computation.
+Quiet is scoped to that action and does not hide a stopped computation or its
+recovery receipt. Nonzero process exits remain in the retained result.
 
 ```haskell
 let changed = T.lines <$> Cmd.stdout result

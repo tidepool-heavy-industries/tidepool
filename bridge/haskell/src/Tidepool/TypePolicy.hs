@@ -42,7 +42,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import qualified GHC.Types.Unique.Set as USet
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
-import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
+import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 
 data NominalHead = NominalHead
   { nhUnit :: Text
@@ -259,7 +259,9 @@ definedIn expected tc = maybe False
   (nameModule_maybe (tyConName tc))
 
 renderType :: Type -> Text
-renderType = T.pack . renderWithContext defaultSDocContext . ppr
+renderType = T.pack . renderWithContext stableContext . ppr
+  where
+    stableContext = defaultSDocContext { sdocSuppressUniques = True }
 
 -- | Whether a name belongs to the @ghc@ compiler package rather than a
 -- runtime package such as @ghc-prim@ or @ghc-internal@. Compiler API values

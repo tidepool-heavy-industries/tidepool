@@ -15,6 +15,10 @@ main = do
   exhaustedBudgetDoesNotForceTheNextField
   legacyLeavesReportUnavailableDetail
   applicationsParenthesizeOnlyAboveApplicationPrecedence
+  compactCompoundValuesStayOnOneLine
+  wideCompoundValuesBreakOnlyWhenNeeded
+  textUsesEscapedStringLiterals
+  topLevelTextKeepsLineBreaks
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -24,18 +28,48 @@ applicationsParenthesizeOnlyAboveApplicationPrecedence = do
   assertEqual "an application argument is parenthesized" "(Just 5)"
     (renderAll 64 (precedenceParens 11 application))
 
+compactCompoundValuesStayOnOneLine :: IO ()
+compactCompoundValuesStayOnOneLine = do
+  let value = treeParts "Right [" "]"
+        [treeParts "(" ")" [literalText "fib.py", TextLeaf "0.96", TextLeaf "0.17"],
+         treeParts "(" ")" [literalText "notes.md", TextLeaf "0.27", TextLeaf "0.75"]]
+  assertEqual "the saved tuple-list result stays compact"
+    "Right [(\"fib.py\", 0.96, 0.17), (\"notes.md\", 0.27, 0.75)]"
+    (renderAll 512 value)
+
+wideCompoundValuesBreakOnlyWhenNeeded :: IO ()
+wideCompoundValuesBreakOnlyWhenNeeded = do
+  let longValue = mconcat (replicate 25 "long")
+      value = treeParts "[" "]" [TextLeaf "first", TextLeaf longValue]
+  assertEqual "long collections keep line breaks between elements"
+    ("[first,\n" <> longValue <> "]") (renderAll 512 value)
+
+textUsesEscapedStringLiterals :: IO ()
+textUsesEscapedStringLiterals =
+  assertEqual "quotes, backslashes and newlines are escaped"
+    "\"a\\\"b\\\\c\\nd\"" (renderAll 64 (literalText "a\"b\\c\nd"))
+
+topLevelTextKeepsLineBreaks :: IO ()
+topLevelTextKeepsLineBreaks = do
+  assertEqual "standalone text is raw" ("first\nsecond", False)
+    (renderText 64 "first\nsecond")
+  assertEqual "standalone text remains bounded" ("first", True)
+    (renderText 5 "first\nsecond")
+  assertEqual "text nested in a pair is quoted" "(\"first\\nsecond\", 1)"
+    (renderAll 64 (treeParts "(" ")" [literalText "first\nsecond", TextLeaf "1"]))
+
 punctuationAndChildrenRespectBudget :: IO ()
 punctuationAndChildrenRespectBudget = do
   let tree = treeParts "(" ")" [TextLeaf "alpha", TextLeaf "beta"]
       (rendered, remainder, unavailable) = renderTree 8 tree
-  assertEqual "punctuation and children consume one shared budget" "(alpha,\n" rendered
+  assertEqual "punctuation and children consume one shared budget" "(alpha, " rendered
   assertTrue "tree retains the unrendered child and closing punctuation" (hasRemainder remainder)
   assertEqual "ordinary tree detail remains available" False unavailable
 
 pagesCoverTheExactTree :: IO ()
 pagesCoverTheExactTree = do
   let tree = treeParts "{" "}" [TextLeaf "left", TextLeaf "right", TextLeaf "tail"]
-      expected = "{left,\nright,\ntail}"
+      expected = "{left, right, tail}"
   assertEqual "successive pages concatenate without gaps or duplicates" expected
     (renderAll 4 tree)
 

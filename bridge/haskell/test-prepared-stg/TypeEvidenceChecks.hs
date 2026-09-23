@@ -2,7 +2,9 @@ module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
 import Control.Monad (unless)
 import Data.Bits ((.&.))
+import Data.List (isSuffixOf)
 import Data.Text qualified as Text
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import Tidepool.ExecutionProjection (ProjectionError)
 import Tidepool.ExecutionSchema
@@ -17,8 +19,49 @@ runTypeEvidenceChecks :: FilePath
   -> IO ()
 runTypeEvidenceChecks directory project projectWithAux = do
   let target = directory </> "TypeEvidence.hs"
+  createDirectoryIfMissing True (directory </> "Tidepool" </> "Effects")
+  writeFile (directory </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
+    [ "{-# LANGUAGE ExplicitForAll #-}"
+    , "{-# LANGUAGE GADTs #-}"
+    , "module Tidepool.Effects.Core where"
+    , "data InvocationExit = InvocationExit"
+    , "{-# OPAQUE runLLMTurn #-}"
+    , "runLLMTurn :: forall answer. String -> Maybe answer"
+    , "runLLMTurn _ = Nothing"
+    , "{-# OPAQUE runLLMTurnSited #-}"
+    , "runLLMTurnSited :: forall answer. Int -> String -> Maybe answer"
+    , "runLLMTurnSited _ _ = Nothing"
+    , "{-# OPAQUE runLLMTurnFork #-}"
+    , "runLLMTurnFork :: forall answer. String -> Maybe (Either InvocationExit answer)"
+    , "runLLMTurnFork _ = Nothing"
+    , "{-# OPAQUE runLLMTurnForkSited #-}"
+    , "runLLMTurnForkSited :: forall answer. Int -> String -> Maybe (Either InvocationExit answer)"
+    , "runLLMTurnForkSited _ _ = Nothing"
+    , "{-# OPAQUE runLLMTurnFanout #-}"
+    , "runLLMTurnFanout :: forall answer. [String] -> Maybe [Either InvocationExit answer]"
+    , "runLLMTurnFanout _ = Nothing"
+    , "{-# OPAQUE runLLMTurnFanoutSited #-}"
+    , "runLLMTurnFanoutSited :: forall answer. Int -> [String] -> Maybe [Either InvocationExit answer]"
+    , "runLLMTurnFanoutSited _ _ = Nothing"
+    , "{-# OPAQUE forkAllSited #-}"
+    , "forkAllSited :: forall answer. Int -> String -> Maybe [answer]"
+    , "forkAllSited _ _ = Nothing"
+    , "keepForkAllSited :: Maybe [Bool]"
+    , "keepForkAllSited = forkAllSited 0 \"\""
+    , "data AgentSession a where"
+    , "  AgentAttachWith :: Maybe String -> AgentSession ()"
+    , "data AgentTools a where"
+    , "  AgentToolsInstallWith :: AgentTools ()"
+    ])
+  writeFile (directory </> "Tidepool" </> "Effects" </> "Row.hs") (unlines
+    [ "{-# LANGUAGE KindSignatures #-}"
+    , "module Tidepool.Effects.Row (KnownEffect(..)) where"
+    , "import Data.Kind (Type)"
+    , "class KnownEffect (effect :: Type -> Type)"
+    ])
   readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs" >>= writeFile target
   result <- runPipelineSelected PreparedStg target [directory]
+  secondResult <- runPipelineSelected PreparedStg target [directory]
   let program entry = either
         (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
       answer entry = do
@@ -102,6 +145,20 @@ runTypeEvidenceChecks directory project projectWithAux = do
   profileWire <- program "profileWitness"
   assert (null (programVerbSites profileWire))
     "an effect-list witness acquired a synthetic reply site"
+  firstPoly <- program "polyChoice"
+  firstNestedPoly <- program "polyChoiceNested"
+  secondPoly <- either (ioError . userError . show) pure (project secondResult "polyChoice")
+  secondNestedPoly <- either (ioError . userError . show) pure (project secondResult "polyChoiceNested")
+  let polyEvidence wire =
+        [ row
+        | row <- programSites wire
+        , siteDelivery row == HostAnswer
+        , ":|" `isSuffixOf` Text.unpack (siteOrigin row)
+        ]
+      assertNoAlts wire = assert (null (polyEvidence wire))
+        ("ordinary alternatives constructor received synthetic reply rows: "
+          ++ show (polyEvidence wire))
+  mapM_ assertNoAlts [firstPoly, firstNestedPoly, secondPoly, secondNestedPoly]
   progressWire <- program "progressRequest"
   progressNode <- verbAnswer progressWire "ObserveProgress"
   case progressNode of
@@ -112,6 +169,15 @@ runTypeEvidenceChecks directory project projectWithAux = do
       assert (isRefusal (nodeAt progressWire payload))
         "polymorphic progress payload was treated as constructible"
     other -> ioError (userError ("polymorphic progress reply lacks algebraic evidence: " ++ show other))
+
+  mapM_ (\(entry, constructor) -> do
+      wire <- program entry
+      node <- verbAnswerFrom wire "Tidepool.Effects.Core" constructor
+      assert (familyOf node `elem` [Just "Unit", Just "()"])
+        (constructor ++ ": private protocol request lost its unit reply row"))
+    [ ("agentAttachRequest", "AgentAttachWith")
+    , ("agentToolsInstallRequest", "AgentToolsInstallWith")
+    ]
 
   empty <- program "unrelated"
   assert (null (programSites empty) && null (programTypes empty))
@@ -141,7 +207,8 @@ runTypeEvidenceChecks directory project projectWithAux = do
   synthetic site = siteId site .&. 0x8000000000000000 /= 0
   -- The request constructor's verb-site entry names exactly one synthetic,
   -- input-free host-answer row; return that row's wire evidence.
-  verbAnswer wire occurrence = do
+  verbAnswer wire occurrence = verbAnswerFrom wire "TypeEvidence" occurrence
+  verbAnswerFrom wire moduleName occurrence = do
     let named = [ ConstructorId index
                 | (index, declaration) <- zip [0 ..] (programConstructors wire)
                 , symbolOccurrence (constructorIdentity declaration) == Text.pack occurrence ]
@@ -152,7 +219,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
         [row] -> do
           assert (synthetic row && siteDelivery row == HostAnswer
               && null (siteInputs row) && siteOrdinal row == 0
-              && siteOrigin row == Text.pack ("TypeEvidence." ++ occurrence))
+              && siteOrigin row == Text.pack (moduleName ++ "." ++ occurrence))
             (occurrence ++ ": malformed synthetic row " ++ show row)
           pure (nodeAt wire (siteWire row))
         rows -> ioError (userError (occurrence ++ ": verb site names rows " ++ show rows))
