@@ -13,7 +13,7 @@
 /// machine-readable measurement/accounting lines (as opposed to a GHC source
 /// diagnostic). A worker line starting with one of these, after leading
 /// whitespace is trimmed, is machine-readable and never a source diagnostic.
-pub const MACHINE_STDERR_PREFIXES: [&str; 13] = [
+pub const MACHINE_STDERR_PREFIXES: [&str; 15] = [
     "tidepool-timing ",
     "tidepool-timing-detail ",
     "tidepool-timing-module ",
@@ -27,6 +27,8 @@ pub const MACHINE_STDERR_PREFIXES: [&str; 13] = [
     "tidepool-checked-interface-elided ",
     "tidepool-dependency-witness ",
     "tidepool-target ",
+    "tidepool-memo-cycle-graph ",
+    "tidepool-memo-trace-miss ",
 ];
 
 /// Whether `line` (after trimming leading whitespace) starts with a

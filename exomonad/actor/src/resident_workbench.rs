@@ -26,7 +26,10 @@ use tidepool_runtime::session::{
     ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
     TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
-use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
+use tidepool_runtime::{
+    classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
+};
+use tracing::Instrument;
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
 use crate::request_effect::{
@@ -2430,6 +2433,17 @@ pub enum ResidentActorWorkbenchError {
     ToolDeclarations(serde_json::Error),
 }
 
+/// Render an actor's ordered include roots for the `compile_blocking` span,
+/// in search order, so a diagnostic reader sees the exact search path a
+/// compile ran against without cross-referencing the actor registry.
+fn render_include_roots(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Preserve the resident session's authoritative boundary classification.
 /// A rejected response leaves the parked effect available for retry; a
 /// consumed response has crossed that boundary even if running onward failed.
@@ -2477,6 +2491,21 @@ where
     where
         ResultValue: Send + 'static,
     {
+        // `compile_blocking` carries the context a compile-cost diagnostic
+        // needs and that `spawn_blocking` would otherwise drop: which actor
+        // and input unit (session) this turn belongs to, and the ordered
+        // include roots it compiles against. `Instrument`ing the whole
+        // `with_host_machine` future (not just its `spawn_blocking` closure)
+        // keeps the span active across every `.await` point inside it, so
+        // `Span::current()` is correct wherever `spawn_blocking_in_span` is
+        // eventually called.
+        let compile_span = tracing::debug_span!(
+            "compile_blocking",
+            actor = %context.actor,
+            session = %context.placement.session,
+            operation = "resident_turn",
+            include_roots = %render_include_roots(&context.source_layer),
+        );
         self.with_host_machine(
             context.placement.session,
             max_wait,
@@ -2491,6 +2520,7 @@ where
                 operation(session, &context, source)
             },
         )
+        .instrument(compile_span)
         .await
     }
 
@@ -2523,7 +2553,7 @@ where
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
 
-        let task = tokio::task::spawn_blocking(move || {
+        let task = spawn_blocking_in_span(move || {
             // The blocking task owns the machine and its linear checkout
             // receipt together. Its async caller may be cooperatively
             // cancelled while this closure is running; settlement must not
@@ -3488,36 +3518,48 @@ where
         };
         let compiler_source = source.clone();
         let effects = context.haskell_effects_alias.clone();
-        let inspected = tokio::task::spawn_blocking(move || {
-            let prepared = compiler_source.prepare(&compile_view);
-            let include = prepared
-                .include
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            run_inspections(InspectionRequest {
-                preamble: &prepared.preamble,
-                imports: &prepared.imports,
-                include: &include,
-                session_root: compile_view.session_root(),
-                inject_modules: &prepared.injected,
-                queries: &[request_query],
-                effects: Some(&effects),
+        let inspection_span = tracing::debug_span!(
+            "compile_blocking",
+            actor = %context.actor,
+            session = %context.placement.session,
+            operation = "structured_introspection",
+            include_roots = %render_include_roots(&context.source_layer),
+        );
+        // Enter the span only for the synchronous call that captures it —
+        // an `Entered` guard is not `Send` and must not live across the
+        // `.await` below.
+        let spawn = {
+            let _entered = inspection_span.enter();
+            spawn_blocking_in_span(move || {
+                let prepared = compiler_source.prepare(&compile_view);
+                let include = prepared
+                    .include
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>();
+                run_inspections(InspectionRequest {
+                    preamble: &prepared.preamble,
+                    imports: &prepared.imports,
+                    include: &include,
+                    session_root: compile_view.session_root(),
+                    inject_modules: &prepared.injected,
+                    queries: &[request_query],
+                    effects: Some(&effects),
+                })
+                .map_err(|error| error.to_string())
+                .and_then(|mut results| {
+                    if results.len() == 1 {
+                        Ok(results.remove(0))
+                    } else {
+                        Err(format!(
+                            "inspection returned {} results for one query",
+                            results.len()
+                        ))
+                    }
+                })
             })
-            .map_err(|error| error.to_string())
-            .and_then(|mut results| {
-                if results.len() == 1 {
-                    Ok(results.remove(0))
-                } else {
-                    Err(format!(
-                        "inspection returned {} results for one query",
-                        results.len()
-                    ))
-                }
-            })
-        })
-        .await
-        .map_err(ResidentActorWorkbenchError::Join)?;
+        };
+        let inspected = spawn.await.map_err(ResidentActorWorkbenchError::Join)?;
 
         self.access
             .with_machine(context, move |session, context, _| {

@@ -107,6 +107,7 @@ import Control.Exception (finally, try, throwIO, IOException)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
+import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
 import System.Directory (makeAbsolute)
@@ -128,7 +129,8 @@ import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
-  , newTimingRequestIdentity )
+  , newTimingRequestIdentity
+  , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
   ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority
@@ -802,12 +804,29 @@ homeDependencyDigests graph =
     childFrame (HomeDependencyDigest digest) = frame digest
     frame bytes = BS8.pack (show (BS.length bytes) ++ ":") <> bytes
 
+-- | Diagnostic only: hex-render a digest for a 'tidepool-memo-cycle-graph'
+-- line. Not used by any validity comparison, which compares the raw
+-- 'HomeDependencyDigest' bytes directly.
+hexBytes :: BS.ByteString -> String
+hexBytes = concatMap hexByte . BS.unpack
+  where hexByte byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
+
 -- CPP, splices, and quasiquoters can consume inputs outside the downsweep
 -- source graph. TemplateHaskellQuotes alone only constructs syntax and does
 -- not execute a compiler-time provider, so it remains memoizable.
 hasUntrackedCompileTimeExecution :: DynFlags -> Bool
 hasUntrackedCompileTimeExecution flags =
   any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes]
+
+-- | Diagnostic only: which extension in 'hasUntrackedCompileTimeExecution'
+-- fired, for an exact no-reuse reason rather than a boolean. The first match
+-- in the same order that function checks; a module can enable more than one
+-- of these, in which case the trace names the first.
+untrackedExtensionName :: DynFlags -> Maybe String
+untrackedExtensionName flags = case filter (`xopt` flags)
+    [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes] of
+  (ext : _) -> Just (show ext)
+  []        -> Nothing
 
 -- Facts needed even when a module contributes no executable body. Keeping
 -- these separately lets an unchanged re-export or validation-only module
@@ -837,6 +856,17 @@ data GutsMemoEntry = GutsMemoEntry
     -- ^ Exact prepared interface for later importers, without TH linkables.
     -- Re-adding it after load clears the HPT does not require retaining the
     -- HscEnv, TcGblEnv, or pre-tidy ModGuts that produced it.
+  , gmeCycle :: Word64
+    -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): the compile-cycle id
+    -- ('requestIdentity') that produced this entry. Never read by a
+    -- validity check.
+  , gmeDirectWitnesses :: Map.Map HomeDependency HomeDependencyWitness
+    -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): this module's direct
+    -- dependency witnesses (selected path, content fingerprint) at the
+    -- cycle that produced this entry. Retained so a later miss can report
+    -- exactly which witness changed, and whether the change was in path,
+    -- fingerprint, or both. Validity itself continues to compare
+    -- 'memoHomeDependencies' (an opaque digest), never this map.
   }
 
 data ModuleObservation
@@ -895,6 +925,7 @@ runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> Set.Set SymbolIdentity -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessionT0 variant path = do
+    memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
     target <- guessTarget path Nothing Nothing
     setTargets [target]
@@ -1197,12 +1228,30 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                 , let mn = unLoc lmn
                 , HomeDependency mn OrdinaryHomeSource `Map.member` summaryFingerprints
                 ]
+              -- Diagnostic only (TIDEPOOL_MEMO_TRACE): the raw per-dependency
+              -- witnesses (path, fingerprint) behind 'homeDependencyWitnesses'
+              -- opaque digest, retained on the memo entry so a later miss can
+              -- name exactly which dependency's witness changed.
+              directWitnesses modSum = Map.restrictKeys summaryFingerprints
+                (directDependencyKeys modSum)
               dependencyEdgeCount = sum
                 [ length children | (_, children) <- Map.elems dependencyGraph ]
           when timing $ liftIO $ hPutStrLn stderr $
             "tidepool-dependency-witness nodes=" ++ show (Map.size dependencyGraph)
               ++ " direct_edges=" ++ show dependencyEdgeCount
               ++ " digest_computations=" ++ show digestComputations
+          -- The selected module graph, once per cycle (never per lookup).
+          -- Graph capture holds paths and fingerprints only.
+          when memoTrace $ liftIO $
+            forM_ (Map.toList summaryByDependency) $ \(dependency@(HomeDependency name kind), summary) -> do
+              let HomeDependencyWitness selectedPath fingerprint = summaryFingerprints Map.! dependency
+                  resolvedPath = normalise <$> ml_hs_file (ms_location summary)
+                  directDeps = [ moduleNameString d | d <- Set.toList (directHomeDeps summary) ]
+                  digestHex = case Map.lookup dependency dependencyDigests of
+                    Just (HomeDependencyDigest bytes) -> hexBytes bytes
+                    Nothing -> "<none>"
+              emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
+                selectedPath resolvedPath fingerprint directDeps digestHex
           validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
           -- The withholding pass can change only a module's own retained
           -- definitions; retained identities defined elsewhere reach it through
@@ -1218,19 +1267,65 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
                 "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
                   ++ " reason=" ++ reason
+          -- Under TIDEPOOL_MEMO_TRACE, the same miss with the originating
+          -- cycle and (when a prior entry exists) the exact per-dependency
+          -- witness diff — added/removed/changed keys, each shown with old
+          -- and new path/fingerprint separately so a path-only change is
+          -- distinguishable from a real content change.
+          let memoMissTrace modSum reason mEntry = liftIO $
+                emitMemoMissTrace memoTrace requestIdentity
+                  (maybe "none" (show . gmeCycle) mEntry)
+                  (moduleNameString (ms_mod_name modSum))
+                  reason
+                  [ renderWitness d w | (d, w) <- Map.toList added ]
+                  [ renderWitness d w | (d, w) <- Map.toList removed ]
+                  [ renderWitnessChange d old new | (d, (old, new)) <- Map.toList changed ]
+                where
+                  oldWitnesses = maybe Map.empty gmeDirectWitnesses mEntry
+                  newWitnesses = directWitnesses modSum
+                  added = Map.difference newWitnesses oldWitnesses
+                  removed = Map.difference oldWitnesses newWitnesses
+                  changed = Map.mapMaybe id $ Map.intersectionWith
+                    (\old new -> if old == new then Nothing else Just (old, new))
+                    oldWitnesses newWitnesses
+                  renderDependency (HomeDependency name kind) = moduleNameString name ++ "/" ++ show kind
+                  renderWitness d (HomeDependencyWitness witnessPath fp) =
+                    renderDependency d ++ ":path=" ++ maybe "<none>" id witnessPath ++ ",fingerprint=" ++ show fp
+                  renderWitnessChange d (HomeDependencyWitness op ofp) (HomeDependencyWitness np nfp) =
+                    renderDependency d
+                      ++ ":path=" ++ maybe "<none>" id op ++ "->" ++ maybe "<none>" id np
+                      ++ ",fingerprint=" ++ show ofp ++ "->" ++ show nfp
+                      ++ ",path_changed=" ++ show (op /= np)
+                      ++ ",fingerprint_changed=" ++ show (ofp /= nfp)
           let lookupValidMemo modSum = case mMemoRef of
                 Nothing  -> pure Nothing
                 Just ref -> do
                   depsOk <- depsValidSoFar modSum
                   if not depsOk || hasUntrackedCompileTimeExecution (ms_hspp_opts modSum)
                     then do
+                      -- Only the deps this cycle actually marked invalid —
+                      -- not every direct dependency, which the always-on
+                      -- 'memoMiss' summary line above lists in full.
+                      invalidDeps <- if depsOk then pure [] else liftIO $ do
+                        validMap <- readIORef validThisCycleRef
+                        pure [ moduleNameString d
+                             | d <- Set.toList (directHomeDeps modSum)
+                             , not (Map.findWithDefault False d validMap) ]
+                      let traceReason
+                            | not depsOk = "dependency-miss:" ++ unwords invalidDeps
+                            | otherwise = "no-reuse:" ++ maybe "untracked-compile-time-execution"
+                                ("extension=" ++) (untrackedExtensionName (ms_hspp_opts modSum))
                       memoMiss modSum (if depsOk then "untracked-compile-time-execution" else "dependency-miss:" ++ unwords
                         [ moduleNameString d | d <- Set.toList (directHomeDeps modSum) ])
+                      memoMissTrace modSum traceReason Nothing
                       pure Nothing
                     else do
                       m <- liftIO (readIORef ref)
                       case Map.lookup (ms_mod_name modSum) m of
-                        Nothing -> memoMiss modSum "absent" >> pure Nothing
+                        Nothing -> do
+                          memoMiss modSum "absent"
+                          memoMissTrace modSum "absent" Nothing
+                          pure Nothing
                         Just entry -> do
                           let validity = gmeValidity entry
                               sameHash = memoSourceHash validity == ms_hs_hash modSum
@@ -1252,6 +1347,11 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                                 , "same-hash=" ++ show sameHash
                                 , "same-retained=" ++ show sameRetained
                                 , "same-home-dependencies=" ++ show sameHomeDependencies ]
+                              memoMissTrace modSum (unwords
+                                [ "dependent-files=" ++ show (moduleFactHasDependentFiles (gmeFacts entry))
+                                , "same-hash=" ++ show sameHash
+                                , "same-retained=" ++ show sameRetained
+                                , "same-home-dependencies=" ++ show sameHomeDependencies ]) (Just entry)
                               pure Nothing
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case cpTier plan of
@@ -1291,7 +1391,9 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                           facts
                           (Just r)
                           prepared
-                          mInterface)))
+                          mInterface
+                          requestIdentity
+                          (directWitnesses modSum))))
                       Nothing  -> pure ()
                     pure (FreshObservation mf, r, prepared)
               pure ([observation | (observation, _, _) <- pairs], [r | (_, r, _) <- pairs],
@@ -1371,7 +1473,9 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             moduleFacts
                             (Just output)
                             prepared
-                            mInterface)))
+                            mInterface
+                            requestIdentity
+                            (directWitnesses modSum))))
                       Nothing -> pure ()
                   compileReachable interfaceUse modSum moduleFacts = do
                     -- The reachability pass ran against load's interfaces. Recheck
@@ -1416,7 +1520,9 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             moduleFacts
                             Nothing
                             Nothing
-                            Nothing)))
+                            Nothing
+                            requestIdentity
+                            (directWitnesses modSum))))
                       _ -> pure ()
                     pure []
               pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)

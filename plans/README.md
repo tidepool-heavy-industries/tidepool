@@ -19,6 +19,14 @@ unconsumed proposals are removed; Git retains their history.
 - [Observation-budget finding](jev-lab/observation-limit/FINDING.md): the
   regression invariant is covered by
   `bridge/facade/src/actor_host/observation_budget_tests.rs`.
+- [Compile-memo evidence](compile-memo-evidence.md): why a parent/child
+  checkout pair misses the compile memo on byte-identical dependencies
+  (`HomeDependencyWitness`'s digest mixes in selected path, not just
+  content fingerprint) and the `TIDEPOOL_MEMO_TRACE=1` diagnostic added to
+  confirm it directly. Covered by
+  `tidepool/extract-cmd/src/diagnostics.rs`'s
+  `machine_stderr_prefixes_match_the_haskell_emitters` and
+  `tidepool/runtime/src/span_blocking.rs`'s tests.
 ## Test support
 
 [`next/WaveContract.hs`](next/WaveContract.hs) is imported by the evidence

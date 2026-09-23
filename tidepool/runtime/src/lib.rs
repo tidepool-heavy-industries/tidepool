@@ -43,6 +43,8 @@ pub mod failclass;
 pub mod generated;
 mod render;
 pub mod session;
+pub mod span_blocking;
+pub use span_blocking::spawn_blocking_in_span;
 pub use session::prepared as prepared_execution;
 
 pub use artifacts::{

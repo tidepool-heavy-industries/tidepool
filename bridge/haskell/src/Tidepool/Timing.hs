@@ -19,12 +19,17 @@ module Tidepool.Timing
   , newTimingRequestIdentity
   , monotonicTime
   , elapsedMs
+    -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
+  , readMemoTraceEnabled
+  , emitMemoCycleGraph
+  , emitMemoMissTrace
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.List (intercalate)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
+import GHC.Fingerprint.Type (Fingerprint)
 import qualified GHC.Stats as RTS
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
@@ -231,3 +236,48 @@ delta :: (Num a, Ord a) => a -> a -> a
 delta before after
   | after >= before = after - before
   | otherwise = 0
+
+-- | Read the @TIDEPOOL_MEMO_TRACE@ env var. On iff exactly @"1"@; unset or
+-- any other value is off. Independent of 'readTimingEnabled': a diagnostic
+-- run can enable one, both, or neither.
+readMemoTraceEnabled :: IO Bool
+readMemoTraceEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_MEMO_TRACE"
+
+-- | One line per module in the selected module graph, written once per
+-- compile cycle (never per lookup) when @TIDEPOOL_MEMO_TRACE=1@. Graph
+-- capture holds paths and fingerprints only, never source or Core.
+emitMemoCycleGraph
+  :: Bool -> Word64 -> String -> String -> Maybe FilePath -> Maybe FilePath
+  -> Fingerprint -> [String] -> String -> IO ()
+emitMemoCycleGraph False _ _ _ _ _ _ _ _ = pure ()
+emitMemoCycleGraph True cycleId moduleName sourceKind selectedPath resolvedPath
+  sourceFingerprint directDeps dependencyDigest =
+  hPutStrLn stderr $
+    "tidepool-memo-cycle-graph cycle=" ++ show cycleId
+      ++ " module=" ++ moduleName
+      ++ " source_kind=" ++ sourceKind
+      ++ " selected_path=" ++ maybe "<none>" id selectedPath
+      ++ " resolved_path=" ++ maybe "<none>" id resolvedPath
+      ++ " fingerprint=" ++ show sourceFingerprint
+      ++ " direct_deps=" ++ intercalate "," directDeps
+      ++ " dependency_digest=" ++ dependencyDigest
+
+-- | One line per memo miss, written when @TIDEPOOL_MEMO_TRACE=1@. Distinct
+-- from the always-under-'TIDEPOOL_TIMING' @tidepool-memo-miss@ summary line:
+-- this one names the originating cycle that produced the stale entry, and
+-- for a dependency-witness change lists exactly which witnesses were added,
+-- removed, or changed — with path and fingerprint reported separately so a
+-- path-only change (identical fingerprint, different path) is distinguishable
+-- from a real content change.
+emitMemoMissTrace
+  :: Bool -> Word64 -> String -> String -> String -> [String] -> [String] -> [String] -> IO ()
+emitMemoMissTrace False _ _ _ _ _ _ _ = pure ()
+emitMemoMissTrace True cycleId originatingCycle moduleName reason added removed changed =
+  hPutStrLn stderr $
+    "tidepool-memo-trace-miss cycle=" ++ show cycleId
+      ++ " originating_cycle=" ++ originatingCycle
+      ++ " module=" ++ moduleName
+      ++ " reason=" ++ reason
+      ++ " added=" ++ intercalate ";" added
+      ++ " removed=" ++ intercalate ";" removed
+      ++ " changed=" ++ intercalate ";" changed
