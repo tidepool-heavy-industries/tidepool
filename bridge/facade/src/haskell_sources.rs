@@ -149,7 +149,20 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 /// Exomonad's frozen library must match `source_identity`, independent of launch
 /// cwd or development overrides used by the general Tidepool tools.
+///
+/// A dev build embeds nothing, so there is no fixed bundle to materialize:
+/// callers (the interactive driver's GHC include path, recipe checks) need a
+/// real directory containing `Tidepool.Prelude` et al., not an empty
+/// materialized stand-in. Resolve the checkout's stdlib the same way
+/// [`source_identity`]'s dev path does.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if EMBEDDED_STDLIB.is_empty() {
+        return tidepool_toolchain::toolchain::locate_stdlib(
+            &tidepool_toolchain::toolchain::StdlibFallbacks::default(),
+        )
+        .map(|location| location.dir)
+        .map_err(Into::into);
+    }
     let hash = content_hash(EMBEDDED_STDLIB);
     materialize(
         EMBEDDED_STDLIB,
