@@ -101,6 +101,11 @@ pub(super) struct HostedRetirement {
     resident: ResidentObservation,
     service: Option<tokio::task::JoinHandle<Result<(), String>>>,
     service_result: Option<Result<(), String>>,
+    // Counts consecutive `advance` calls that returned immediately because
+    // `input_seal` is still `Required` (a terminal actor with no seal
+    // installed). Used only to warn once when retirement is stuck on this.
+    stalled_on_required_input_seal: u32,
+    warned_stalled_input_seal: bool,
 }
 
 enum InputSealState {
@@ -216,6 +221,8 @@ fn start_endpoint(
         resident: ResidentObservation::Pending,
         service: Some(service),
         service_result: None,
+        stalled_on_required_input_seal: 0,
+        warned_stalled_input_seal: false,
     }));
     *entry = Some(owner.clone());
     start
@@ -333,7 +340,18 @@ impl HostedRetirement {
     async fn advance(&mut self) {
         let exact = self.actor.identity();
         match &mut self.input_seal {
-            InputSealState::Required => return,
+            InputSealState::Required => {
+                self.stalled_on_required_input_seal += 1;
+                if self.stalled_on_required_input_seal > 3 && !self.warned_stalled_input_seal {
+                    self.warned_stalled_input_seal = true;
+                    tracing::warn!(
+                        actor = ?exact,
+                        stalled_advances = self.stalled_on_required_input_seal,
+                        "hosted retirement blocked: input_seal is still Required (no seal installed) for this terminal actor"
+                    );
+                }
+                return;
+            }
             InputSealState::NoProducer => {}
             InputSealState::Pending(input_seal) => {
                 input_seal.finish().await;

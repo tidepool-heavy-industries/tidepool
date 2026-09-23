@@ -13,6 +13,11 @@ use workspace_publication::Admission;
 
 const SOURCE_CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Bound on how long a fork will queue for the parent workspace's publication
+/// gate before giving up. A stuck publication (held by another fork that
+/// never settles) would otherwise block every sibling fork forever.
+const PUBLICATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub(super) struct AdmittedWorkspace {
     pub(super) handle: WtWorktreeHandle,
     pub(super) workspace: Arc<PreparedWorkspace>,
@@ -472,7 +477,24 @@ impl NativeForkAdmission {
         // says nothing about native writers or the source's availability.
         // A caller cancelled while waiting has not begun an operation.
         let wait_started = std::time::Instant::now();
-        let mut publication = parent.workspace.publication.clone().lock_owned().await;
+        let mut publication = match tokio::time::timeout(
+            PUBLICATION_WAIT_TIMEOUT,
+            parent.workspace.publication.clone().lock_owned(),
+        )
+        .await
+        {
+            Ok(publication) => publication,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "waited {}s on the parent workspace publication held by another fork; \
+                         the fork was not started",
+                        PUBLICATION_WAIT_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        };
         tracing::info!(
             publication_wait_ms = wait_started.elapsed().as_millis() as u64,
             "workspace publication gate acquired"
@@ -552,9 +574,27 @@ impl NativeForkAdmission {
                 Err(error) => {
                     // If identity is known this may immediately finish; a lost
                     // begin reply remains owned for the fleet's next retry.
-                    let _ = parent
+                    match parent
                         .settle_publication(&mut publication, backend.as_ref())
-                        .await;
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(settle_error) => {
+                            tracing::error!(
+                                creator = ?creator,
+                                source_owner = ?source_owner,
+                                begin_error = %error,
+                                settle_error = %settle_error,
+                                "workspace publication admission failed and settling it afterward also failed"
+                            );
+                            return Err(io::Error::new(
+                                error.kind(),
+                                format!(
+                                    "{error}; additionally, settling the publication afterward failed: {settle_error}"
+                                ),
+                            ));
+                        }
+                    }
                     return Err(error);
                 }
             };
