@@ -39,8 +39,8 @@ effect with the default request constructor:
 lookupRaw (lookupRequest ["Cmd.quiet"])
 ```
 
-`lookupRequest` applies the hosted lookup defaults; use `LookupRequest` directly
-when a request needs custom discovery, view, candidate limit, or references.
+`lookupRequest` uses the shipped hosted tool's defaults; use `LookupRequest`
+directly when a request needs custom discovery, view, candidate limit, or references.
 
 ## Text, not String
 

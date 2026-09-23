@@ -11,6 +11,7 @@ import Control.Monad (unless)
 import Control.Monad.Freer (Eff, run)
 import Control.Monad.Freer.Internal (handleRelay)
 import qualified Data.Text as T
+import Tidepool.Agent.Contract (AsServerT, Tool (handler))
 import Tidepool.Lookup
 import Tidepool.Effects.Core (Lookup (..))
 import qualified Tidepool.Lookup.Tools as Tools
@@ -34,10 +35,10 @@ answer request
       [LookupResult query (LookupFound [entry query] False) | query <- lookupQueries request]
       [] "frozen-view" Nothing
 
-observe :: Eff '[Lookup] T.Text -> ([LookupRequest], T.Text)
+observe :: Eff '[Lookup] a -> ([LookupRequest], a)
 observe = observeWith answer
 
-observeWith :: (LookupRequest -> LookupBatch) -> Eff '[Lookup] T.Text -> ([LookupRequest], T.Text)
+observeWith :: (LookupRequest -> LookupBatch) -> Eff '[Lookup] a -> ([LookupRequest], a)
 observeWith respond = run . handleRelay (\value -> pure ([], value))
   (\(LookupRaw request) resume -> do
     (requests, value) <- resume (respond request)
@@ -48,15 +49,16 @@ check name value = unless value (fail name)
 
 main :: IO ()
 main = do
-  let expectedDefaults = lookupRequest ["Cmd.quiet"]
+  let expectedDefaults = LookupRequest ["Cmd.quiet"] False Nothing 128 []
       (cellRequests, _) = observe (lookupRaw (lookupRequest ["Cmd.quiet"]))
-  check "cell lookup constructor uses hosted defaults"
+      hostedLookup = Tools.lookup
+        (Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup])))
+      (hostedRequests, _) = observe
+        (handler hostedLookup (Tools.LookupArguments ["Cmd.quiet"]))
+  check "cell lookup constructor matches the shipped hosted tool request"
     (cellRequests == [expectedDefaults]
-      && lookupQueries expectedDefaults == ["Cmd.quiet"]
-      && lookupDiscover expectedDefaults
-      && lookupExpectedView expectedDefaults == Nothing
-      && lookupCandidateLimit expectedDefaults == 128
-      && null (lookupReferences expectedDefaults))
+      && hostedRequests == [expectedDefaults]
+      && lookupRequest ["Cmd.quiet"] == expectedDefaults)
   let select _ values = pure (Tools.rankCandidates (zip values [2,3,1,3,2,3]))
       (requests, output) = observe (Tools.executeWith select (Tools.LookupArguments ["root"]))
   check "one original batch and one nonrecursive follow-up" (length requests == 2)

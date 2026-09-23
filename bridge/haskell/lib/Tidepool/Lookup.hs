@@ -12,7 +12,6 @@ import Data.Text (Text)
 import Tidepool.Effects (lookupRaw)
 import Tidepool.Effects.Core
 
--- | Build a raw request with the same bounded discovery defaults as the
--- hosted lookup tool.
+-- | Build a raw request with the default hosted lookup tool's bounded options.
 lookupRequest :: [Text] -> LookupRequest
-lookupRequest queries' = LookupRequest queries' True Nothing 128 []
+lookupRequest queries' = LookupRequest queries' False Nothing 128 []

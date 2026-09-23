@@ -33,8 +33,8 @@ Opaque functions are useful values. Ask `lookup` for a name or use a
 questions without disturbing the cell.
 
 The hosted `lookup` tool is not a Haskell function. From a cell, use
-`lookupRaw (lookupRequest ["Cmd.quiet"])`; `lookupRequest` supplies the hosted
-tool's defaults. Use `LookupRequest` directly for custom lookup options.
+`lookupRaw (lookupRequest ["Cmd.quiet"])`; `lookupRequest` supplies the shipped
+hosted tool's defaults. Use `LookupRequest` directly for custom lookup options.
 
 Expressions share a bounded display allowance per cell. A truncated display
 offers `cellDisplay.more`, which reads its next retained page without repeating the
