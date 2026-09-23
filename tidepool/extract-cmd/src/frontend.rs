@@ -46,6 +46,9 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     if args.first().is_some_and(|arg| arg == "--connect") {
         return connect(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "--stop-daemon") {
+        return stop_daemon(&args[1..]);
+    }
 
     let worker_args = match worker_payload(&args)? {
         Some(payload) => vec![WORKER_REQUEST_FLAG.into(), payload],
@@ -82,6 +85,34 @@ fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
         .write_all(&output.stderr)
         .map_err(FrontendError::Io)?;
     Ok(exit_code(output.status))
+}
+
+/// `--stop-daemon --socket <path>`: request a graceful stop of a running
+/// persistent daemon and wait for its ack (or an idempotent no-op if nothing
+/// is listening). This is `scripts/lib-extract.sh`'s preferred path before it
+/// falls back to signaling the process directly — a signal has no orderly
+/// exit here (the daemon does not handle one) and can kill an in-flight
+/// compile another caller is waiting on.
+fn stop_daemon(args: &[OsString]) -> Result<u8, FrontendError> {
+    let mut socket = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let option = arg.to_str().ok_or_else(|| {
+            FrontendError::Usage("--stop-daemon options must be UTF-8".to_owned())
+        })?;
+        match option {
+            "--socket" => socket = Some(PathBuf::from(next(&mut args, option)?)),
+            _ => {
+                return Err(FrontendError::Usage(format!(
+                    "unknown --stop-daemon option: {option}"
+                )))
+            }
+        }
+    }
+    let socket =
+        socket.ok_or_else(|| FrontendError::Usage("--stop-daemon requires --socket".to_owned()))?;
+    daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
+    Ok(0)
 }
 
 fn worker_payload(args: &[OsString]) -> Result<Option<OsString>, FrontendError> {

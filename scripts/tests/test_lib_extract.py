@@ -24,6 +24,23 @@ if sys.argv[1] == "--compiler-endpoint-v1":
     producer_byte = int(os.environ.get("PRODUCER_BYTE", "0"))
     sys.stdout.buffer.write(b"TPCID001" + bytes([producer_byte]) * 32)
     sys.exit(2)  # EOF is deliberately not a complete compiler request.
+if sys.argv[1] == "--stop-daemon":
+    # Mirrors tidepool-extract's real --stop-daemon mode: send the wire's
+    # STOP tag and wait (briefly) for the daemon's one-byte ack. No daemon
+    # listening is success too — the desired end state already holds.
+    stop_sock = sys.argv[sys.argv.index("--socket") + 1]
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(stop_sock)
+    except OSError:
+        sys.exit(0)
+    client.sendall(b"TPDST001")
+    try:
+        client.recv(1)
+    except OSError:
+        pass
+    sys.exit(0)
 assert sys.argv[1] == "--daemon"
 Path(os.environ["DAEMON_PID_FILE"]).write_text(str(os.getpid()))
 Path(os.environ["DAEMON_PID_FILE"] + ".argv").write_text("\n".join(sys.argv[1:]))
@@ -35,11 +52,22 @@ signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 if mode == "hang":
     while True:
         time.sleep(0.01)
+daemon_sock_path = sys.argv[sys.argv.index("--socket") + 1]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.bind(sys.argv[sys.argv.index("--socket") + 1])
+sock.bind(daemon_sock_path)
 sock.listen()
 while True:
     conn, _ = sock.accept()
+    header = conn.recv(8)
+    if header == b"TPDST001":
+        # The real daemon acks before retiring its socket and exiting its
+        # accept loop; this fake mirrors that so daemon_stop_persistent's
+        # wait-for-exit can observe an orderly shutdown.
+        conn.sendall(b"\x01")
+        conn.close()
+        sock.close()
+        os.unlink(daemon_sock_path)
+        sys.exit(0)
     conn.close()
 '''
 CARGO = r'''#!/usr/bin/env python3
@@ -328,6 +356,45 @@ class ExtractHelpers(unittest.TestCase):
         # Quiet no-op when nothing is running.
         result = self.run_shell('daemon_stop_persistent', **env)
         self.assertEqual(result.returncode, 0)
+
+    def test_daemon_stop_persistent_uses_the_graceful_stop_daemon_path(self):
+        # The fake daemon's "ready" loop only exits on the wire's STOP tag
+        # (see FRONTEND above) — it ignores SIGTERM's default disposition by
+        # installing its own handler that also just exits cleanly, so this
+        # only passes if daemon_stop_persistent actually drove the
+        # `--stop-daemon` CLI mode rather than falling straight through to
+        # signaling.
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        daemon_dir = self.persistent_dir()
+        self.assertEqual((daemon_dir / "daemon.exe").read_text().strip(), str(self.frontend))
+        pid = int((daemon_dir / "daemon.pid").read_text())
+        result = self.run_shell('daemon_stop_persistent', **env)
+        self.assertIn("requesting graceful stop", result.stderr)
+        self.assertNotIn("falling back to termination", result.stderr)
+        self.assertIn("stopped gracefully", result.stderr)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertFalse((daemon_dir / "extract.sock").exists())
+        self.assertFalse((daemon_dir / "daemon.pid").exists())
+        self.assertFalse((daemon_dir / "daemon.exe").exists())
+
+    def test_daemon_stop_persistent_falls_back_without_a_recorded_binary(self):
+        # State from before daemon.exe existed (or a caller that never went
+        # through daemon_start_persistent): no recorded binary to ask
+        # gracefully, so this must still reap the process via the ordinary
+        # signal escalation path, quietly.
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        daemon_dir = self.persistent_dir()
+        pid = int((daemon_dir / "daemon.pid").read_text())
+        (daemon_dir / "daemon.exe").unlink()
+        result = self.run_shell('daemon_stop_persistent', **env)
+        self.assertNotIn("requesting graceful stop", result.stderr)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertFalse((daemon_dir / "extract.sock").exists())
+        self.assertFalse((daemon_dir / "daemon.pid").exists())
 
     def test_start_battery_daemon_reuses_current_persistent_daemon(self):
         env = self.persistent_env()

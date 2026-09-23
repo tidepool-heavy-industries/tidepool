@@ -13,9 +13,18 @@
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
 //! transaction ::= "TPDTR001" expected_epoch[32]
 //!                 (request-tag request)* end-tag
+//! stop      ::= "TPDST001"
+//! stop_ack  ::= 1u8
 //! decision  ::= accepted:u8 | rejected:u8 frame(reason)
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
+//!
+//! `stop` is unauthenticated and carries no epoch: any local caller with
+//! socket access may ask the daemon to retire. It acks once, then retires
+//! its socket and exits its accept loop exactly as it does on a watched-stamp
+//! change — any request already accepted finishes first (the accept loop is
+//! single-threaded), and any client still queued behind it gets an explicit
+//! `rejected` in the same drain.
 //!
 //! Connect failure or an explicit rejection proves the request was not
 //! accepted and permits rebinding. Once the accepted marker is observed, EOF
@@ -58,6 +67,14 @@ const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
 const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
+/// A graceful-stop request: no epoch, no body. The daemon acks with a single
+/// byte, retires its socket exactly as it does on a watched-stamp change
+/// (queued clients get an explicit `REJECTED` — known-unsubmitted, safe to
+/// rebind direct), and exits its accept loop. The single-threaded accept
+/// loop only reads this connection once the request it is currently
+/// servicing has finished, so a `STOP` sent mid-compile never interrupts it.
+const STOP: &[u8; 8] = b"TPDST001";
+const STOP_ACK: u8 = 1;
 pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR001";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
@@ -422,6 +439,49 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
     Ok(DaemonBinding { producer, epoch })
 }
 
+/// Bound on the STOP round trip. The daemon writes its ack immediately,
+/// before draining or retiring, so this only needs to cover local
+/// round-trip time — never the in-flight compile the daemon may still be
+/// finishing when `STOP` is sent.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ask a running daemon at `socket_path` to stop gracefully: it finishes any
+/// request already accepted, retires its socket so queued clients rebind
+/// direct, and exits its accept loop. Idempotent: no daemon listening (the
+/// connect itself fails) is success, not failure, since the desired end
+/// state — no daemon — already holds.
+pub(crate) fn request_stop(socket_path: &Path) -> Result<(), DaemonError> {
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(DaemonError::Connect(error)),
+    };
+    stream
+        .set_read_timeout(Some(STOP_TIMEOUT))
+        .map_err(DaemonError::Io)?;
+    stream
+        .set_write_timeout(Some(STOP_TIMEOUT))
+        .map_err(DaemonError::Io)?;
+    stream.write_all(STOP).map_err(DaemonError::Io)?;
+    let mut ack = [0u8; 1];
+    match stream.read_exact(&mut ack) {
+        // A clean ack or an EOF (the daemon may exit before this client
+        // drains the reply) both prove the daemon saw the request and is
+        // stopping or gone; only a genuine I/O failure (e.g. a timeout) is
+        // reported as one.
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(DaemonError::Io(error)),
+    }
+}
+
 fn push_frame(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
@@ -714,6 +774,13 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 response.extend_from_slice(&epoch);
                 let _ = connection.write_all(&response);
                 continue;
+            }
+            if &kind == STOP {
+                tracing::info!(run_id, "compiler daemon stopping on request");
+                let _ = connection.write_all(&[STOP_ACK]);
+                let _ = connection.flush();
+                socket.retire()?;
+                break;
             }
             if &kind == TRANSACTION {
                 let expected_epoch = match read_exact_or_crash(&mut connection, 32) {
@@ -2271,6 +2338,159 @@ fn main() {{
         std::fs::write(&stamp, b"changed").unwrap();
         assert!(preflight(&socket).is_err());
         assert_eq!(server.join().unwrap().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_drains_the_in_flight_request_then_exits_and_rejects_a_queued_client() {
+        // A fake worker that acks `begin_transaction`, then on a request
+        // touches a "started" sentinel (proving the daemon has dispatched
+        // the request and its single-threaded accept loop is now blocked
+        // waiting on the worker) before sleeping briefly and replying
+        // successfully. `STOP` sent during that sleep must let the request
+        // finish rather than interrupt it — the accept loop only reads a
+        // queued connection once the current one is fully serviced.
+        let dir = std::env::temp_dir().join(format!("tp-stop-drain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let started_sentinel = dir.join("started");
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let payload_len = encode_request(&dir, &worker_argv).len();
+        let source = dir.join("fake_worker.rs");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+use std::io::{{Read, Write}};
+
+fn main() {{
+    let started = std::path::Path::new(r"{started}");
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut one = [0u8; 1];
+
+    stdin.read_exact(&mut one).unwrap(); // begin_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // request prefix
+    let mut payload = vec![0u8; {payload_len}];
+    stdin.read_exact(&mut payload).unwrap();
+
+    std::fs::write(started, b"").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // end_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+}}
+"#,
+                started = started_sentinel.display(),
+                payload_len = payload_len,
+            ),
+        )
+        .unwrap();
+        let worker_bin = dir.join("fake-worker");
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&worker_bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // Submit the in-flight request from its own thread; it blocks on the
+        // worker's sleep and is only expected to return once the worker
+        // replies.
+        let client_socket = socket.clone();
+        let client_epoch = binding.epoch;
+        let client_dir = dir.clone();
+        let client_argv = argv.clone();
+        let in_flight = std::thread::spawn(move || {
+            execute(&client_socket, &client_epoch, &client_dir, &client_argv)
+        });
+
+        // Wait for the fake worker to confirm the daemon has dispatched the
+        // request and is now blocked in `request_while_connected` — only
+        // then is the accept loop guaranteed to be busy servicing it, so a
+        // `STOP` and a second client connected now are guaranteed to queue
+        // behind it rather than race it for the next `accept()`.
+        let dispatched_deadline = Instant::now() + Duration::from_secs(10);
+        while !started_sentinel.exists() {
+            assert!(
+                Instant::now() < dispatched_deadline,
+                "the in-flight request was never dispatched to the worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Queue `STOP` and then a second, ordinary request behind the
+        // in-flight one. Both connects land in the listener's backlog while
+        // the accept loop is still blocked servicing the first request; the
+        // loop reads them, in order, only once that request completes.
+        let mut stop_connection = UnixStream::connect(&socket).unwrap();
+        stop_connection.write_all(STOP).unwrap();
+
+        let queued = std::thread::spawn({
+            let socket = socket.clone();
+            let epoch = binding.epoch;
+            let dir = dir.clone();
+            move || execute(&socket, &epoch, &dir, &[OsString::from("Expr.hs")])
+        });
+
+        // The in-flight request completes successfully, unaffected by the
+        // `STOP` queued behind it.
+        let in_flight_result = in_flight.join().unwrap();
+        assert!(
+            matches!(&in_flight_result, Ok(output) if output.status.code() == Some(0)),
+            "{in_flight_result:?}"
+        );
+
+        // `STOP` acks and the daemon exits its accept loop normally, exactly
+        // as it does on a watched-stamp change.
+        let mut ack = [0u8; 1];
+        stop_connection.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, [STOP_ACK]);
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+
+        // The queued client, still waiting behind `STOP`, is drained with an
+        // explicit rejection — known-unsubmitted, so it is safe to rebind
+        // direct — rather than left to time out or observe a crash.
+        let queued_result = queued.join().unwrap();
+        let error = queued_result.unwrap_err();
+        assert!(error.is_not_accepted(), "{error}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

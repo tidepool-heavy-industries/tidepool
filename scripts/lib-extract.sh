@@ -620,28 +620,66 @@ daemon_start_persistent() {
   done
 
   printf '%s\n' "$current_producer" >"$producer_file"
+  # Recorded so a later, unrelated `just daemon-stop` shell (which never
+  # calls resolve_tidepool_extract itself) can still ask THIS daemon to stop
+  # gracefully with its own binary, matching producer_file's convention.
+  printf '%s\n' "$TIDEPOOL_EXTRACT" >"$dir/daemon.exe"
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
   echo "==> persistent compile daemon up: pid=$pid socket=$sock" >&2
   echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
 }
 
-# Terminates the recorded persistent daemon (if any, via _terminate_and_wait
-# above) and removes its socket/pid/producer files. Succeeds quietly if
-# nothing is running.
+# Terminates the recorded persistent daemon (if any) and removes its
+# socket/pid/producer files. Succeeds quietly if nothing is running.
+#
+# Prefers a graceful stop: the daemon's own `--stop-daemon` frontend mode
+# (tidepool/extract-cmd/src/frontend.rs) sends the wire's STOP kind
+# (tidepool/extract-cmd/src/daemon.rs), which lets any in-flight compile
+# finish before the daemon retires its socket and exits on its own. Signaling
+# it directly (_terminate_and_wait, below) has no such orderly path — the
+# daemon does not handle SIGTERM — and can tear down a compile another
+# concurrent caller is waiting on. The running daemon's own binary path,
+# recorded by daemon_start_persistent at launch (daemon.exe, alongside
+# producer_file), is invoked rather than a resolved $TIDEPOOL_EXTRACT: this
+# function runs from `just daemon-stop` before any resolve_tidepool_extract,
+# and it must speak the exact wire the running daemon does.
 daemon_stop_persistent() {
-  local dir sock pidfile producer_file
+  local dir sock pidfile producer_file exe_file
   dir="$(_persistent_daemon_dir)"
   sock="$dir/extract.sock"
   pidfile="$dir/daemon.pid"
   producer_file="$dir/producer"
+  exe_file="$dir/daemon.exe"
 
   if [ -f "$pidfile" ]; then
     local pid
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      _terminate_and_wait "$pid" "persistent compile daemon"
-      echo "==> persistent compile daemon (pid $pid) stopped" >&2
+      local stop_bin=""
+      [ -f "$exe_file" ] && stop_bin="$(cat "$exe_file" 2>/dev/null || true)"
+      if [ -n "$stop_bin" ] && [ -x "$stop_bin" ]; then
+        echo "==> requesting graceful stop of persistent compile daemon (pid $pid); waiting for in-flight compile to finish" >&2
+        if timeout --kill-after=5 30 "$stop_bin" --stop-daemon --socket "$sock" >/dev/null 2>&1; then
+          local wait_started=$SECONDS
+          while kill -0 "$pid" 2>/dev/null; do
+            if [ $((SECONDS - wait_started)) -ge 120 ]; then
+              echo "==> persistent compile daemon (pid $pid) did not exit within 120s of a graceful stop request — falling back to termination" >&2
+              break
+            fi
+            sleep 0.5
+          done
+        else
+          echo "==> graceful stop request to persistent compile daemon (pid $pid) failed — falling back to termination" >&2
+        fi
+      fi
+      if kill -0 "$pid" 2>/dev/null; then
+        _terminate_and_wait "$pid" "persistent compile daemon"
+        echo "==> persistent compile daemon (pid $pid) stopped" >&2
+      else
+        wait "$pid" 2>/dev/null || true
+        echo "==> persistent compile daemon (pid $pid) stopped gracefully" >&2
+      fi
     fi
   fi
-  rm -f "$sock" "$pidfile" "$producer_file"
+  rm -f "$sock" "$pidfile" "$producer_file" "$exe_file"
 }
