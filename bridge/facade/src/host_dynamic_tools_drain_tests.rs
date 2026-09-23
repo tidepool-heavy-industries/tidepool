@@ -783,7 +783,9 @@ mod actual_seal {
                 Err(_) => {
                     startup.abort();
                     // best-effort: task is aborted; the join outcome is not actionable here.
-                    tokio::time::timeout(Duration::from_secs(5), &mut startup).await.ok();
+                    tokio::time::timeout(Duration::from_secs(5), &mut startup)
+                        .await
+                        .ok();
                     cleanup_failures.push("root startup aborted without completion proof");
                 }
             }
@@ -820,7 +822,9 @@ mod actual_seal {
             Err(_) => {
                 task.abort();
                 // best-effort: task is aborted; the join outcome is not actionable here.
-                tokio::time::timeout(Duration::from_secs(5), task).await.ok();
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .ok();
                 None // emergency abort is not a successful drain
             }
         }

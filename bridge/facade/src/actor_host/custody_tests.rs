@@ -49,8 +49,8 @@ pub(super) fn custody_fixture() -> (
 async fn bootstrapping_a_campaign_leaves_the_source_repository_clean() {
     let campaign = test_campaign::TestCampaign::start().await;
     let git = exomonad_worktree::GitCli::new();
-    let dirty = exomonad_worktree::git::inspect::dirty_summary(&git, campaign._repository.path())
-        .unwrap();
+    let dirty =
+        exomonad_worktree::git::inspect::dirty_summary(&git, campaign._repository.path()).unwrap();
     assert!(
         dirty.is_clean(),
         "source repository dirty after bootstrap: {dirty}"
@@ -379,7 +379,10 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     // reads that inbox, only after the gate commits (the host's binding
     // discovery waits on `wait_committed`). What must not happen yet is any
     // child finishing or retiring.
-    let children: Vec<_> = installed.iter().map(|child| child.actor.identity()).collect();
+    let children: Vec<_> = installed
+        .iter()
+        .map(|child| child.actor.identity())
+        .collect();
     campaign.assert_no_deployment("fork boundary not yet acknowledged", |event| match event {
         LocalResidentDeployment::ChildExited { notice } => {
             children.contains(&notice.child.identity())
@@ -527,7 +530,8 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
             Duration::from_secs(120),
             move |event| match event {
                 LocalResidentDeployment::WatchChanged { notification }
-                    if notification.owner == owner && notification.label == "custody-leaf-ready" =>
+                    if notification.owner == owner
+                        && notification.label == "custody-leaf-ready" =>
                 {
                     assert_eq!(
                         notification.transition,

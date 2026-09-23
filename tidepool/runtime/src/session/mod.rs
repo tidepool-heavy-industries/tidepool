@@ -109,10 +109,9 @@ pub use turn::{
     CellCheckRequest, CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection,
     CompiledTurn, DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
     HostBindingAuthority, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue,
-    TemplateSelector, TurnClassification,
-    TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
-    AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE,
-    PREPARED_SCAFFOLD_TARGET,
+    TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
+    DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

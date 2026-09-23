@@ -675,7 +675,11 @@ fn service_transaction(
         return Ok(ConnectionOutcome::Continue);
     }
     if transaction && orderly_end {
-        log_send_failure(run_id, "transaction accepted", connection.write_all(&[ACCEPTED]));
+        log_send_failure(
+            run_id,
+            "transaction accepted",
+            connection.write_all(&[ACCEPTED]),
+        );
         log_send_failure(run_id, "transaction accepted flush", connection.flush());
     }
     drop(connection);
@@ -772,7 +776,11 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(&producer);
                 response.extend_from_slice(&epoch);
-                log_send_failure(run_id, "preflight response", connection.write_all(&response));
+                log_send_failure(
+                    run_id,
+                    "preflight response",
+                    connection.write_all(&response),
+                );
                 continue;
             }
             if &kind == STOP {
@@ -788,25 +796,41 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     Err(_) => continue,
                 };
                 if expected_epoch != epoch {
-                    log_reject_failure(run_id, "stale epoch (transaction)", write_rejected(&mut connection, "daemon boot epoch changed"));
+                    log_reject_failure(
+                        run_id,
+                        "stale epoch (transaction)",
+                        write_rejected(&mut connection, "daemon boot epoch changed"),
+                    );
                     continue;
                 }
                 match stamp_changed(config, &boot_stamp) {
                     Ok(false) => {}
                     Ok(true) => {
-                        log_reject_failure(run_id, "deployment changed (transaction)", write_rejected(&mut connection, "watched deployment changed"));
+                        log_reject_failure(
+                            run_id,
+                            "deployment changed (transaction)",
+                            write_rejected(&mut connection, "watched deployment changed"),
+                        );
                         socket.retire()?;
                         break;
                     }
                     Err(error) => {
-                        log_reject_failure(run_id, "daemon stopping (transaction)", write_rejected(&mut connection, "daemon stopping"));
+                        log_reject_failure(
+                            run_id,
+                            "daemon stopping (transaction)",
+                            write_rejected(&mut connection, "daemon stopping"),
+                        );
                         return Err(error);
                     }
                 }
                 if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                     continue;
                 }
-                log_send_failure(run_id, "transaction read timeout", connection.set_read_timeout(Some(IO_TIMEOUT)));
+                log_send_failure(
+                    run_id,
+                    "transaction read timeout",
+                    connection.set_read_timeout(Some(IO_TIMEOUT)),
+                );
                 let outcome = service_transaction(
                     connection,
                     &mut worker,
@@ -870,14 +894,22 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             };
             if expected_epoch != epoch {
                 tracing::warn!(run_id, "rejected compiler request for stale daemon epoch");
-                log_reject_failure(run_id, "stale epoch (request)", write_rejected(&mut connection, "daemon boot epoch changed"));
+                log_reject_failure(
+                    run_id,
+                    "stale epoch (request)",
+                    write_rejected(&mut connection, "daemon boot epoch changed"),
+                );
                 continue;
             }
             let (cwd, argv) = match read_request(&mut connection) {
                 Ok(request) => request,
                 Err(_) => {
                     tracing::warn!(run_id, "rejected malformed compiler request");
-                    log_reject_failure(run_id, "malformed request", write_rejected(&mut connection, "invalid compiler request"));
+                    log_reject_failure(
+                        run_id,
+                        "malformed request",
+                        write_rejected(&mut connection, "invalid compiler request"),
+                    );
                     continue;
                 }
             };
@@ -885,7 +917,11 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 Ok(argv) => argv,
                 Err(_) => {
                     tracing::warn!(run_id, "rejected invalid typed compiler request");
-                    log_reject_failure(run_id, "invalid typed request", write_rejected(&mut connection, "invalid typed worker request"));
+                    log_reject_failure(
+                        run_id,
+                        "invalid typed request",
+                        write_rejected(&mut connection, "invalid typed worker request"),
+                    );
                     continue;
                 }
             };
@@ -895,19 +931,31 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             match stamp_changed(config, &boot_stamp) {
                 Ok(false) => {}
                 Ok(true) => {
-                    log_reject_failure(run_id, "deployment changed (request)", write_rejected(&mut connection, "watched deployment changed"));
+                    log_reject_failure(
+                        run_id,
+                        "deployment changed (request)",
+                        write_rejected(&mut connection, "watched deployment changed"),
+                    );
                     socket.retire()?;
                     break;
                 }
                 Err(error) => {
-                    log_reject_failure(run_id, "daemon stopping (request)", write_rejected(&mut connection, "daemon stopping"));
+                    log_reject_failure(
+                        run_id,
+                        "daemon stopping (request)",
+                        write_rejected(&mut connection, "daemon stopping"),
+                    );
                     return Err(error);
                 }
             }
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                 continue;
             }
-            log_send_failure(run_id, "request read timeout", connection.set_read_timeout(Some(IO_TIMEOUT)));
+            log_send_failure(
+                run_id,
+                "request read timeout",
+                connection.set_read_timeout(Some(IO_TIMEOUT)),
+            );
             let mut first_request = Some((cwd, worker_argv));
             let outcome = service_transaction(
                 connection,
@@ -2180,7 +2228,10 @@ tidepool-target phase=desugar module=Execute\n",
 
     #[test]
     fn transaction_disconnect_interrupts_an_inflight_worker_request() {
-        #[allow(clippy::disallowed_methods, reason = "test fixture: fakes a stuck compiler worker, not a production launch site")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: fakes a stuck compiler worker, not a production launch site"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .stdin(Stdio::piped())
@@ -2334,7 +2385,10 @@ fn main() {{
         )
         .unwrap();
         let worker_bin = dir.join("fake-worker");
-        #[allow(clippy::disallowed_methods, reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
@@ -2364,7 +2418,10 @@ fn main() {{
                 Instant::now() < ready_deadline,
                 "daemon did not become ready"
             );
-            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
             std::thread::sleep(Duration::from_millis(10));
         };
 
@@ -2452,7 +2509,10 @@ fn main() {{
         )
         .unwrap();
         let worker_bin = dir.join("fake-worker");
-        #[allow(clippy::disallowed_methods, reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
         let rustc = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
@@ -2482,7 +2542,10 @@ fn main() {{
                 Instant::now() < ready_deadline,
                 "daemon did not become ready"
             );
-            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
             std::thread::sleep(Duration::from_millis(10));
         };
 
@@ -2508,7 +2571,10 @@ fn main() {{
                 Instant::now() < dispatched_deadline,
                 "the in-flight request was never dispatched to the worker"
             );
-            #[allow(clippy::disallowed_methods, reason = "test: sync polling loop waiting for the daemon/fake worker, not async code")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
             std::thread::sleep(Duration::from_millis(5));
         }
 

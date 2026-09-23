@@ -19,7 +19,6 @@
 //! A path that names no existing file and matches no glob is reported and
 //! skipped, never silently dropped.
 
-
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};

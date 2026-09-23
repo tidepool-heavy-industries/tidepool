@@ -5,7 +5,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
-use super::{command_jobs_tests::TestCommands, command_jobs_tests::backend_request};
+use super::{command_jobs_tests::backend_request, command_jobs_tests::TestCommands};
 use exomonad_actor::{JevBackend, JevCallFailure};
 
 /// Answers every request with one choice answer and records the requests.

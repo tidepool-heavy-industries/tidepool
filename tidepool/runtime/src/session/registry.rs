@@ -254,7 +254,10 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// [`CheckoutError::Unknown`] (never seen, or aged out of the bound).
     fn unknown_or_retired(&self, id: SessionId) -> CheckoutError<H> {
         match self.retirement_reason(id) {
-            Some(reason) => CheckoutError::Retired { session: id, reason },
+            Some(reason) => CheckoutError::Retired {
+                session: id,
+                reason,
+            },
             None => CheckoutError::Unknown(id),
         }
     }

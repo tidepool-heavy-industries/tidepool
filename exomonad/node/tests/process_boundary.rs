@@ -95,7 +95,7 @@ fn linked_actor_worktree_commits_into_shared_git_namespace() {
             source.to_str().unwrap(),
             "cat-file",
             "-e",
-            "actor^{commit}"
+            "actor^{commit}",
         ])
         .status()
         .unwrap()

@@ -955,9 +955,11 @@ where
         match message {
             KernelMessage::AbortReplacement { reply } => {
                 if !state.behavior.replacement_staged() {
-                    reply.send(Err(KernelBehaviorError {
-                        detail: "actor is not a prepared replacement".into(),
-                    })).ok();
+                    reply
+                        .send(Err(KernelBehaviorError {
+                            detail: "actor is not a prepared replacement".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
                 let terminal = finish_actor(
@@ -1007,10 +1009,12 @@ where
                             })
                         }
                         Err(error) => {
-                            reply.send(Err(crate::KernelInvocationFailure::Rejected {
-                                actor: state.context.identity,
-                                detail: error.detail,
-                            })).ok();
+                            reply
+                                .send(Err(crate::KernelInvocationFailure::Rejected {
+                                    actor: state.context.identity,
+                                    detail: error.detail,
+                                }))
+                                .ok();
                         }
                     }
                 }
@@ -1035,10 +1039,12 @@ where
                     .commit_replacement(&state.context, &successor_context)
                 {
                     if let Some(reply) = pending.reply.take() {
-                        reply.send(Err(crate::KernelInvocationFailure::Failed {
-                            actor: state.context.identity,
-                            detail: error.detail,
-                        })).ok();
+                        reply
+                            .send(Err(crate::KernelInvocationFailure::Failed {
+                                actor: state.context.identity,
+                                detail: error.detail,
+                            }))
+                            .ok();
                     }
                     state.replacement = Some(pending);
                     return Ok(());
@@ -1121,9 +1127,11 @@ where
             }
             KernelMessage::Drain { reply } => {
                 if state.replacement.is_some() {
-                    reply.send(Err(KernelBehaviorError {
-                        detail: "actor replacement is in progress".into(),
-                    })).ok();
+                    reply
+                        .send(Err(KernelBehaviorError {
+                            detail: "actor replacement is in progress".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
                 let result = state.behavior.begin_drain().and_then(|()| {
@@ -1160,9 +1168,11 @@ where
                     return Ok(());
                 }
                 state.hosted_admission = HostedAdmission::Sealed;
-                reply.send(crate::HostedWorkSeal {
-                    actor: state.context.identity,
-                }).ok();
+                reply
+                    .send(crate::HostedWorkSeal {
+                        actor: state.context.identity,
+                    })
+                    .ok();
             }
             KernelMessage::Cast { sender, request } => {
                 match state.behavior.cast(&state.context, sender, request).await {
@@ -1194,20 +1204,24 @@ where
                     }
                     Err(error) => {
                         let detail = error.to_string();
-                        reply.send(Err(KernelCallFailure::Handler {
-                            actor: state.context.identity,
-                            detail: detail.clone(),
-                        })).ok();
+                        reply
+                            .send(Err(KernelCallFailure::Handler {
+                                actor: state.context.identity,
+                                detail: detail.clone(),
+                            }))
+                            .ok();
                         fail_handler(&myself, state, format!("actor call failed: {detail}")).await;
                     }
                 },
             },
             KernelMessage::Tool { invocation, reply } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply.send(Err(KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: "hosted work admission is sealed".into(),
-                    })).ok();
+                    reply
+                        .send(Err(KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "hosted work admission is sealed".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
 
@@ -1233,10 +1247,12 @@ where
             }
             KernelMessage::ToolCompleted { boundary, reply } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    reply.send(Err(KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: "hosted completion boundary is closed".into(),
-                    })).ok();
+                    reply
+                        .send(Err(KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "hosted completion boundary is closed".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
                 let result = state
@@ -1272,10 +1288,12 @@ where
                 reply,
             } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply.send(Err(KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: "hosted work admission is sealed".into(),
-                    })).ok();
+                    reply
+                        .send(Err(KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "hosted work admission is sealed".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
 

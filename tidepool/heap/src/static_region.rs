@@ -628,4 +628,3 @@ mod tests {
         assert!(catalog.admit(entry, &metrics).unwrap().is_none());
     }
 }
-

@@ -187,7 +187,9 @@ fn memo_trace_flag_adds_diagnostics_without_changing_compiled_output() {
         "TIDEPOOL_MEMO_TRACE must not change the compiled artifact"
     );
     assert!(
-        with_trace.stderr_lossy().contains("tidepool-memo-cycle-graph"),
+        with_trace
+            .stderr_lossy()
+            .contains("tidepool-memo-cycle-graph"),
         "expected a tidepool-memo-cycle-graph line with TIDEPOOL_MEMO_TRACE=1: {}",
         with_trace.stderr_lossy()
     );

@@ -154,7 +154,10 @@ fn strict_inbox_faults_propagate_without_retry() {
     let temp = tempfile::tempdir().unwrap();
     let library = temp.path().join("fault.so");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inbox/fixtures/directory_fault.c");
-    #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture build")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous test-fixture build"
+    )]
     let cc = Command::new("cc")
         .args(["-shared", "-fPIC", "-Wall", "-Werror"])
         .arg(source)
@@ -183,7 +186,10 @@ fn strict_inbox_faults_propagate_without_retry() {
             let root = temp.path().join(format!("{index}-{kind}"));
             fs::create_dir(&root).unwrap();
             let log = root.join("hits");
-            #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture spawn")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "short synchronous test-fixture spawn"
+            )]
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",

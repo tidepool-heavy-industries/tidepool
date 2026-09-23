@@ -43,8 +43,8 @@ pub mod generated;
 mod render;
 pub mod session;
 pub mod span_blocking;
-pub use span_blocking::spawn_blocking_in_span;
 pub use session::prepared as prepared_execution;
+pub use span_blocking::spawn_blocking_in_span;
 
 pub use artifacts::{
     compile_targets, CompiledArtifacts, NominalHead, SiteType, TargetArtifact, YieldSite,
@@ -321,7 +321,11 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
             // No handler claimed it and there is no resume path in a
             // one-shot run: release the parked frame rather than leak it.
             if let Err(err) = engine.abort_parked(id) {
-                tracing::warn!(?err, ?id, "failed to abort parked frame for unhandled effect");
+                tracing::warn!(
+                    ?err,
+                    ?id,
+                    "failed to abort parked frame for unhandled effect"
+                );
             }
             Err(RuntimeError::Jit(EffectError::UnhandledEffect {
                 constructor,

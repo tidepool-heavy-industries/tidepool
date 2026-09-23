@@ -52,11 +52,10 @@ mod tests {
         let span = tracing::span!(Level::INFO, "compile_request", actor = "probe");
         let _entered = span.enter();
 
-        let seen_name = spawn_blocking_in_span(|| {
-            tracing::Span::current().metadata().map(|m| m.name())
-        })
-        .await
-        .unwrap();
+        let seen_name =
+            spawn_blocking_in_span(|| tracing::Span::current().metadata().map(|m| m.name()))
+                .await
+                .unwrap();
 
         assert_eq!(
             seen_name,
@@ -70,11 +69,10 @@ mod tests {
     /// invent one.
     #[tokio::test]
     async fn propagates_no_span_when_none_was_current() {
-        let seen_name = spawn_blocking_in_span(|| {
-            tracing::Span::current().metadata().map(|m| m.name())
-        })
-        .await
-        .unwrap();
+        let seen_name =
+            spawn_blocking_in_span(|| tracing::Span::current().metadata().map(|m| m.name()))
+                .await
+                .unwrap();
         assert_eq!(seen_name, None);
     }
 }

@@ -638,7 +638,10 @@ fn serve(
             Ok(connection) => connection,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 submit_expired_primary_loss(scope, &mut last_primary);
-                #[allow(clippy::disallowed_methods, reason = "synchronous accept-loop poll, not async")]
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "synchronous accept-loop poll, not async"
+                )]
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -1218,7 +1221,10 @@ mod tests {
             client.prepare(Duration::from_secs(10)).unwrap();
             client.pin(Duration::from_secs(10)).unwrap();
             drop(client);
-            #[allow(clippy::disallowed_methods, reason = "sync test waits out the primary lease")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "sync test waits out the primary lease"
+            )]
             std::thread::sleep(PRIMARY_LEASE + Duration::from_millis(200));
             let (recovery, observed) = ProcessSupervisorRecovery::recover(
                 socket,
@@ -1254,7 +1260,10 @@ mod tests {
             client.pin(Duration::from_secs(10)).unwrap();
             client.release(Duration::from_secs(10)).unwrap();
             drop(client);
-            #[allow(clippy::disallowed_methods, reason = "sync test waits out the primary lease")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "sync test waits out the primary lease"
+            )]
             std::thread::sleep(PRIMARY_LEASE + Duration::from_millis(200));
             let (mut recovery, observed) = ProcessSupervisorRecovery::recover(
                 socket,

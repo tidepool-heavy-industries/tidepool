@@ -541,15 +541,15 @@ pub mod inspect {
     /// than "there is no repository here") stays [`WorktreeError::GitFailure`]
     /// so it cannot be misread the same way — see [`is_not_a_repository`].
     pub fn work_tree(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
-        let out = git.run(cwd, &["rev-parse", "--show-toplevel"]).map_err(
-            |failure| {
+        let out = git
+            .run(cwd, &["rev-parse", "--show-toplevel"])
+            .map_err(|failure| {
                 if is_not_a_repository(&failure) {
                     WorktreeError::NotARepository(cwd.to_path_buf())
                 } else {
                     WorktreeError::GitFailure(failure)
                 }
-            },
-        )?;
+            })?;
         Ok(PathBuf::from(out.trimmed()))
     }
 

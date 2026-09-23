@@ -128,12 +128,15 @@ fn binding_fault_child() {
 fn binding_public_paths_fence_uncertain_custody_until_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let library = temp.path().join("binding-fault.so");
-    #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture build")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous test-fixture build"
+    )]
     let cc = Command::new("cc")
         .args(["-shared", "-fPIC", "-Wall", "-Werror"])
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/binding_directory_fault.c")
+                .join("tests/fixtures/binding_directory_fault.c"),
         )
         .arg("-o")
         .arg(&library)
@@ -151,7 +154,10 @@ fn binding_public_paths_fence_uncertain_custody_until_reopen() {
             } else {
                 root.clone()
             };
-            #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture spawn")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "short synchronous test-fixture spawn"
+            )]
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",

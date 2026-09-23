@@ -29,7 +29,10 @@ pub(super) async fn connect(
     // One startup owner; this guard is not held during command admission.
     lock.lock()?;
     let socket = directory.join("resources.sock");
-    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl is-active, waited on directly via .status()")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: systemctl is-active, waited on directly via .status()"
+    )]
     let active = tokio::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", UNIT])
         .status()
@@ -103,7 +106,10 @@ pub(super) async fn connect(
 }
 
 async fn verify_service_slice(slice: &exomonad_node::systemd_slice::SystemdSlice) -> Result<()> {
-    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl show, waited on directly via .output()")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: systemctl show, waited on directly via .output()"
+    )]
     let output = tokio::process::Command::new("systemctl")
         .args(["--user", "show", UNIT, "--property=ControlGroup", "--value"])
         .output()

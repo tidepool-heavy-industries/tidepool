@@ -5237,7 +5237,9 @@ where
                                             output.stderr.available_end
                                         ),
                                         Err(error) => {
-                                            format!("stdout/stderr byte counts unavailable: {error:?}")
+                                            format!(
+                                                "stdout/stderr byte counts unavailable: {error:?}"
+                                            )
                                         }
                                     };
                                     presentation = CommandPresentation::CommandVisible(

@@ -1441,20 +1441,19 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     }
     let mut presented = std::collections::HashSet::new();
     while presented.len() < children.len() {
-        let activation = if let Some(activation) = activation_messages.pop() {
-            activation
-        } else {
-            campaign
-                .next_deployment(
-                    "request activation",
-                    Duration::from_secs(120),
-                    |event| match event {
-                        LocalResidentDeployment::SessionReady { activation } => Ok(activation),
-                        other => Err(other),
-                    },
-                )
-                .await
-        };
+        let activation =
+            if let Some(activation) = activation_messages.pop() {
+                activation
+            } else {
+                campaign
+                    .next_deployment("request activation", Duration::from_secs(120), |event| {
+                        match event {
+                            LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                            other => Err(other),
+                        }
+                    })
+                    .await
+            };
         let Some(child) = children
             .iter()
             .find(|child| child.actor.identity() == activation.id.actor())
@@ -1620,7 +1619,9 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                     "model-context child admission",
                     Duration::from_secs(120),
                     |event| match event {
-                        LocalResidentDeployment::PolicyInstalled(child) => Ok(Arrival::Child(child)),
+                        LocalResidentDeployment::PolicyInstalled(child) => {
+                            Ok(Arrival::Child(child))
+                        }
                         LocalResidentDeployment::SessionReady { .. } => Ok(Arrival::Ready),
                         other => Err(other),
                     },
@@ -1670,15 +1671,15 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         let mut ready = 0;
         while ready != 2 {
             let arrival = campaign
-                .next_deployment(
-                    "route child admission",
-                    Duration::from_secs(120),
-                    |event| match event {
-                        LocalResidentDeployment::PolicyInstalled(child) => Ok(Arrival::Child(child)),
+                .next_deployment("route child admission", Duration::from_secs(120), |event| {
+                    match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => {
+                            Ok(Arrival::Child(child))
+                        }
                         LocalResidentDeployment::SessionReady { .. } => Ok(Arrival::Ready),
                         other => Err(other),
-                    },
-                )
+                    }
+                })
                 .await;
             match arrival {
                 Arrival::Child(child) => {

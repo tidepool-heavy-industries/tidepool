@@ -1034,7 +1034,10 @@ mod tests {
                     ],
                 },
             );
-            #[allow(clippy::disallowed_methods, reason = "test: launches a real mount-namespace worker process directly")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: launches a real mount-namespace worker process directly"
+            )]
             let mut child = Command::new(invocation.program)
                 .args(invocation.args)
                 .stdin(Stdio::piped())

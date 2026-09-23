@@ -159,10 +159,14 @@ fn spawn_daemon(bin: &Path, socket: &Path, extra_args: &[&str]) -> Option<Daemon
                 timeout
             );
             if let Err(error) = child.kill() {
-                eprintln!("daemon_integration: failed to kill unready test daemon process: {error}");
+                eprintln!(
+                    "daemon_integration: failed to kill unready test daemon process: {error}"
+                );
             }
             if let Err(error) = child.wait() {
-                eprintln!("daemon_integration: failed to reap unready test daemon process: {error}");
+                eprintln!(
+                    "daemon_integration: failed to reap unready test daemon process: {error}"
+                );
             }
             return None;
         }
@@ -1063,7 +1067,7 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
 
     let Some(daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1"]) else {
         // best-effort: test cleanup of a temp path.
-    fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir).ok();
         return;
     };
 
@@ -1121,7 +1125,7 @@ fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
     let Some(mut daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1", "--persistent"])
     else {
         // best-effort: test cleanup of a temp path.
-    fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir).ok();
         return;
     };
 

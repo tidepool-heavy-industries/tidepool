@@ -1,7 +1,6 @@
 //! Transport-neutral model tool contracts shared by actor policies and their
 //! concrete host projections.
 
-
 pub mod surface;
 
 /// One model-visible tool declaration, independent of who serves it.

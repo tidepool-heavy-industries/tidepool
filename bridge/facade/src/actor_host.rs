@@ -433,14 +433,15 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                     (prepared.handle, Some(prepared.workspace), prepared.notice)
                 }
                 _ => {
-                    let handle = tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
-                        .await
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: format!("workspace preparation task failed: {error}"),
-                        })?
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: tidepool_handlers::render_worktree_error(&error),
-                        })?;
+                    let handle =
+                        tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
+                            .await
+                            .map_err(|error| ForkWorkspaceAdmissionError {
+                                detail: format!("workspace preparation task failed: {error}"),
+                            })?
+                            .map_err(|error| ForkWorkspaceAdmissionError {
+                                detail: tidepool_handlers::render_worktree_error(&error),
+                            })?;
                     (handle, None, None)
                 }
             };
@@ -1973,7 +1974,8 @@ pub(crate) async fn run(
     std::fs::create_dir_all(&run_root)?;
     let workspace = config.workspace.clone();
     let (worktrees, bindings) =
-        tidepool_runtime::spawn_blocking_in_span(move || actor_worktree_resources(&workspace)).await??;
+        tidepool_runtime::spawn_blocking_in_span(move || actor_worktree_resources(&workspace))
+            .await??;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
@@ -2117,11 +2119,13 @@ pub(crate) async fn run(
         .map(|record| record.admission.actor)
         .collect::<Vec<_>>();
     for predecessor in &unavailable_records {
-        readiness.send(ActorHostReadiness::ActorUnavailable {
-            predecessor: *predecessor,
-            reason: "durable actor resources or replayable launch state could not be verified"
-                .into(),
-        }).ok();
+        readiness
+            .send(ActorHostReadiness::ActorUnavailable {
+                predecessor: *predecessor,
+                reason: "durable actor resources or replayable launch state could not be verified"
+                    .into(),
+            })
+            .ok();
     }
     if host_incarnation.incarnation() != exomonad_actor::Incarnation::FIRST {
         let notice_path = run_root.join("host-recovery-notice.txt");
@@ -5366,10 +5370,11 @@ async fn deliver_pending_checked(
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
-    let pending = tidepool_runtime::spawn_blocking_in_span(move || pending_inbox.legacy_pending_prefix())
-        .await
-        .map_err(|error| format!("inbox reader task: {error}"))?
-        .map_err(|error| error.to_string())?;
+    let pending =
+        tidepool_runtime::spawn_blocking_in_span(move || pending_inbox.legacy_pending_prefix())
+            .await
+            .map_err(|error| format!("inbox reader task: {error}"))?
+            .map_err(|error| error.to_string())?;
     let Some(last) = pending.last() else {
         return deliver_tracked_message(
             actor,
@@ -6633,17 +6638,15 @@ mod tests {
         let mut children = Vec::new();
         while children.len() < 2 {
             let child = campaign
-                .next_deployment(
-                    "roster child admission",
-                    Duration::from_secs(30),
-                    |event| match event {
+                .next_deployment("roster child admission", Duration::from_secs(30), |event| {
+                    match event {
                         LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
                         LocalResidentDeployment::Retired { actor, terminal } => {
                             panic!("{actor:?}: {terminal:?}")
                         }
                         other => Err(other),
-                    },
-                )
+                    }
+                })
                 .await;
             children.push(child);
         }
@@ -8256,7 +8259,10 @@ mod tests {
             },
         );
         let environment = actor_launch_environment(BTreeMap::new(), false, Some(relative_target));
-        #[allow(clippy::disallowed_methods, reason = "test: short synchronous cargo check probe under a real mount boundary")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: short synchronous cargo check probe under a real mount boundary"
+        )]
         let mut command = std::process::Command::new(invocation.program);
         command.args(invocation.args).envs(environment.set);
         for name in environment.unset {
@@ -9312,10 +9318,9 @@ mod tests {
             unchanged.to_string().contains("original assignment"),
             "{unchanged:?}"
         );
-        campaign.assert_no_deployment(
-            "notification created an assignment/wake obligation",
-            |_| true,
-        );
+        campaign.assert_no_deployment("notification created an assignment/wake obligation", |_| {
+            true
+        });
         let reply =
             dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
         assert_eq!(reply["status"], "replied", "{reply:?}");
@@ -9661,7 +9666,9 @@ mod tests {
                         panic!("stage {stage}: {}", command.message());
                     }
                 }
-            }).await.expect("lifecycle fixture stage did not settle");
+            })
+            .await
+            .expect("lifecycle fixture stage did not settle");
             assert_eq!(result["status"], "committed", "stage {stage}: {result:?}");
             for item in result["items"].as_array().unwrap() {
                 assert_eq!(item["status"], "committed", "stage {stage}: {result:?}");

@@ -4964,8 +4964,7 @@ mod tests {
                 break;
             }
         }
-        let found = found
-            .expect("preparedScaffoldTargetName = \"...\" not found in Session.hs");
+        let found = found.expect("preparedScaffoldTargetName = \"...\" not found in Session.hs");
         assert_eq!(found, PREPARED_SCAFFOLD_TARGET);
     }
 }

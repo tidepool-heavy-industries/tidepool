@@ -116,7 +116,10 @@ fn monitor_fault_child() {
 fn owning_paths_poison_and_reopen_without_reusing_sequences() {
     let temp = tempfile::tempdir().unwrap();
     let library = temp.path().join("journal-fault.so");
-    #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture build")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous test-fixture build"
+    )]
     let cc = Command::new("cc")
         .args(["-shared", "-fPIC", "-Wall", "-Werror"])
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal_fault.c"))
@@ -138,7 +141,10 @@ fn owning_paths_poison_and_reopen_without_reusing_sequences() {
             fs::create_dir(&root).unwrap();
             let log = root.join("hits");
             let qualified = format!("journal_uncertainty::{child}");
-            #[allow(clippy::disallowed_methods, reason = "short synchronous test-fixture spawn")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "short synchronous test-fixture spawn"
+            )]
             let result = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &qualified, "--nocapture"])
                 .env("LD_PRELOAD", &library)

@@ -347,7 +347,10 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         };
         let thread = thread.id().0.clone();
         Box::pin(async move {
-            #[allow(clippy::disallowed_methods, reason = "tidepool_runtime::spawn_blocking_in_span is the sanctioned span-carrying wrapper, but it pulls in the full compile/codegen dependency graph this crate does not otherwise need")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "tidepool_runtime::spawn_blocking_in_span is the sanctioned span-carrying wrapper, but it pulls in the full compile/codegen dependency graph this crate does not otherwise need"
+            )]
             tokio::task::spawn_blocking(move || read_rollout_usage(&sessions, &thread))
                 .await
                 .map_err(|error| AgentBackendError::BackendUnavailable {
@@ -367,7 +370,10 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         };
         let thread = thread.id().0.clone();
         Box::pin(async move {
-            #[allow(clippy::disallowed_methods, reason = "tidepool_runtime::spawn_blocking_in_span is the sanctioned span-carrying wrapper, but it pulls in the full compile/codegen dependency graph this crate does not otherwise need")]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "tidepool_runtime::spawn_blocking_in_span is the sanctioned span-carrying wrapper, but it pulls in the full compile/codegen dependency graph this crate does not otherwise need"
+            )]
             tokio::task::spawn_blocking(move || {
                 read_rollout_conversation(&sessions, &thread, count)
             })
@@ -529,7 +535,10 @@ fn command_for(
     // Never spawned: built only to reuse Command's arg-escaping, then
     // flattened back into InteractiveAgentCommand's plain argv for the caller
     // to launch (see below).
-    #[allow(clippy::disallowed_methods, reason = "never spawned; used only for its argv builder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "never spawned; used only for its argv builder"
+    )]
     let mut command = Command::new(installation.executable());
     match &spec.mode {
         InteractiveLaunchMode::Fresh => {}
@@ -844,7 +853,10 @@ async fn run_captured<'a>(
     args: impl IntoIterator<Item = &'a str>,
     deadline: Duration,
 ) -> Result<CapturedCommand, AgentBackendError> {
-    #[allow(clippy::disallowed_methods, reason = "spawned with kill_on_drop(true), dies with its owner")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "spawned with kill_on_drop(true), dies with its owner"
+    )]
     let mut command = Command::new(executable);
     command
         .args(args)

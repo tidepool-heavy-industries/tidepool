@@ -141,12 +141,13 @@ where
         owner: ActorRef,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(custody) = self.worktree_custody.clone() {
-            let transferred = tidepool_runtime::spawn_blocking_in_span(move || {
-                custody.transfer_to(owner)
-            })
-                .await
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+            let transferred =
+                tidepool_runtime::spawn_blocking_in_span(move || custody.transfer_to(owner))
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
             self.worktree_custody = Some(transferred);
         }
         Ok(())

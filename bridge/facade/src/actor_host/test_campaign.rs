@@ -59,12 +59,14 @@ impl TestCampaign {
         timeout: Duration,
         pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
     ) -> T {
-        self.next_deployment_opt(timeout, pick).await.unwrap_or_else(|| {
-            panic!(
-                "{what}: timed out or the deployment channel closed; still pending: {:?}",
-                self.pending_kinds()
-            )
-        })
+        self.next_deployment_opt(timeout, pick)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}: timed out or the deployment channel closed; still pending: {:?}",
+                    self.pending_kinds()
+                )
+            })
     }
 
     /// As [`Self::next_deployment`], but `None` on timeout or channel close
@@ -104,9 +106,16 @@ impl TestCampaign {
     /// Assert that no parked or currently-buffered deployment matches
     /// `pick`. Draining leaves every non-matching deployment parked, never
     /// dropped.
-    pub fn assert_no_deployment(&mut self, what: &str, mut pick: impl FnMut(&LocalResidentDeployment) -> bool) {
+    pub fn assert_no_deployment(
+        &mut self,
+        what: &str,
+        mut pick: impl FnMut(&LocalResidentDeployment) -> bool,
+    ) {
         if let Some(event) = self.pending.iter().find(|event| pick(event)) {
-            panic!("{what}: already parked a matching deployment: {}", event.kind());
+            panic!(
+                "{what}: already parked a matching deployment: {}",
+                event.kind()
+            );
         }
         while let Ok(event) = self.deployments.try_recv() {
             if pick(&event) {
@@ -129,7 +138,10 @@ impl TestCampaign {
 
     /// Kinds of every deployment currently parked, for diagnostics.
     pub fn pending_kinds(&self) -> Vec<&'static str> {
-        self.pending.iter().map(LocalResidentDeployment::kind).collect()
+        self.pending
+            .iter()
+            .map(LocalResidentDeployment::kind)
+            .collect()
     }
 
     /// Take exclusive, permanent ownership of the deployment channel away
@@ -145,7 +157,10 @@ impl TestCampaign {
             "deployments already parked: {:?}; drain them before detaching the channel",
             self.pending_kinds()
         );
-        std::mem::replace(&mut self.deployments, tokio::sync::mpsc::unbounded_channel().1)
+        std::mem::replace(
+            &mut self.deployments,
+            tokio::sync::mpsc::unbounded_channel().1,
+        )
     }
 
     pub async fn await_watch_ready(&mut self) {

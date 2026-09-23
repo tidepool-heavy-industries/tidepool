@@ -64,7 +64,10 @@ impl<'de> Deserialize<'de> for Answer {
         }
 
         let value = Value::deserialize(deserializer)?;
-        let kind = value.get("type").and_then(Value::as_str).map(str::to_string);
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         match kind.as_deref() {
             Some("noul") => serde_json::from_value::<Noul>(value)
                 .map(|Noul { noul }| Answer::Noul { noul })

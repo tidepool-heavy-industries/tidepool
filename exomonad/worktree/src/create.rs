@@ -333,7 +333,10 @@ impl WorktreeManager {
             .stdout
             .take()
             .ok_or_else(|| failure(std::io::Error::other("missing archive pipe")))?;
-        #[allow(clippy::disallowed_methods, reason = "one-shot tar extraction into a tempdir")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "one-shot tar extraction into a tempdir"
+        )]
         let consumer = std::process::Command::new("tar")
             .args(["--acls", "--xattrs", "--sparse", "-xf", "-", "-C"])
             .arg(stage.path())

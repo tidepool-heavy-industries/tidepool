@@ -23,9 +23,8 @@ use tidepool_runtime::session::{
     run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
     CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
     HostBindingAuthority, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    ResidentError, ResidentHole,
-    ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
-    TurnClassification, TurnKind, TurnRequest, TurnResult,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, SourceImports, TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,

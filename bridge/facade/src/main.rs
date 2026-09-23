@@ -1,4 +1,3 @@
-
 #[derive(clap::Parser)]
 #[command(
     name = "tidepool",

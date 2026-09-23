@@ -8,7 +8,6 @@
 //! what its own downstream callers still reach through `tidepool_runtime::`
 //! paths).
 
-
 use std::io;
 use std::path::PathBuf;
 

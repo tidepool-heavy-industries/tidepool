@@ -203,7 +203,10 @@ async fn publication_peer_pid_is_host_visible_across_pid_namespace() {
     use std::os::unix::fs::MetadataExt;
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("native.sock");
-    #[allow(clippy::disallowed_methods, reason = "spawned with kill_on_drop(true), dies with its owner")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "spawned with kill_on_drop(true), dies with its owner"
+    )]
     let mut child = tokio::process::Command::new("bwrap")
         .args([
             "--unshare-user",

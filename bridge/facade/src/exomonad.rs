@@ -869,7 +869,10 @@ pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error:
         return Err(runtime_error("invalid Exomonad run identity"));
     }
     let unit = format!("exomonad-host-{run_id}.service");
-    #[allow(clippy::disallowed_methods, reason = "short synchronous probe: systemctl stop, waited on directly via .status()")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: systemctl stop, waited on directly via .status()"
+    )]
     let status = tokio::process::Command::new("systemctl")
         .args(["--user", "stop", &unit])
         .status()
@@ -2167,12 +2170,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             pinned.trimmed(),
-            git_stdout(
-                example_skills().parent().unwrap(),
-                &["rev-parse", "HEAD"]
-            )
-            .await
-            .trim()
+            git_stdout(example_skills().parent().unwrap(), &["rev-parse", "HEAD"])
+                .await
+                .trim()
         );
     }
 

@@ -290,12 +290,14 @@ pub(super) async fn backend_request(
     campaign: &mut TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     campaign
-        .next_deployment("backend request", Duration::from_secs(30), |event| {
-            match event {
+        .next_deployment(
+            "backend request",
+            Duration::from_secs(30),
+            |event| match event {
                 LocalResidentDeployment::CommandBackend(request) => Ok(request),
                 other => Err(other),
-            }
-        })
+            },
+        )
         .await
 }
 

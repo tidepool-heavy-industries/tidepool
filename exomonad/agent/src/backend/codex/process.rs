@@ -1018,7 +1018,10 @@ mod tests {
     }
 
     async fn connect_peer(executable: &Path, cwd: &Path) -> Result<Session, SessionError> {
-        #[allow(clippy::disallowed_methods, reason = "fed into spawn_transport, which spawns with kill_on_drop(true)")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "fed into spawn_transport, which spawns with kill_on_drop(true)"
+        )]
         let mut command = tokio::process::Command::new(executable);
         command.current_dir(cwd).env_clear().envs(child_env_vars());
         let mut session = Session::over(spawn_transport(command)?);
