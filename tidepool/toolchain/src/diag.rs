@@ -87,29 +87,13 @@ fn truncate_tail(s: &str, max: usize) -> &str {
 /// Machine-readable measurements belong in the daemon's structured log, not
 /// in a source diagnostic. Filter before applying the bounded diagnostic
 /// budget so a long measurement run cannot push the GHC error out of view.
+/// The prefixes are the single list in
+/// `tidepool_extract_cmd::diagnostics`, shared with the daemon's own
+/// transaction log.
 fn without_machine_lines(stderr: &str) -> String {
-    const PREFIXES: [&str; 13] = [
-        "tidepool-timing ",
-        "tidepool-timing-detail ",
-        "tidepool-timing-module ",
-        "tidepool-timing-module-detail ",
-        "tidepool-count ",
-        "tidepool-compile-summary ",
-        "tidepool-memo-miss ",
-        "tidepool-checked ",
-        "tidepool-checked-dependency-executable ",
-        "tidepool-checked-interface-retained ",
-        "tidepool-checked-interface-elided ",
-        "tidepool-dependency-witness ",
-        "tidepool-target ",
-    ];
     stderr
         .lines()
-        .filter(|line| {
-            !PREFIXES
-                .iter()
-                .any(|prefix| line.trim_start().starts_with(prefix))
-        })
+        .filter(|line| !tidepool_extract_cmd::diagnostics::is_machine_stderr_line(line))
         .collect::<Vec<_>>()
         .join("\n")
 }

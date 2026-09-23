@@ -391,7 +391,7 @@ mod tests {
                 serde_json::json!({
                     "operation": "bind",
                     "binding": {
-                        "protocolVersion": 5,
+                        "protocolVersion": codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
                         "launchId": "launch-1",
                         "instanceId": "instance-2",
                         "generation": 7,
@@ -503,8 +503,11 @@ mod tests {
 
     #[test]
     fn compacted_outcome_matches_native_wire_vector() {
-        let json = r#"{"binding":{"protocolVersion":5,"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"},"outcome":"compacted"}"#;
-        let response: InputControlResponse = serde_json::from_str(json).unwrap();
+        let json = format!(
+            r#"{{"binding":{{"protocolVersion":{},"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"}},"outcome":"compacted"}}"#,
+            codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION
+        );
+        let response: InputControlResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(response.outcome, OutcomeWire::Compacted);
         assert_eq!(serde_json::to_string(&response).unwrap(), json);
     }

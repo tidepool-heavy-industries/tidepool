@@ -70,7 +70,7 @@ async fn exact_publication_request_and_lost_reply_are_not_retried() {
                 };
                 let mut expected = serde_json::json!({
                     "binding": {
-                        "protocolVersion": 5,
+                        "protocolVersion": codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
                         "launchId": "launch",
                         "instanceId": "instance",
                         "generation": 1,

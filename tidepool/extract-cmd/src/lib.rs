@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod daemon;
+pub mod diagnostics;
 mod endpoint;
 pub mod exec_check;
 pub mod frontend;

@@ -2398,6 +2398,18 @@ fn actor_worktree_resources_at(
     root: &Path,
     workspace: &Path,
 ) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
+    let git = GitCli::new();
+    // The root actor writes its own runtime state (journal, logs) directly
+    // into `workspace` — it is not admitted through `prepare()` the way a
+    // fork's checkout is, so nothing else on this path installs the
+    // exclusion that keeps that state from registering as a dirty source.
+    // This is the one place every caller that builds a `WorktreeManager`
+    // over a source repository passes through, so it is where the exclusion
+    // belongs rather than in each caller (a launcher, a scaffold, a test
+    // harness) remembering to call it separately. `ensure_exomonad_local_exclude`
+    // is idempotent, so a caller upstream that already installed it (real
+    // `exomonad` launches do, via `exomonad.rs`) pays only a no-op write check.
+    git.ensure_exomonad_local_exclude(workspace)?;
     let registry = WorktreeRegistry::open(root.join("registry"))?;
     let worktree_root = root.join("worktrees");
     // The root's own allocation directory exists before ANY launch: a mount
@@ -2416,7 +2428,7 @@ fn actor_worktree_resources_at(
         })?;
     }
     Ok((
-        WorktreeManager::new(GitCli::new(), registry, worktree_root, workspace),
+        WorktreeManager::new(git, registry, worktree_root, workspace),
         BindingTable::open_with_timeout(root.join("bindings"), Duration::from_secs(10))?,
     ))
 }
@@ -8740,7 +8752,7 @@ mod tests {
         ) {
             let body = serde_json::to_vec(&serde_json::json!({
                 "binding": {
-                    "protocolVersion": 5,
+                    "protocolVersion": codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
                     "launchId": binding.launch_id,
                     "instanceId": binding.instance_id,
                     "generation": binding.generation.get(),

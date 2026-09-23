@@ -1227,4 +1227,37 @@ mod tests {
         let error = ExtractRequest::from_cli(&["--target".into(), "answer".into()]).unwrap_err();
         assert_eq!(error.to_string(), "an input file is required");
     }
+
+    /// Parses `name = "value"` out of a Haskell source file by scanning for a
+    /// line whose trimmed text starts with `name` followed by `=` and a
+    /// quoted literal — never a substring search, so a renamed or
+    /// re-shaped binding fails this test instead of silently passing.
+    fn haskell_string_const(source: &str, name: &str) -> Option<String> {
+        for line in source.lines() {
+            let Some(rest) = line.trim_start().strip_prefix(name) else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            if let Some(end) = rest.find('"') {
+                return Some(rest[..end].to_string());
+            }
+        }
+        None
+    }
+
+    /// The Rust worker request flag must match the exact Haskell encoder
+    /// literal — a version bump on either side without the other would make
+    /// `decode_worker_argv` reject every request from a compiled worker.
+    #[test]
+    fn worker_request_flag_matches_the_haskell_encoder() {
+        let haskell = include_str!("../../../bridge/haskell/src/Tidepool/ExtractRequest.hs");
+        let found = haskell_string_const(haskell, "workerRequestFlag")
+            .expect("workerRequestFlag = \"...\" not found in ExtractRequest.hs");
+        assert_eq!(found, WORKER_REQUEST_FLAG);
+    }
 }

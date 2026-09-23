@@ -4939,4 +4939,33 @@ mod tests {
             "expected ExtractFailed, got {err:?}"
         );
     }
+
+    /// `PREPARED_SCAFFOLD_TARGET` names the compile target on the Rust side;
+    /// `Tidepool.Session.preparedScaffoldTargetName` must name the exact same
+    /// target on the Haskell side, or a compiled scaffold silently targets
+    /// the wrong binding. Parses the Haskell literal (never a substring
+    /// search) so a rename on either side fails this test.
+    #[test]
+    fn prepared_scaffold_target_matches_the_haskell_scaffold_name() {
+        let session_hs = include_str!("../../../../bridge/haskell/src/Tidepool/Session.hs");
+        let mut found = None;
+        for line in session_hs.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("preparedScaffoldTargetName") else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            if let Some(end) = rest.find('"') {
+                found = Some(rest[..end].to_string());
+                break;
+            }
+        }
+        let found = found
+            .expect("preparedScaffoldTargetName = \"...\" not found in Session.hs");
+        assert_eq!(found, PREPARED_SCAFFOLD_TARGET);
+    }
 }

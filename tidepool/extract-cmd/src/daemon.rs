@@ -864,33 +864,12 @@ fn hex(bytes: &[u8]) -> String {
 /// under `TIDEPOOL_TIMING=1`, one `tidepool-timing` line per phase and one
 /// `tidepool-memo-miss` line per memoized module it recompiled. Structural
 /// `tidepool-checked` and `tidepool-target` lines distinguish metadata-only
-/// checks from executable target desugaring. The
-/// prefixes mirror `tidepool_toolchain::timing` (this crate is a dependency
-/// leaf and cannot name it).
-const MACHINE_STDERR_PREFIXES: [&str; 13] = [
-    "tidepool-timing ",
-    "tidepool-timing-detail ",
-    "tidepool-timing-module ",
-    "tidepool-timing-module-detail ",
-    "tidepool-count ",
-    "tidepool-compile-summary ",
-    "tidepool-memo-miss ",
-    "tidepool-checked ",
-    "tidepool-checked-dependency-executable ",
-    "tidepool-checked-interface-retained ",
-    "tidepool-checked-interface-elided ",
-    "tidepool-dependency-witness ",
-    "tidepool-target ",
-];
-
+/// checks from executable target desugaring. The prefixes are the single
+/// list in [`crate::diagnostics`], shared with `tidepool_toolchain::diag`.
 fn diagnostic_stderr(stderr: &[u8]) -> Vec<u8> {
     String::from_utf8_lossy(stderr)
         .lines()
-        .filter(|line| {
-            !MACHINE_STDERR_PREFIXES
-                .iter()
-                .any(|prefix| line.trim_start().starts_with(prefix))
-        })
+        .filter(|line| !crate::diagnostics::is_machine_stderr_line(line))
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes()
@@ -899,10 +878,7 @@ fn diagnostic_stderr(stderr: &[u8]) -> Vec<u8> {
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
-        if MACHINE_STDERR_PREFIXES
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        {
+        if crate::diagnostics::is_machine_stderr_line(line) {
             tracing::debug!(run_id, %compile_request, line, "compiler timing");
         }
     }
