@@ -1,4 +1,8 @@
 //! Matched full-TUI acceptance with a local scripted provider; no paid model calls.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 use super::*;
 use crate::host_dynamic_tools::{HostDynamicToolService, MODEL_OUTPUT_LIMIT};
 use axum::{extract::State, routing::post, Json, Router};

@@ -4,6 +4,10 @@
     clippy::expect_used,
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "integration test: launches the real binary/process fixtures directly, not through the production launcher"
+)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{Duration, Instant};

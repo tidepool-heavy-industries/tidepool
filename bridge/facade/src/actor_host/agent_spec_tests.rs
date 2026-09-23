@@ -11,6 +11,10 @@
 //! slot, applied at the tool-result boundary in the actor's own resident
 //! machine, annotates or prunes what the model is shown without ever rewriting
 //! it.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 
 use std::path::Path;
 

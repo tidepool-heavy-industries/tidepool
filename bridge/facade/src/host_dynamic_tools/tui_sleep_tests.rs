@@ -2,6 +2,10 @@
 //!
 //! These ignored tests use the packaged native TUI under a real tmux PTY, a
 //! scripted local provider, and the production actor-scoped host service.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 
 use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;

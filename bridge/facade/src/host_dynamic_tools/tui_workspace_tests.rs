@@ -1,4 +1,8 @@
 //! Production Exomonad/TUI/fork composition with a local scripted provider.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 use super::*;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path, sync::Mutex as StdMutex, time::Duration};

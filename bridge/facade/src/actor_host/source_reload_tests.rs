@@ -7,6 +7,10 @@
 //! live session can answer: a later cell compiles against the published
 //! revision while a value bound before the reload keeps the code it was built
 //! from, and an actor's reload reaches its own layer and no other.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 
 use std::path::Path;
 

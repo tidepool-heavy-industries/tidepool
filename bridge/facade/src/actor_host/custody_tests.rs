@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
+)]
 use super::*;
 use exomonad_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
 

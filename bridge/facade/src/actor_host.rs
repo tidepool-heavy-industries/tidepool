@@ -8256,6 +8256,7 @@ mod tests {
             },
         );
         let environment = actor_launch_environment(BTreeMap::new(), false, Some(relative_target));
+        #[allow(clippy::disallowed_methods, reason = "test: short synchronous cargo check probe under a real mount boundary")]
         let mut command = std::process::Command::new(invocation.program);
         command.args(invocation.args).envs(environment.set);
         for name in environment.unset {
