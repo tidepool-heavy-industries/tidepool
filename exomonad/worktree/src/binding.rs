@@ -343,6 +343,10 @@ impl BindingTable {
                 Ok(()) => break,
                 Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < timeout => {
                     let remaining = timeout.saturating_sub(started.elapsed());
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "synchronous file-lock poll loop, not async"
+                    )]
                     std::thread::sleep(std::time::Duration::from_millis(50).min(remaining));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {

@@ -153,6 +153,10 @@ impl GitCli {
         if let Some(namespace) = &self.namespace {
             return namespace.host_command(cwd, OsStr::new("git"));
         }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "exomonad-worktree owns the git CLI (AGENTS.md)"
+        )]
         let mut command = Command::new("git");
         command.current_dir(cwd);
         Ok(command)
@@ -738,6 +742,7 @@ mod admission_tests {
         let thread = std::thread::spawn(move || {
             let _capture = holder.try_capture().unwrap();
             held.send(()).unwrap();
+            #[allow(clippy::disallowed_methods, reason = "sync test thread, not async")]
             std::thread::sleep(std::time::Duration::from_millis(200));
         });
         ready.recv().unwrap();

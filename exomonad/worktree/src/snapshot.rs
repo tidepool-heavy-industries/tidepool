@@ -127,7 +127,9 @@ pub fn snapshot_source(
         .try_run(source, &["write-tree"])?
         .trimmed()
         .to_string();
-    let _ = std::fs::remove_file(&temp_index_path);
+    // best-effort: the temp index lives in a scratch location; a leftover
+    // file here doesn't affect correctness, only tidiness.
+    std::fs::remove_file(&temp_index_path).ok();
 
     let message = format!(
         "tidepool: dirty-source snapshot for worktree {worktree_id}\n\nSource HEAD: {source_head}\n{pre_status}"

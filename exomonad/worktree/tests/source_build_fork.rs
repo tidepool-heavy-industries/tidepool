@@ -19,8 +19,9 @@ struct Owner(Child);
 impl Drop for Owner {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        // best-effort: Drop cannot propagate; the child may already have exited.
+        self.0.kill().ok();
+        self.0.wait().ok();
     }
 }
 
@@ -32,6 +33,7 @@ fn launch(boundary: ProcessMountBoundary) -> (Owner, MountNamespace, u32) {
             args: vec!["-c".into(), "echo $$; read finished".into()],
         },
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let mut process = Command::new(command.program);
     process.args(command.args);
     capture_worker(process)

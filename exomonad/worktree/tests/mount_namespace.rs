@@ -17,8 +17,9 @@ struct Owner(Child);
 impl Drop for Owner {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        // best-effort: Drop cannot propagate; the child may already have exited.
+        self.0.kill().ok();
+        self.0.wait().ok();
     }
 }
 
@@ -155,13 +156,15 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         })
         .unwrap();
     let private_admin = storage.path().join("git-admin");
-    assert!(Command::new("cp")
+    #[allow(clippy::disallowed_methods, reason = "one-shot cp test fixture")]
+    let cp = Command::new("cp")
         .arg("-a")
         .arg(&git_dir)
         .arg(&private_admin)
         .status()
-        .unwrap()
-        .success());
+        .unwrap();
+    assert!(cp.success());
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let mut owner = Owner(
         Command::new("bwrap")
             .args([

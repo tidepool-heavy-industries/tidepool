@@ -1079,6 +1079,7 @@ fn binding_table_waits_for_release_without_stealing_live_ownership() {
     let first = BindingTable::open(&root).unwrap();
     assert!(BindingTable::open_with_timeout(&root, Duration::from_millis(20)).is_err());
     let release = std::thread::spawn(move || {
+        #[allow(clippy::disallowed_methods, reason = "sync test thread, not async")]
         std::thread::sleep(Duration::from_millis(50));
         drop(first);
     });

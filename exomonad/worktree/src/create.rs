@@ -333,13 +333,16 @@ impl WorktreeManager {
             .stdout
             .take()
             .ok_or_else(|| failure(std::io::Error::other("missing archive pipe")))?;
+        #[allow(clippy::disallowed_methods, reason = "one-shot tar extraction into a tempdir")]
         let consumer = std::process::Command::new("tar")
             .args(["--acls", "--xattrs", "--sparse", "-xf", "-", "-C"])
             .arg(stage.path())
             .stdin(input)
             .status();
         if consumer.is_err() {
-            let _ = producer.kill();
+            // best-effort: the pipeline already failed; this only stops the
+            // producer from writing into a closed pipe.
+            producer.kill().ok();
         }
         let produced = producer.wait().map_err(failure)?;
         if !consumer.map_err(failure)?.success() || !produced.success() {

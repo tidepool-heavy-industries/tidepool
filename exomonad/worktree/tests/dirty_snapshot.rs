@@ -388,9 +388,10 @@ fn refuses_when_source_is_mid_merge_and_leaves_it_untouched() {
     w.checkout("main").expect("checkout main");
     w.commit_file("f.txt", "main change\n", "main commit")
         .expect("main commit");
-    let _ = repo
-        .git()
-        .run(repo.path(), &["merge", "--no-edit", "feature"]);
+    // Expected to fail with a conflict; that's the fixture state this test needs.
+    repo.git()
+        .run(repo.path(), &["merge", "--no-edit", "feature"])
+        .ok();
     assert!(
         repo.path().join(".git").join("MERGE_HEAD").exists(),
         "test setup must actually produce a conflicted, in-progress merge"
@@ -423,7 +424,8 @@ fn refuses_when_source_is_mid_rebase_and_leaves_it_untouched() {
     w.commit_file("f.txt", "main change\n", "main commit")
         .expect("main commit");
     w.checkout("feature").expect("checkout feature");
-    let _ = w.rebase_onto("main");
+    // Expected to fail with a conflict; that's the fixture state this test needs.
+    w.rebase_onto("main").ok();
     assert!(
         repo.path().join(".git").join("rebase-apply").exists()
             || repo.path().join(".git").join("rebase-merge").exists(),
