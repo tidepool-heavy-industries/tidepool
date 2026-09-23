@@ -88,7 +88,7 @@ unsafe fn render_into_wrapper(
         .store_external_bytes(payload, 0, text.as_bytes())
         .is_err()
     {
-        return super::arrays::array_error(machine, RuntimeError::BadPointer);
+        return super::arrays::array_error(machine, crate::host_fns::bad_pointer());
     }
     // The wrapper header and handle slot were reserved before this noncollecting call.
     unsafe { wrapper.add(8).cast::<*mut u8>().write(payload) };

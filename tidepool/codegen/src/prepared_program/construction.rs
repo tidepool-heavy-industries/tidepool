@@ -165,9 +165,12 @@ impl ConstructionCore {
         };
         let chunk = index / ROOT_CHUNK_WORDS;
         let slot_index = index % ROOT_CHUNK_WORDS;
-        let root = self.roots.get_mut(chunk).ok_or(RuntimeError::BadPointer)?;
+        let root = self
+            .roots
+            .get_mut(chunk)
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         if root.active[slot_index] || root.registrations[slot_index].is_some() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let generation = root.generations[slot_index]
             .checked_add(1)
@@ -176,7 +179,7 @@ impl ConstructionCore {
         let slot = root
             .words
             .slot_address(slot_index)
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         // A consumed managed node leaves its old pointer in the backing word.
         // Clear it before registration so a collection between preparation and
         // publication never treats the previous occupant as this new root.
@@ -222,7 +225,7 @@ impl ConstructionCore {
         root: PreparedRoot,
     ) -> Result<(), RuntimeError> {
         self.consume(machine, root.node)
-            .map_err(|_| RuntimeError::BadPointer)
+            .map_err(|_| crate::host_fns::bad_pointer())
     }
 
     fn root(&self, node: ConstructionNode) -> Result<(&RootChunk, usize), NodeAccessError> {
@@ -368,9 +371,9 @@ impl ConstructionCore {
     ) -> Result<ConstructionNode, ConstructionError<E>> {
         for (index, child) in consumed.iter().enumerate() {
             self.root(*child)
-                .map_err(|_| ConstructionError::Runtime(RuntimeError::BadPointer))?;
+                .map_err(|_| ConstructionError::Runtime(crate::host_fns::bad_pointer()))?;
             if consumed[..index].contains(child) {
-                return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
+                return Err(ConstructionError::Runtime(crate::host_fns::bad_pointer()));
             }
         }
         let mut values = Vec::new();
@@ -404,7 +407,7 @@ impl ConstructionCore {
         let node = self.publish_root(root, pointer as usize | usize::from(descriptor.tag()));
         for child in consumed {
             self.consume(machine, *child)
-                .map_err(|_| ConstructionError::Runtime(RuntimeError::BadPointer))?;
+                .map_err(|_| ConstructionError::Runtime(crate::host_fns::bad_pointer()))?;
         }
         Ok(node)
     }
@@ -443,7 +446,7 @@ impl ConstructionCore {
             self.abandon_root(machine, root)
                 .map_err(ConstructionError::Runtime)?;
             if !released {
-                return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
+                return Err(ConstructionError::Runtime(crate::host_fns::bad_pointer()));
             }
             return Err(ConstructionError::Storage(error));
         }
@@ -460,7 +463,7 @@ impl ConstructionCore {
             self.abandon_root(machine, root)
                 .map_err(ConstructionError::Runtime)?;
             if !released {
-                return Err(ConstructionError::Runtime(RuntimeError::BadPointer));
+                return Err(ConstructionError::Runtime(crate::host_fns::bad_pointer()));
             }
             return Err(ConstructionError::Marshal(error));
         }

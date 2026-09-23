@@ -695,7 +695,7 @@ impl MachineState {
             return;
         }
         if reference.is_null() {
-            self.set_first_cause(RuntimeError::BadPointer);
+            self.set_first_cause(crate::host_fns::bad_pointer());
         } else {
             self.record_first_cause(RuntimeError::RaisedException, Some(reference));
         }
@@ -811,7 +811,7 @@ impl MachineState {
     pub(crate) fn begin_prepared_call(&self) -> Result<(), MachineFailure> {
         if self.disposition() == MachineDisposition::Unavailable {
             return Err(self.last_failure().unwrap_or(MachineFailure {
-                cause: RuntimeError::BadPointer,
+                cause: crate::host_fns::bad_pointer(),
                 disposition: MachineDisposition::Unavailable,
             }));
         }
@@ -922,16 +922,16 @@ impl MachineState {
         use tidepool_heap::managed_reference::{tag_valid, untag};
         let reference = untag(encoded) as *const usize;
         if reference.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let active = self
             .gc_state
             .try_borrow()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         let prepared = active
             .as_ref()
             .and_then(|state| state.prepared.as_ref())
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let header = unsafe { reference.read() };
         if header & 7 != 0 {
             return Err(RuntimeError::BadThunkState((header & 7) as u8));
@@ -939,7 +939,7 @@ impl MachineState {
         let descriptor = prepared
             .space
             .live_descriptor(header)
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         if descriptor.kind() != ObjectKind::Constructor {
             return Err(RuntimeError::ExpectedConstructor);
         }
@@ -952,7 +952,7 @@ impl MachineState {
             DescriptorState::Live,
             Some(tag),
         ) {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         Ok(i64::from(tag.get() - 1))
     }
@@ -972,16 +972,16 @@ impl MachineState {
         use tidepool_heap::managed_reference::untag;
         let reference = untag(encoded) as *const usize;
         if reference.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let active = self
             .gc_state
             .try_borrow()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         let prepared = active
             .as_ref()
             .and_then(|state| state.prepared.as_ref())
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let header = unsafe { reference.read() };
         if header & 7 != 0 {
             return Err(RuntimeError::BadThunkState((header & 7) as u8));
@@ -990,7 +990,7 @@ impl MachineState {
             .space
             .live_descriptor(header)
             .map(|descriptor| descriptor.kind())
-            .ok_or(RuntimeError::BadPointer)
+            .ok_or_else(|| crate::host_fns::bad_pointer())
     }
 
     /// Install a prepared nursery whose descriptor space admits one immutable
@@ -1004,9 +1004,9 @@ impl MachineState {
         let mut active = self
             .gc_state
             .try_borrow_mut()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         if active.is_some() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         // `layouts` is not read again after this call: hand its Arcs to the
         // space by move (`into_iter`), not by a second Arc-bump pass over a
@@ -1049,11 +1049,11 @@ impl MachineState {
         let mut active = self
             .gc_state
             .try_borrow_mut()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         let prepared = active
             .as_mut()
             .and_then(|state| state.prepared.as_mut())
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         prepared
             .space
             .extend_descriptors(layouts)
@@ -1077,11 +1077,11 @@ impl MachineState {
         let active = self
             .gc_state
             .try_borrow()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         let prepared = active
             .as_ref()
             .and_then(|state| state.prepared.as_ref())
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         Ok(prepared.space.static_catalog())
     }
 
@@ -1529,12 +1529,12 @@ impl MachineState {
         let active = self
             .gc_state
             .try_borrow()
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         active
             .as_ref()
             .and_then(|state| state.prepared.as_ref())
             .map(|_| ())
-            .ok_or(RuntimeError::BadPointer)
+            .ok_or_else(|| crate::host_fns::bad_pointer())
     }
 
     /// Program retirement: remove the layouts only that program owned and
@@ -2045,7 +2045,7 @@ impl MachineState {
     ) -> Result<Vec<u8>, RuntimeError> {
         let storage = self.external_storage.borrow();
         let data = Self::checked_external_byte_range(&storage, published, byte_offset, count)
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         let mut copied: Vec<u8> = Vec::new();
         copied
             .try_reserve_exact(count)
@@ -3296,18 +3296,18 @@ mod tests {
             })
         );
         assert_eq!(ms.last_failure(), None);
-        ms.set_first_cause(RuntimeError::BadPointer);
+        ms.set_first_cause(crate::host_fns::bad_pointer());
 
         // The call outcome keeps its first cause; the latch holds the first
         // INTEGRITY cause, which is what makes the machine unavailable.
         assert_eq!(ms.disposition(), MachineDisposition::Unavailable);
-        assert_eq!(
+        assert!(matches!(
             ms.last_failure(),
             Some(MachineFailure {
-                cause: RuntimeError::BadPointer,
+                cause: RuntimeError::BadPointer { .. },
                 disposition: MachineDisposition::Unavailable,
             })
-        );
+        ));
         assert_eq!(ms.current_failure(), ms.last_failure());
         assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
         assert!(ms.begin_prepared_call().is_err(), "the latch never clears");
@@ -3470,20 +3470,20 @@ mod tests {
     #[test]
     fn prepared_constructor_tag_rejects_contradictory_low_bits_and_null() {
         let (machine, _, address) = prepared_tag_fixture(2);
-        assert_eq!(
+        assert!(matches!(
             unsafe { machine.prepared_constructor_tag(address | 1) },
-            Err(RuntimeError::BadPointer)
-        );
+            Err(RuntimeError::BadPointer { .. })
+        ));
         let (machine, _, address) = prepared_tag_fixture(8);
-        assert_eq!(
+        assert!(matches!(
             unsafe { machine.prepared_constructor_tag(address | 1) },
-            Err(RuntimeError::BadPointer)
-        );
+            Err(RuntimeError::BadPointer { .. })
+        ));
         for encoded in [0, 7] {
-            assert_eq!(
+            assert!(matches!(
                 unsafe { machine.prepared_constructor_tag(encoded) },
-                Err(RuntimeError::BadPointer)
-            );
+                Err(RuntimeError::BadPointer { .. })
+            ));
         }
     }
 
@@ -3525,10 +3525,10 @@ mod tests {
             );
         }
         unsafe { (address as *mut usize).write(usize::MAX & !7) };
-        assert_eq!(
+        assert!(matches!(
             unsafe { machine.prepared_constructor_tag(address) },
-            Err(RuntimeError::BadPointer)
-        );
+            Err(RuntimeError::BadPointer { .. })
+        ));
     }
 
     fn prepared_exception_fixture(
@@ -3622,7 +3622,7 @@ mod tests {
 
         // SAFETY: `reference` is an admitted exact start in the fixture nursery.
         unsafe { machine.record_prepared_raise(reference) };
-        machine.set_first_cause(RuntimeError::BadPointer);
+        machine.set_first_cause(crate::host_fns::bad_pointer());
 
         assert_eq!(machine.prepared_exception.get(), reference);
         assert_eq!(machine.disposition(), MachineDisposition::Unavailable);

@@ -80,7 +80,7 @@ fn snapshot_context(
         .map_err(storage_error)?;
     let bytes: [u8; CONTEXT_BYTES] = bytes
         .try_into()
-        .map_err(|_| crate::host_fns::RuntimeError::BadPointer)?;
+        .map_err(|_| crate::host_fns::bad_pointer())?;
     Ok(Context::from_bytes(bytes))
 }
 
@@ -190,7 +190,7 @@ pub(super) unsafe extern "C" fn prepared_md5_final(
             .read_external_address(digest_address, DIGEST_BYTES)
             .map_err(storage_error)?;
         if !disjoint_ranges(context_address, CONTEXT_BYTES, digest_address, DIGEST_BYTES) {
-            return Err(crate::host_fns::RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (digest, cleared) = context.finalize();
         machine

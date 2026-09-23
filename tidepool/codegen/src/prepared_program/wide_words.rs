@@ -79,7 +79,7 @@ pub(super) unsafe extern "C" fn prepared_quot_rem_word2(
         return machine.prepared_call_status() as i32;
     }
     let result = if output.is_null() {
-        Err(RuntimeError::BadPointer)
+        Err(crate::host_fns::bad_pointer())
     } else {
         checked_quot_rem(high, low, divisor)
     };

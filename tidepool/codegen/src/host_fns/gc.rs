@@ -444,8 +444,11 @@ fn collect_prepared(
     let active = state
         .active_buffer
         .as_mut()
-        .ok_or(RuntimeError::BadPointer)?;
-    let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
+    let prepared = state
+        .prepared
+        .as_mut()
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     let ceiling = max_heap_bytes() & !7;
     if reserve > ceiling || ceiling < 8 {
         return Err(RuntimeError::HeapOverflow);
@@ -510,7 +513,7 @@ fn collect_prepared(
             Err(DescriptorTraceError::MetadataAllocation) => {
                 return Err(RuntimeError::HeapOverflow)
             }
-            Err(_) => return Err(RuntimeError::BadPointer),
+            Err(_) => return Err(crate::host_fns::bad_pointer()),
         }
     }
 }
@@ -529,7 +532,7 @@ fn sweep_prepared_young(
     marked.extend(payloads.map(|(address, _)| address as *mut u8));
     let classify = |error| match error {
         ExternalStorageValidationError::BookkeepingAllocation => RuntimeError::HeapOverflow,
-        _ => RuntimeError::BadPointer,
+        _ => crate::host_fns::bad_pointer(),
     };
     let plan = machine
         .plan_external_minor_sweep(&marked)
@@ -555,7 +558,7 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
             ms.put_gc_state(state);
         }
         if !is_prepared {
-            ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+            ms.set_first_cause(crate::host_fns::bad_pointer());
             return ms.prepared_call_status() as i32;
         }
         #[cfg(target_arch = "x86_64")]
@@ -567,7 +570,7 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
             perform_gc_request(fp, vmctx, reserve);
         }
         #[cfg(not(target_arch = "x86_64"))]
-        ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+        ms.set_first_cause(crate::host_fns::bad_pointer());
     }
     ms.prepared_call_status() as i32
 }
@@ -633,7 +636,7 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
         let from_used = alloc_ptr.checked_sub(from_start as usize);
         let Some(from_used) = from_used.filter(|&used| used <= from_size) else {
             ms.put_gc_state(state);
-            ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+            ms.set_first_cause(crate::host_fns::bad_pointer());
             return;
         };
 
@@ -671,10 +674,25 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
             }
         }
         match result {
-            Ok(used) => unsafe {
-                (*vmctx).alloc_ptr = state.active_start.add(used);
-                (*vmctx).alloc_limit = state.active_start.add(state.active_size);
-            },
+            Ok(used) => {
+                unsafe {
+                    (*vmctx).alloc_ptr = state.active_start.add(used);
+                    (*vmctx).alloc_limit = state.active_start.add(state.active_size);
+                }
+                // A completed copy that still can't fit the reservation is a
+                // heap-overflow outcome, not a missing-cause defect: record it
+                // here so the JIT's post-GC reservation check in
+                // `emit_prepared_reserve_fast_path` (a backstop; it now
+                // returns this recorded status instead of a missing cause)
+                // reports a diagnosed cause instead of falling through to
+                // `StatusWithoutCause`.
+                let fits = used
+                    .checked_add(reserve)
+                    .is_some_and(|needed| needed <= state.active_size);
+                if !fits {
+                    ms.set_first_cause(crate::host_fns::RuntimeError::HeapOverflow);
+                }
+            }
             Err(error) => ms.set_first_cause(error),
         }
         ms.put_gc_state(state);
@@ -955,7 +973,7 @@ mod tests {
         let ms = crate::machine_state::MachineState::new();
         ms.set_first_cause(RuntimeError::Cancelled);
         assert_eq!(ms.prepared_call_status(), CallStatus::Cancelled);
-        ms.set_first_cause(RuntimeError::BadPointer);
+        ms.set_first_cause(crate::host_fns::bad_pointer());
         assert_eq!(ms.prepared_call_status(), CallStatus::IntegrityFailure);
         assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
         assert_eq!(ms.prepared_call_status(), CallStatus::IntegrityFailure);

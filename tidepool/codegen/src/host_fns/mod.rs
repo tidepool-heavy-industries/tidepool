@@ -27,4 +27,4 @@ pub use gc::{
 pub(crate) use gc::{prepared_gc_trigger, GcState, PreparedHeap};
 
 pub(crate) use errors::MIN_VALID_ADDR;
-pub use errors::{drain_diagnostics, push_diagnostic, RuntimeError};
+pub use errors::{bad_pointer, drain_diagnostics, push_diagnostic, RuntimeError};

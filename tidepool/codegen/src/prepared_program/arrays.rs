@@ -191,7 +191,7 @@ pub(super) fn storage_error(
             RuntimeError::ArrayIndexOutOfBounds { index, len: old }
         }
         ExternalStorageValidationError::BookkeepingAllocation => RuntimeError::HeapOverflow,
-        _ => RuntimeError::BadPointer,
+        _ => crate::host_fns::bad_pointer(),
     }
 }
 
@@ -226,50 +226,52 @@ pub(super) unsafe fn active_payload(
     descriptor: *const ObjectDescriptor,
     kind: ExternalStorageKind,
 ) -> Result<(*mut u8, usize), crate::host_fns::RuntimeError> {
-    use crate::host_fns::RuntimeError;
     if vmctx.is_null() || descriptor.is_null() || reference.is_null() {
-        return Err(RuntimeError::BadPointer);
+        return Err(crate::host_fns::bad_pointer());
     }
     // SAFETY: the generated code embeds a pointer to its program-owned Arc.
     let descriptor = unsafe { &*descriptor };
     if descriptor.external_kind() != Some(kind)
         || (reference as usize & 7) != usize::from(descriptor.tag())
     {
-        return Err(RuntimeError::BadPointer);
+        return Err(crate::host_fns::bad_pointer());
     }
     let encoded = reference as usize;
     let address = untag(encoded);
     let extent = descriptor.allocation_extent() as usize;
-    let (start, size) = machine.gc_active_range().ok_or(RuntimeError::BadPointer)?;
+    let (start, size) = machine
+        .gc_active_range()
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     let active_end = (start as usize)
         .checked_add(size)
-        .ok_or(RuntimeError::BadPointer)?;
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     if address >= start as usize && address < active_end {
         let used_end = unsafe { (*vmctx).alloc_ptr } as usize;
         if used_end < start as usize
             || used_end > active_end
             || address.checked_add(extent).is_none_or(|end| end > used_end)
         {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
     } else {
-        let old = unsafe { machine.prepared_old_space() }.ok_or(RuntimeError::BadPointer)?;
+        let old = unsafe { machine.prepared_old_space() }
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         if old
             .admit(encoded)
-            .map_err(|_| RuntimeError::BadPointer)?
+            .map_err(|_| crate::host_fns::bad_pointer())?
             .is_none()
         {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
     }
     let object = address as *mut u8;
-    if unsafe { descriptor.state(object, extent) }.map_err(|_| RuntimeError::BadPointer)?
+    if unsafe { descriptor.state(object, extent) }.map_err(|_| crate::host_fns::bad_pointer())?
         != DescriptorState::Live
     {
-        return Err(RuntimeError::BadPointer);
+        return Err(crate::host_fns::bad_pointer());
     }
     let handle = unsafe { descriptor.external_payload_slot(object, extent) }
-        .map_err(|_| RuntimeError::BadPointer)?;
+        .map_err(|_| crate::host_fns::bad_pointer())?;
     let published = unsafe { handle.read() };
     let view = machine
         .external_active_view(published, kind)
@@ -294,7 +296,7 @@ pub(super) unsafe extern "C" fn prepared_read_boxed(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) =
             unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
@@ -349,17 +351,17 @@ pub(super) unsafe extern "C" fn prepared_sizeof_boxed(
     descriptor: *const ObjectDescriptor,
     output: *mut i64,
 ) -> i32 {
-    use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
+    use crate::prepared_control::CallStatus;
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     if machine.prepared_call_status() != CallStatus::Success {
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (_, len) = unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
-        let len = i64::try_from(len).map_err(|_| RuntimeError::BadPointer)?;
+        let len = i64::try_from(len).map_err(|_| crate::host_fns::bad_pointer())?;
         unsafe { output.write(len) };
         Ok(())
     })();
@@ -492,7 +494,7 @@ pub(super) unsafe extern "C" fn prepared_cas_boxed(
     }
     let result = (|| {
         if flag_output.is_null() || value_output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) =
             unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
@@ -2350,10 +2352,10 @@ mod tests {
             crate::prepared_control::CallStatus::IntegrityFailure as i32
         );
         assert_eq!(output, 13usize as *mut u8);
-        assert_eq!(
+        assert!(matches!(
             machine.take_runtime_error(),
-            Some(crate::host_fns::RuntimeError::BadPointer)
-        );
+            Some(crate::host_fns::RuntimeError::BadPointer { .. })
+        ));
         assert_eq!(machine.external_storage_stats().live_objects, 1);
     }
 
@@ -2415,10 +2417,10 @@ mod tests {
             crate::prepared_control::CallStatus::IntegrityFailure as i32
         );
         assert_eq!(output, sentinel);
-        assert_eq!(
+        assert!(matches!(
             machine.take_runtime_error(),
-            Some(crate::host_fns::RuntimeError::BadPointer)
-        );
+            Some(crate::host_fns::RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]

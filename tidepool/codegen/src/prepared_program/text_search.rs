@@ -80,7 +80,7 @@ pub(super) unsafe extern "C" fn prepared_text_memchr(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) = unsafe {
             super::arrays::active_payload(
@@ -123,7 +123,7 @@ pub(super) unsafe extern "C" fn prepared_text_measure_off(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) = unsafe {
             super::arrays::active_payload(
@@ -590,7 +590,10 @@ mod tests {
             status,
             crate::prepared_control::CallStatus::IntegrityFailure as i32
         );
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+        assert!(matches!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::BadPointer { .. })
+        ));
         assert_eq!(output, i64::MIN);
     }
 }

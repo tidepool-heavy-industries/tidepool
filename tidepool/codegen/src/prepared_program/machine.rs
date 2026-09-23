@@ -296,7 +296,10 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             .try_reserve_handles(1)
             .map_err(|_| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
         if unsafe { machine.machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(&machine.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(
+                &machine.machine,
+                crate::host_fns::bad_pointer(),
+            ));
         }
         let owner = machine.next_builder;
         machine.next_builder = machine
@@ -385,14 +388,14 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         for field in fields {
             if let ManagedField::Consume(node) = field {
                 if consumed.contains(&node.node) {
-                    return Err(runtime_error(machine, RuntimeError::BadPointer));
+                    return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
                 }
                 self.core.word(node.node).map_err(|error| match error {
                     super::construction::NodeAccessError::Foreign => {
                         super::answer::AnswerBuildError::ForeignNode.into()
                     }
                     super::construction::NodeAccessError::Invalid => {
-                        runtime_error(machine, RuntimeError::BadPointer)
+                        runtime_error(machine, crate::host_fns::bad_pointer())
                     }
                 })?;
                 consumed.push(node.node);
@@ -418,7 +421,7 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                                         super::answer::AnswerBuildError::ForeignNode.into()
                                     }
                                     super::construction::NodeAccessError::Invalid => {
-                                        runtime_error(machine, RuntimeError::BadPointer)
+                                        runtime_error(machine, crate::host_fns::bad_pointer())
                                     }
                                 })?,
                             ManagedField::Scalar(bits) => DescriptorValue::Bits(*bits),
@@ -504,7 +507,7 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 super::answer::AnswerBuildError::ForeignNode.into()
             }
             super::construction::NodeAccessError::Invalid => {
-                runtime_error(&self.machine.machine, RuntimeError::BadPointer)
+                runtime_error(&self.machine.machine, crate::host_fns::bad_pointer())
             }
         })?;
         let source = source.cast::<*mut u8>();
@@ -529,7 +532,7 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             }
             return Err(runtime_error(
                 &self.machine.machine,
-                RuntimeError::BadPointer,
+                crate::host_fns::bad_pointer(),
             ));
         };
         let raw = self
@@ -1122,7 +1125,7 @@ impl<'code> PreparedMachine<'code> {
             let (start, size) = match self.machine.gc_active_range() {
                 Some(range) => range,
                 None => {
-                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                    return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
                 }
             };
             let cursor = match (self.vmctx.alloc_ptr as usize)
@@ -1131,7 +1134,7 @@ impl<'code> PreparedMachine<'code> {
             {
                 Some(cursor) => cursor,
                 None => {
-                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                    return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
                 }
             };
             let remaining = size - cursor;
@@ -1929,7 +1932,7 @@ impl<'code> PreparedMachine<'code> {
         if self.machine.disposition() == MachineDisposition::Unavailable {
             return Err(ExecutionError::Runtime(
                 self.machine.last_failure().unwrap_or(MachineFailure {
-                    cause: RuntimeError::BadPointer,
+                    cause: crate::host_fns::bad_pointer(),
                     disposition: MachineDisposition::Unavailable,
                 }),
             ));
@@ -2020,7 +2023,7 @@ impl<'code> PreparedMachine<'code> {
         };
         if !managed.is_empty() {
             if unsafe { self.machine.prepared_old_space() }.is_some() {
-                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
             }
             unsafe { self.machine.install_prepared_old_space(&self.old_space) };
             let retained = unsafe {
@@ -2037,7 +2040,7 @@ impl<'code> PreparedMachine<'code> {
                 for root in roots {
                     self.machine.deregister_persistent_root(root.addr());
                 }
-                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
             }
             for ((field_index, rep), root) in managed.into_iter().zip(roots) {
                 let raw = self.handles.insert_handle(root, realm, rep);
@@ -2080,11 +2083,11 @@ impl<'code> PreparedMachine<'code> {
         let (start, size) = self
             .machine
             .gc_active_range()
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+            .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
         let cursor = (self.vmctx.alloc_ptr as usize)
             .checked_sub(start as usize)
             .filter(|cursor| *cursor <= size && *cursor % std::mem::size_of::<u64>() == 0)
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+            .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
         let nursery = unsafe {
             std::slice::from_raw_parts(start.cast::<u64>(), cursor / std::mem::size_of::<u64>())
         };
@@ -2264,7 +2267,7 @@ impl<'code> PreparedMachine<'code> {
             .try_reserve_handles(1)
             .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         if unsafe { self.machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         }
         unsafe { self.machine.install_prepared_old_space(&self.old_space) };
         let retained = unsafe {
@@ -2281,7 +2284,7 @@ impl<'code> PreparedMachine<'code> {
             for root in roots {
                 self.machine.deregister_persistent_root(root.addr());
             }
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
         let raw = match class {
             HandleClass::Value => {
@@ -2464,7 +2467,7 @@ impl<'code> PreparedMachine<'code> {
         let mut values = match observed {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {
-                self.machine.set_first_cause(RuntimeError::BadPointer);
+                self.machine.set_first_cause(crate::host_fns::bad_pointer());
                 return Err(runtime_error_from_machine_or_observation(
                     &self.machine,
                     error,
@@ -2474,7 +2477,7 @@ impl<'code> PreparedMachine<'code> {
         };
         values
             .pop()
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))
+            .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))
     }
 
     /// The runtime resource scope `handle` is currently live under, or
@@ -2668,7 +2671,7 @@ fn collect_on(
     let _scope = OldSpaceScope::new(machine, old_space)?;
     let raw = unsafe { prepared_gc_trigger(vmctx, reserve) };
     let status = CallStatus::from_raw(i64::from(raw))
-        .map_err(|_| runtime_error(machine, RuntimeError::BadPointer))?;
+        .map_err(|_| runtime_error(machine, crate::host_fns::bad_pointer()))?;
     if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
         return Err(runtime_error_for_status(machine, status));
     }
@@ -2822,7 +2825,7 @@ impl<'code> InstalledProgram<'code> {
             }
         };
         let status = CallStatus::from_raw(i64::from(raw))
-            .map_err(|_| runtime_error(machine, RuntimeError::BadPointer))?;
+            .map_err(|_| runtime_error(machine, crate::host_fns::bad_pointer()))?;
         if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
             super::forcing::describe_raised_exception(
                 machine,
@@ -2879,7 +2882,7 @@ impl<'code> InstalledProgram<'code> {
         }
         if !slots.is_empty() {
             if unsafe { machine.prepared_old_space() }.is_some() {
-                return Err(runtime_error(machine, RuntimeError::BadPointer));
+                return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
             // Promotion mutates OldSpace, so its admission pointer is scoped
             // manually rather than held through an immutable Rust borrow.
@@ -2892,7 +2895,7 @@ impl<'code> InstalledProgram<'code> {
                 for root in roots {
                     machine.deregister_persistent_root(root.addr());
                 }
-                return Err(runtime_error(machine, RuntimeError::BadPointer));
+                return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
             handles
                 .try_reserve_handles(roots.len())
@@ -3000,12 +3003,12 @@ impl<'code> InstalledProgram<'code> {
         let status = match CallStatus::from_raw(i64::from(raw_status)) {
             Ok(status) => status,
             Err(_) => {
-                machine.set_first_cause(RuntimeError::BadPointer);
+                machine.set_first_cause(crate::host_fns::bad_pointer());
                 return Err(runtime_error_from_machine(machine));
             }
         };
         if status == CallStatus::IntegrityFailure {
-            machine.set_first_cause(RuntimeError::BadPointer);
+            machine.set_first_cause(crate::host_fns::bad_pointer());
         }
         if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
             super::forcing::describe_raised_exception(
@@ -3040,7 +3043,7 @@ impl<'code> InstalledProgram<'code> {
             match super::observe::snapshot_results(&result_words, result_reps, &result_layout) {
                 Ok(seeds) => seeds,
                 Err(error @ super::ObservationFailure::Integrity(_)) => {
-                    machine.set_first_cause(RuntimeError::BadPointer);
+                    machine.set_first_cause(crate::host_fns::bad_pointer());
                     return Err(runtime_error_from_machine_or_observation(machine, error));
                 }
                 Err(error) => return Err(error.into()),
@@ -3058,7 +3061,7 @@ impl<'code> InstalledProgram<'code> {
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {
-                machine.set_first_cause(RuntimeError::BadPointer);
+                machine.set_first_cause(crate::host_fns::bad_pointer());
                 return Err(runtime_error_from_machine_or_observation(machine, error));
             }
             Err(error) => return Err(error),
@@ -3872,11 +3875,13 @@ mod tests {
         let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
             panic!("CAF must return one managed value");
         };
-        machine.machine.set_first_cause(RuntimeError::BadPointer);
+        machine
+            .machine
+            .set_first_cause(crate::host_fns::bad_pointer());
         assert!(matches!(
             machine.inspect_outer(*handle, RealmId::ROOT),
             Err(ExecutionError::Runtime(failure))
-                if failure.cause == RuntimeError::BadPointer
+                if matches!(failure.cause, RuntimeError::BadPointer { .. })
                     && failure.disposition == MachineDisposition::Unavailable
         ));
     }

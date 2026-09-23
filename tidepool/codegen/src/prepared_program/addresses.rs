@@ -118,18 +118,18 @@ fn read_address_element<const WIDTH: usize>(
 ) -> Result<[u8; WIDTH], RuntimeError> {
     let offset = index
         .checked_mul(WIDTH as i64)
-        .ok_or(RuntimeError::BadPointer)?;
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     if let Some(bytes) = machine.resolve_literal_bytes(|pool| {
         pool.read_range_offset(address, offset, WIDTH)
             .map(<[u8; WIDTH]>::try_from)
     }) {
-        return bytes.map_err(|_| RuntimeError::BadPointer);
+        return bytes.map_err(|_| crate::host_fns::bad_pointer());
     }
     machine
         .read_external_address_offset(address, offset, WIDTH)
         .map_err(|error| address_error(error, index))?
         .try_into()
-        .map_err(|_| RuntimeError::BadPointer)
+        .map_err(|_| crate::host_fns::bad_pointer())
 }
 
 /// Read one byte after authenticating the base address against one retained
@@ -147,7 +147,7 @@ pub(super) unsafe extern "C" fn prepared_read_word8_address(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let value = if let Some(value) =
             machine.resolve_literal_bytes(|pool| pool.read_byte(address, offset))
@@ -179,7 +179,7 @@ pub(super) unsafe extern "C" fn prepared_read_int8_address(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let bytes = read_address_element::<1>(machine, address, index)?;
         unsafe { output.write(i64::from(i8::from_ne_bytes(bytes))) };
@@ -203,7 +203,7 @@ pub(super) unsafe extern "C" fn prepared_read_word32_address(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let bytes = read_address_element::<4>(machine, address, index)?;
         unsafe { output.write(u64::from(u32::from_ne_bytes(bytes))) };
@@ -227,7 +227,7 @@ pub(super) unsafe extern "C" fn prepared_read_address_address(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let bytes = read_address_element::<8>(machine, address, index)?;
         unsafe { output.write(u64::from_ne_bytes(bytes)) };
@@ -253,14 +253,16 @@ pub(super) unsafe extern "C" fn prepared_read_wide_char_address(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
-        let offset = index.checked_mul(4).ok_or(RuntimeError::BadPointer)?;
+        let offset = index
+            .checked_mul(4)
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let value = if let Some(bytes) = machine.resolve_literal_bytes(|pool| {
             pool.read_range_offset(address, offset, 4)
                 .map(<[u8; 4]>::try_from)
         }) {
-            u32::from_ne_bytes(bytes.map_err(|_| RuntimeError::BadPointer)?)
+            u32::from_ne_bytes(bytes.map_err(|_| crate::host_fns::bad_pointer())?)
         } else {
             let bytes = machine
                 .read_external_address_offset(address, offset, 4)
@@ -269,7 +271,7 @@ pub(super) unsafe extern "C" fn prepared_read_wide_char_address(
                 bytes
                     .as_slice()
                     .try_into()
-                    .map_err(|_| RuntimeError::BadPointer)?,
+                    .map_err(|_| crate::host_fns::bad_pointer())?,
             )
         };
         unsafe { output.write(u64::from(value)) };
@@ -314,7 +316,7 @@ pub(super) unsafe extern "C" fn prepared_write_wide_char_address(
     }
     let result = index
         .checked_mul(4)
-        .ok_or(RuntimeError::BadPointer)
+        .ok_or_else(|| crate::host_fns::bad_pointer())
         .and_then(|offset| {
             machine
                 .store_external_address_offset(address, offset, &(value as u32).to_ne_bytes())
@@ -804,7 +806,10 @@ mod tests {
             CallStatus::IntegrityFailure as i32
         );
         assert_eq!(pinned.as_ref(), b"static\0");
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+        assert!(matches!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]
@@ -852,10 +857,10 @@ mod tests {
             CallStatus::IntegrityFailure as i32
         );
         assert_eq!(pinned.as_ref(), b"static\0");
-        assert_eq!(
+        assert!(matches!(
             static_machine.take_runtime_error(),
-            Some(RuntimeError::BadPointer)
-        );
+            Some(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]
@@ -1071,7 +1076,10 @@ mod tests {
                 CallStatus::IntegrityFailure as i32
             );
             assert_eq!(output, 0x55);
-            assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+            assert!(matches!(
+                machine.take_runtime_error(),
+                Some(RuntimeError::BadPointer { .. })
+            ));
         }
     }
 

@@ -2,6 +2,7 @@
 
 use crate::gc::frame_walker::FrameWalkError;
 use crate::machine_state::{current_machine, ExternalStorageKind, MachineDisposition};
+use crate::prepared_control::CallStatus;
 
 /// Addresses below this are considered invalid (null page guard).
 pub(crate) const MIN_VALID_ADDR: u64 = 0x1000;
@@ -46,8 +47,17 @@ pub enum RuntimeError {
         constructor: tidepool_repr::DataConId,
         owner: u64,
     },
-    #[error("bad pointer in JIT runtime (diagnostics on server stderr)")]
-    BadPointer,
+    /// Constructed only through [`bad_pointer`] so every occurrence carries
+    /// the call site that raised it.
+    #[error("bad pointer in JIT runtime at {site}")]
+    BadPointer {
+        site: &'static std::panic::Location<'static>,
+    },
+    /// A failure status arrived with no cause recorded by the failing call:
+    /// an invariant violation in the compiler or runtime, not a language-level
+    /// failure or a shape/pointer defect with its own diagnosis.
+    #[error("a native call failed with status {0:?} without recording a cause (compiler/runtime defect)")]
+    StatusWithoutCause(CallStatus),
     #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
     #[error("application of null function pointer")]
@@ -112,7 +122,8 @@ impl RuntimeError {
             Self::CaseTrap
             | Self::ExpectedConstructor
             | Self::NoSuccessReturned
-            | Self::BadPointer
+            | Self::BadPointer { .. }
+            | Self::StatusWithoutCause(_)
             | Self::TypeMetadata
             | Self::NullFunPtr
             | Self::BadFunPtrTag(_)
@@ -139,6 +150,16 @@ impl RuntimeError {
             | Self::CaseMiss { .. }
             | Self::Cancelled => MachineDisposition::Reusable,
         }
+    }
+}
+
+/// Construct a [`RuntimeError::BadPointer`] carrying its own call site.
+/// This is the only way to build the variant, so every occurrence in a
+/// trace or test failure names exactly where the check that raised it lives.
+#[track_caller]
+pub fn bad_pointer() -> RuntimeError {
+    RuntimeError::BadPointer {
+        site: std::panic::Location::caller(),
     }
 }
 

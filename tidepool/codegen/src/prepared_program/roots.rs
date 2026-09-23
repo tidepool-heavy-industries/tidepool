@@ -19,7 +19,7 @@ impl<'a> OldSpaceScope<'a> {
         owner: &'a OldSpace,
     ) -> Result<Self, ExecutionError> {
         if unsafe { machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(machine, RuntimeError::BadPointer));
+            return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
         }
         unsafe { machine.install_prepared_old_space(owner) };
         Ok(Self {
@@ -66,7 +66,7 @@ impl RootWords {
         let word = self
             .0
             .get(index)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::BadPointer))?;
+            .ok_or_else(|| runtime_error_without_machine(crate::host_fns::bad_pointer()))?;
         unsafe { word.get().write(value) };
         Ok(())
     }
@@ -76,7 +76,10 @@ impl RootWords {
     /// during heap-top initialization, where the caller already works in
     /// [`RuntimeError`] rather than [`ExecutionError`].
     pub(crate) fn read(&self, index: usize) -> Result<u64, RuntimeError> {
-        let word = self.0.get(index).ok_or(RuntimeError::BadPointer)?;
+        let word = self
+            .0
+            .get(index)
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         Ok(unsafe { *word.get() })
     }
 

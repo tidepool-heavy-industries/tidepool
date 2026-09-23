@@ -1,5 +1,5 @@
 use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, Unsupported};
-use crate::host_fns::RuntimeError;
+use crate::host_fns::{bad_pointer, RuntimeError};
 use cranelift_codegen::ir::{InstructionData, Opcode};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{testing, *};
@@ -169,7 +169,7 @@ fn resize_bytes_old_alias_rejects_after_success() {
         .unwrap_err();
     assert!(matches!(
         error,
-        ExecutionError::Runtime(failure) if failure.cause == RuntimeError::BadPointer
+        ExecutionError::Runtime(failure) if matches!(failure.cause, RuntimeError::BadPointer { .. })
     ));
 }
 
@@ -476,7 +476,7 @@ fn byte_copy_compare_hosts_reject_bad_ranges_alias_copy_and_revocation() {
             RuntimeError::ArrayIndexOutOfBounds { index: -1, len: 4 },
         ),
         (0, 0, 1, true, false, RuntimeError::AliasedByteCopy),
-        (0, 0, 1, false, true, RuntimeError::BadPointer),
+        (0, 0, 1, false, true, bad_pointer()),
     ] {
         let descriptor = Arc::new(
             ObjectDescriptor::external(ExternalStorageKind::Bytes, &testing::target()).unwrap(),
@@ -540,7 +540,10 @@ fn byte_copy_compare_hosts_reject_bad_ranges_alias_copy_and_revocation() {
                 CallStatus::LanguageFailure as i32
             }
         );
-        assert_eq!(machine.take_runtime_error(), Some(expected.clone()));
+        match (machine.take_runtime_error(), &expected) {
+            (Some(RuntimeError::BadPointer { .. }), RuntimeError::BadPointer { .. }) => {}
+            (actual, expected) => assert_eq!(actual.as_ref(), Some(expected)),
+        }
         assert_eq!(machine.external_storage_stats(), before);
         assert_eq!(machine.copy_external_bytes(destination).unwrap(), b"zzzz");
     }
@@ -973,7 +976,7 @@ fn c_string_len_real_adapter_stops_at_owned_nul_and_rejects_unknown_addresses() 
             c_string_len(&program, address),
             Err(ExecutionError::Runtime(
                 crate::machine_state::MachineFailure {
-                    cause: RuntimeError::BadPointer,
+                    cause: RuntimeError::BadPointer { .. },
                     ..
                 }
             ))
@@ -1159,8 +1162,8 @@ fn copy_addr_real_adapter_handles_full_interior_and_empty_spans_after_gc() {
 #[test]
 fn copy_addr_real_adapter_rejects_unowned_source_and_destination_overrun() {
     for (address, offset, count, expected) in [
-        (None, 0, 1, RuntimeError::BadPointer),
-        (Some(6), 0, 2, RuntimeError::BadPointer),
+        (None, 0, 1, bad_pointer()),
+        (Some(6), 0, 2, bad_pointer()),
         (
             Some(0),
             3,
@@ -1179,11 +1182,14 @@ fn copy_addr_real_adapter_rejects_unowned_source_and_destination_overrun() {
                 Arc::new(AtomicBool::new(false)),
             )
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ExecutionError::Runtime(crate::machine_state::MachineFailure { cause, .. })
-                if cause == expected
-        ));
+        let ExecutionError::Runtime(crate::machine_state::MachineFailure { cause, .. }) = &error
+        else {
+            panic!("expected a runtime failure, got {error:?}");
+        };
+        match (cause, &expected) {
+            (RuntimeError::BadPointer { .. }, RuntimeError::BadPointer { .. }) => {}
+            (cause, expected) => assert_eq!(cause, expected),
+        }
     }
 }
 
@@ -1209,7 +1215,7 @@ fn assert_bad_pointer(result: Result<u64, ExecutionError>) {
         result,
         Err(ExecutionError::Runtime(
             crate::machine_state::MachineFailure {
-                cause: RuntimeError::BadPointer,
+                cause: RuntimeError::BadPointer { .. },
                 ..
             }
         ))

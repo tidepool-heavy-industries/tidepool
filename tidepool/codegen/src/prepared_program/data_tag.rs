@@ -3,7 +3,7 @@
 //! result. A noncollecting host returns the descriptor's zero-based family tag
 //! through a caller-owned scalar slot; pointer low bits are only evidence.
 
-use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
+use crate::prepared_control::CallStatus;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{FuncId, Module};
@@ -24,7 +24,7 @@ pub(super) unsafe extern "C" fn prepared_data_to_tag_small(
         return machine.prepared_call_status() as i32;
     }
     let result = if output.is_null() {
-        Err(RuntimeError::BadPointer)
+        Err(crate::host_fns::bad_pointer())
     } else {
         unsafe { machine.prepared_constructor_tag(reference) }
     };

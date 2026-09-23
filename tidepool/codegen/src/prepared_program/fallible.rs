@@ -32,7 +32,7 @@ pub(super) unsafe extern "C" fn prepared_primitive_failure(
         0 => RuntimeError::DivisionByZero,
         1 => RuntimeError::Overflow,
         2 => RuntimeError::Underflow,
-        _ => RuntimeError::BadPointer,
+        _ => crate::host_fns::bad_pointer(),
     });
     machine.prepared_call_status() as i32
 }

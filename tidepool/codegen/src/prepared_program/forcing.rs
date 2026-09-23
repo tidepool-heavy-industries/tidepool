@@ -84,9 +84,9 @@ impl<'a> ObservationRoots<'a> {
             );
         }
         self.used += 1;
-        let slot = self.chunks[chunk]
-            .slot_address(offset)
-            .ok_or_else(|| super::run::runtime_error(self.machine, RuntimeError::BadPointer))?;
+        let slot = self.chunks[chunk].slot_address(offset).ok_or_else(|| {
+            super::run::runtime_error(self.machine, crate::host_fns::bad_pointer())
+        })?;
         // The collector updates this slot through its registered raw address
         // while generated code is running; UnsafeCell makes that interior
         // mutation explicit to Rust's aliasing model.
@@ -106,7 +106,7 @@ impl<'a> ObservationRoots<'a> {
             .get(chunk)
             .and_then(|words| words.slot_address(offset))
             .map(|slot| slot.cast::<u64>())
-            .ok_or_else(|| super::run::runtime_error(self.machine, RuntimeError::BadPointer))
+            .ok_or_else(|| super::run::runtime_error(self.machine, crate::host_fns::bad_pointer()))
     }
 
     pub fn read(&self, slot: ObservationSlot) -> Result<usize, ExecutionError> {
@@ -154,7 +154,7 @@ impl<'a> ObservationRoots<'a> {
             unsafe { adapter(vmctx, output, input) }
         };
         let status = CallStatus::from_raw(i64::from(raw))
-            .map_err(|_| super::run::runtime_error(self.machine, RuntimeError::BadPointer))?;
+            .map_err(|_| super::run::runtime_error(self.machine, crate::host_fns::bad_pointer()))?;
         if status != CallStatus::Success
             || self.machine.prepared_call_status() != CallStatus::Success
         {
@@ -451,11 +451,11 @@ pub(super) fn current_heap<'a>(
 ) -> Result<super::observe::ObservationHeap<'a>, ExecutionError> {
     let (start, size) = machine
         .gc_active_range()
-        .ok_or_else(|| super::run::runtime_error(machine, RuntimeError::BadPointer))?;
+        .ok_or_else(|| super::run::runtime_error(machine, crate::host_fns::bad_pointer()))?;
     let cursor = (vmctx.alloc_ptr as usize)
         .checked_sub(start as usize)
         .filter(|cursor| *cursor <= size && *cursor % std::mem::size_of::<u64>() == 0)
-        .ok_or_else(|| super::run::runtime_error(machine, RuntimeError::BadPointer))?;
+        .ok_or_else(|| super::run::runtime_error(machine, crate::host_fns::bad_pointer()))?;
     let words = cursor / std::mem::size_of::<u64>();
     // The machine owns the active buffer until run cleanup. This borrow is
     // deliberately confined to `ObservationHeap::expand`; no force occurs

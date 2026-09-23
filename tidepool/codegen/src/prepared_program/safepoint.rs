@@ -115,7 +115,7 @@ pub(super) unsafe extern "C" fn prepared_poll_at(vmctx: *mut VMContext, point: u
     match crate::prepared_control::PreparedSafepoint::from_raw(point) {
         Some(point) => machine.poll_prepared(point) as i32,
         None => {
-            machine.set_first_cause(RuntimeError::BadPointer);
+            machine.set_first_cause(crate::host_fns::bad_pointer());
             machine.prepared_call_status() as i32
         }
     }
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn w5_a1_poll_preserves_terminal_first_cause() {
         let machine = MachineState::new();
-        machine.set_first_cause(RuntimeError::BadPointer);
+        machine.set_first_cause(crate::host_fns::bad_pointer());
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
         let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
@@ -200,7 +200,10 @@ mod tests {
             },
             CallStatus::IntegrityFailure as i32
         );
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+        assert!(matches!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]

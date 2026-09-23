@@ -22,10 +22,10 @@ pub(super) fn wired_in_failure(
     }
     let length = bytes
         .c_string_len(address)
-        .ok_or(RuntimeError::BadPointer)?;
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     let raw = bytes
         .read_range(address, length)
-        .ok_or(RuntimeError::BadPointer)?;
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     let text = String::from_utf8_lossy(raw);
     let untangle = |message: &str| {
         let (location, details) = match text.split_once('|') {
@@ -95,7 +95,7 @@ pub(super) unsafe extern "C" fn prepared_wired_in_error(
                 let unowned = super::static_bytes::PinnedBytes::new(Default::default());
                 wired_in_failure(&unowned, kind, address)
             }),
-        None => Err(RuntimeError::BadPointer),
+        None => Err(crate::host_fns::bad_pointer()),
     };
     machine.set_first_cause(match failure {
         Ok(error) | Err(error) => error,
@@ -149,10 +149,10 @@ mod tests {
                 "Suite.hs:3: Non-exhaustive patterns in f\n".into()
             ))
         );
-        assert_eq!(
+        assert!(matches!(
             wired_in_failure(&pool, WiredInErrorKind::PatternMatch, 0),
-            Err(RuntimeError::BadPointer)
-        );
+            Err(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]
@@ -170,10 +170,10 @@ mod tests {
                 message: "bad\u{fffd}message".into(),
             })
         );
-        assert_eq!(
+        assert!(matches!(
             wired_in_failure(&pool, WiredInErrorKind::DeferredType, address + 12),
-            Err(RuntimeError::BadPointer)
-        );
+            Err(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]
@@ -213,7 +213,10 @@ mod tests {
                 status,
                 crate::prepared_control::CallStatus::IntegrityFailure as i32
             );
-            assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+            assert!(matches!(
+                machine.take_runtime_error(),
+                Some(RuntimeError::BadPointer { .. })
+            ));
         }
     }
 

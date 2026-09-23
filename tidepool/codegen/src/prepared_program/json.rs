@@ -299,7 +299,7 @@ impl JsonDescriptors {
         builder: &IntrinsicBuilder<'_>,
         layout: *const JsonLayoutIds,
     ) -> Result<Self, RuntimeError> {
-        let ids = unsafe { layout.as_ref() }.ok_or(RuntimeError::BadPointer)?;
+        let ids = unsafe { layout.as_ref() }.ok_or_else(|| crate::host_fns::bad_pointer())?;
         let d = |id| builder.descriptor(id);
         let resolved = Self {
             object: d(ids.object)?,
@@ -333,7 +333,7 @@ impl JsonDescriptors {
             &resolved.bool_,
         ] {
             if reps(descriptor) != [lifted] {
-                return Err(RuntimeError::BadPointer);
+                return Err(crate::host_fns::bad_pointer());
             }
         }
         for descriptor in [
@@ -344,7 +344,7 @@ impl JsonDescriptors {
             &resolved.nil,
         ] {
             if !reps(descriptor).is_empty() {
-                return Err(RuntimeError::BadPointer);
+                return Err(crate::host_fns::bad_pointer());
             }
         }
         if reps(&resolved.cons) != [lifted, lifted]
@@ -354,17 +354,17 @@ impl JsonDescriptors {
             || reps(&resolved.ip) != [unlifted]
             || reps(&resolved.in_) != [unlifted]
         {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let scientific = reps(&resolved.scientific);
         if scientific != [lifted, scalar] {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let bin = reps(&resolved.bin);
         if bin != [lifted, lifted, lifted, lifted, lifted]
             && bin != [scalar, lifted, lifted, lifted, lifted]
         {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         Ok(resolved)
     }
@@ -447,7 +447,7 @@ impl JsonSink<'_, '_> {
             let mut carry = std::str::from_utf8(chunk)
                 .ok()
                 .and_then(|digits| digits.parse::<u64>().ok())
-                .ok_or(RuntimeError::BadPointer)?;
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
             for (index, limb) in limbs.iter_mut().enumerate() {
                 if index % 1024 == 0
                     && self
@@ -484,7 +484,7 @@ impl JsonSink<'_, '_> {
 
     fn number(&mut self, token: &str) -> Result<IntrinsicNode, RuntimeError> {
         let (coefficient, exponent) = tidepool_bridge::decimal::Decimal::parse_token(token)
-            .map_err(|_| RuntimeError::BadPointer)?
+            .map_err(|_| crate::host_fns::bad_pointer())?
             .into_parts();
         let coefficient = self.integer(&coefficient)?;
         let scientific = Arc::clone(&self.d.scientific);
@@ -544,7 +544,7 @@ impl JsonSink<'_, '_> {
                     &[IntrinsicField::Bits(int_bits(entries.len() as i64))],
                 )?)
             }
-            _ => return Err(RuntimeError::BadPointer),
+            _ => return Err(crate::host_fns::bad_pointer()),
         };
         self.con(
             &bin,
@@ -576,7 +576,7 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, total) = unsafe {
             super::arrays::active_payload(
@@ -596,11 +596,11 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
             len: total,
         })?;
         let input = machine.read_external_payload_offset_polling(published, offset, length)?;
-        let input = std::str::from_utf8(&input).map_err(|_| RuntimeError::BadPointer)?;
+        let input = std::str::from_utf8(&input).map_err(|_| crate::host_fns::bad_pointer())?;
         let input_start = input.as_ptr() as usize;
         let input_end = input_start
             .checked_add(input.len())
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let input_range = input_start..input_end;
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
         let descriptors = JsonDescriptors::resolve(&builder, layout)?;
@@ -609,7 +609,7 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
         if descriptor_reps(&left) != [RuntimeRep::LiftedRef]
             || descriptor_reps(&right) != [RuntimeRep::LiftedRef]
         {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let mut sink = JsonSink {
             builder: &mut builder,
@@ -718,7 +718,7 @@ pub(super) unsafe extern "C" fn prepared_encode_json(
     }
     let result = (|| -> Result<(), EncodeFailure> {
         if output.is_null() || layout.is_null() {
-            return Err(RuntimeError::BadPointer.into());
+            return Err(crate::host_fns::bad_pointer().into());
         }
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
         let descriptors = JsonDescriptors::resolve(&builder, layout)?;
@@ -798,7 +798,7 @@ impl EncoderIds {
         builder: &IntrinsicBuilder<'_>,
         layout: *const JsonLayoutIds,
     ) -> Result<Self, RuntimeError> {
-        let layout = unsafe { layout.as_ref() }.ok_or(RuntimeError::BadPointer)?;
+        let layout = unsafe { layout.as_ref() }.ok_or_else(|| crate::host_fns::bad_pointer())?;
         let id = |header: u64| builder.constructor_identity(header);
         Ok(Self {
             object: id(layout.object)?,
@@ -853,13 +853,21 @@ impl ValueAncestors {
         node: IntrinsicNode,
         #[cfg(test)] identity_comparisons: &mut usize,
     ) -> Result<(), RuntimeError> {
-        let identity = core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7;
+        let identity = core
+            .word(node)
+            .map_err(|_| crate::host_fns::bad_pointer())?
+            & !7;
         for ancestor in self.nodes.iter().rev() {
             #[cfg(test)]
             {
                 *identity_comparisons += 1;
             }
-            if core.word(*ancestor).map_err(|_| RuntimeError::BadPointer)? & !7 == identity {
+            if core
+                .word(*ancestor)
+                .map_err(|_| crate::host_fns::bad_pointer())?
+                & !7
+                == identity
+            {
                 return Err(RuntimeError::BlackHole);
             }
         }
@@ -874,7 +882,7 @@ impl ValueAncestors {
         if self.nodes.pop() == Some(node) {
             Ok(())
         } else {
-            Err(RuntimeError::BadPointer)
+            Err(crate::host_fns::bad_pointer())
         }
     }
 }
@@ -907,7 +915,8 @@ impl BrentCycle {
     ) -> Result<Self, RuntimeError> {
         let checkpoint = core.push_word(
             machine,
-            core.word(node.0).map_err(|_| RuntimeError::BadPointer)?,
+            core.word(node.0)
+                .map_err(|_| crate::host_fns::bad_pointer())?,
             node.1,
         )?;
         Ok(Self {
@@ -928,7 +937,9 @@ impl BrentCycle {
         machine: &MachineState,
         node: (IntrinsicNode, RuntimeRep),
     ) -> Result<(), RuntimeError> {
-        let checkpoint = self.checkpoint.ok_or(RuntimeError::BadPointer)?;
+        let checkpoint = self
+            .checkpoint
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         if self.distance != 0 {
             #[cfg(test)]
             {
@@ -936,9 +947,12 @@ impl BrentCycle {
             }
             if core
                 .word(checkpoint)
-                .map_err(|_| RuntimeError::BadPointer)?
+                .map_err(|_| crate::host_fns::bad_pointer())?
                 & !7
-                == core.word(node.0).map_err(|_| RuntimeError::BadPointer)? & !7
+                == core
+                    .word(node.0)
+                    .map_err(|_| crate::host_fns::bad_pointer())?
+                    & !7
             {
                 return Err(RuntimeError::BlackHole);
             }
@@ -950,11 +964,12 @@ impl BrentCycle {
                 .ok_or(RuntimeError::HeapOverflow)?;
             let replacement = core.push_word(
                 machine,
-                core.word(node.0).map_err(|_| RuntimeError::BadPointer)?,
+                core.word(node.0)
+                    .map_err(|_| crate::host_fns::bad_pointer())?,
                 node.1,
             )?;
             core.consume(machine, checkpoint)
-                .map_err(|_| RuntimeError::BadPointer)?;
+                .map_err(|_| crate::host_fns::bad_pointer())?;
             self.checkpoint = Some(replacement);
             self.power = next_power;
             self.distance = 0;
@@ -980,9 +995,12 @@ impl BrentCycle {
         core: &mut ConstructionCore,
         machine: &MachineState,
     ) -> Result<(), RuntimeError> {
-        let checkpoint = self.checkpoint.take().ok_or(RuntimeError::BadPointer)?;
+        let checkpoint = self
+            .checkpoint
+            .take()
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         core.consume(machine, checkpoint)
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         #[cfg(test)]
         {
             self.metrics.checkpoint_releases += 1;
@@ -1059,9 +1077,12 @@ impl MovingIdentities {
         node: IntrinsicNode,
     ) -> Result<bool, RuntimeError> {
         self.refresh(generation, |node| {
-            core.word(node).map_err(|_| RuntimeError::BadPointer)
+            core.word(node).map_err(|_| crate::host_fns::bad_pointer())
         })?;
-        let identity = core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7;
+        let identity = core
+            .word(node)
+            .map_err(|_| crate::host_fns::bad_pointer())?
+            & !7;
         if self.nodes.contains_key(&identity) {
             return Ok(false);
         }
@@ -1080,11 +1101,16 @@ impl MovingIdentities {
         node: IntrinsicNode,
     ) -> Result<bool, RuntimeError> {
         self.refresh(generation, |node| {
-            core.word(node).map_err(|_| RuntimeError::BadPointer)
+            core.word(node).map_err(|_| crate::host_fns::bad_pointer())
         })?;
         Ok(self
             .nodes
-            .remove(&(core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7))
+            .remove(
+                &(core
+                    .word(node)
+                    .map_err(|_| crate::host_fns::bad_pointer())?
+                    & !7),
+            )
             .is_some())
     }
 }
@@ -1126,7 +1152,7 @@ impl JsonEncoder<'_, '_> {
     ) -> Result<(DataConId, Vec<(IntrinsicNode, RuntimeRep)>), EncodeFailure> {
         match self.frame(node, rep)? {
             super::observe::ObservationFrame::Constructor(id, fields) => Ok((id, fields)),
-            _ => Err(RuntimeError::BadPointer.into()),
+            _ => Err(crate::host_fns::bad_pointer().into()),
         }
     }
 
@@ -1162,7 +1188,7 @@ impl JsonEncoder<'_, '_> {
                 } else if id == self.ids.object && fields.len() == 1 {
                     self.write_map(fields[0], depth + 1, out)?;
                 } else {
-                    return Err(RuntimeError::BadPointer.into());
+                    return Err(crate::host_fns::bad_pointer().into());
                 }
                 Ok(())
             })();
@@ -1179,7 +1205,7 @@ impl JsonEncoder<'_, '_> {
     ) -> Result<(), EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
         let result = if !fields.is_empty() {
-            Err(RuntimeError::BadPointer.into())
+            Err(crate::host_fns::bad_pointer().into())
         } else if id == self.ids.true_ {
             out.extend_from_slice(b"true");
             Ok(())
@@ -1187,7 +1213,7 @@ impl JsonEncoder<'_, '_> {
             out.extend_from_slice(b"false");
             Ok(())
         } else {
-            Err(RuntimeError::BadPointer.into())
+            Err(crate::host_fns::bad_pointer().into())
         };
         self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
@@ -1248,7 +1274,7 @@ impl JsonEncoder<'_, '_> {
             }
             if id != self.ids.cons || fields.len() != 2 {
                 return self.finish_nodes(
-                    Err(RuntimeError::BadPointer.into()),
+                    Err(crate::host_fns::bad_pointer().into()),
                     fields.into_iter().map(|field| field.0),
                 );
             }
@@ -1302,7 +1328,7 @@ impl JsonEncoder<'_, '_> {
                         }
                         if id != self.ids.bin || fields.len() != 5 {
                             let result = self.finish_nodes(
-                                Err(RuntimeError::BadPointer.into()),
+                                Err(crate::host_fns::bad_pointer().into()),
                                 fields.into_iter().map(|field| field.0),
                             );
                             if owned {
@@ -1347,7 +1373,7 @@ impl JsonEncoder<'_, '_> {
                     }
                     MapAction::Leave(node, owned) => {
                         if !active.remove(self.builder, node)? {
-                            return Err(RuntimeError::BadPointer.into());
+                            return Err(crate::host_fns::bad_pointer().into());
                         }
                         if owned {
                             self.builder.release_node(node)?;
@@ -1383,16 +1409,22 @@ impl JsonEncoder<'_, '_> {
         let (id, fields) = self.constructor(field.0, field.1)?;
         let result = (|| {
             if id != self.ids.text || fields.len() != 3 {
-                return Err(RuntimeError::BadPointer.into());
+                return Err(crate::host_fns::bad_pointer().into());
             }
             let bytes = self.bytes(fields[0])?;
             let offset = self.int(fields[1])?;
             let length = self.int(fields[2])?;
-            let offset = usize::try_from(offset).map_err(|_| RuntimeError::BadPointer)?;
-            let length = usize::try_from(length).map_err(|_| RuntimeError::BadPointer)?;
-            let end = offset.checked_add(length).ok_or(RuntimeError::BadPointer)?;
-            let text = std::str::from_utf8(bytes.get(offset..end).ok_or(RuntimeError::BadPointer)?)
-                .map_err(|_| RuntimeError::BadPointer)?;
+            let offset = usize::try_from(offset).map_err(|_| crate::host_fns::bad_pointer())?;
+            let length = usize::try_from(length).map_err(|_| crate::host_fns::bad_pointer())?;
+            let end = offset
+                .checked_add(length)
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
+            let text = std::str::from_utf8(
+                bytes
+                    .get(offset..end)
+                    .ok_or_else(|| crate::host_fns::bad_pointer())?,
+            )
+            .map_err(|_| crate::host_fns::bad_pointer())?;
             serde_json::to_writer(
                 PollingWriter {
                     output: out,
@@ -1400,7 +1432,7 @@ impl JsonEncoder<'_, '_> {
                 },
                 text,
             )
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
             Ok(())
         })();
         self.finish_nodes(result, fields.into_iter().map(|field| field.0))
@@ -1414,12 +1446,12 @@ impl JsonEncoder<'_, '_> {
         let (id, fields) = self.constructor(field.0, field.1)?;
         let result = (|| {
             if id != self.ids.scientific || fields.len() != 2 {
-                return Err(RuntimeError::BadPointer.into());
+                return Err(crate::host_fns::bad_pointer().into());
             }
             let coefficient = self.integer(fields[0])?;
             let exponent = self.int(fields[1])?;
             let decimal = tidepool_bridge::decimal::Decimal::from_parts(&coefficient, exponent)
-                .map_err(|_| RuntimeError::BadPointer)?;
+                .map_err(|_| crate::host_fns::bad_pointer())?;
             out.extend_from_slice(decimal.render().as_bytes());
             Ok(())
         })();
@@ -1440,7 +1472,7 @@ impl JsonEncoder<'_, '_> {
                 }
                 return Ok(value);
             }
-            Err(RuntimeError::BadPointer.into())
+            Err(crate::host_fns::bad_pointer().into())
         })();
         self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
@@ -1454,11 +1486,11 @@ impl JsonEncoder<'_, '_> {
                 let result = if id == self.ids.i_hash && fields.len() == 1 {
                     self.int(fields[0])
                 } else {
-                    Err(RuntimeError::BadPointer.into())
+                    Err(crate::host_fns::bad_pointer().into())
                 };
                 self.finish_nodes(result, fields.into_iter().map(|field| field.0))
             }
-            _ => Err(RuntimeError::BadPointer.into()),
+            _ => Err(crate::host_fns::bad_pointer().into()),
         }
     }
 
@@ -1486,7 +1518,7 @@ impl JsonEncoder<'_, '_> {
             super::observe::ObservationFrame::Leaf(tidepool_bridge::HaskellValue::ByteArray(
                 ref bytes,
             )) => {
-                let bytes = bytes.lock().map_err(|_| RuntimeError::BadPointer)?;
+                let bytes = bytes.lock().map_err(|_| crate::host_fns::bad_pointer())?;
                 let mut copy = Vec::new();
                 copy.try_reserve_exact(bytes.len())
                     .map_err(|_| RuntimeError::HeapOverflow)?;
@@ -1508,7 +1540,7 @@ impl JsonEncoder<'_, '_> {
                 }
                 Ok(copy)
             }
-            _ => Err(RuntimeError::BadPointer.into()),
+            _ => Err(crate::host_fns::bad_pointer().into()),
         }
     }
 
@@ -1775,8 +1807,8 @@ impl<'a> IntrinsicBuilder<'a> {
         machine: &'a MachineState,
         vmctx: &'a mut VMContext,
     ) -> Result<Self, RuntimeError> {
-        let program =
-            unsafe { machine.active_intrinsic_program() }.ok_or(RuntimeError::BadPointer)?;
+        let program = unsafe { machine.active_intrinsic_program() }
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         Ok(Self {
             machine,
             vmctx,
@@ -1807,14 +1839,14 @@ impl<'a> IntrinsicBuilder<'a> {
         header: u64,
     ) -> Result<(&DescriptorMetadata, &ConstructorObservation), RuntimeError> {
         let (_, registry) = unsafe { self.machine.active_intrinsic_observation() }
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let metadata = usize::try_from(header)
             .ok()
             .and_then(|header| registry.get(&header))
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         match &metadata.meaning {
             DescriptorMeaning::Constructor(observation) => Ok((metadata, observation)),
-            _ => Err(RuntimeError::BadPointer),
+            _ => Err(crate::host_fns::bad_pointer()),
         }
     }
 
@@ -1824,11 +1856,12 @@ impl<'a> IntrinsicBuilder<'a> {
         needed: usize,
     ) -> Result<(), RuntimeError> {
         let raw = unsafe { prepared_gc_trigger(vmctx, needed) };
-        let status = CallStatus::from_raw(i64::from(raw)).map_err(|_| RuntimeError::BadPointer)?;
+        let status =
+            CallStatus::from_raw(i64::from(raw)).map_err(|_| crate::host_fns::bad_pointer())?;
         if status == CallStatus::Success && machine.prepared_call_status() == CallStatus::Success {
             Ok(())
         } else {
-            Err(RuntimeError::BadPointer)
+            Err(crate::host_fns::bad_pointer())
         }
     }
 
@@ -1846,7 +1879,7 @@ impl<'a> IntrinsicBuilder<'a> {
     fn release_node(&mut self, node: IntrinsicNode) -> Result<(), RuntimeError> {
         self.core
             .consume(self.machine, node)
-            .map_err(|_| RuntimeError::BadPointer)
+            .map_err(|_| crate::host_fns::bad_pointer())
     }
 
     fn force(&mut self, node: IntrinsicNode) -> Result<(), CallStatus> {
@@ -1961,7 +1994,9 @@ impl<'a> IntrinsicBuilder<'a> {
     }
 
     fn word(&self, node: IntrinsicNode) -> Result<usize, RuntimeError> {
-        self.core.word(node).map_err(|_| RuntimeError::BadPointer)
+        self.core
+            .word(node)
+            .map_err(|_| crate::host_fns::bad_pointer())
     }
 
     fn constructor(
@@ -1979,7 +2014,7 @@ impl<'a> IntrinsicBuilder<'a> {
         for field in fields {
             if let IntrinsicField::Node(node) = field {
                 if consumed.contains(node) || self.core.word(*node).is_err() {
-                    return Err(RuntimeError::BadPointer);
+                    return Err(crate::host_fns::bad_pointer());
                 }
                 consumed.push(*node);
             }
@@ -1996,7 +2031,9 @@ impl<'a> IntrinsicBuilder<'a> {
                     for (output, field) in values.iter_mut().zip(fields) {
                         *output = match field {
                             IntrinsicField::Node(node) => DescriptorValue::Managed(
-                                core.word(*node).map_err(|_| RuntimeError::BadPointer)? as *mut u8,
+                                core.word(*node)
+                                    .map_err(|_| crate::host_fns::bad_pointer())?
+                                    as *mut u8,
                             ),
                             IntrinsicField::Bits(bits) => DescriptorValue::Bits(*bits),
                         };
@@ -2007,7 +2044,7 @@ impl<'a> IntrinsicBuilder<'a> {
             .map_err(|error| match error {
                 ConstructionError::Runtime(error) | ConstructionError::Operation(error) => error,
                 ConstructionError::TooLarge(_) => RuntimeError::HeapOverflow,
-                ConstructionError::Marshal(_) => RuntimeError::BadPointer,
+                ConstructionError::Marshal(_) => crate::host_fns::bad_pointer(),
                 ConstructionError::Storage(_) => RuntimeError::HeapOverflow,
             })
     }
@@ -2019,7 +2056,7 @@ impl<'a> IntrinsicBuilder<'a> {
             .map_err(|error| match error {
                 ConstructionError::Runtime(error) | ConstructionError::Operation(error) => error,
                 ConstructionError::TooLarge(_) => RuntimeError::HeapOverflow,
-                ConstructionError::Marshal(_) => RuntimeError::BadPointer,
+                ConstructionError::Marshal(_) => crate::host_fns::bad_pointer(),
                 ConstructionError::Storage(_) => RuntimeError::HeapOverflow,
             })
     }
@@ -2468,7 +2505,7 @@ mod tests {
         }
         identities
             .refresh(1, |node| {
-                roots.word(node).map_err(|_| RuntimeError::BadPointer)
+                roots.word(node).map_err(|_| crate::host_fns::bad_pointer())
             })
             .unwrap();
         assert_eq!(identities.nodes.get(&0x3000), Some(&first));

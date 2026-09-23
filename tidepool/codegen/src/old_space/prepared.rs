@@ -199,18 +199,23 @@ impl super::OldSpace {
         if machine.prepared_call_status() != crate::prepared_control::CallStatus::Success {
             return Err(machine
                 .current_failure()
-                .map_or(RuntimeError::BadPointer, |failure| failure.cause));
+                .map_or(crate::host_fns::bad_pointer(), |failure| failure.cause));
         }
         let snapshot = machine.complete_root_snapshot(&[]).into_slots();
-        let mut state = machine.take_gc_state().ok_or(RuntimeError::BadPointer)?;
+        let mut state = machine
+            .take_gc_state()
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         // Always restore the owning GcState, including terminal failure: a
         // partially forwarded source still holds live pointers.
         let outcome: Result<PreparedCompactionStats, RuntimeError> = (|| {
             let used = (vmctx.alloc_ptr as usize)
                 .checked_sub(state.active_start as usize)
                 .filter(|used| *used <= state.active_size && used % 8 == 0)
-                .ok_or(RuntimeError::BadPointer)?;
-            let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
+            let prepared = state
+                .prepared
+                .as_mut()
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
 
             // Every fallible step precedes the first forwarded header.
             let mut roots = Vec::new();
@@ -351,7 +356,7 @@ impl super::OldSpace {
             .map_err(|_| RuntimeError::HeapOverflow)?;
         for &source in selected {
             if source.is_null() || (*source).is_null() {
-                return Err(RuntimeError::BadPointer);
+                return Err(crate::host_fns::bad_pointer());
             }
         }
         self.promote_prepared(machine, vmctx, selected, descriptors)?;
@@ -380,13 +385,14 @@ impl super::OldSpace {
         if machine.prepared_call_status() != crate::prepared_control::CallStatus::Success {
             return Err(machine
                 .current_failure()
-                .map_or(RuntimeError::BadPointer, |failure| failure.cause));
+                .map_or(crate::host_fns::bad_pointer(), |failure| failure.cause));
         }
-        let (active_start, active_size) =
-            machine.gc_active_range().ok_or(RuntimeError::BadPointer)?;
+        let (active_start, active_size) = machine
+            .gc_active_range()
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let active_end = (active_start as usize)
             .checked_add(active_size)
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         // Static and previously retained results already have stable owners;
         // retention promotion is a no-op for them and must not manufacture an
         // empty descriptor arena.
@@ -394,7 +400,7 @@ impl super::OldSpace {
         for &slot in selected {
             let encoded = *slot as usize;
             if encoded == 0 {
-                return Err(RuntimeError::BadPointer);
+                return Err(crate::host_fns::bad_pointer());
             }
             let address = tidepool_heap::managed_reference::untag(encoded);
             if address >= active_start as usize && address < active_end {
@@ -409,25 +415,30 @@ impl super::OldSpace {
             {
                 continue;
             }
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         if already_stable {
             return Ok(());
         }
         let roots = machine.complete_root_snapshot(&[]).into_slots();
-        let mut state = machine.take_gc_state().ok_or(RuntimeError::BadPointer)?;
+        let mut state = machine
+            .take_gc_state()
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         // Always restore the owning GcState, including terminal failure. Its
         // semispaces may both contain live pointers after partial forwarding.
         let outcome: Result<(), RuntimeError> = (|| {
             let used = (vmctx.alloc_ptr as usize)
                 .checked_sub(state.active_start as usize)
                 .filter(|used| *used <= state.active_size && used % 8 == 0)
-                .ok_or(RuntimeError::BadPointer)?;
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
             let active = state
                 .active_buffer
                 .as_mut()
-                .ok_or(RuntimeError::BadPointer)?;
-            let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
+            let prepared = state
+                .prepared
+                .as_mut()
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
             if prepared.spare.len() < active.len() {
                 prepared
                     .spare
@@ -509,7 +520,9 @@ unsafe fn scan_nursery_edges(
     roots: &mut Vec<*mut *mut u8>,
 ) -> Result<NurseryObjects, RuntimeError> {
     let base = start as usize;
-    let end = base.checked_add(used).ok_or(RuntimeError::BadPointer)?;
+    let end = base
+        .checked_add(used)
+        .ok_or_else(|| crate::host_fns::bad_pointer())?;
     let mut objects = HashMap::new();
     let mut offset = 0;
     while offset < used {
@@ -517,10 +530,10 @@ unsafe fn scan_nursery_edges(
         let identity = object.cast::<usize>().read() & !7;
         let descriptor = space
             .live_descriptor(identity)
-            .ok_or(RuntimeError::BadPointer)?;
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let extent = descriptor.allocation_extent() as usize;
         if extent < 16 || !extent.is_multiple_of(8) || extent > used - offset {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         if let Some(kind) = descriptor.external_kind() {
             let payload = descriptor
@@ -571,7 +584,7 @@ unsafe fn scan_nursery_edges(
 fn preparation_error(error: DescriptorTraceError) -> RuntimeError {
     match error {
         DescriptorTraceError::MetadataAllocation => RuntimeError::HeapOverflow,
-        _ => RuntimeError::BadPointer,
+        _ => crate::host_fns::bad_pointer(),
     }
 }
 

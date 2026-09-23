@@ -90,7 +90,7 @@ pub(super) unsafe extern "C" fn unsupported(
         6 => Capability::CostCentreStrings,
         7 => Capability::DecodeStackEntries,
         _ => {
-            machine.set_first_cause(RuntimeError::BadPointer);
+            machine.set_first_cause(crate::host_fns::bad_pointer());
             return machine.prepared_call_status() as i32;
         }
     };
@@ -582,10 +582,11 @@ mod tests {
             let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
             vmctx.machine_state = &machine as *const _ as *mut _;
             unsafe { unsupported(&mut vmctx, u64::MAX) };
-            assert_eq!(
-                machine.take_runtime_error(),
-                Some(existing.unwrap_or(RuntimeError::BadPointer))
-            );
+            let cause = machine.take_runtime_error();
+            match existing {
+                Some(expected) => assert_eq!(cause, Some(expected)),
+                None => assert!(matches!(cause, Some(RuntimeError::BadPointer { .. }))),
+            }
         }
     }
 }

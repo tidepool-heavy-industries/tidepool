@@ -201,13 +201,17 @@ pub(super) fn initialize_heap_tops(
         .collect::<std::collections::BTreeMap<_, _>>();
     let pointer = |id: ValueId| -> Result<usize, RuntimeError> {
         if let Some(offset) = offsets.get(&id) {
-            let descriptor = descriptors.get(&id).ok_or(RuntimeError::BadPointer)?;
+            let descriptor = descriptors
+                .get(&id)
+                .ok_or_else(|| crate::host_fns::bad_pointer())?;
             return base
                 .checked_add(*offset)
                 .and_then(|address| address.checked_add(usize::from(descriptor.tag())))
-                .ok_or(RuntimeError::BadPointer);
+                .ok_or_else(|| crate::host_fns::bad_pointer());
         }
-        statics.entry(id).ok_or(RuntimeError::BadPointer)
+        statics
+            .entry(id)
+            .ok_or_else(|| crate::host_fns::bad_pointer())
     };
     for spec in specs {
         let offset = offsets[&spec.id];
@@ -241,12 +245,12 @@ pub(super) fn initialize_heap_tops(
                     import_slots,
                 )?;
             }
-            HeapRhs::Bytes(_) => return Err(RuntimeError::BadPointer),
+            HeapRhs::Bytes(_) => return Err(crate::host_fns::bad_pointer()),
         }
         if let Some(&slot) = top_slots.get(&spec.id) {
             top_table
                 .write(slot, pointer(spec.id)? as u64)
-                .map_err(|_| RuntimeError::BadPointer)?;
+                .map_err(|_| crate::host_fns::bad_pointer())?;
         }
     }
     Ok(total)
@@ -285,7 +289,7 @@ fn write_atoms(
             (RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef, Atom::Ref(ValueRef::Local(id))) => {
                 let value = pointer(*id)?;
                 if field.size() as usize != std::mem::size_of::<usize>() {
-                    return Err(RuntimeError::BadPointer);
+                    return Err(crate::host_fns::bad_pointer());
                 }
                 value.to_ne_bytes().to_vec()
             }
@@ -300,21 +304,21 @@ fn write_atoms(
                 // caller's ordering discipline.
                 let slot = import_slots
                     .get(id.0 as usize)
-                    .ok_or(RuntimeError::BadPointer)?
+                    .ok_or_else(|| crate::host_fns::bad_pointer())?
                     .slot;
                 let value = top_table.read(slot)?;
                 if value == 0 {
-                    return Err(RuntimeError::BadPointer);
+                    return Err(crate::host_fns::bad_pointer());
                 }
                 if field.size() as usize != std::mem::size_of::<usize>() {
-                    return Err(RuntimeError::BadPointer);
+                    return Err(crate::host_fns::bad_pointer());
                 }
                 value.to_ne_bytes().to_vec()
             }
             (RuntimeRep::Address, Atom::Ref(ValueRef::Local(id))) => byte_tops
                 .get(id)
                 .map(|bytes| bytes.as_ptr() as usize)
-                .ok_or(RuntimeError::BadPointer)?
+                .ok_or_else(|| crate::host_fns::bad_pointer())?
                 .to_ne_bytes()
                 .to_vec(),
             (RuntimeRep::Address, Atom::Scalar(literal)) => match literal {
@@ -324,10 +328,10 @@ fn write_atoms(
                 tidepool_repr::execution_schema::ScalarLiteral::Bytes(literal) => bytes
                     .get(literal)
                     .map(|storage| storage.as_ptr() as usize)
-                    .ok_or(RuntimeError::BadPointer)?
+                    .ok_or_else(|| crate::host_fns::bad_pointer())?
                     .to_ne_bytes()
                     .to_vec(),
-                _ => return Err(RuntimeError::BadPointer),
+                _ => return Err(crate::host_fns::bad_pointer()),
             },
             (
                 RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_),
@@ -337,17 +341,17 @@ fn write_atoms(
                     tidepool_repr::execution_schema::ScalarLiteral::Int { bytes, .. }
                     | tidepool_repr::execution_schema::ScalarLiteral::Word { bytes, .. }
                     | tidepool_repr::execution_schema::ScalarLiteral::Float { bytes, .. } => bytes,
-                    _ => return Err(RuntimeError::BadPointer),
+                    _ => return Err(crate::host_fns::bad_pointer()),
                 };
                 if bytes.len() != field.size() as usize {
-                    return Err(RuntimeError::BadPointer);
+                    return Err(crate::host_fns::bad_pointer());
                 }
                 let mut native = bytes.clone();
                 native.reverse();
                 native
             }
             (RuntimeRep::Void, Atom::Void) => continue,
-            _ => return Err(RuntimeError::BadPointer),
+            _ => return Err(crate::host_fns::bad_pointer()),
         };
         unsafe {
             std::ptr::copy_nonoverlapping(value.as_ptr(), object.add(address), value.len());
@@ -398,14 +402,20 @@ pub(super) fn runtime_error(machine: &MachineState, error: RuntimeError) -> Exec
 
 /// The failure a completing call reports: the machine latch when set,
 /// otherwise this call's own pending outcome (see
-/// `MachineState::current_failure`).
+/// `MachineState::current_failure`). A machine with no recorded cause at all
+/// (never latched, never reported by the completing call) is itself an
+/// invariant violation distinct from any diagnosed failure.
 pub(super) fn runtime_error_from_machine(machine: &MachineState) -> ExecutionError {
     ExecutionError::Runtime(machine.current_failure().unwrap_or(MachineFailure {
-        cause: RuntimeError::BadPointer,
+        cause: RuntimeError::StatusWithoutCause(CallStatus::IntegrityFailure),
         disposition: MachineDisposition::Unavailable,
     }))
 }
 
+/// A failure status arrived from a completing call with no cause recorded:
+/// give it its own diagnosis (`StatusWithoutCause`) rather than folding it
+/// into `BadPointer`, so a missing-cause defect is never confused with an
+/// actual bad-pointer check failing.
 pub(super) fn runtime_error_for_status(
     machine: &MachineState,
     status: CallStatus,
@@ -413,8 +423,9 @@ pub(super) fn runtime_error_for_status(
     if machine.current_failure().is_none() {
         machine.set_first_cause(match status {
             CallStatus::Cancelled => RuntimeError::Cancelled,
-            CallStatus::LanguageFailure => RuntimeError::BadPointer,
-            CallStatus::IntegrityFailure | CallStatus::Success => RuntimeError::BadPointer,
+            CallStatus::LanguageFailure | CallStatus::IntegrityFailure | CallStatus::Success => {
+                RuntimeError::StatusWithoutCause(status)
+            }
         });
     }
     runtime_error_from_machine(machine)

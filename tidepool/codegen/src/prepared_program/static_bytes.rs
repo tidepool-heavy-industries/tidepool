@@ -393,7 +393,7 @@ pub(super) unsafe extern "C" fn prepared_c_string_len(
             crate::prepared_control::CallStatus::Success as i32
         }
         None => {
-            machine.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+            machine.set_first_cause(crate::host_fns::bad_pointer());
             machine.prepared_call_status() as i32
         }
     }
@@ -439,7 +439,7 @@ pub(super) unsafe extern "C" fn prepared_index_char(
         return status as i32;
     }
     let byte = if output.is_null() {
-        Err(crate::host_fns::RuntimeError::BadPointer)
+        Err(crate::host_fns::bad_pointer())
     } else if let Some(byte) = machine.resolve_literal_bytes(|pool| pool.read_byte(address, index))
     {
         Ok(byte)
@@ -451,7 +451,7 @@ pub(super) unsafe extern "C" fn prepared_index_char(
                 bytes
                     .first()
                     .copied()
-                    .ok_or(crate::host_fns::RuntimeError::BadPointer)
+                    .ok_or_else(|| crate::host_fns::bad_pointer())
             })
     };
     match byte {
@@ -741,14 +741,8 @@ mod tests {
     #[test]
     fn copy_addr_host_rejects_bad_spans_before_mutating_destination() {
         for (source_shift, offset, count, invalid_dest, expected) in [
-            (None, 0, 1, false, crate::host_fns::RuntimeError::BadPointer),
-            (
-                Some(2),
-                0,
-                2,
-                false,
-                crate::host_fns::RuntimeError::BadPointer,
-            ),
+            (None, 0, 1, false, crate::host_fns::bad_pointer()),
+            (Some(2), 0, 2, false, crate::host_fns::bad_pointer()),
             (
                 Some(0),
                 -1,
@@ -770,13 +764,7 @@ mod tests {
                 false,
                 crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: 4, len: 4 },
             ),
-            (
-                Some(0),
-                0,
-                1,
-                true,
-                crate::host_fns::RuntimeError::BadPointer,
-            ),
+            (Some(0), 0, 1, true, crate::host_fns::bad_pointer()),
         ] {
             with_copy_fixture(|vmctx, machine, descriptor, base, dest_ref, payload| {
                 let address = source_shift.map_or(0, |shift| base + shift);
@@ -797,7 +785,13 @@ mod tests {
                 };
                 assert_ne!(status, crate::prepared_control::CallStatus::Success as i32);
                 assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zzzz");
-                assert_eq!(machine.take_runtime_error(), Some(expected));
+                match (machine.take_runtime_error(), &expected) {
+                    (
+                        Some(crate::host_fns::RuntimeError::BadPointer { .. }),
+                        crate::host_fns::RuntimeError::BadPointer { .. },
+                    ) => {}
+                    (actual, expected) => assert_eq!(actual.as_ref(), Some(expected)),
+                }
             });
         }
     }

@@ -55,7 +55,7 @@ pub(super) unsafe extern "C" fn prepared_parse_iso8601(
     }
     let result = (|| {
         if error_wrapper.is_null() || success_output.is_null() || millis_output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) = unsafe {
             super::arrays::active_payload(
@@ -71,7 +71,7 @@ pub(super) unsafe extern "C" fn prepared_parse_iso8601(
         let bytes = machine
             .read_external_payload_offset(published, offset, length)
             .map_err(super::byte_arrays::byte_range_error)?;
-        let input = std::str::from_utf8(&bytes).map_err(|_| RuntimeError::BadPointer)?;
+        let input = std::str::from_utf8(&bytes).map_err(|_| crate::host_fns::bad_pointer())?;
         let parsed = chrono::DateTime::parse_from_rfc3339(input.trim());
         let (success, millis, message) = match parsed {
             Ok(value) => (1, value.timestamp_millis(), String::new()),
@@ -82,7 +82,7 @@ pub(super) unsafe extern "C" fn prepared_parse_iso8601(
             .map_err(|_| RuntimeError::HeapOverflow)?;
         machine
             .store_external_bytes(payload, 0, message.as_bytes())
-            .map_err(|_| RuntimeError::BadPointer)?;
+            .map_err(|_| crate::host_fns::bad_pointer())?;
         unsafe {
             error_wrapper.add(8).cast::<*mut u8>().write(payload);
             success_output.write(success);

@@ -412,7 +412,7 @@ fn w5_a5_stable_gate_rejects_forged_outside_references() {
         assert_scope_clear(&invocation);
         assert!(matches!(
             error,
-            ExecutionError::Runtime(failure) if failure.cause == RuntimeError::BadPointer
+            ExecutionError::Runtime(failure) if matches!(failure.cause, RuntimeError::BadPointer { .. })
         ));
     }
 }

@@ -1180,8 +1180,15 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::EncodeJson => {
             let layout = json_layout.ok_or(super::CompileError::MissingJsonLayout)?;
-            super::json::emit_encode_json(builder, pipeline, vmctx, *layout, arguments, constructors)
-                .map(Some)
+            super::json::emit_encode_json(
+                builder,
+                pipeline,
+                vmctx,
+                *layout,
+                arguments,
+                constructors,
+            )
+            .map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(

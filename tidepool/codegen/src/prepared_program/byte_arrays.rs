@@ -350,7 +350,7 @@ pub(super) unsafe extern "C" fn prepared_byte_array_contents(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, _) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
         let address = machine
@@ -377,10 +377,10 @@ pub(super) unsafe extern "C" fn prepared_sizeof_bytes(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (_, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
-        let len = i64::try_from(len).map_err(|_| RuntimeError::BadPointer)?;
+        let len = i64::try_from(len).map_err(|_| crate::host_fns::bad_pointer())?;
         unsafe { output.write(len) };
         Ok(())
     })();
@@ -580,7 +580,7 @@ pub(super) unsafe extern "C" fn prepared_compare_bytes(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (left, left_len) = unsafe { active_bytes(machine, vmctx, left, descriptor) }?;
         let (right, right_len) = unsafe { active_bytes(machine, vmctx, right, descriptor) }?;
@@ -613,7 +613,7 @@ unsafe fn prepared_read_bytes(
     }
     let result = (|| {
         if output.is_null() {
-            return Err(RuntimeError::BadPointer);
+            return Err(crate::host_fns::bad_pointer());
         }
         let (published, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
         let offset = checked_offset(index, len, element)?;
@@ -623,11 +623,15 @@ unsafe fn prepared_read_bytes(
         let value = match element {
             Element::Word8 => i64::from(bytes[0]),
             Element::Address | Element::Word64 => {
-                let bytes: [u8; 8] = bytes.try_into().map_err(|_| RuntimeError::BadPointer)?;
+                let bytes: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| crate::host_fns::bad_pointer())?;
                 u64::from_ne_bytes(bytes) as i64
             }
             Element::Int64 => {
-                let bytes: [u8; 8] = bytes.try_into().map_err(|_| RuntimeError::BadPointer)?;
+                let bytes: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| crate::host_fns::bad_pointer())?;
                 i64::from_ne_bytes(bytes)
             }
         };
@@ -2178,7 +2182,10 @@ mod tests {
             };
             assert_eq!(status, CallStatus::IntegrityFailure as i32);
             assert_eq!(output, 0x55);
-            assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+            assert!(matches!(
+                machine.take_runtime_error(),
+                Some(RuntimeError::BadPointer { .. })
+            ));
         }
     }
 
@@ -2293,7 +2300,10 @@ mod tests {
             CallStatus::IntegrityFailure as i32
         );
         assert_eq!(output, usize::MAX);
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+        assert!(matches!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::BadPointer { .. })
+        ));
     }
 
     #[test]
@@ -2351,17 +2361,18 @@ mod tests {
                     CallStatus::LanguageFailure as i32
                 }
             );
-            assert_eq!(
-                machine.take_runtime_error(),
-                Some(if revoked {
-                    RuntimeError::BadPointer
-                } else {
-                    RuntimeError::ArrayIndexOutOfBounds {
+            let cause = machine.take_runtime_error();
+            if revoked {
+                assert!(matches!(cause, Some(RuntimeError::BadPointer { .. })));
+            } else {
+                assert_eq!(
+                    cause,
+                    Some(RuntimeError::ArrayIndexOutOfBounds {
                         index: new_len,
                         len: 4,
-                    }
-                })
-            );
+                    })
+                );
+            }
             assert_eq!(unsafe { payload.sub(8).cast::<u64>().read() }, capacity);
             assert_eq!(unsafe { payload.cast::<u64>().read() }, 4);
             assert_eq!(

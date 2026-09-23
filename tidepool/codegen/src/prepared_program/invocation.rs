@@ -54,7 +54,7 @@ fn static_catalog(
         .insert(Arc::clone(region))
         .map_err(|error| match error {
             DescriptorTraceError::MetadataAllocation => RuntimeError::HeapOverflow,
-            _ => RuntimeError::BadPointer,
+            _ => crate::host_fns::bad_pointer(),
         })?;
     Ok(catalog)
 }
@@ -185,7 +185,7 @@ impl<'code> PreparedInvocation<'code> {
                 machine.clear_gc_state();
                 machine.clear_stack_map_registry();
                 machine.clear_cancel_flag();
-                return Err(runtime_error(&machine, RuntimeError::BadPointer));
+                return Err(runtime_error(&machine, crate::host_fns::bad_pointer()));
             }
         };
         let heap_used = match initialize_heap_tops(
@@ -269,12 +269,16 @@ impl<'code> PreparedInvocation<'code> {
         let status = match CallStatus::from_raw(i64::from(raw_status)) {
             Ok(status) => status,
             Err(_) => {
-                invocation.machine.set_first_cause(RuntimeError::BadPointer);
+                invocation
+                    .machine
+                    .set_first_cause(crate::host_fns::bad_pointer());
                 return Err(runtime_error_from_machine(&invocation.machine));
             }
         };
         if status == CallStatus::IntegrityFailure {
-            invocation.machine.set_first_cause(RuntimeError::BadPointer);
+            invocation
+                .machine
+                .set_first_cause(crate::host_fns::bad_pointer());
         }
         if status != CallStatus::Success
             || invocation.machine.prepared_call_status() != CallStatus::Success
@@ -325,7 +329,7 @@ impl<'code> PreparedInvocation<'code> {
             {
                 Ok(seeds) => seeds,
                 Err(error @ super::ObservationFailure::Integrity(_)) => {
-                    self.machine.set_first_cause(RuntimeError::BadPointer);
+                    self.machine.set_first_cause(crate::host_fns::bad_pointer());
                     return Err(runtime_error_from_machine_or_observation(
                         &self.machine,
                         error,
@@ -346,7 +350,7 @@ impl<'code> PreparedInvocation<'code> {
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {
-                self.machine.set_first_cause(RuntimeError::BadPointer);
+                self.machine.set_first_cause(crate::host_fns::bad_pointer());
                 return Err(runtime_error_from_machine_or_observation(
                     &self.machine,
                     error,
@@ -371,7 +375,7 @@ impl<'code> PreparedInvocation<'code> {
         let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
         let raw = unsafe { prepared_gc_trigger(&mut self.vmctx, reserve) };
         let status = CallStatus::from_raw(i64::from(raw))
-            .map_err(|_| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+            .map_err(|_| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
         if status != CallStatus::Success
             || self.machine.prepared_call_status() != CallStatus::Success
         {
@@ -394,10 +398,10 @@ impl<'code> PreparedInvocation<'code> {
             .and_then(|reps| reps.get(logical_index))
             .copied()
         else {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
         if !matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         }
         let Some(stored) = self
             .result_layout
@@ -406,10 +410,10 @@ impl<'code> PreparedInvocation<'code> {
             .copied()
             .flatten()
         else {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
         let Some(field) = self.result_layout.fields().get(stored as usize) else {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
         let slot = unsafe {
             self.results
@@ -456,7 +460,7 @@ mod tests {
         let error = (|| -> Result<(), ExecutionError> {
             let _scope = OldSpaceScope::new(&machine, &owner)?;
             assert!(unsafe { machine.prepared_old_space() }.is_some());
-            Err(runtime_error(&machine, RuntimeError::BadPointer))
+            Err(runtime_error(&machine, crate::host_fns::bad_pointer()))
         })();
         assert!(error.is_err());
         assert!(unsafe { machine.prepared_old_space() }.is_none());
