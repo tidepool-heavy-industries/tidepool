@@ -284,7 +284,7 @@ mod tests {
                 received.extend_from_slice(&buffer[..count]);
             }
             thread::sleep(delay);
-            let _ = stream.write_all(reply.as_bytes());
+            stream.write_all(reply.as_bytes()).ok();
             received
         });
         (url, task)

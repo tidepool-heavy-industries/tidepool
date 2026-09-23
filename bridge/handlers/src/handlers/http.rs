@@ -629,6 +629,12 @@ mod tests {
             // unread peer data is allowed to produce a TCP RST, which made
             // this otherwise-local body test intermittently fail in ureq.
             let mut request = [0_u8; 1024];
+            // best-effort: draining the request is only to avoid a TCP RST
+            // (see comment above) — how many bytes came back is irrelevant.
+            #[allow(
+                clippy::unused_io_amount,
+                reason = "best-effort drain before responding; the byte count is unused by design"
+            )]
             stream.read(&mut request).ok();
             let body = b"{\"hello\":\"world\"}";
             let header = format!(
