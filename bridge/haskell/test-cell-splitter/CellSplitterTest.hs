@@ -758,11 +758,7 @@ prologuePlans flags = do
       assertContains "rendered cell import" "import qualified Data.Map.Strict as Map" checked
   importOnly <- analyzeCellWithFlags flags checkTemplate "import Data.List\n"
   case importOnly of
-    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
-      assertEqual "import-only kind" KDecl (sbKind (cellAnalysisVerdict item))
-      assertEqual "import-only body" "" (cellAnalysisSource item)
-      assertEqual "import-only ordinals" [0]
-        (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems item))
+    Right (CellSourcePlan { cellPlanItems = [] }) -> pure ()
     other -> fail ("import-only plan: " ++ show other)
   cpp <- analyzeCellWithFlags flags checkTemplate "{-# LANGUAGE CPP #-}\nvalue = 1\n"
   case cpp of
@@ -777,14 +773,21 @@ prologuePlans flags = do
     other -> fail ("late pragma should be rejected: " ++ show other)
   pragmaOnly <- analyzeCellWithFlags flags checkTemplate "{-# LANGUAGE NoLambdaCase #-}\n"
   case pragmaOnly of
-    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
-      assertEqual "pragma-only kind" KDecl (sbKind (cellAnalysisVerdict item))
-      assertEqual "pragma-only body" "" (cellAnalysisSource item)
+    Right (CellSourcePlan { cellPlanItems = [] }) -> pure ()
     other -> fail ("pragma-only plan: " ++ show other)
+  pragmaBeforeExpression <- analyzeCellWithFlags flags checkTemplate
+    "{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}\n1 + 1\n"
+  case pragmaBeforeExpression of
+    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
+      assertEqual "leading pragma leaves only the expression" KExpr
+        (sbKind (cellAnalysisVerdict item))
+      assertEqual "leading pragma does not create a declaration notice" [KExpr]
+        (map cellAnalysisSourceKind (cellAnalysisSourceItems item))
+    other -> fail ("leading pragma plan: " ++ show other)
   disabled <- analyzeCellWithFlags flags checkTemplate
     "{-# LANGUAGE NoQuasiQuotes #-}\nf = [bash|echo hello|]\n"
   case disabled of
-    Right (CellSourcePlan { cellPlanItems = [_, item] }) ->
+    Right (CellSourcePlan { cellPlanItems = [item] }) ->
       assertEqual "NoQuasiQuotes survives classification" KExpr
         (sbKind (cellAnalysisVerdict item))
     other -> fail ("NoQuasiQuotes plan: " ++ show other)

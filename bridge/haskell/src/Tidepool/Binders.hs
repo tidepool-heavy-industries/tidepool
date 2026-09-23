@@ -551,7 +551,7 @@ analyzeCellWithFlags dflags template source = do
       }
     groupDeclarations headerItems classified generated =
       case partition isDeclaration classified of
-        ([], executable) | null headerItems -> executable
+        ([], executable) -> executable
         (declarations, executable) -> declarationGroup headerItems declarations generated : executable
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict
