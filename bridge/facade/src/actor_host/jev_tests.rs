@@ -1,7 +1,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
-use super::{command_jobs_tests::backend_request, command_jobs_tests::TestCommands};
+use super::{command_jobs_tests::TestCommands, command_jobs_tests::backend_request};
 use exomonad_actor::{JevBackend, JevCallFailure};
 
 /// Answers every request with one choice answer and records the requests.
@@ -20,6 +20,79 @@ impl JevBackend for FakeJev {
             .push(serde_json::from_str(&request).expect("request is JSON"));
         let answer = self.answer.clone();
         Box::pin(async move { answer })
+    }
+}
+
+/// Answers one Score packet and then one Choice packet without contacting a
+/// provider. Both requests are made by separate cell programs on the same
+/// resident machine, so this covers installation of repeated `J..|` evidence.
+struct SequentialScoreChoiceJev {
+    requests: Mutex<Vec<serde_json::Value>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl JevBackend for SequentialScoreChoiceJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        use std::sync::atomic::Ordering;
+
+        let request: serde_json::Value = serde_json::from_str(&request).expect("request is JSON");
+        self.requests.lock().push(request.clone());
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        let answers = request["questions"]
+            .as_object()
+            .expect("one or more Jev questions")
+            .iter()
+            .map(|(key, question)| {
+                let answer = match (call, question["type"].as_str()) {
+                    (0, Some("score")) => {
+                        let criteria = question["criteria"]
+                            .as_array()
+                            .expect("score question criteria");
+                        let selected = criteria.len().saturating_sub(1);
+                        let legend = criteria
+                            .iter()
+                            .enumerate()
+                            .map(|(index, value)| (index.to_string(), value.clone()))
+                            .collect::<serde_json::Map<_, _>>();
+                        let probabilities = criteria
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| {
+                                (
+                                    index.to_string(),
+                                    serde_json::json!(if index == selected { 1.0 } else { 0.0 }),
+                                )
+                            })
+                            .collect::<serde_json::Map<_, _>>();
+                        serde_json::json!({
+                            "type": "score",
+                            "score": selected,
+                            "confidence": 1.0,
+                            "legend": legend,
+                            "probabilities": probabilities,
+                        })
+                    }
+                    (1, Some("choice")) => serde_json::json!({
+                        "type": "choice",
+                        "choice": "second",
+                        "probabilities": {"first": 0.0, "second": 1.0},
+                        "confidence": 1.0,
+                    }),
+                    (call, kind) => panic!("unexpected Jev request {call}: {kind:?}; {question}"),
+                };
+                (key.clone(), answer)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let body = serde_json::json!({
+            "model": "jev-test",
+            "answers": answers,
+            "usage": {},
+        })
+        .to_string();
+        Box::pin(async move { Ok(body) })
     }
 }
 
@@ -579,6 +652,56 @@ async fn jev_choice_round_trips_through_the_host_backend() {
     let request = &requests[0];
     assert_eq!(request["model"], "jev-latest", "{request}");
     assert_eq!(request["questions"]["value"]["type"], "choice", "{request}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn score_then_choice_packets_with_alternatives_install_on_one_machine() {
+    let backend = Arc::new(SequentialScoreChoiceJev {
+        requests: Mutex::new(Vec::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+
+    let score = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        r#"let rubric = J.level #low "low" (0 :: Int) J..| J.level #high "high" 1
+answer <- J.ask (J.rawState (String "one machine regression")) (#q := J.score "How important is this?" rubric)
+fmap (\a -> a.q.expectation) answer"#,
+    )
+    .await;
+    assert_eq!(score["status"], "committed", "Score packet failed: {score}");
+
+    let choice = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        r#"answer <- J.ask1 (J.rawState (String "one machine regression"))
+  (J.choice "Which branch?" (J.alt #first "First branch" (1 :: Int) J..| J.alt #second "Second branch" 2))
+either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer"#,
+    )
+    .await;
+    assert_eq!(
+        choice["status"], "committed",
+        "Choice packet failed after Score: {choice}"
+    );
+    assert_eq!(
+        choice["items"].as_array().unwrap().last().unwrap()["output"],
+        "2",
+        "Choice answer did not reach the selected branch: {choice}"
+    );
+
+    let requests = backend.requests.lock();
+    assert_eq!(requests.len(), 2, "both cells should ask the fake backend");
+    assert_eq!(
+        requests[0]["questions"]["q"]["type"], "score",
+        "{requests:?}"
+    );
+    assert_eq!(
+        requests[1]["questions"]["value"]["type"], "choice",
+        "{requests:?}"
+    );
+    drop(requests);
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1209,7 +1332,7 @@ async fn next_notification_send(
                         format!("no NotificationSend within the budget; last other event: {kind}")
                     }
                     None => "no event at all within the budget".to_string(),
-                })
+                });
             }
         }
     }
