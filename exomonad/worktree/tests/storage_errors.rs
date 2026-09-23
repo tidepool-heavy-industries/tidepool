@@ -386,10 +386,17 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
     match EventJournal::open(&path) {
         Err(WorktreeError::StorageFailure { path: p, detail }) => {
             assert_eq!(p, path, "the failure names the journal file");
+            // `journal.rs` itself (not the underlying jsonl reader's incidental
+            // wording) stamps "at line N" into every malformed-row detail it
+            // builds — see its `MalformedRow` and row-shape `map_err` arms.
+            // Asserting on that line number, rather than substring-matching
+            // jsonl's prose, pins the fact that actually matters: the failure
+            // names the corrupted row itself (line 2 — the header is line 1),
+            // not some other row.
             assert!(
-                detail.contains("followed by"),
-                "the failure must say the bad row was not final, so a reader can \
-                 tell corruption from a torn write: {detail}"
+                detail.contains("at line 2"),
+                "the failure must name the corrupted row (line 2), not merely \
+                 fail loudly for an unrelated reason: {detail}"
             );
         }
         Ok(j) => panic!(
