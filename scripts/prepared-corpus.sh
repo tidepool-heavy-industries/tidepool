@@ -98,6 +98,14 @@ effects_core="$("$prepared_runner" effects-core "$("$effects_generator")")"
 
 metadata="$repo_root/bridge/haskell/test/suite_cbor/meta.cbor"
 
+# A contract cohort's expected row count is its Targets file: one row per
+# non-blank, non-comment line, the same file the corpus itself reads to build
+# the manifest. This keeps `assert_contract_report` callers from drifting out
+# of sync whenever a Targets file gains or loses a target.
+target_count() {
+  grep -vc '^[[:space:]]*\(#.*\)\?$' "$1"
+}
+
 assert_contract_report() {
   local cohort="$1"
   local expected="$2"
@@ -306,7 +314,9 @@ priority_report="$priority_root/results.json"
   "$priority_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
   "$priority_root/results.json"
-assert_contract_report priority-project-work 1 "$priority_root/results.json"
+assert_contract_report priority-project-work \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/ProjectWorkCandidateTargets")" \
+  "$priority_root/results.json"
 
 fi
 
@@ -318,68 +328,80 @@ actor_report="$actor_root/results.json"
   "$actor_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
   "$actor_root/results.json"
-assert_contract_report actor-await-settled-dependencies 1 "$actor_root/results.json"
+assert_contract_report actor-await-settled-dependencies \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/AwaitSettledDependenciesTargets")" \
+  "$actor_root/results.json"
 
 
 fi
 
 if selected_cohort recovered-base-contract; then
 
-echo "==> checking prepared recovered base-call contract (1 target)"
+echo "==> checking prepared recovered base-call contract"
 recovered_report="$recovered_root/results.json"
 "$prepared_runner" run \
   "$recovered_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/RecoveredBodyExpectations.json" \
   "$metadata" "$recovered_root/results.json"
-assert_contract_report recovered-base 1 "$recovered_root/results.json"
+assert_contract_report recovered-base \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/RecoveredBodyTargets")" \
+  "$recovered_root/results.json"
 
 fi
 
 if selected_cohort formatting-execution-contract; then
 
-echo "==> checking prepared formatting execution contract (5 targets)"
+echo "==> checking prepared formatting execution contract"
 formatting_report="$formatting_root/results.json"
 "$prepared_runner" run \
   "$formatting_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/FormattingExecutionExpectations.json" \
   "$metadata" "$formatting_root/results.json"
-assert_contract_report formatting-execution 5 "$formatting_root/results.json"
+assert_contract_report formatting-execution \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/FormattingExecutionTargets")" \
+  "$formatting_root/results.json"
 
 fi
 
 if selected_cohort formatting-dependency-shadow; then
 
-echo "==> checking prepared formatting dependency-shadow contract (1 target)"
+echo "==> checking prepared formatting dependency-shadow contract"
 formatting_shadow_report="$formatting_shadow_root/results.json"
 "$prepared_runner" run \
   "$formatting_shadow_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/FormattingDependencyShadowExpectations.json" \
   "$metadata" "$formatting_shadow_root/results.json"
-assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_root/results.json"
+assert_contract_report formatting-dependency-shadow \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/FormattingDependencyShadowTargets")" \
+  "$formatting_shadow_root/results.json"
 
 fi
 
 if selected_cohort fingerprint-execution-contract; then
 
-echo "==> checking prepared fingerprint execution contract (3 targets)"
+echo "==> checking prepared fingerprint execution contract"
 fingerprint_report="$fingerprint_root/results.json"
 "$prepared_runner" run \
   "$fingerprint_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/FingerprintExecutionExpectations.json" \
   "$metadata" "$fingerprint_root/results.json"
-assert_contract_report fingerprint-execution 3 "$fingerprint_root/results.json"
+assert_contract_report fingerprint-execution \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/FingerprintExecutionTargets")" \
+  "$fingerprint_root/results.json"
 
 fi
 
 if selected_cohort time-intrinsic-contract; then
 
-echo "==> checking prepared time intrinsic contract (4 targets)"
+echo "==> checking prepared time intrinsic contract"
 time_report="$time_root/results.json"
 "$prepared_runner" run \
   "$time_root/manifest.json" \
   "$repo_root/bridge/haskell/test-prepared-stg/TimeIntrinsicExpectations.json" \
   "$metadata" "$time_root/results.json"
-assert_contract_report time-intrinsic 4 "$time_root/results.json"
+assert_contract_report time-intrinsic \
+  "$(target_count "$repo_root/bridge/haskell/test-prepared-stg/TimeIntrinsicTargets")" \
+  "$time_root/results.json"
 
 fi
 
@@ -390,7 +412,8 @@ run_pure_cohort() {
   local cohort="$1"
   local module="$2"
   local root="$3"
-  local expected="$4"
+  local expected
+  expected="$(target_count "$repo_root/bridge/haskell/test-prepared-stg/${module}Targets")"
   selected_cohort "$(basename "$root")" || return 0
   echo "==> checking prepared $cohort pure-eval cohort ($expected targets)"
   "$prepared_runner" run \
@@ -400,10 +423,10 @@ run_pure_cohort() {
   assert_contract_report "$cohort" "$expected" "$root/results.json"
 }
 
-run_pure_cohort containers ContainersContract "$containers_root" 8
-run_pure_cohort bignum BignumContract "$bignum_root" 6
-run_pure_cohort usertypes UserTypesContract "$usertypes_root" 8
-run_pure_cohort text TextContract "$text_root" 8
+run_pure_cohort containers ContainersContract "$containers_root"
+run_pure_cohort bignum BignumContract "$bignum_root"
+run_pure_cohort usertypes UserTypesContract "$usertypes_root"
+run_pure_cohort text TextContract "$text_root"
 
 echo "==> checking pure-eval cohort probes against the committed opacity manifest"
 "$repo_root/scripts/probe-opacity-check.sh"
