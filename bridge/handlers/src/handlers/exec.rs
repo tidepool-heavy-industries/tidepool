@@ -75,6 +75,22 @@ impl ExecHandler {
     }
 
     fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<Proc, ExecError> {
+        // TODO(launcher): Exec's whole point is running an arbitrary,
+        // caller-named host command (see this crate's CLAUDE.md,
+        // "Exec is NOT filesystem-sandboxed") — it is not a fixed
+        // process this crate owns the lifecycle of. `spawn_and_capture`
+        // already gives it its own process-group timeout/kill, which is
+        // this handler's substitute for the launcher's die-with-owner
+        // guarantee. Routing this through exomonad-node's process_scope
+        // (no dependency cycle: exomonad-node does not depend on
+        // tidepool-handlers) is real future work, not a drop-in swap —
+        // deferred rather than attempted under a lint-triage parcel.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Exec spawns an arbitrary caller command with its own \
+                      timeout/process-group lifecycle, not a launcher-owned \
+                      long-lived child; see TODO(launcher) above"
+        )]
         let mut command = Command::new("sh");
         command.arg("-c").arg(cmd).current_dir(dir);
         Self::spawn_and_capture(command, Self::exec_timeout())
@@ -131,6 +147,14 @@ impl ExecHandler {
                     if Instant::now() >= deadline {
                         break None;
                     }
+                    // `spawn_and_capture` is a synchronous method invoked
+                    // from `EffectHandler` dispatch on its own dedicated
+                    // thread, not from async code on a shared executor —
+                    // see `.clippy.toml`'s dedicated-sync-thread exemption.
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "poll loop on a dedicated sync handler thread, not an async executor thread"
+                    )]
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 // A `try_wait` failure post-spawn is not a documented failure
@@ -152,9 +176,14 @@ impl ExecHandler {
                 // The kill closes every process's copy of the pipe write
                 // ends in the group, which unblocks the reader threads with
                 // EOF; `wait()` then reaps the zombie.
-                let _ = child.wait();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                // best-effort: `wait()` only needs to reap the zombie here —
+                // its exit status is moot once the command has been killed
+                // for a timeout. The reader threads are joined only to
+                // avoid leaking them; their captured output is discarded on
+                // this path (the caller gets `ExecTimeout`, not `Proc`).
+                child.wait().ok();
+                stdout_thread.join().ok();
+                stderr_thread.join().ok();
                 Err(ExecError::ExecTimeout(format!(
                     "command exceeded its {}s timeout and was killed",
                     timeout.as_secs()
@@ -257,6 +286,15 @@ impl ExecHandler {
         if argv.is_empty() {
             return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }
+        // TODO(launcher): same reasoning as `run_command` above — an
+        // arbitrary caller-named command, not a launcher-owned long-lived
+        // child.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Exec spawns an arbitrary caller command with its own \
+                      timeout/process-group lifecycle, not a launcher-owned \
+                      long-lived child; see TODO(launcher) on run_command"
+        )]
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]).current_dir(&self.root);
         Self::spawn_and_capture(command, Self::exec_timeout())
@@ -321,6 +359,11 @@ mod tests {
         // Give the SIGKILL a brief moment to land, then confirm the
         // grandchild — not just the top-level `sh` — is actually gone.
         let mut alive = true;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "short synchronous probe in a test: poll `kill -0` for the \
+                      grandchild's death, not a long-lived child needing the launcher"
+        )]
         for _ in 0..40 {
             let status = std::process::Command::new("kill")
                 .args(["-0", &grandchild_pid.to_string()])

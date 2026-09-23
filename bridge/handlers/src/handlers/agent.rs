@@ -333,7 +333,7 @@ impl AsyncCycle {
         };
         // A panicked cycle thread is already accounted for above; joining it
         // is how its resources are released, not how it is diagnosed.
-        let _ = thread.join();
+        thread.join().ok();
         out
     }
 
@@ -376,7 +376,7 @@ impl AsyncCycle {
                 match reports.try_recv() {
                     Ok(report) => {
                         let (terminal, _saga, transcript) = Self::settle_with(report);
-                        let _ = thread.join();
+                        thread.join().ok();
                         AsyncCycle::Settled {
                             terminal,
                             transcript,
@@ -388,7 +388,7 @@ impl AsyncCycle {
                         canceller,
                     },
                     Err(TryRecvError::Disconnected) => {
-                        let _ = thread.join();
+                        thread.join().ok();
                         AsyncCycle::Settled {
                             terminal: lost_no_report(id),
                             transcript: Vec::new(),
@@ -951,11 +951,13 @@ impl SubagentHandler {
                 let saga = None;
                 // A receiver dropped before the report lands means the handler
                 // itself is gone; there is nobody left to tell.
-                let _ = reports.send(CycleReport {
-                    result,
-                    saga,
-                    backend,
-                });
+                reports
+                    .send(CycleReport {
+                        result,
+                        saga,
+                        backend,
+                    })
+                    .ok();
             })
             .map_err(|e| {
                 SpawnError::SpawnDriveFailed(

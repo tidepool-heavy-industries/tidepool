@@ -25,7 +25,7 @@ pub(crate) fn with_dir_flock<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> std::
     // Explicit, so the unlock is visible before `f`'s side effects are
     // observed rather than deferred to `dir`'s drop; same as the flock
     // original, an unlock failure here is not surfaced.
-    let _ = dir.unlock();
+    dir.unlock().ok();
     Ok(out)
 }
 
@@ -1379,7 +1379,7 @@ mod tests {
         let meta = meta.expect("Cargo.toml has metadata");
         assert!(meta.is_file && !meta.is_dir);
         // A directory: is_dir, not is_file (doesFileExist folds this to False).
-        let req = FsReadReq::FsMetadata("tidepool-handlers".into());
+        let req = FsReadReq::FsMetadata("bridge/handlers".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let meta: Option<FileMeta> = FromHaskell::from_value(&res, &table).unwrap();
         let meta = meta.expect("bridge/handlers/ has metadata");
@@ -1523,6 +1523,6 @@ mod tests {
             (THREADS * ITERS) as u64,
             "flock did not serialize the read-modify-write — updates were lost"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

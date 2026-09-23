@@ -629,14 +629,14 @@ mod tests {
             // unread peer data is allowed to produce a TCP RST, which made
             // this otherwise-local body test intermittently fail in ureq.
             let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request);
+            stream.read(&mut request).ok();
             let body = b"{\"hello\":\"world\"}";
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.write_all(body);
+            stream.write_all(header.as_bytes()).ok();
+            stream.write_all(body).ok();
         });
 
         let url_str = format!("http://{addr}/");

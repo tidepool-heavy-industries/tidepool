@@ -257,6 +257,11 @@ mod tests {
 
     /// Serves one canned HTTP/1.1 response on a local ephemeral port and
     /// returns (url, join-handle capturing the raw request bytes received).
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous delay on a dedicated test-fixture thread simulating a \
+                  slow server reply, not a long-lived child needing the launcher"
+    )]
     fn server(status: &str, body: &str, delay: Duration) -> (String, thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());

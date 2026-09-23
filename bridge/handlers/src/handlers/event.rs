@@ -1336,6 +1336,14 @@ impl RepoEventHandler {
             if let Some(dl) = deadline {
                 step = step.min(dl.saturating_duration_since(Instant::now()));
             }
+            // `repo_event_await` is a synchronous method invoked from
+            // `EffectHandler` dispatch on its own dedicated thread, not
+            // from async code on a shared executor — see `.clippy.toml`'s
+            // dedicated-sync-thread exemption.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "poll loop on a dedicated sync handler thread, not an async executor thread"
+            )]
             std::thread::sleep(step);
         }
     }

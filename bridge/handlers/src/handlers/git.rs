@@ -471,6 +471,11 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
     }
 
     // Build a scratch git repo with 2 commits, a staged file, and an untracked file.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous test-fixture probes (git init/add/commit) that exit \
+                  immediately, not a long-lived child needing the launcher"
+    )]
     fn make_scratch_repo() -> tempfile::TempDir {
         use std::fs;
         use std::process::Command;

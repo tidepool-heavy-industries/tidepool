@@ -308,8 +308,8 @@ mod tests {
         let pid = std::process::id();
         let path_a = std::env::temp_dir().join(format!("tidepool_kv_iso_a_{pid}.json"));
         let path_b = std::env::temp_dir().join(format!("tidepool_kv_iso_b_{pid}.json"));
-        let _ = std::fs::remove_file(&path_a);
-        let _ = std::fs::remove_file(&path_b);
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
 
         let mut ha = frunk::hlist![KvHandler::new(path_a.clone())];
         let mut hb = frunk::hlist![KvHandler::new(path_b.clone())];
@@ -336,8 +336,8 @@ mod tests {
             other => panic!("expected empty list (\"[]\"), got {:?}", other),
         }
 
-        let _ = std::fs::remove_file(&path_a);
-        let _ = std::fs::remove_file(&path_b);
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
     }
 
     /// kvClear with a prefix deletes only keys under that prefix; the other
@@ -350,7 +350,7 @@ mod tests {
 
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("tidepool_kv_clear_{pid}.json"));
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let mut h = frunk::hlist![KvHandler::new(path.clone())];
 
         let set_id = table.get_by_name("KvSet").unwrap();
@@ -407,7 +407,7 @@ mod tests {
             surviving
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// kvKeysP filters keys by prefix and returns them sorted.
@@ -419,7 +419,7 @@ mod tests {
 
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("tidepool_kv_keysp_{pid}.json"));
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let mut h = frunk::hlist![KvHandler::new(path.clone())];
 
         let set_id = table.get_by_name("KvSet").unwrap();
@@ -459,7 +459,7 @@ mod tests {
             keys
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A backing file that EXISTS but can't be read at startup (transient
@@ -477,7 +477,7 @@ mod tests {
 
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("tidepool_kv_unreadable_{pid}.json"));
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let original = r#"{"marker":"original"}"#;
         std::fs::write(&path, original).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -485,7 +485,7 @@ mod tests {
         // Skip in environments (e.g. root) where permission bits don't gate reads.
         if std::fs::read_to_string(&path).is_ok() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            let _ = std::fs::remove_file(&path);
+            std::fs::remove_file(&path).ok();
             eprintln!("skipping: read succeeded despite 0o000 (likely running as root)");
             return;
         }
@@ -506,7 +506,7 @@ mod tests {
             "flush must refuse to overwrite a file that failed to read at startup"
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// Cross-process compare-and-swap: two handlers over the SAME backing file
@@ -523,7 +523,7 @@ mod tests {
 
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("tidepool_kv_cas_{pid}.json"));
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
 
         let mut ha = frunk::hlist![KvHandler::new(path.clone())];
         let mut hb = frunk::hlist![KvHandler::new(path.clone())];
@@ -565,7 +565,7 @@ mod tests {
             "the committed value must survive; B must not have clobbered it"
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// kvInfo returns a JSON object with count, sample, and file_size_bytes fields.
@@ -577,7 +577,7 @@ mod tests {
 
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("tidepool_kv_info_{pid}.json"));
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let mut h = frunk::hlist![KvHandler::new(path.clone())];
 
         let set_id = table.get_by_name("KvSet").unwrap();
@@ -606,6 +606,6 @@ mod tests {
             "kvInfo should return an Object; got constructor {name:?}"
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 }

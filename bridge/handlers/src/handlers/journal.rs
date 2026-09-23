@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn append_then_fold_roundtrips() {
         let path = tmp_file("roundtrip");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
 
@@ -896,13 +896,13 @@ mod tests {
         assert_eq!(entries[1].key, "branch/b");
         assert_eq!(entries[1].payload, serde_json::json!({"ok": true}));
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn seq_is_monotonic() {
         let path = tmp_file("seq");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
 
@@ -915,13 +915,13 @@ mod tests {
         let seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn torn_last_line_skipped_with_warning() {
         let path = tmp_file("torn");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
         h.append("split".into(), "a".into(), serde_json::json!(1))
@@ -949,7 +949,7 @@ mod tests {
         );
         assert_eq!(entries[0].key, "a");
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn torn_mid_file_line_is_loud_not_absorbed() {
         let path = tmp_file("torn_mid");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         // A well-formed final line preceded by a corrupted first line can
         // never happen from a real append-only crash, so it must be
         // reported, not silently dropped the way a torn final line is.
@@ -988,13 +988,13 @@ mod tests {
             result
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn by_key_helper_returns_last_record_per_key() {
         let path = tmp_file("bykey");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
         h.append("split".into(), "branch/a".into(), serde_json::json!(1))
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(by_key["branch/a"].payload, serde_json::json!(2));
         assert_eq!(by_key["branch/b"].kind, "split");
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     fn entry(seq: u64, kind: &str, key: &str, payload: i64) -> JournalEntry {
@@ -1144,7 +1144,7 @@ mod tests {
     #[test]
     fn resuming_at_a_distinct_ordinal_keeps_seq_disjoint_from_the_prior_handler() {
         let path = tmp_file("resuming");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
 
         let first = JournalHandler::new(SegmentPath::create_exclusive(path.clone()).unwrap())
             .expect("fresh segment header stamp succeeds");
@@ -1178,7 +1178,7 @@ mod tests {
              after the prior handler's"
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// `seq` is run-GLOBALLY UNIQUE by construction (segment ordinal composed
@@ -1196,8 +1196,8 @@ mod tests {
     fn resuming_across_two_segments_keeps_seq_ascending_in_physical_order() {
         let seg0 = tmp_file("seq-order-seg0");
         let seg1 = tmp_file("seq-order-seg1");
-        let _ = std::fs::remove_file(&seg0);
-        let _ = std::fs::remove_file(&seg1);
+        std::fs::remove_file(&seg0).ok();
+        std::fs::remove_file(&seg1).ok();
 
         let first = JournalHandler::new(SegmentPath::for_test(seg0.clone()))
             .expect("fresh segment header stamp succeeds");
@@ -1243,8 +1243,8 @@ mod tests {
             "seq order and physical order must agree on a well-behaved sequential run"
         );
 
-        let _ = std::fs::remove_file(&seg0);
-        let _ = std::fs::remove_file(&seg1);
+        std::fs::remove_file(&seg0).ok();
+        std::fs::remove_file(&seg1).ok();
     }
 
     /// The concurrent-resume hazard this whole scheme exists to close: two
@@ -1259,8 +1259,8 @@ mod tests {
     fn concurrent_resumes_never_collide_on_seq() {
         let seg_a = tmp_file("concurrent-resume-a");
         let seg_b = tmp_file("concurrent-resume-b");
-        let _ = std::fs::remove_file(&seg_a);
-        let _ = std::fs::remove_file(&seg_b);
+        std::fs::remove_file(&seg_a).ok();
+        std::fs::remove_file(&seg_b).ok();
 
         // Both handlers resume from the SAME prior fold — the exact
         // condition (two resumes of one extant lease) the bug reproduced
@@ -1308,14 +1308,14 @@ mod tests {
             "every seq across both concurrently-resumed handlers must be distinct"
         );
 
-        let _ = std::fs::remove_file(&seg_a);
-        let _ = std::fs::remove_file(&seg_b);
+        std::fs::remove_file(&seg_a).ok();
+        std::fs::remove_file(&seg_b).ok();
     }
 
     #[test]
     fn parent_dir_creation_works() {
         let base = tmp_dir("parentdir");
-        let _ = std::fs::remove_dir_all(&base);
+        std::fs::remove_dir_all(&base).ok();
         let path = base.join("nested").join("run.jsonl");
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
@@ -1327,7 +1327,7 @@ mod tests {
         let entries = load_journal(&path).unwrap();
         assert_eq!(entries.len(), 1);
 
-        let _ = std::fs::remove_dir_all(&base);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A parent-directory creation failure surfaces as a structured
@@ -1336,7 +1336,7 @@ mod tests {
     #[test]
     fn create_dir_failure_is_a_structured_error() {
         let base = tmp_dir("createdir_conflict");
-        let _ = std::fs::remove_dir_all(&base);
+        std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         // A regular FILE where the journal's parent directory needs to be —
         // `create_dir_all` must fail on it, since it exists but is not a
@@ -1358,7 +1358,7 @@ mod tests {
             "message content must survive: {err}"
         );
 
-        let _ = std::fs::remove_dir_all(&base);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// The trace stream: sibling file derived from the segment name, version
@@ -1366,7 +1366,7 @@ mod tests {
     #[test]
     fn trace_lands_in_sibling_stream_with_ts_envelope() {
         let dir = tmp_dir("trace");
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("journal-run1.0.jsonl");
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
@@ -1409,13 +1409,13 @@ mod tests {
         let journal_entries = load_journal(&path).unwrap();
         assert!(journal_entries.is_empty());
 
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn missing_file_loads_as_empty() {
         let path = tmp_file("missing");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         assert_eq!(load_journal(&path).unwrap(), vec![]);
     }
 
@@ -1423,7 +1423,7 @@ mod tests {
     #[test]
     fn fresh_segment_gets_a_header_line() {
         let path = tmp_file("header");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
         h.append("split".into(), "a".into(), serde_json::json!(1))
@@ -1438,7 +1438,7 @@ mod tests {
         );
         // The header doesn't count as an entry.
         assert_eq!(load_journal(&path).unwrap().len(), 1);
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A legacy segment (written before this scheme existed — no header
@@ -1447,7 +1447,7 @@ mod tests {
     #[test]
     fn unstamped_legacy_segment_still_loads() {
         let path = tmp_file("legacy_segment");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         std::fs::write(
             &path,
             "{\"seq\":0,\"kind\":\"split\",\"key\":\"a\",\"payload\":1}\n",
@@ -1458,13 +1458,13 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "a");
         assert_eq!(entries[0].ts, 0, "legacy timestamps migrate to unknown");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn version_one_segment_migrates_missing_timestamp_to_unknown() {
         let path = tmp_file("v1_timestamp_migration");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         std::fs::write(
             &path,
             "{\"version\":1}\n{\"seq\":4,\"kind\":\"split\",\"key\":\"a\",\"payload\":1}\n",
@@ -1475,14 +1475,14 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].ts, 0);
         assert_eq!(journal_version::CURRENT, 2);
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A version newer than this build supports is a loud, typed refusal.
     #[test]
     fn future_segment_version_is_a_typed_rejection() {
         let path = tmp_file("future_version");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         std::fs::write(&path, "{\"version\":9999}\n").unwrap();
 
         let err = load_journal(&path).expect_err("a future version must be refused");
@@ -1490,7 +1490,7 @@ mod tests {
             matches!(err, JournalLoadError::FutureVersion { found: 9999, .. }),
             "expected FutureVersion, got {err:?}"
         );
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A multi-threaded burst of records through CLONED handlers (sharing the
@@ -1504,7 +1504,7 @@ mod tests {
     #[test]
     fn concurrent_burst_through_cloned_handlers_yields_no_torn_lines() {
         let path = tmp_file("concurrent_burst");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
         let handler = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
 
@@ -1543,6 +1543,6 @@ mod tests {
             "the shared seq counter must not be raced past — no seq reused across threads"
         );
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 }
