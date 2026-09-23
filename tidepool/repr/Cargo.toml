@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-repr"
 version.workspace = true
 edition.workspace = true
@@ -18,3 +19,7 @@ tidepool-atomic-write.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+
+[[test]]
+name = "repr"
+path = "tests/suites/repr.rs"

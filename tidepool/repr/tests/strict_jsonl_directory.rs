@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 use std::{fs, path::Path, process::Command};
 use tidepool_repr::jsonl::{append_new_line, SyncPolicy};
 
@@ -62,7 +61,7 @@ fn strict_jsonl_append_syncs_new_and_existing_directory_entries() {
             }
             let log = root.join(format!("hit-{policy}-{existing}"));
             let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "jsonl_fault_child", "--nocapture"])
+                .args(["--exact", "strict_jsonl_directory::jsonl_fault_child", "--nocapture"])
                 .env("LD_PRELOAD", &library)
                 .env("FAULT_ROOT", &dir)
                 .env("FAULT_PATH", &dir)
