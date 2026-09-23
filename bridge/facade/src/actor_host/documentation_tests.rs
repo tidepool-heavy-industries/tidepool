@@ -76,6 +76,25 @@ async fn notebook_display_pages_large_text_and_exhausts_continuation() {
 }
 
 #[tokio::test]
+async fn notebook_display_explains_actor_scoped_handle_rejections() {
+    let campaign = TestCampaign::start().await;
+    let result = committed(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("notebook_actor_scoped_handle.hs"),
+    )
+    .await;
+    assert!(
+        result["items"].as_array().unwrap().last().unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .contains("actor-scoped handle guidance rendered"),
+        "{result}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn notebook_display_compiles_one_expression_and_one_display_bundle() {
     let campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.as_ref();

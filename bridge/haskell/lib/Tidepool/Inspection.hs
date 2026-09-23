@@ -106,6 +106,25 @@ instance Display Text where
     let (rendered, remaining, unavailable) = renderTree budget (literalText value)
     in (rendered, maybe False (const True) remaining || unavailable)
 
+instance Display ReplyError where
+  displayTree ReplyUnauthorized =
+    TextLeaf "ReplyUnauthorized (this handle is actor-scoped; your assignment can continue with this actor's own handles)"
+  displayTree ReplyWrongIncarnation =
+    TextLeaf "ReplyWrongIncarnation (this handle belongs to a different actor incarnation)"
+  displayTree error = TextLeaf (Text.pack (show error))
+
+instance Display ResponseFailure where
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence (ResponseRejected error) =
+    application precedence "ResponseRejected" [displayTreePrec 11 error]
+  displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
+
+instance Display WatchFailure where
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence (WatchRejected error) =
+    application precedence "WatchRejected" [displayTreePrec 11 error]
+  displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
+
 -- | A 'String' is text, and renders as 'Text' does. Without this the list
 -- instance answers for @[Char]@ and the result of 'show' displays as a list of
 -- characters, one to a line.
