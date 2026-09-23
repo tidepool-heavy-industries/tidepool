@@ -19,7 +19,10 @@ if sys.argv[1] == "--compiler-endpoint-v1":
     if os.environ.get("BAD_ENDPOINT"):
         print("worker unavailable", file=sys.stderr)
         sys.exit(2)
-    sys.stdout.buffer.write(b"TPCID001" + bytes(32))
+    # PRODUCER_BYTE parameterizes the fake producer identity so tests can
+    # simulate a rebuild (a changed producer) between two probes.
+    producer_byte = int(os.environ.get("PRODUCER_BYTE", "0"))
+    sys.stdout.buffer.write(b"TPCID001" + bytes([producer_byte]) * 32)
     sys.exit(2)  # EOF is deliberately not a complete compiler request.
 assert sys.argv[1] == "--daemon"
 Path(os.environ["DAEMON_PID_FILE"]).write_text(str(os.getpid()))
@@ -247,6 +250,122 @@ class ExtractHelpers(unittest.TestCase):
                        'teardown_battery_daemon\n[[ ! -d "$saved_dir" ]]\n'
                        '[[ -f "$BATTERY_ARTIFACT_DIR/daemon.log" ]]',
                        TIDEPOOL_EXTRACT=str(self.frontend), DAEMON_MODE="exit")
+
+    # --- Persistent compile daemon (daemon_start_persistent / daemon_stop_persistent) ---
+
+    def persistent_env(self, **extra):
+        cache = self.root / "cache"
+        return dict(TIDEPOOL_EXTRACT=str(self.frontend), XDG_CACHE_HOME=str(cache), **extra)
+
+    def persistent_dir(self):
+        return self.root / "cache/tidepool/battery-daemon"
+
+    def test_daemon_start_persistent_creates_state_and_prints_export(self):
+        env = self.persistent_env()
+        result = self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        sock = daemon_dir / "extract.sock"
+        self.assertIn(f"export TIDEPOOL_EXTRACT_DAEMON_SOCKET={sock}", result.stdout)
+        self.assertTrue((daemon_dir / "daemon.pid").exists())
+        self.assertTrue(sock.exists())
+        self.assertEqual((daemon_dir / "producer").read_text().strip(), "00" * 32)
+        os.kill(int((daemon_dir / "daemon.pid").read_text()), 0)
+
+    def test_daemon_start_persistent_is_idempotent(self):
+        env = self.persistent_env()
+        result1 = self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        sock = daemon_dir / "extract.sock"
+        self.assertIn(f"export TIDEPOOL_EXTRACT_DAEMON_SOCKET={sock}", result1.stdout)
+        pid1 = (daemon_dir / "daemon.pid").read_text()
+        result2 = self.run_shell('daemon_start_persistent', **env)
+        self.assertIn("already running", result2.stderr)
+        self.assertIn(f"export TIDEPOOL_EXTRACT_DAEMON_SOCKET={sock}", result2.stdout)
+        self.assertEqual((daemon_dir / "daemon.pid").read_text(), pid1)
+
+    def test_daemon_start_persistent_cleans_dead_state_and_restarts(self):
+        env = self.persistent_env()
+        daemon_dir = self.persistent_dir()
+        daemon_dir.mkdir(parents=True)
+        (daemon_dir / "daemon.pid").write_text("999999")
+        (daemon_dir / "extract.sock").write_text("stale, not a real socket")
+        (daemon_dir / "producer").write_text("deadbeef")
+        result = self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        self.assertIn("clearing stale persistent compile daemon state", result.stderr)
+        pid = int((daemon_dir / "daemon.pid").read_text())
+        self.assertNotEqual(pid, 999999)
+        os.kill(pid, 0)
+
+    def test_daemon_start_persistent_restarts_on_producer_change(self):
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        pid1 = int((daemon_dir / "daemon.pid").read_text())
+        result = self.run_shell('daemon_start_persistent', **env, PRODUCER_BYTE="1")
+        self.assertIn("is stale (producer changed) — restarting", result.stderr)
+        pid2 = int((daemon_dir / "daemon.pid").read_text())
+        self.assertNotEqual(pid1, pid2)
+        self.assertEqual((daemon_dir / "producer").read_text().strip(), "01" * 32)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid1, 0)
+        os.kill(pid2, 0)
+
+    def test_daemon_stop_persistent_reaps_and_cleans(self):
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        daemon_dir = self.persistent_dir()
+        pid = int((daemon_dir / "daemon.pid").read_text())
+        self.run_shell('daemon_stop_persistent', **env)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertFalse((daemon_dir / "extract.sock").exists())
+        self.assertFalse((daemon_dir / "daemon.pid").exists())
+        self.assertFalse((daemon_dir / "producer").exists())
+        # Quiet no-op when nothing is running.
+        result = self.run_shell('daemon_stop_persistent', **env)
+        self.assertEqual(result.returncode, 0)
+
+    def test_start_battery_daemon_reuses_current_persistent_daemon(self):
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        pid_before = (daemon_dir / "daemon.pid").read_text()
+        sock = str(daemon_dir / "extract.sock")
+        result = self.run_shell(
+            'trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'
+            'printf "OWNED=%s\\n" "$BATTERY_DAEMON_OWNED"\n'
+            'printf "SOCK=%s\\n" "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"',
+            **env)
+        self.assertIn(f"reusing persistent compile daemon at {sock}", result.stderr)
+        self.assertIn("OWNED=0", result.stdout)
+        self.assertIn(f"SOCK={sock}", result.stdout)
+        pid_after = (daemon_dir / "daemon.pid").read_text()
+        self.assertEqual(pid_before, pid_after)
+        os.kill(int(pid_after), 0)
+
+    def test_start_battery_daemon_skips_stale_persistent_daemon(self):
+        env = self.persistent_env()
+        self.run_shell('daemon_start_persistent', **env)
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        persistent_sock = str(daemon_dir / "extract.sock")
+        result = self.run_shell(
+            'trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'
+            'printf "OWNED=%s\\n" "$BATTERY_DAEMON_OWNED"\n'
+            'printf "SOCK=%s\\n" "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"',
+            **env, PRODUCER_BYTE="1")
+        self.assertIn(f"persistent compile daemon at {persistent_sock} is stale (producer mismatch)",
+                     result.stderr)
+        self.assertIn("just daemon-stop && just daemon-start", result.stderr)
+        self.assertIn("OWNED=1", result.stdout)
+        self.assertNotIn(f"SOCK={persistent_sock}", result.stdout)
+        # The persistent daemon itself is left running untouched.
+        os.kill(int((daemon_dir / "daemon.pid").read_text()), 0)
 
 
 if __name__ == "__main__":

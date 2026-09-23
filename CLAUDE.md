@@ -67,6 +67,12 @@ just changed
 just verify
 ```
 
+`just daemon-start` keeps one compile daemon warm across test runs; battery,
+suite, and check runs reuse it automatically. Stop and restart it after
+rebuilding the extractor or the Haskell worker. Leave the host cargo config's
+incremental compilation on (no `CARGO_INCREMENTAL=0`) and cap jobs to fit
+beside a 10 GiB GHC worker.
+
 Large integration suites use small entry points in `tests/suites/` that import
 separate test files as modules. Cargo's `autotests = false` prevents linking a
 runtime copy for every file; `just suite-check` checks suite registration and

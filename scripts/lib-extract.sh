@@ -6,9 +6,12 @@
 # the build step below runs `cd bridge/haskell`.
 #
 # Also owns the resident-compile-daemon lifecycle helpers
-# (start_battery_daemon / teardown_battery_daemon) used by test wrappers.
-# Kept here, not duplicated per script, for the same reason as
-# resolve_tidepool_extract above.
+# (start_battery_daemon / teardown_battery_daemon) used by test wrappers, and
+# the persistent-daemon pair (daemon_start_persistent / daemon_stop_persistent,
+# driven by `just daemon-start` / `just daemon-stop`) that keeps one compile
+# daemon's GHC module memo warm across separate `just test`/`just check`
+# invocations instead of rebooting it every run. Kept here, not duplicated
+# per script, for the same reason as resolve_tidepool_extract above.
 
 # A no-argument frontend invocation is a usage error and therefore exits
 # non-zero. Capture its complete output without letting `set -e` short-circuit
@@ -333,6 +336,27 @@ start_battery_daemon() {
   fi
   unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
 
+  # No caller-supplied socket: check for a `just daemon-start`-managed
+  # persistent daemon before booting a per-run one. Reused only when it is
+  # both alive and current (producer identity matches this invocation's
+  # resolved $TIDEPOOL_EXTRACT/$TIDEPOOL_EXTRACT_WORKER); a stale one is left
+  # running (never killed out from under whoever started it) and this run
+  # falls back to its own per-run daemon below.
+  local _persistent_sock _persistent_producer_file
+  _persistent_sock="$(_persistent_daemon_dir)/extract.sock"
+  _persistent_producer_file="$(_persistent_daemon_dir)/producer"
+  if _battery_daemon_socket_alive "$_persistent_sock"; then
+    local _current_producer
+    _current_producer="$(_current_producer_hex 2>/dev/null)" || _current_producer=""
+    if [ -n "$_current_producer" ] && [ -f "$_persistent_producer_file" ] \
+      && [ "$(cat "$_persistent_producer_file" 2>/dev/null)" = "$_current_producer" ]; then
+      export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$_persistent_sock"
+      echo "==> reusing persistent compile daemon at $_persistent_sock" >&2
+      return 0
+    fi
+    echo "==> persistent compile daemon at $_persistent_sock is stale (producer mismatch) — run 'just daemon-stop && just daemon-start' to refresh it; starting a per-run daemon instead" >&2
+  fi
+
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
   local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
   local log="$BATTERY_DAEMON_SOCKET_DIR/daemon.log"
@@ -450,4 +474,161 @@ teardown_battery_daemon() {
   BATTERY_DAEMON_SOCKET_DIR=""
   BATTERY_DAEMON_OWNED=0
   unset TIDEPOOL_EXTRACT_DAEMON_LOG
+}
+
+# --- Persistent compile daemon ---
+#
+# A second daemon lifecycle, independent of start_battery_daemon/
+# teardown_battery_daemon above: those boot a fresh daemon per script
+# invocation and always tear it down at exit, so the GHC module memo dies
+# with every `just test`. daemon_start_persistent instead boots one
+# long-lived daemon under a well-known directory and leaves it running past
+# the invoking shell; start_battery_daemon's reuse check picks it up
+# automatically (see above) whenever the caller has not already supplied its
+# own $TIDEPOOL_EXTRACT_DAEMON_SOCKET. `just daemon-start` / `just
+# daemon-stop` are the direct entry points.
+#
+# Directory layout under <cache_dir>/battery-daemon/ (cache_dir() above):
+#   extract.sock  - the daemon's listening socket
+#   daemon.pid    - pid of the daemon process this helper started
+#   daemon.log    - the daemon's stdout+stderr (includes its "compiler
+#                   daemon ready ... producer=<hex>" banner)
+#   compiler.log  - the daemon's --log-path detailed/trace log
+#   producer      - hex producer identity recorded at the daemon's last
+#                   successful start, used to detect staleness below
+
+_persistent_daemon_dir() {
+  echo "$(cache_dir)/battery-daemon"
+}
+
+# Producer identity of the CURRENTLY resolved $TIDEPOOL_EXTRACT +
+# $TIDEPOOL_EXTRACT_WORKER, read without booting a GHC worker session.
+# tidepool-extract has no standalone "print producer identity" flag; the
+# cheapest existing path is --compiler-endpoint-v1
+# (tidepool/extract-cmd/src/frontend.rs serve_bound_endpoint), which writes
+# an 8-byte magic plus the 32-byte PreparedWorker::producer_identity() hash
+# to stdout and then blocks reading a transaction prefix from stdin. Piping
+# /dev/null in makes that read hit EOF immediately, so the process exits
+# right after writing the identity bytes and never spawns a GHC worker
+# process. This is the same probe validate_tidepool_extract_endpoint above
+# uses to prove a bindable endpoint (same magic/timeout checks, reused here)
+# — just reading the identity's producer half instead of only its presence.
+# It is exactly the value the daemon itself later logs as `producer=<hex>`
+# in "compiler daemon ready" (tidepool/extract-cmd/src/daemon.rs), since
+# both come from the same PreparedWorker::producer_identity() call.
+_current_producer_hex() {
+  local probe status=0
+  probe="$(mktemp -t tidepool-producer-probe.XXXXXX)" || return 1
+  timeout --kill-after=5 30 "$TIDEPOOL_EXTRACT" --compiler-endpoint-v1 \
+    </dev/null >"$probe" 2>/dev/null || status=$?
+  local magic
+  magic="$(od -An -tx1 -N8 "$probe" | tr -d '[:space:]')"
+  if [[ "$status" = 124 || "$status" = 137 || "$magic" != "5450434944303031" ]] \
+    || [[ "$(wc -c <"$probe")" -lt 40 ]]; then
+    rm -f "$probe"
+    return 1
+  fi
+  # -v disables od's default elision of repeated identical output lines
+  # (`*`): the 32-byte producer hash spans multiple 16-byte lines and a
+  # producer with a repeated byte pattern would otherwise come back
+  # truncated.
+  od -v -An -tx1 -j8 -N32 "$probe" | tr -d '[:space:]'
+  rm -f "$probe"
+}
+
+# Starts (or reuses) the persistent compile daemon and prints
+# `export TIDEPOOL_EXTRACT_DAEMON_SOCKET=<sock>`. Idempotent: a live daemon
+# whose recorded producer identity still matches the current one is reused
+# as-is and left running. A stale (producer mismatch) or dead/half-started
+# daemon left in the directory is cleaned up (recorded pid terminated if
+# still alive) before a fresh one is launched. Must run after
+# resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
+daemon_start_persistent() {
+  local dir sock pidfile log compiler_log producer_file
+  dir="$(_persistent_daemon_dir)"
+  mkdir -p "$dir"
+  sock="$dir/extract.sock"
+  pidfile="$dir/daemon.pid"
+  log="$dir/daemon.log"
+  compiler_log="$dir/compiler.log"
+  producer_file="$dir/producer"
+
+  local current_producer
+  current_producer="$(_current_producer_hex)" || {
+    echo "error: could not probe the current compiler producer identity via '$TIDEPOOL_EXTRACT --compiler-endpoint-v1'" >&2
+    return 1
+  }
+
+  if _battery_daemon_socket_alive "$sock"; then
+    if [ -f "$producer_file" ] && [ "$(cat "$producer_file" 2>/dev/null)" = "$current_producer" ]; then
+      export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
+      echo "==> persistent compile daemon already running: socket=$sock" >&2
+      echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
+      return 0
+    fi
+    echo "==> persistent compile daemon at $sock is stale (producer changed) — restarting" >&2
+    daemon_stop_persistent
+  elif [ -f "$pidfile" ] || [ -e "$sock" ]; then
+    echo "==> clearing stale persistent compile daemon state in $dir" >&2
+    daemon_stop_persistent
+  fi
+
+  local stamp watch_args=()
+  stamp="$(_battery_daemon_stamp_path)"
+  if [ -f "$stamp" ]; then
+    watch_args=(--watch-stamp "$stamp")
+  fi
+
+  echo "==> starting persistent compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
+  # setsid detaches into a new session so the daemon outlives the invoking
+  # `just daemon-start` shell instead of dying with it. Rotation/RSS flags
+  # are omitted so the frontend owns their defaults, matching
+  # start_battery_daemon above.
+  setsid "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" \
+    </dev/null >"$log" 2>&1 &
+  local pid=$!
+  echo "$pid" >"$pidfile"
+
+  local started_at=$SECONDS
+  while ! _battery_daemon_socket_alive "$sock"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "error: persistent compile daemon exited before readiness (see $log)" >&2
+      wait "$pid" 2>/dev/null || true
+      rm -f "$pidfile"
+      return 1
+    fi
+    if [ $((SECONDS - started_at)) -ge 30 ]; then
+      echo "error: persistent compile daemon was not ready within 30s (see $log)" >&2
+      _terminate_and_wait "$pid" "persistent compile daemon startup"
+      rm -f "$pidfile"
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  printf '%s\n' "$current_producer" >"$producer_file"
+  export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
+  echo "==> persistent compile daemon up: pid=$pid socket=$sock" >&2
+  echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
+}
+
+# Terminates the recorded persistent daemon (if any, via _terminate_and_wait
+# above) and removes its socket/pid/producer files. Succeeds quietly if
+# nothing is running.
+daemon_stop_persistent() {
+  local dir sock pidfile producer_file
+  dir="$(_persistent_daemon_dir)"
+  sock="$dir/extract.sock"
+  pidfile="$dir/daemon.pid"
+  producer_file="$dir/producer"
+
+  if [ -f "$pidfile" ]; then
+    local pid
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      _terminate_and_wait "$pid" "persistent compile daemon"
+      echo "==> persistent compile daemon (pid $pid) stopped" >&2
+    fi
+  fi
+  rm -f "$sock" "$pidfile" "$producer_file"
 }

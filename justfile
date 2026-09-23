@@ -48,6 +48,14 @@ test-lib crate filter="":
 test-toolchain-scripts:
     {{ nix }} python3 scripts/tests/test_lib_extract.py -v
 
+# Start (or reuse) the persistent compile daemon; battery/suite/check reuse it automatically.
+daemon-start:
+    {{ nix }} bash -c 'set -euo pipefail; source scripts/lib-extract.sh && resolve_tidepool_extract && daemon_start_persistent'
+
+# Stop the persistent compile daemon started by `just daemon-start`.
+daemon-stop:
+    {{ nix }} bash -c 'set -euo pipefail; source scripts/lib-extract.sh && daemon_stop_persistent'
+
 # Run a crate's Cargo integration suites in one bounded nextest invocation.
 [positional-arguments]
 suite crate:
