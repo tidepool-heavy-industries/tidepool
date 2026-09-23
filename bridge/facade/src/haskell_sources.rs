@@ -84,9 +84,14 @@ fn locate_exomonad_haskell() -> Option<PathBuf> {
 }
 
 fn find_actors_from(start: &Path) -> Option<PathBuf> {
+    // `bridge/haskell/actors` from the checkout root or above; `haskell/actors`
+    // from inside `bridge/`.
     tidepool_toolchain::toolchain::walk_up_for(
         start,
-        &[Path::new("haskell/actors")],
+        &[
+            Path::new("bridge/haskell/actors"),
+            Path::new("haskell/actors"),
+        ],
         is_actors_root,
     )
 }

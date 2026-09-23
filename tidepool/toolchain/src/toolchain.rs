@@ -451,11 +451,20 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
     //    with CWD=<repo>/tidepool-runtime finds the same stdlib as a server
     //    launched from the repo root.
     if let Ok(cwd) = std::env::current_dir() {
-        let candidates = [Path::new("haskell/lib"), Path::new("lib")];
+        // `bridge/haskell/lib` from the checkout root or above, `haskell/lib`
+        // from inside `bridge/`, `lib` from inside `bridge/haskell/`.
+        let candidates = [
+            Path::new("bridge/haskell/lib"),
+            Path::new("haskell/lib"),
+            Path::new("lib"),
+        ];
         if let Some(found) = walk_up_for(&cwd, &candidates, is_stdlib_root) {
             return Ok(StdlibLocation { dir: found });
         }
-        tried.push(("repo tree above cwd", cwd.join("haskell").join("lib")));
+        tried.push((
+            "repo tree above cwd",
+            cwd.join("bridge").join("haskell").join("lib"),
+        ));
     }
 
     // 3. The `lib/` sibling of the extract's `dist-newstyle` (absorbs the old
