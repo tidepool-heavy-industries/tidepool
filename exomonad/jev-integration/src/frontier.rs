@@ -133,6 +133,10 @@ fn graph_case(model: &str, depth: usize, valid: bool) -> Case {
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "every link pushed above is a json!({\"node\":...,\"next\":...}) literal with a string node id; as_str() cannot fail on it"
+)]
 fn pointer_case(model: &str, depth: usize, salt: usize) -> Case {
     let node_count = depth * 2 + 1;
     let node_id = |index: usize| opaque((index * 31 + salt * 17) % 997, salt + 29);
@@ -516,12 +520,12 @@ pub async fn run(
         .iter()
         .filter(|o| o["passed"] == json!(true))
         .count();
-    let summary =
-        json!({"model":model,"passed":passed,"total":observations.len(),"cases":observations});
+    let total = observations.len();
+    let summary = json!({"model":model,"passed":passed,"total":total,"cases":observations});
     serde_json::to_writer_pretty(&mut summary_file, &summary)?;
     summary_file.write_all(b"\n")?;
     summary_file.sync_all()?;
-    Ok(if passed == summary["total"].as_u64().unwrap() as usize {
+    Ok(if passed == total {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)

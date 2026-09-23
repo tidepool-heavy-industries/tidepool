@@ -90,6 +90,10 @@ pub enum Probe {
 }
 
 impl Probe {
+    #[allow(
+        clippy::expect_used,
+        reason = "every Probe variant is listed above with no #[value(skip)]; clap's ValueEnum derive always produces a possible_value for it"
+    )]
     pub fn name(self) -> String {
         self.to_possible_value()
             .expect("all probes are named")
@@ -97,6 +101,10 @@ impl Probe {
             .to_owned()
     }
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "the JSON literals unwrapped here are constructed a few lines above in this same function, so their shape (an object at request.questions.wake, or at request's top level) is guaranteed by the json!() call, not external input"
+    )]
     pub fn request(self, model: &str) -> Value {
         let mut request = json!({
             "model": model,

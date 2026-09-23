@@ -124,6 +124,10 @@ fn new_evidence_file(path: &PathBuf) -> std::io::Result<File> {
 
 // Preserve bytes except any literal/JSON-escaped copy of the credential echoed
 // by a server. A flag distinguishes sanitized evidence from an exact body.
+#[allow(
+    clippy::expect_used,
+    reason = "key is a &str; serde_json's String serialization only fails for non-finite floats or map keys that aren't strings, neither of which applies here"
+)]
 fn redact(body: &mut Vec<u8>, key: &str) -> bool {
     let quoted = serde_json::to_string(key).expect("strings serialize");
     let mut changed = false;

@@ -139,8 +139,17 @@ mod tests {
                 }
                 received.extend_from_slice(&buffer[..count]);
             }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "this is a std::thread::spawn'd test fixture, not async code running on the tokio executor"
+            )]
             thread::sleep(delay);
-            let _ = stream.write_all(reply.as_bytes());
+            // Best-effort: the client under test may have already timed out and
+            // dropped its connection, in which case this write legitimately fails.
+            // This is a test fixture, so log rather than propagate or panic.
+            if let Err(error) = stream.write_all(reply.as_bytes()) {
+                eprintln!("test fixture server: failed to write reply: {error}");
+            }
             listener.set_nonblocking(true).unwrap();
             1 + usize::from(listener.accept().is_ok())
         });

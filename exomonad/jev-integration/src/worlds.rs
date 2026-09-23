@@ -51,6 +51,10 @@ fn choice(instructions: Value, criteria: Value) -> Value {
     json!({"type":"choice", "instructions":instructions, "criteria":criteria})
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "state comes from world(), whose actors field is always a json!() array of objects each carrying a string id; the shape is fixed by that literal, not external input"
+)]
 pub fn swarm(model: &str, local: bool, renamed: bool) -> Value {
     let state = world(local, renamed);
     let mut questions = Map::new();

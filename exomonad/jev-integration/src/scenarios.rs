@@ -98,6 +98,10 @@ pub fn investigate(model: &str, fold: bool) -> Value {
     )
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "candidates is a json!({...}) object literal constructed immediately above; as_object_mut() cannot fail on it"
+)]
 pub fn evidence(model: &str, missing: bool) -> Value {
     let mut candidates = json!({
         "group_1": {"span": "worker.rs:91", "diagnostic": "cannot find value result in this scope", "notes": ["Downstream use of the binding from line 70"]},
@@ -142,6 +146,10 @@ pub fn relate(model: &str, distinct: bool) -> Value {
     )
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "options is a json!({...}) object literal constructed immediately above; as_object_mut() cannot fail on it"
+)]
 pub fn repair(model: &str, unavailable: bool) -> Value {
     let mut options = json!({
         "repair": {"kind": "RepairTask", "target": "retained-implementer", "task": "Replace offset retention with stable IDs at the observed caller"},
@@ -164,6 +172,10 @@ pub fn repair(model: &str, unavailable: bool) -> Value {
     )
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "options is a json!({...}) object literal constructed immediately above; as_object_mut() cannot fail on it"
+)]
 pub fn experiment(model: &str, insufficient: bool) -> Value {
     let mut options = json!({
         "clear_cache": {"plan": "Clear the cache and retry", "prediction": {"stale_cache": "passes", "missing_invalidation": "passes"}, "cost_seconds": 5},
