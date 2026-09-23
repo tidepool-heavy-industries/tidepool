@@ -1044,8 +1044,8 @@ data Console a where
         // A change to the orchestrate source alone busts the dir.
         let dir3 = write_shim_module(eff, "module Tidepool.Orchestrate where\n-- other\n").unwrap();
         assert_ne!(dir1, dir3, "orchestrate change must bust the dir");
-        let _ = std::fs::remove_dir_all(&dir1);
-        let _ = std::fs::remove_dir_all(&dir3);
+        std::fs::remove_dir_all(&dir1).ok();
+        std::fs::remove_dir_all(&dir3).ok();
     }
 
     #[test]
@@ -1086,7 +1086,7 @@ data Console a where
         assert!(orch_module.exists(), "orchestrate self-healed after reap");
         assert_eq!(std::fs::read_to_string(&module).unwrap(), eff);
         assert_eq!(std::fs::read_to_string(&orch_module).unwrap(), orch);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

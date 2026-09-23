@@ -343,7 +343,7 @@ import Extra
         let h2 = lib_snapshot_hash(&dirs);
         std::fs::write(dir.join("B.hs"), "module B where\nb = 1\n").unwrap();
         assert_ne!(h2, lib_snapshot_hash(&dirs), "add must bust the snapshot");
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1173,7 +1173,7 @@ import Extra
     }
     impl Drop for FixtureDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
@@ -1247,6 +1247,6 @@ import Extra
             "explicit Beta should be tagged needs-import: {beta}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
