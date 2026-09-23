@@ -6,8 +6,8 @@ bindings and the conversation through the actual tool result.
 ```haskell
 let campaign = "my-project" :: CampaignLabel
 let wave = "first-wave" :: ForkGroupLabel
-let domainLabel = "domain" :: Label
-let consumerLabel = "consumer-tests" :: Label
+let domainLabel = [label|domain|]
+let consumerLabel = [label|consumer-tests|]
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report projectHead (assignment domainLabel domainPlan))
       <*> child (withEffort Medium (coding @Report projectHead (assignment consumerLabel consumerPlan)))

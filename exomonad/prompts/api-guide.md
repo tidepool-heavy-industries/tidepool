@@ -13,7 +13,7 @@ let task = "Remove the stale path and report the focused check." :: Text
 (worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
   child @Text $
     coding projectHead $
-      assignment "remove-stale-path" task
+      assignment [label|remove-stale-path|] task
 ready
 ```
 
@@ -41,11 +41,12 @@ Commit useful units without mistaking checkpoints for accepted delivery.
 selects an explicit model. `withEffort Medium` sets effort. Omitted settings follow
 the native launch selector's defaults; `previewBranch` shows resolved policy.
 `withContext (selected render)` selects fresh context. Launch options do not
-modify retained actors. Use `labelFromText` for dynamic labels.
+modify retained actors. Use `[label|orbit-motif|]` for compile-checked static
+assignment labels. Use `labelFromText` for dynamic labels and handle its `Either`.
 
 The activation supplies typed `sessionInput` and its reply declaration; use
 `inspectFull sessionInput` only for omitted detail. Roots outside an assignment
-have no reply binding. `request @Report (responseActor worker) (assignment "revision" input)`
+have no reply binding. `request @Report (responseActor worker) (assignment [label|revision|] input)`
 assigns follow-up work. `pollRequestUpdate` inspects an accepted update handle.
 Requests notify their owner unless a watch/route takes over; record actor
 settlement sources require `report = Silent`.

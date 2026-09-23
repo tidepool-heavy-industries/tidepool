@@ -6,6 +6,7 @@
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -702,7 +703,7 @@ startReviewer own _contract brief oid = do
     withEffort Medium $
     narrowed @ReviewerEffects knownEffects
       (inspectionPolicy (atRef (GitRef (renderGitOid oid))))
-      ((assignment "review" brief) { report = Silent })
+      ((assignment [label|review|] brief) { report = Silent })
   void (R.forwardResult reviewer (reviewSettled own))
   void (record "review" (Just oid) RanHere "reviewer_admitted"
     ("read-only luna at " <> shortOid oid) "await the verdict")
@@ -857,7 +858,7 @@ requestRepair own oid findings = do
         RanHere index "take the task over, or raise the budget"
     else do
       attempt <- requestWith (responseActor (reviewWorker state))
-        ((assignment "repair" RepairTask
+        ((assignment [label|repair|] RepairTask
             { repairTaskName = contractTask contract
             , repairCandidate = renderGitOid oid
             , repairFindings = findings

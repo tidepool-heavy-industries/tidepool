@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
 -- Tools for resident sessions. Bind their handles and compose the next operation
@@ -95,7 +96,7 @@ implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (solTask "implement" task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (solTask [label|implement|] task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
@@ -116,7 +117,7 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "executor" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
-    ((assignment "review" (ReviewTask task candidate owner)) { report = Silent })
+    ((assignment [label|review|] (ReviewTask task candidate owner)) { report = Silent })
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.

@@ -12,8 +12,8 @@ worktree handle: seed its children with `projectHead`. Before a live-source fork
 Exomonad checkpoints eligible edits on the source's current branch. The child starts
 from that committed source. If the optional overlay capture is busy or unavailable,
 the child starts from the checkpointed HEAD with an omission notice. If native
-source admission is busy, the committed fallback instead uses the existing HEAD
-and reports omitted working files. A Git checkpoint failure stops the fork.
+source admission is busy, it instead uses existing committed HEAD and reports
+omitted working files. A Git checkpoint failure stops the fork.
 Commit authored units with meaningful
 messages for integration and recovery.
 

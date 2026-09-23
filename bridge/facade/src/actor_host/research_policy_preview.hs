@@ -1,6 +1,6 @@
 let campaign = "research-preview" :: CampaignLabel
 let group = "coordinator" :: ForkGroupLabel
-let leafLabel = "researcher" :: Label
+let leafLabel = [label|researcher|]
 let proposal = withForkBudget (ForkBudget 2 2) (researching @Text projectHead (assignment leafLabel ()))
 defaultPreview <- previewBranch (researching @Text projectHead (assignment leafLabel ()))
 requestedPreview <- previewBranch proposal

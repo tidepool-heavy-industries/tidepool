@@ -64,6 +64,7 @@ module Tidepool.Actors.Exomonad
   , CampaignLabel
   , ForkGroupLabel
   , Label
+  , label
   , NameError (..)
   , Assignment (..)
   , SettlementReporting (..)
@@ -287,6 +288,7 @@ import Tidepool.Actor (EffectProfile, ActorExit, ActorLifecycle)
 import Tidepool.Inspection (FullInspection, inspectFull)
 
 import Tidepool.Agent.Reply
+import Tidepool.QQ.Label (label)
 import Tidepool.Actor.Record
   ( (:-), State, Call, NoReply, Event
   , Shape, Definition, Client, Self, Private

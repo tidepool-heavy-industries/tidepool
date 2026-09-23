@@ -1,3 +1,3 @@
 worker <- startAgent (readonlyAgent "operator-worker")
-let requestKey = "operator-request" :: Label
+let requestKey = [label|operator-request|]
 answer <- request @Int worker (assignment requestKey (41 :: Int))

@@ -580,7 +580,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     .await;
     committed(
         root.as_ref(),
-        "response <- request @Text worker (assignment \"notebook-reply\" (\"ready\" :: Text))\n",
+        "response <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text))\n",
     )
     .await;
     let child = tokio::time::timeout(Duration::from_secs(120), async {
@@ -718,8 +718,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "badWorkers <- unfold (batch \"literal-errors\" \"branches\") $ ",
-            "(,) <$> child (researching @Text projectHead (assignment \"valid\" ())) ",
-            "<*> child (researching @Text projectHead (assignment \"Bad Label\" ()))",
+            "(,) <$> child (researching @Text projectHead (assignment [label|valid|] ())) ",
+            "<*> child (researching @Text projectHead (assignment [label|Bad Label|] ()))",
         ),
     )
     .await;
@@ -741,7 +741,7 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "worker <- unfold (batch \"literal-errors\" \"request\") ",
-            "(child (researching @Text projectHead (assignment \"target\" ())))",
+            "(child (researching @Text projectHead (assignment [label|target|] ())))",
         ),
     )
     .await;
@@ -768,7 +768,7 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     assert!(rendered.contains("Response { request ="), "{rendered}");
     let invalid_request = dispatch_haskell_script(
         root.as_ref(),
-        "badResponse <- request @Text (responseActor worker) (assignment (\"Bad Label\" :: Label) ())",
+        "badResponse <- request @Text (responseActor worker) (assignment [label|Bad Label|] ())",
     )
     .await;
     assert_eq!(invalid_request["status"], "rejected", "{invalid_request}");
@@ -1043,7 +1043,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let previewLabel = \"{label}\" :: Label\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
+        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
         let activation = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 match campaign.deployments.recv().await {
@@ -2162,7 +2162,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let followupLabel = \"peer-followup\" :: Label\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
+    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =

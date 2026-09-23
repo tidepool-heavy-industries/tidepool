@@ -1,3 +1,3 @@
 let nestedGroup = "nested" :: ForkGroupLabel
-let nestedLabel = "leaf" :: Label
+let nestedLabel = [label|leaf|]
 nested <- unfold (subgroup nestedGroup) (child (researching @Text boundHead (assignment nestedLabel ())))

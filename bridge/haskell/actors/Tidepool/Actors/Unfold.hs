@@ -603,7 +603,7 @@ attemptUnfold (ForkGroupPath relative groupName) plan = do
 
     branchNames :: Unfold parent a -> [Text]
     branchNames (PureU _) = []
-    branchNames (BranchU _ (Branch _ _ _ _ assigned)) = [labelText (label assigned)]
+    branchNames (BranchU _ (Branch _ _ _ _ assigned)) = [labelText (assignmentLabel assigned)]
     branchNames (ApU functions arguments) =
       branchNames functions <> branchNames arguments
 
@@ -742,7 +742,7 @@ requestBranch
   -> WorktreeHandle
   -> Eff effects (Response result)
 requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assigned) actor allocated tree = do
-  let leaf = labelText (label assigned)
+  let leaf = labelText (assignmentLabel assigned)
   let requested = group <> "/" <> leaf
       (actorId, incarnation) = agentIdentity actor
   response <- requestWithSited @result @input site actor assigned

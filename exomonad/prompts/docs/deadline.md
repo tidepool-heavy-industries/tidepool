@@ -5,7 +5,7 @@ input `task`:
 
 ```haskell
 response <- request @Report worker $
-  (assignment "bounded-review" task) { deadline = Just (minutes 10) }
+  (assignment [label|bounded-review|] task) { deadline = Just (minutes 10) }
 ```
 
 `milliseconds`, `seconds`, and `minutes` construct `Duration`. Status preserves the authored unit and shows

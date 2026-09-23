@@ -64,14 +64,13 @@ let unreachable path = error ("no owner for " <> path) :: Text
 ("annotated, and never forced" :: Text)
 ```
 
-`assignment` takes a validated `Label`, not free `Text`. A literal validates
-when it is forced, so `assignment "revision" task` reads naturally, but a
-`Text` computed at runtime needs `labelFromText`, which keeps a validation
-failure as a value instead of throwing inside a launch. The same applies to
-campaign, fork-group, request and watch labels.
+`assignment` takes a validated `Label`, not free `Text`. Static assignment
+labels use `[label|revision|]`, which is checked at compile time. A `Text`
+computed at runtime needs `labelFromText`; handle its `Either` before launch.
+Campaign, fork-group and watch labels have their own constructors and validators.
 
 ```haskell
-let laneLabel = "consumer-tests" :: Label
+let laneLabel = [label|consumer-tests|]
 let dynamic = labelFromText ("work-" <> T.pack (show (2 :: Int)))
 (laneLabel, dynamic)
 ```

@@ -110,7 +110,7 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
 
 const CODING_CHILD: &str = "let campaign = \"source-reload\" :: CampaignLabel\n\
      let group = \"checkout\" :: ForkGroupLabel\n\
-     let leaf = \"editor\" :: Label\n\
+     let leaf = [label|editor|]\n\
      worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n";
 
 /// A child editing Haskell in its OWN checkout reloads its own layer: its

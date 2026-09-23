@@ -1261,7 +1261,7 @@ fn watchdog_child_script(label: &str) -> String {
     format!(
         "let campaign = \"watchdog\" :: CampaignLabel\n\
          let group = \"children\" :: ForkGroupLabel\n\
-         let leaf = \"{label}\" :: Label\n\
+         let leaf = [label|{label}|]\n\
          worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n"
     )
 }

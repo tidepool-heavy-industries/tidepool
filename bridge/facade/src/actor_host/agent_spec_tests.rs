@@ -924,7 +924,7 @@ async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
 
 const CODING_CHILD: &str = "let campaign = \"agent-spec\" :: CampaignLabel\n\
      let group = \"checkout\" :: ForkGroupLabel\n\
-     let leaf = \"editor\" :: Label\n\
+     let leaf = [label|editor|]\n\
      worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n";
 
 fn commit(workspace: &Path, message: &str) {

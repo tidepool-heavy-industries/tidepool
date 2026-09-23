@@ -1,2 +1,2 @@
-let busyLabel = "busy" :: Label
+let busyLabel = [label|busy|]
 busyWork <- unfold (batch campaign group) (child @Text (coding projectHead (assignment busyLabel ("fixture-busy" :: Text))))

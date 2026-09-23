@@ -23,6 +23,7 @@
 module Tidepool.QQ.Validate
   ( uri
   , mkValidatorQQ
+  , mkValidatorQQWith
   ) where
 
 import Data.Text (Text)
@@ -31,22 +32,23 @@ import qualified Tidepool.Data.Text as T
 import Language.Haskell.TH (Exp, Q, litE, stringL)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 
--- | Build a validator quasi-quoter from a name (used in error messages) and a
--- compile-time check.  On 'Right' the quote body is emitted as a 'Text'
--- literal; on 'Left' the splice fails with the quoter name and the message.
--- Pattern\/type\/declaration positions are rejected with a pointer to
--- expression position.
+-- | Build a validator quasi-quoter that emits the checked 'Text' literal.
 mkValidatorQQ :: String -> (Text -> Either Text ()) -> QuasiQuoter
-mkValidatorQQ name check = QuasiQuoter
+mkValidatorQQ name check = mkValidatorQQWith name check $ \s ->
+  [| T.pack $(litE (stringL s)) |]
+
+-- | Validate at splice time, then emit the checked expression.
+mkValidatorQQWith :: String -> (Text -> Either Text ()) -> (String -> Q Exp) -> QuasiQuoter
+mkValidatorQQWith name check emit = QuasiQuoter
   { quoteExp  = checkExp
-  , quotePat  = \_ -> fail (name ++ ": cannot be used in pattern position (it builds a Text literal; use it in expression position)")
+  , quotePat  = \_ -> fail (name ++ ": cannot be used in pattern position (use it in expression position)")
   , quoteType = \_ -> fail (name ++ ": cannot be used in a type context")
   , quoteDec  = \_ -> fail (name ++ ": cannot be used in a declaration context")
   }
   where
     checkExp :: String -> Q Exp
     checkExp s = case check (T.pack s) of
-      Right ()  -> [| T.pack $(litE (stringL s)) |]
+      Right ()  -> emit s
       Left msg  -> fail (name ++ ": " ++ T.unpack msg)
 
 -- | @[uri| https://example.com/x |]@ — an http(s) URI, structure checked.

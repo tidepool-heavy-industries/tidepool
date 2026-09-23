@@ -75,7 +75,7 @@ For a retained `lead :: AgentRef`, this requests cumulative nonterminal
 findings (`[Text]`) and a final `Text` reply:
 
 ```haskell
-let progressOptions = assignment "lead-findings" ("Publish cumulative findings; then return your final report." :: Text)
+let progressOptions = assignment [label|lead-findings|] ("Publish cumulative findings; then return your final report." :: Text)
 (leadResponse, leadProgress) <- requestWithProgress @[Text] @Text lead progressOptions
 let findingsLabel = "lead-findings-ready" :: WatchLabel
 findingsReady <- watch findingsLabel (awaitProgressAfter leadProgress (ProgressCursor 0))

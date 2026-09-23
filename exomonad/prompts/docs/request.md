@@ -3,7 +3,7 @@ handle is durable while its resident Haskell machine lives; readiness alone
 does not spend another model turn.
 
 ```haskell
-response <- request @Report worker (assignment "review-change" task)
+response <- request @Report worker (assignment [label|review-change|] task)
 pollResponse response
 ```
 

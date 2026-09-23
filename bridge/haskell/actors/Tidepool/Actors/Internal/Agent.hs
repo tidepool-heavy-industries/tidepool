@@ -428,8 +428,8 @@ requestConfiguredSited
   -> (Response result -> Eff effs ())
   -> Eff effs (Response result)
 requestConfiguredSited site target targetWorktree options retain = do
-  requestId <- reserveRequest (label options) (actorAddress target) (report options)
-  let renderedLabel = labelText (label options)
+  requestId <- reserveRequest (assignmentLabel options) (actorAddress target) (report options)
+  let renderedLabel = labelText (assignmentLabel options)
       requestInput = input options
       responseGuidance = guidance options
       requestDeadline = deadline options
@@ -450,7 +450,7 @@ requestConfiguredSited site target targetWorktree options retain = do
         Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
-          site requestId (Just (activationGuidance (labelText (label options)) (guidance options))) (input options)
+          site requestId (Just (activationGuidance (labelText (assignmentLabel options)) (guidance options))) (input options)
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do

@@ -4,7 +4,7 @@ guideIsUnavailable :: WatchState result -> Bool
 guideIsUnavailable WatchPending = False
 guideIsUnavailable (WatchReady _) = False
 guideIsUnavailable (WatchUnavailable _) = True
-let failureLabel = "guide-unavailable" :: Label
+let failureLabel = [label|guide-unavailable|]
 failureResponse <- request @Text (responseActor worker) (assignment failureLabel ("This request will be interrupted." :: Text))
 let failureWatchLabel = "guide-unavailable-ready" :: WatchLabel
 failureReady <- watch failureWatchLabel (awaitSettled failureResponse)
