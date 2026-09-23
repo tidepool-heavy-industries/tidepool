@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     async fn run() {
-        let home = isolation::codex_home();
+        let home = isolation::codex_home().expect("HOME set in test environment");
         let before = ConfigSnapshot::capture(&home).expect("capture pre-run config snapshot");
 
         let mut session = Session::connect(InitializeCapabilities::default())
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     async fn run_live_turn() {
-        let home = isolation::codex_home();
+        let home = isolation::codex_home().expect("HOME set in test environment");
         let before = ConfigSnapshot::capture(&home).expect("capture pre-run config snapshot");
         let config_before_text =
             std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();

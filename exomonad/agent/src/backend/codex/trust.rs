@@ -26,7 +26,7 @@ pub fn trust_interactive_project(project_root: &Path) -> Result<(), AgentBackend
         )
     })?;
     trust_project_in_home(
-        &crate::backend::codex::isolation::codex_home(),
+        &crate::backend::codex::isolation::codex_home()?,
         &project_root,
     )
 }

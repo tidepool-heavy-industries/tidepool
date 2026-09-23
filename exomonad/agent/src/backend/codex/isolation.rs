@@ -23,15 +23,23 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::AgentBackendError;
+
 /// Resolve the Codex home directory the same way the CLI does: `$CODEX_HOME`
 /// if set, else `~/.codex`.
-pub fn codex_home() -> PathBuf {
+///
+/// Fails instead of panicking when neither is available — `HOME` unset is a
+/// possible environment condition (a stripped-down service unit, a sandboxed
+/// runner), not a programmer error, so a caller on a production path gets a
+/// named `AgentBackendError` instead of an abort.
+pub fn codex_home() -> Result<PathBuf, AgentBackendError> {
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    #[allow(clippy::expect_used, reason = "HOME must be set to locate ~/.codex")]
-    let home = std::env::var_os("HOME").expect("HOME must be set to locate ~/.codex");
-    PathBuf::from(home).join(".codex")
+    let home = std::env::var_os("HOME").ok_or_else(|| AgentBackendError::BackendUnavailable {
+        detail: "cannot locate ~/.codex: neither CODEX_HOME nor HOME is set".to_string(),
+    })?;
+    Ok(PathBuf::from(home).join(".codex"))
 }
 
 /// A point-in-time snapshot of the config/credential surface under a Codex
@@ -372,7 +380,10 @@ mod tests {
         // scoped tightly around the read it's testing.
         let saved = std::env::var_os("CODEX_HOME");
         unsafe { std::env::set_var("CODEX_HOME", "/tmp/example-codex-home") };
-        assert_eq!(codex_home(), PathBuf::from("/tmp/example-codex-home"));
+        assert_eq!(
+            codex_home().unwrap(),
+            PathBuf::from("/tmp/example-codex-home")
+        );
         match saved {
             Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
             None => unsafe { std::env::remove_var("CODEX_HOME") },

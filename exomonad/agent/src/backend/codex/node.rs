@@ -341,7 +341,10 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         &'a self,
         thread: &'a QueueReadyThread,
     ) -> InteractiveFuture<'a, Option<ProviderObservation>> {
-        let sessions = super::isolation::codex_home().join("sessions");
+        let sessions = match super::isolation::codex_home() {
+            Ok(home) => home.join("sessions"),
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         let thread = thread.id().0.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || read_rollout_usage(&sessions, &thread))
@@ -357,7 +360,10 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         thread: &'a QueueReadyThread,
         count: usize,
     ) -> InteractiveFuture<'a, Option<Vec<ConversationTurn>>> {
-        let sessions = super::isolation::codex_home().join("sessions");
+        let sessions = match super::isolation::codex_home() {
+            Ok(home) => home.join("sessions"),
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         let thread = thread.id().0.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
@@ -442,7 +448,7 @@ fn prepare_native_tool_policy(
     policy: InteractiveNativeToolPolicy,
     staging_root: &Path,
 ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
-    prepare_native_tool_policy_in_home(policy, staging_root, &super::isolation::codex_home())
+    prepare_native_tool_policy_in_home(policy, staging_root, &super::isolation::codex_home()?)
 }
 
 fn prepare_native_tool_policy_in_home(
