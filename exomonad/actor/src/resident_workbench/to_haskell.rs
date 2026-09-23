@@ -42,7 +42,9 @@ pub(super) fn visit_core(
     visit_named(table, visitor, "Tidepool.Effects.Core", name, fields)
 }
 
-pub(super) struct RouteStateAnswer(pub(super) Result<crate::request::routes::RouteState, crate::ReplyError>);
+pub(super) struct RouteStateAnswer(
+    pub(super) Result<crate::request::routes::RouteState, crate::ReplyError>,
+);
 
 impl tidepool_bridge::sealed::ToHaskellSealed for RouteStateAnswer {}
 impl ToHaskell for RouteStateAnswer {
@@ -122,7 +124,9 @@ pub(super) enum LifecycleAnswer {
     Exited(crate::ActorTerminal),
 }
 
-pub(super) struct ForkCleanupAnswer(pub(super) Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>);
+pub(super) struct ForkCleanupAnswer(
+    pub(super) Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>,
+);
 
 impl tidepool_bridge::sealed::ToHaskellSealed for ForkCleanupAnswer {}
 impl ToHaskell for ForkCleanupAnswer {

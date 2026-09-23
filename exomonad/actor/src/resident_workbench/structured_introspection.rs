@@ -2,8 +2,8 @@
 //! queries, identifier/type info, and query errors surfaced by the
 //! introspection inspection kinds, plus the typed answer enum they build.
 
-use super::*;
 use super::to_haskell::{actor_haskell_int, visit_core, visit_named};
+use super::*;
 
 fn visit_introspection_scope(
     table: &DataConTable,

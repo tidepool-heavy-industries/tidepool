@@ -5,9 +5,9 @@ unarisation pipeline. The wire format is a finite prepared representation; it
 is not rendered STG, a Core compatibility format, or a production-execution
 parity claim.
 
-## Wire contract (schema 10, execution ABI 5)
+## Wire contract (schema 14, execution ABI 7)
 
-`ProgramEnvelope.schema_version` is 10 and `execution_abi_version` is 5.
+`ProgramEnvelope.schema_version` is 14 and `execution_abi_version` is 7.
 The artifact carries a site table: each `SiteRow` names its site id, its
 `SiteDelivery` mode, and the structural `TypeNode` of the wire value a host
 answer must build, so a parked continuation's answer is validated against the
@@ -25,7 +25,7 @@ tops so bare references and partial applications retain their meaning.
 `ResultContract` values (`Returns` versus authoritative `NoSuccess`) are
 carried on case scrutinees. An external record-parent identity is optional,
 and an operation identity is typed (`PrimOp` versus an intrinsic symbol with
-a calling convention). ABI 5 carries
+a calling convention). ABI 7 carries
 the explicit terminal-result distinction through prepared calls while keeping
 the physical `NoSuccess` shape status-only. Lowering keeps the semantic result
 contract beside the physical register/area layout: status-only does not mean a

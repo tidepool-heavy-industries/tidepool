@@ -13,12 +13,12 @@ mod structured_introspection;
 mod to_haskell;
 
 use structured_introspection::StructuredIntrospectionAnswer;
+#[cfg(test)]
+use to_haskell::visit_usage_summary;
 use to_haskell::{
     ActorContextProjection, CallStatus, ForkCleanupAnswer, LifecycleAnswer, ProgressAnswer,
     RouteStateAnswer,
 };
-#[cfg(test)]
-use to_haskell::visit_usage_summary;
 
 use serde::Serialize;
 use tidepool_bridge::HaskellValue;
@@ -5432,7 +5432,6 @@ fn source_request_id(value: i64) -> Result<crate::RequestId, ResidentActorWorkbe
         .map(crate::RequestId)
         .map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))
 }
-
 
 #[derive(Clone, Copy)]
 enum OutboundKind {
