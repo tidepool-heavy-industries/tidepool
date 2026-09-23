@@ -7,7 +7,7 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
 use tidepool_testing::eval_harness;
 
-mod support;
+use super::support;
 
 #[test]
 fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {

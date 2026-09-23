@@ -17,7 +17,7 @@ use tidepool_runtime::session::{
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
 
-mod support;
+use super::support;
 
 #[derive(Clone, Default)]
 struct TestSink;

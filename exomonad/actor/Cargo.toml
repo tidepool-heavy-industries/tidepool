@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "exomonad-actor"
 description = "Actor identity, lifecycle, and observability kernel for Exomonad"
 version.workspace = true
@@ -41,3 +42,7 @@ tidepool-testing.workspace = true
 tidepool-test-data.workspace = true
 tokio = { workspace = true, features = ["rt", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+[[test]]
+name = "actor"
+path = "tests/suites/actor.rs"
