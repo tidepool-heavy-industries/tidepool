@@ -440,6 +440,10 @@
             ${interactiveCodex}/bin/codex --version
             test -x ${interactiveCodex}/bin/codex-code-mode-host
             ${interactiveCodex}/bin/codex-code-mode-host --help
+            fork_help="$(${interactiveCodex}/bin/codex fork --help)"
+            for flag in --destination-local --after-call --through-call; do
+              printf '%s\n' "$fork_help" | grep -Fq -- "$flag"
+            done
             ${interactiveCodex}/bin/codex --shoal-protocol-manifest \
               | ${pkgs.jq}/bin/jq --exit-status \
                   '.hostProtocolVersion == 5 and .inputControlProtocolVersion == 5 and .maxRegistrationResponseBytes == 1048576 and .maxCallResponseBytes == 4194304 and .maxCommandReplyBytes == 819200 and .maxWorkspaceReplyBytes == 16384 and .maxInputControlReplyBytes == 16384 and .maxInputBytes == 262144 and .maxCorrelationBytes == 256 and .maxProducerBytes == 512 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
