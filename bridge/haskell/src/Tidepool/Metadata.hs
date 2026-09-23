@@ -23,8 +23,9 @@ import GHC.Core.DataCon
   , dataConWorkId, isVanillaDataCon )
 import GHC.Core.Predicate (isCoVarType)
 import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Tidy (tidyOpenType)
 import GHC.Core.TyCon (TyCon, isAlgTyCon, tyConDataCons, tyConUnique)
-import GHC.Core.Type (splitFunTy_maybe, splitTyConApp_maybe)
+import GHC.Core.Type (Type, splitFunTy_maybe, splitTyConApp_maybe)
 import GHC.Data.FastString (unpackFS)
 import GHC (HsBang(..), HsSrcBang(..), SrcStrictness(..), SrcUnpackedness(..))
 import GHC.Types.FieldLabel (flLabel)
@@ -32,7 +33,9 @@ import GHC.Types.Id (idName, idType)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getKey)
-import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
+import GHC.Types.Var.Env (emptyTidyEnv)
+import GHC.Utils.Outputable
+  (SDoc, defaultSDocContext, ppr, renderWithContext, sdocSuppressUniques)
 import Language.Haskell.Syntax.Basic (Boxity(..), FieldLabelString(..))
 
 import Tidepool.Identity (qualifiedName, varId)
@@ -58,11 +61,46 @@ dcToMeta dc = DCMeta
   , dcmBangs = map mapBang (dataConSrcBangs dc)
   , dcmQualName = qualifiedName (dataConName dc)
   , dcmFieldLabels = map (T.pack . unpackFS . field_label . flLabel) (dataConFieldLabels dc)
-  , dcmTypeName = T.pack (renderWithContext defaultSDocContext (ppr (dataConTyCon dc)))
+  , dcmTypeName = renderMetaType (ppr (dataConTyCon dc))
   , dcmFieldTypes = if isVanillaDataCon dc
-      then [T.pack (renderWithContext defaultSDocContext (ppr ft)) | Scaled _ ft <- dataConOrigArgTys dc]
+      then [renderFieldType ft | Scaled _ ft <- dataConOrigArgTys dc]
       else []
   }
+
+-- | Render an 'SDoc' the way every @meta.cbor@ text field is rendered — the
+-- sole point that text reaches 'DCMeta', so this context covers every field.
+--
+-- Field types (and, defensively, the type name) can carry compiler-generated
+-- (kind-inference, or interface-reloaded) type/kind variables. Those
+-- variables have GHC's \"System\" name sort, and GHC's default printer
+-- (@'GHC.Types.Name.pprSystem'@) shows a System name as its 'OccName' plus
+-- @_@ plus its raw 'Unique' UNCONDITIONALLY — unlike an ordinary name, this
+-- is not gated on debug/dump style, so 'tidyOpenType' alone cannot suppress
+-- it (tidying only reassigns 'OccName's to avoid a same-name clash; it does
+-- not change a name's sort, and the unique suffix is added at print time
+-- regardless of the tidied 'OccName'). Confirmed empirically: a synthetic
+-- System-named tyvar renders with its unique both before and after
+-- 'tidyOpenType', and stops only once 'sdocSuppressUniques' is set.
+--
+-- A long-running worker's 'Unique' supply has advanced by however many prior
+-- compiles it has served, so an unsuppressed unique leaks worker history
+-- into 'meta.cbor', breaking byte-determinism (and the content-addressed
+-- compile cache) across otherwise-identical compiles. 'sdocSuppressUniques'
+-- removes that leak; 'tidyOpenType' (applied at the one call site that needs
+-- it, 'renderFieldType') still does its own job of giving two distinct free
+-- variables distinct display names so suppressing uniques never makes
+-- genuinely different variables print identically.
+renderMetaType :: SDoc -> Text
+renderMetaType = T.pack . renderWithContext (defaultSDocContext { sdocSuppressUniques = True })
+
+-- | Render a field type for 'dcmFieldTypes'. 'tidyOpenType' assigns a fresh,
+-- structurally-determined display name (a, b, c, ...) to every free
+-- type/kind variable, starting from 'emptyTidyEnv', so distinct variables
+-- never collide once 'renderMetaType' hides their uniques; see
+-- 'renderMetaType' for why that hiding is the part that actually closes the
+-- worker-history leak.
+renderFieldType :: Type -> Text
+renderFieldType ft = renderMetaType (ppr (tidyOpenType emptyTidyEnv ft))
 
 mergeMetaPreserving :: [[DCMeta]] -> [DCMeta]
 mergeMetaPreserving sources = Map.elems $ Map.fromList
