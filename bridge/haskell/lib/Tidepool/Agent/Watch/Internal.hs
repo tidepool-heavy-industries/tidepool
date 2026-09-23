@@ -45,10 +45,10 @@ import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Agent.Reply.Internal
-  ( ReplyError
+  ( ReplyError (..)
   , Progress (..)
   , ProgressCursor (..)
-  , ProgressState
+  , ProgressState (..)
   , RequestId (..)
   , Response
   , ResponseFailure
@@ -174,7 +174,7 @@ awaitSettled response =
 awaitProgressAfter :: Progress progress -> ProgressCursor -> Await (ProgressState progress)
 awaitProgressAfter (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
   Await [[AwaitProgress request cursor]] $ \watchId _ ->
-    Just <$> send (ObserveWatchProgressWith watchId requestId revision)
+    observedProgress <$> send (ObserveWatchProgressWith watchId requestId revision)
 
 -- | Wait until any supplied progress stream advances or closes. Results retain
 -- input order and are captured at the wake; unchanged sources are
@@ -183,11 +183,18 @@ awaitAnyProgress :: [(Progress progress, ProgressCursor)] -> Await [ProgressStat
 awaitAnyProgress [] = pure []
 awaitAnyProgress sources =
   Await [map dependency sources] $ \watchId _ ->
-    Just <$> mapM (observe watchId) sources
+    traverseObservedProgress <$> mapM (observe watchId) sources
   where
     dependency (Progress request, cursor) = AwaitProgress request cursor
     observe watchId (Progress (RequestId requestId), ProgressCursor revision) =
       send (ObserveWatchProgressWith watchId requestId revision)
+
+observedProgress :: ProgressState progress -> Maybe (ProgressState progress)
+observedProgress (ProgressRejected ReplyStale) = Nothing
+observedProgress state = Just state
+
+traverseObservedProgress :: [ProgressState progress] -> Maybe [ProgressState progress]
+traverseObservedProgress = traverse observedProgress
 
 -- | Wait until any supplied response settles. Results retain input order;
 -- a response still pending at the wake is 'Nothing'.
@@ -218,9 +225,17 @@ pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
     RawWatchPending -> pure WatchPending
     RawWatchReady rawFailures -> do
       captured <- observe watchId (map (\(request, failure) -> (RequestId request, failure)) rawFailures)
-      pure $ case captured of
-        Just result -> WatchReady result
-        Nothing -> error "Tidepool watch became ready before every response cell was filled"
+      case captured of
+        Just result -> pure (WatchReady result)
+        Nothing -> do
+          -- A progress effect can run after this Ready poll while the owner
+          -- releases its response. Recheck the watch's typed state.
+          latest <- send (ObserveWatchWith watchId)
+          pure $ case latest of
+            RawWatchUnavailable request failure ->
+              WatchUnavailable (WatchDependencyUnavailable request failure)
+            RawWatchRejected failure -> WatchUnavailable (WatchRejected failure)
+            _ -> error "Tidepool watch became ready before every response cell was filled"
     RawWatchUnavailable request failure ->
       pure (WatchUnavailable (WatchDependencyUnavailable request failure))
     RawWatchRejected failure -> pure (WatchUnavailable (WatchRejected failure))

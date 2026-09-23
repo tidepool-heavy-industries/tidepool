@@ -12,9 +12,9 @@ a new swarm or validating a package change.
 
 ## Context and source defaults
 
-`solTask` inherits the current completed reasoning and uses `boundHead`.
-`implement` uses `solTask`. It suits recursive implementation from an allocated
-checkout. Original-root callers use `solTaskFrom label projectHead`. A Task's source hash records provenance;
+`solTask` inherits the current completed reasoning and uses `currentCheckout`.
+`implement` uses `solTask`. It selects the executing actor's project or bound
+checkout. Explicit project-root selection uses `solTaskFrom label projectHead`. A Task's source hash records provenance;
 it does not override that live checkout selection. Commit coherent work for Git
 integration and restart recovery, even though ordinary unfold inherits working files.
 

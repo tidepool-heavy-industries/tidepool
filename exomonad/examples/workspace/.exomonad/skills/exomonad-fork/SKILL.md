@@ -22,8 +22,9 @@ let branch = withEffort Medium $ withContext (selected taskContext) $ solTaskFro
 (worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
 ```
 
-Choose `source = boundHead` for your current bound checkout, `projectHead` at the
-original root, or `atRef (GitRef (renderGitOid commit))` for a deliberate committed seed. Omit
+Choose `source = currentCheckout` for the executing actor's checkout (root
+project checkout or child's bound checkout), `projectHead` for the project source
+explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Omit
 `withContext (selected taskContext)` when related children should inherit your
 completed reasoning. Fresh context is useful after bulky reconciliation or for
 independent review; descendants within a focused subtree can inherit.

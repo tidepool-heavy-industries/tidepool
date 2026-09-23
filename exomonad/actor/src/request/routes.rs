@@ -143,14 +143,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_route(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         watch: WatchId,
     ) -> Result<RouteState, ReplyError> {
         let state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        if record.owner != owner {
-            return Err(super::identity_error(record.owner, owner));
-        }
         record
             .route
             .as_ref()

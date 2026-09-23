@@ -11,6 +11,11 @@ use exomonad_worktree::GitCli;
 
 include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 
+// Keep this in step with this repository's .exomonad/workspace gitlink.
+// `exomonad new` pulls the source from DEFAULT_WORKSPACE_URL, but must install
+// the commit this release compiled and checked, even if the remote advances.
+pub(super) const DEFAULT_WORKSPACE_REV: &str = "c488a1559abb7b02f10b68f406c6ee0172816e78";
+
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
 /// settings stay out of a new project.
@@ -382,6 +387,11 @@ fn add_default_workspace(git: &GitCli, workspace: &Path) -> Result<(), Box<dyn s
             ".exomonad/workspace",
         ],
     )?;
+    git.try_run(
+        &workspace.join(".exomonad/workspace"),
+        &["checkout", "--detach", DEFAULT_WORKSPACE_REV],
+    )?;
+    git.try_run(workspace, &["add", "--", ".exomonad/workspace"])?;
     Ok(())
 }
 

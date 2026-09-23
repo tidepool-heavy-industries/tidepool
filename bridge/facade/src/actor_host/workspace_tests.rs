@@ -1031,7 +1031,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/dirty-workspace".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             CODING,
         )
         .await;
@@ -1048,7 +1050,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/grandchild".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             CODING,
         )
         .await
@@ -1099,7 +1103,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/inspection".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             ForkWorkspacePolicy {
                 native_tools: exomonad_actor::NativeToolClass::InspectionOnly,
                 workspace: exomonad_actor::WorkspaceAccess::InspectOnly,
@@ -1129,7 +1135,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/in-progress".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             CODING,
         )
         .await;
@@ -1142,7 +1150,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/lost-begin".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             CODING,
         )
         .await;
@@ -1219,7 +1229,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .admit(
             child_actor,
             "root/child/unavailable".into(),
-            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspaceSeed::CurrentCheckout(
+                tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            ),
             CODING,
         )
         .await
@@ -1248,7 +1260,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             .admit(
                 child_actor,
                 "root/child/cancelled".into(),
-                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+                ForkWorkspaceSeed::CurrentCheckout(
+                    tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+                ),
                 CODING,
             )
             .await

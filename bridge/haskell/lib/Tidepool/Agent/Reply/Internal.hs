@@ -136,7 +136,8 @@ data ReplyError
   deriving (Show, Eq)
 
 data ResponseFailure
-  = ResponseTargetUnavailable
+  = ResponseReleased
+  | ResponseTargetUnavailable
   | ResponseTargetFailed Text
   | ResponseTargetCancelled Text
   | ResponseRequesterStopped
@@ -204,7 +205,6 @@ data ForgetResponseOutcome
   = ResponseForgotten
   | ResponseForgetPending
   | ResponseForgetTargetActive
-  | ResponseRetainedByWatches [Int]
   | ResponseForgetRejected ReplyError
   deriving (Show, Eq)
 

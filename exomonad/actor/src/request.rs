@@ -77,6 +77,7 @@ pub struct ActorEventSequence(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseFailure {
+    Released,
     TargetUnavailable,
     TargetFailed(String),
     TargetCancelled(String),
@@ -119,7 +120,6 @@ pub enum ForgetResponseOutcome {
     Forgotten,
     StillPending,
     TargetStillActive,
-    RetainedByWatches(Vec<WatchId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +393,7 @@ pub(crate) struct CleanupMetadataOutcome {
     pub forgotten_watches: Vec<WatchId>,
     pub pending_responses: Vec<RequestId>,
     pub pending_watches: Vec<WatchId>,
+    pub watch_notifications: Vec<WatchNotification>,
 }
 
 fn cleanup_blockers(
@@ -507,12 +508,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_progress(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         request: RequestId,
     ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
-        authorize_owner(record, owner)?;
         let closed = record.owner_state != OwnerState::Observing
             || matches!(
                 record.target_state,
@@ -623,22 +623,17 @@ impl RequestRegistry {
             }
         }
         for request in scoped_requests {
-            let retained_by_watch = state.watches.values().any(|watch| {
-                watch
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency.request == request)
-            });
             let Some(record) = state.requests.get(&request) else {
                 continue;
             };
             if record.owner_state == OwnerState::Observing
                 || record.target_state != TargetState::Closed
-                || retained_by_watch
             {
                 outcome.pending_responses.push(request);
             } else {
-                state.requests.remove(&request);
+                outcome
+                    .watch_notifications
+                    .extend(release_request_record(&mut state, request));
                 outcome.forgotten_responses.push(request);
             }
         }
@@ -806,7 +801,10 @@ impl RequestRegistry {
         notify_owner: bool,
     ) -> RequestId {
         let mut state = self.state.lock();
-        state.next_request = state.next_request.saturating_add(1);
+        state.next_request = state
+            .next_request
+            .checked_add(1)
+            .expect("request identity exhausted");
         let id = RequestId(state.next_request);
         state.requests.insert(
             id,
@@ -838,7 +836,10 @@ impl RequestRegistry {
     /// request id. The surrounding workbench invocation is the transaction:
     /// anything still `Reserved` when that invocation settles was never
     /// published and must not leak into observable request state.
-    pub(crate) fn abort_unsubmitted(&self, owner: ActorRef) -> Vec<RequestId> {
+    pub(crate) fn abort_unsubmitted(
+        &self,
+        owner: ActorRef,
+    ) -> (Vec<RequestId>, Vec<WatchNotification>) {
         let mut state = self.state.lock();
         let mut aborted = state
             .requests
@@ -849,10 +850,11 @@ impl RequestRegistry {
             })
             .collect::<Vec<_>>();
         aborted.sort_unstable();
+        let mut notifications = Vec::new();
         for request in &aborted {
-            state.requests.remove(request);
+            notifications.extend(release_request_record(&mut state, *request));
         }
-        aborted
+        (aborted, notifications)
     }
 
     pub(crate) fn mark_target_unavailable(
@@ -1017,12 +1019,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_response(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         request: RequestId,
     ) -> Result<ResponseObservation, ReplyError> {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
-        authorize_owner(record, owner)?;
         Ok(match &record.owner_state {
             OwnerState::Ready => ResponseObservation::Ready,
             OwnerState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
@@ -1142,12 +1143,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_reply(
         &self,
-        target: ActorRef,
+        _target: ActorRef,
         request: RequestId,
     ) -> Result<ReplyObservation, ReplyError> {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
-        authorize_target(record, target)?;
         Ok(match record.target_state {
             TargetState::CancellationRequested { reason, .. } => {
                 ReplyObservation::CancellationRequested(reason)
@@ -1247,33 +1247,18 @@ impl RequestRegistry {
         &self,
         owner: ActorRef,
         request: RequestId,
-    ) -> Result<ForgetResponseOutcome, ReplyError> {
+    ) -> Result<(ForgetResponseOutcome, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
         if record.owner_state == OwnerState::Observing {
-            return Ok(ForgetResponseOutcome::StillPending);
+            return Ok((ForgetResponseOutcome::StillPending, Vec::new()));
         }
         if record.target_state != TargetState::Closed {
-            return Ok(ForgetResponseOutcome::TargetStillActive);
+            return Ok((ForgetResponseOutcome::TargetStillActive, Vec::new()));
         }
-        let mut watches = state
-            .watches
-            .iter()
-            .filter(|(_, watch)| {
-                watch
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency.request == request)
-            })
-            .map(|(watch, _)| *watch)
-            .collect::<Vec<_>>();
-        watches.sort_unstable();
-        if !watches.is_empty() {
-            return Ok(ForgetResponseOutcome::RetainedByWatches(watches));
-        }
-        state.requests.remove(&request);
-        Ok(ForgetResponseOutcome::Forgotten)
+        let notifications = release_request_record(&mut state, request);
+        Ok((ForgetResponseOutcome::Forgotten, notifications))
     }
 
     #[cfg(test)]
@@ -1369,17 +1354,18 @@ impl RequestRegistry {
                 .requests
                 .get(&dependency.request)
                 .ok_or(ReplyError::Stale)?;
-            authorize_owner(record, owner)?;
             if state.cleaning.contains(&record.target) {
                 return Err(ReplyError::CancellationRequested);
             }
             touched.insert(record.target);
         }
-        // A response watch or route now owns this actor's settlement wake.
-        // Progress-only dependencies do not replace the terminal notice.
+        // An owner's response watch or route owns that owner's settlement
+        // wake. A foreign listener and a progress-only watch do not.
         // A notice already emitted before registration cannot be retracted.
         for dependency in &dependencies {
-            if matches!(dependency.requirement, WatchRequirement::Response { .. }) {
+            if owner == state.requests[&dependency.request].owner
+                && matches!(dependency.requirement, WatchRequirement::Response { .. })
+            {
                 state
                     .requests
                     .get_mut(&dependency.request)
@@ -1390,7 +1376,10 @@ impl RequestRegistry {
         for actor in touched {
             *state.cleanup_revision.entry(actor).or_default() += 1;
         }
-        state.next_watch = state.next_watch.saturating_add(1);
+        state.next_watch = state
+            .next_watch
+            .checked_add(1)
+            .expect("watch identity exhausted");
         let id = WatchId(state.next_watch);
         state.watches.insert(
             id,
@@ -1410,16 +1399,13 @@ impl RequestRegistry {
 
     pub(crate) fn observe_watch_progress(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         watch: WatchId,
         request: RequestId,
         after: u64,
     ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
         let state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        if record.owner != owner {
-            return Err(identity_error(record.owner, owner));
-        }
         if record.state != WatchState::Ready {
             return Err(ReplyError::Stale);
         }
@@ -1439,14 +1425,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_watch(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         watch: WatchId,
     ) -> Result<WatchObservation, ReplyError> {
         let state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        if record.owner != owner {
-            return Err(identity_error(record.owner, owner));
-        }
         Ok(match &record.state {
             WatchState::Pending => WatchObservation::Pending,
             WatchState::Ready => WatchObservation::Ready(
@@ -1499,7 +1482,7 @@ impl RequestRegistry {
     pub(crate) fn forget_terminal_actor_metadata(
         &self,
         actor: ActorRef,
-    ) -> Result<(), (Vec<RequestId>, Vec<WatchId>)> {
+    ) -> Result<Vec<WatchNotification>, (Vec<RequestId>, Vec<WatchId>)> {
         let mut state = self.state.lock();
         let mut requests = state
             .requests
@@ -1529,8 +1512,16 @@ impl RequestRegistry {
             return Err((requests, watches));
         }
         state.watches.retain(|_, record| record.owner != actor);
-        state.requests.retain(|_, record| record.owner != actor);
-        Ok(())
+        let released = state
+            .requests
+            .iter()
+            .filter_map(|(request, record)| (record.owner == actor).then_some(*request))
+            .collect::<Vec<_>>();
+        let mut notifications = Vec::new();
+        for request in released {
+            notifications.extend(release_request_record(&mut state, request));
+        }
+        Ok(notifications)
     }
 
     pub(crate) fn actor_stopped(
@@ -1652,6 +1643,73 @@ fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
     } else {
         ReplyError::Unauthorized
     }
+}
+
+/// Release removes the request under the same lock used to accept reads. A
+/// watch that has not been polled must therefore stop advertising its former
+/// readiness, even if its Ready notification is already queued.
+fn release_request_record(
+    state: &mut RequestStateTable,
+    request: RequestId,
+) -> Vec<WatchNotification> {
+    let notifications = invalidate_response_watches(state, request);
+    if let Some(mut record) = state.requests.remove(&request) {
+        record.publish_source_release();
+    }
+    notifications
+}
+
+fn invalidate_response_watches(
+    state: &mut RequestStateTable,
+    request: RequestId,
+) -> Vec<WatchNotification> {
+    let mut notifications = Vec::new();
+    for (watch_id, watch) in &mut state.watches {
+        if !watch
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.request == request)
+        {
+            continue;
+        }
+        let previous = match &watch.state {
+            WatchState::Pending => WatchStateProjection::Pending,
+            WatchState::Ready => WatchStateProjection::Ready,
+            WatchState::Unavailable { .. } => continue,
+        };
+        watch.state = WatchState::Unavailable {
+            request,
+            failure: ResponseFailure::Released,
+        };
+        watch.progress.clear();
+        if let Some(route) = &mut watch.route {
+            route.schedule(*watch_id);
+            continue;
+        }
+        notifications.push(WatchNotification {
+            owner: watch.owner,
+            watch: *watch_id,
+            label: watch.label.clone(),
+            previous,
+            current: WatchStateProjection::Unavailable {
+                request,
+                failure: ResponseFailure::Released,
+            },
+            transition: WatchTransition::Unavailable {
+                request,
+                failure: ResponseFailure::Released,
+            },
+            occurred_at_unix_ms: unix_time_ms(),
+            sequence: ActorEventSequence(0),
+            watermark: ActorEventSequence(0),
+        });
+    }
+    for notification in &mut notifications {
+        let sequence = next_event_sequence(state, notification.owner);
+        notification.sequence = sequence;
+        notification.watermark = sequence;
+    }
+    notifications
 }
 
 fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
@@ -1894,10 +1952,7 @@ mod tests {
         let watched = registry.reserve(owner, target);
         let progress_only = registry.reserve(owner, target);
 
-        assert!(matches!(
-            registry.register_watch(actor(3), vec![watched]),
-            Err(ReplyError::Unauthorized)
-        ));
+        registry.register_watch(actor(3), vec![watched]).unwrap();
         registry.register_watch(owner, vec![watched]).unwrap();
         registry
             .register_watch_requirements(
@@ -2031,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_watch_closure_is_stable_and_authorized() {
+    fn progress_watch_closure_is_stable_and_shareable() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -2050,18 +2105,20 @@ mod tests {
             registry.observe_watch(owner, watch),
             Ok(WatchObservation::Pending)
         ));
-        assert!(matches!(
-            registry.register_watch_requirements(
+        let (foreign_watch, _) = registry
+            .register_watch_requirements(
                 target,
-                "wrong-owner".into(),
-                vec![(request, WatchRequirement::ProgressAfter(0))]
-            ),
-            Err(ReplyError::Unauthorized)
-        ));
+                "foreign-listener".into(),
+                vec![(request, WatchRequirement::ProgressAfter(0))],
+            )
+            .unwrap();
         registry.begin_reply(target, request).unwrap();
         let notifications = registry.finish_reply(request);
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(notifications.len(), 2);
+        assert!(notifications.iter().any(|notice| notice.watch == watch));
+        assert!(notifications
+            .iter()
+            .any(|notice| notice.watch == foreign_watch));
         for _ in 0..2 {
             assert!(matches!(
                 registry.observe_watch_progress(owner, watch, request, 0),
@@ -2070,7 +2127,7 @@ mod tests {
         }
         assert!(matches!(
             registry.observe_watch_progress(target, watch, request, 0),
-            Err(ReplyError::Unauthorized)
+            Ok((None, true))
         ));
         assert!(registry.finish_reply(request).is_empty());
         let (late, notifications) = registry
@@ -2281,7 +2338,7 @@ mod tests {
         let unrelated = registry.reserve(other_owner, target);
         registry.mark_queued(owner, target, committed).unwrap();
 
-        assert_eq!(registry.abort_unsubmitted(owner), vec![leaked]);
+        assert_eq!(registry.abort_unsubmitted(owner).0, vec![leaked]);
         assert_eq!(
             registry.observe_response(owner, leaked),
             Err(ReplyError::Stale)
@@ -2290,8 +2347,8 @@ mod tests {
             registry.observe_response(owner, committed),
             Ok(ResponseObservation::Pending)
         );
-        assert_eq!(registry.abort_unsubmitted(other_owner), vec![unrelated]);
-        assert!(registry.abort_unsubmitted(owner).is_empty());
+        assert_eq!(registry.abort_unsubmitted(other_owner).0, vec![unrelated]);
+        assert!(registry.abort_unsubmitted(owner).0.is_empty());
     }
 
     #[tokio::test]
@@ -2748,7 +2805,7 @@ mod tests {
     }
 
     #[test]
-    fn another_actor_cannot_observe_or_watch_a_response() {
+    fn another_actor_can_observe_and_watch_but_cannot_control_a_response() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -2758,16 +2815,231 @@ mod tests {
 
         assert_eq!(
             registry.observe_response(intruder, request),
+            Ok(ResponseObservation::Pending)
+        );
+        let (watch, _) = registry.register_watch(intruder, vec![request]).unwrap();
+        assert_eq!(
+            registry.observe_watch(intruder, watch),
+            Ok(WatchObservation::Pending)
+        );
+        assert_eq!(
+            registry.observe_reply(intruder, request),
+            Ok(ReplyObservation::Open)
+        );
+        assert_eq!(
+            registry.begin_reply(intruder, request),
             Err(ReplyError::Unauthorized)
         );
         assert_eq!(
-            registry.register_watch(intruder, vec![request]),
+            registry.cancel_request(intruder, request, CancellationReason::RequesterCancelled),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.forget_response(intruder, request),
             Err(ReplyError::Unauthorized)
         );
     }
 
     #[test]
-    fn explicit_cleanup_refuses_live_dependencies_and_succeeds_inside_out() {
+    fn foreign_listener_preserves_owner_notice_and_release_invalidates_queued_ready() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let child = actor(3);
+        let request = registry.reserve_labeled_with_reporting(owner, target, "shared".into(), true);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (owner_watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+        let (child_watch, _) = registry.register_watch(child, vec![request]).unwrap();
+
+        registry.begin_reply(target, request).unwrap();
+        let ready_notices = registry.finish_reply(request);
+        assert_eq!(ready_notices.len(), 2);
+        assert!(ready_notices
+            .iter()
+            .any(|notice| notice.watch == owner_watch));
+        assert!(ready_notices
+            .iter()
+            .any(|notice| notice.watch == child_watch));
+        // The owner's own response watch suppresses its ordinary settlement
+        // notice, but the child's independent watch cannot change that choice.
+        assert!(registry.take_settlement_notifications().is_empty());
+
+        assert_eq!(
+            registry.observe_response(child, request),
+            Ok(ResponseObservation::Ready)
+        );
+        let (outcome, release_notices) = registry.forget_response(owner, request).unwrap();
+        assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
+        assert_eq!(release_notices.len(), 2);
+        assert_eq!(
+            registry.observe_response(child, request),
+            Err(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_watch(child, child_watch),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            })
+        );
+        assert_eq!(
+            registry.observe_watch(owner, owner_watch),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            })
+        );
+    }
+
+    #[test]
+    fn foreign_watch_alone_does_not_suppress_owner_settlement() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let child = actor(3);
+        let request = registry.reserve_labeled_with_reporting(owner, target, "shared".into(), true);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(child, vec![request]).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        let notices = registry.finish_reply(request);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].watch, watch);
+        let owner_notices = registry.take_settlement_notifications();
+        assert_eq!(owner_notices.len(), 1);
+        assert_eq!(owner_notices[0].owner, owner);
+        assert_eq!(owner_notices[0].request, request);
+    }
+
+    #[test]
+    fn release_wakes_a_pending_foreign_watch_without_releasing_active_work() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let child = actor(3);
+        let completed = registry.reserve(owner, target);
+        let active = registry.reserve(owner, target);
+        for request in [completed, active] {
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+        }
+        let (watch, _) = registry
+            .register_watch(child, vec![completed, active])
+            .unwrap();
+        registry.begin_reply(target, completed).unwrap();
+        assert!(registry.finish_reply(completed).is_empty());
+        assert_eq!(
+            registry.observe_watch(child, watch),
+            Ok(WatchObservation::Pending)
+        );
+
+        let (_, notices) = registry.forget_response(owner, completed).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].owner, child);
+        assert_eq!(
+            notices[0].transition,
+            WatchTransition::Unavailable {
+                request: completed,
+                failure: ResponseFailure::Released
+            }
+        );
+        assert_eq!(
+            registry.observe_watch(child, watch),
+            Ok(WatchObservation::Unavailable {
+                request: completed,
+                failure: ResponseFailure::Released
+            })
+        );
+        assert_eq!(
+            registry.forget_response(owner, active),
+            Ok((ForgetResponseOutcome::StillPending, Vec::new()))
+        );
+    }
+
+    #[test]
+    fn mixed_watch_progress_read_after_release_reports_unavailable() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let child = actor(3);
+        let other = actor(4);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry
+            .register_watch_requirements(
+                child,
+                "mixed".into(),
+                vec![
+                    (
+                        request,
+                        WatchRequirement::Response {
+                            allow_failure: false,
+                        },
+                    ),
+                    (request, WatchRequirement::ProgressAfter(0)),
+                ],
+            )
+            .unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        assert_eq!(
+            registry.observe_watch(child, watch),
+            Ok(WatchObservation::Ready(Vec::new()))
+        );
+        registry.forget_response(owner, request).unwrap();
+        assert!(matches!(
+            registry.observe_watch_progress(child, watch, request, 0),
+            Err(ReplyError::Stale)
+        ));
+        assert!(matches!(
+            registry.observe_watch_progress(other, watch, request, 0),
+            Err(ReplyError::Stale)
+        ));
+        assert_eq!(
+            registry.observe_watch(other, watch),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            })
+        );
+    }
+
+    #[test]
+    fn forgetting_terminal_owner_invalidates_foreign_watch() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let observer = actor(3);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(observer, vec![request]).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+
+        let notifications = registry.forget_terminal_actor_metadata(owner).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].owner, observer);
+        assert_eq!(
+            notifications[0].transition,
+            WatchTransition::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            }
+        );
+        assert_eq!(
+            registry.observe_watch(observer, watch),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_cleanup_releases_terminal_response_and_invalidates_dependent_watch() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -2778,7 +3050,7 @@ mod tests {
 
         assert_eq!(
             registry.forget_response(owner, request),
-            Ok(ForgetResponseOutcome::StillPending)
+            Ok((ForgetResponseOutcome::StillPending, Vec::new()))
         );
         assert_eq!(
             registry.forget_watch(owner, watch),
@@ -2786,9 +3058,22 @@ mod tests {
         );
         registry.begin_reply(target, request).unwrap();
         registry.finish_reply(request);
+        let (outcome, notifications) = registry.forget_response(owner, request).unwrap();
+        assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
+        assert_eq!(notifications.len(), 1);
         assert_eq!(
-            registry.forget_response(owner, request),
-            Ok(ForgetResponseOutcome::RetainedByWatches(vec![watch]))
+            notifications[0].transition,
+            WatchTransition::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            }
+        );
+        assert_eq!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Released
+            })
         );
         assert_eq!(
             registry.forget_watch(owner, watch),
@@ -2796,7 +3081,7 @@ mod tests {
         );
         assert_eq!(
             registry.forget_response(owner, request),
-            Ok(ForgetResponseOutcome::Forgotten)
+            Err(ReplyError::Stale)
         );
         assert_eq!(
             registry.observe_response(owner, request),

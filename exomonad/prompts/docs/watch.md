@@ -1,5 +1,7 @@
-A labeled `Watch a` retains a finite applicative join. Registering it before
-settlement takes over the wake for its response dependencies; progress-only
+A labeled `Watch a` retains a finite applicative join. Register your own watch
+for an inherited response; it cannot run the owner's callback or take the
+owner's notification. Registering a watch for your own response before
+settlement takes over your default wake for that response; progress-only
 dependencies leave the default settlement notice intact. Record actor
 settlement sources still need `report = Silent`.
 
@@ -61,8 +63,11 @@ judgments about an exact candidate. Project task-specific report fields when
 even the report is large; no standard worker ledger is required.
 
 A wake notification is a reason to inspect, not a replacement for the handle's
-current state. On a delayed or duplicate notice, poll the watch before acting;
-do not resubmit the original work merely because another notice arrived.
+current state. A Ready notice does not reserve the result: release before your
+read can make the handle unavailable. Once a read returns a value, later release
+does not revoke that extracted value. On a delayed or duplicate notice, poll the
+watch before acting; do not resubmit the original work merely because another
+notice arrived.
 
 `requestWithProgress @Progress @Result actor options` returns a response and
 a `Progress Progress` handle. `childWithProgress @Progress @Result branch`

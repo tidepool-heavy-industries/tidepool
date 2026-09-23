@@ -76,7 +76,7 @@ async fn notebook_display_pages_large_text_and_exhausts_continuation() {
 }
 
 #[tokio::test]
-async fn notebook_display_explains_actor_scoped_handle_rejections() {
+async fn notebook_display_explains_resource_control_rejections() {
     let campaign = TestCampaign::start().await;
     let result = committed(
         campaign.root_installation.policy.as_ref(),
@@ -87,7 +87,7 @@ async fn notebook_display_explains_actor_scoped_handle_rejections() {
         result["items"].as_array().unwrap().last().unwrap()["output"]
             .as_str()
             .unwrap()
-            .contains("actor-scoped handle guidance rendered"),
+            .contains("resource control guidance rendered"),
         "{result}"
     );
     campaign.forest.shutdown().await;
@@ -916,7 +916,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     );
     assert_eq!(
         success["items"][1]["output"],
-        "WatchReady (Right (Remove the stale path and report the focused check.))"
+        "WatchReady (Right \"Remove the stale path and report the focused check.\")"
     );
 
     committed(
@@ -1177,14 +1177,23 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
             },
         )
         .await;
-    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
+    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond delivery").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
     let first = committed(root.as_ref(), "pollWatch ready").await;
     let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
     let output = first["items"][0]["output"].as_str().unwrap();
     assert!(output.starts_with("WatchReady"), "{first}");
+    assert!(!output.contains("candidate-9828"), "{first}");
     assert!(!output.contains("Display failed"), "{first}");
+    let expanded = committed(root.as_ref(), "cellDisplay.more").await;
+    assert!(
+        expanded["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("candidate-9828"),
+        "{expanded}"
+    );
     committed(root.as_ref(), &format!("let retained = {saved} ()")).await;
     committed(root.as_ref(), &format!("declaredEvidence = {saved} ()")).await;
     let second = committed(root.as_ref(), "pollWatch ready").await;
@@ -2072,7 +2081,7 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         Some(campaign.root_installation.actor.identity())
     );
     let attempted = fixture
-        .replace("projectHead", "boundHead")
+        .replace("projectHead", "currentCheckout")
         .replace("peer <- unfold", "standaloneAttempt <- attemptUnfold");
     committed(worker.policy.as_ref(), &attempted).await;
     let result = committed(

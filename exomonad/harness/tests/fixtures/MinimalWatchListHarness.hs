@@ -14,7 +14,7 @@
 -- one piece at a time, everything not load-bearing for the crash:
 --
 -- * No `sendUp`, no `received`, no deadline select, no `Tidepool.Node` at
---   all — just two `mailboxNew`-derived Ints and one `async`.
+--   all — just two `mailboxNew`-derived handles and one `async`.
 -- * No `wait`/`waitCatch` protocol required — the SPAWNER's OWN resume
 --   traps directly (confirmed by an even smaller variant with `wait`
 --   dropped entirely — not committed, since this file already reproduces

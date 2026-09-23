@@ -193,10 +193,11 @@ checked = either (error . T.unpack . renderCommandError) id
 renderCommandError :: CommandError -> Text
 renderCommandError failure = case failure of
   CommandUnauthorized ->
-    "this actor may not run commands: its effect row does not include Commands, \
-    \or its role does not grant them"
+    "this command operation is not authorized: starting requires command authority; \
+    \input, resize and cancellation require the job's owner. Shared handles allow \
+    \status and output reads, not control; ask the owner to perform the operation"
   CommandUnavailable detail ->
-    "no command service is available to this actor: " <> detail
+    "command resource or service unavailable: " <> detail
   CommandInvalid detail -> "the command itself is not runnable: " <> detail
   CommandOutputPending ->
     "the command has not opened its output streams yet; await it, or observe it later"

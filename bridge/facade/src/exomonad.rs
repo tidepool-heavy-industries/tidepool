@@ -2168,6 +2168,7 @@ mod tests {
                 &["rev-parse", "HEAD"],
             )
             .unwrap();
+        assert_eq!(pinned.trimmed(), scaffold::DEFAULT_WORKSPACE_REV);
         assert_eq!(
             pinned.trimmed(),
             git_stdout(example_skills().parent().unwrap(), &["rev-parse", "HEAD"])

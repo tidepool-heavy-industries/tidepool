@@ -46,8 +46,8 @@ handlers, and observability UIs stay in their owning crates.
   turns. Keep source seed, inherited scope, candidate commit, integration head,
   and recipient acknowledgment distinguishable in receipts and observations.
 - `fork_workspace.rs` owns fork workspace preparation. A writable project
-  checkout does not imply an allocated bound worktree: root `projectHead` and
-  child `boundHead` have different prerequisites.
+  checkout does not imply an allocated bound worktree: `currentCheckout`
+  resolves the caller's root project or bound child checkout at admission.
 - Inspect focused tests beside the owning request, workbench, or lifecycle
   module. Use `just test-lib exomonad-actor 'test(<name>)'`; compile changed
   consumers and test failure/cleanup paths, not only successful replies.

@@ -138,8 +138,8 @@ completes when the tool block returns; do not await its new child in that same b
 `inherited` chooses the caller's current completed context boundary. Use it when
 shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask/componentLead uses
-inherited context and boundHead, as does implement. Original-root callers use
-solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
+inherited context and currentCheckout, as does implement. Use
+solTaskFrom/componentLeadFrom with projectHead for an explicit project source. Select a fresh taskContext
 explicitly for unrelated work. componentLead, solTask/implement and reviews select Medium. Keep Sol effort
 stable across inherited forks. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants

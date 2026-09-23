@@ -13,8 +13,8 @@ a new swarm or validating a package change.
 ## Context and source defaults
 
 `solTask` and `componentLead` inherit the current completed reasoning and use
-`boundHead`. `implement` uses `solTask`. They suit recursive implementation from
-an allocated checkout. Component leads, solTask/implement and reviews explicitly select Medium;
+`currentCheckout`. `implement` uses `solTask`. They suit recursive implementation from
+the executing actor's checkout. Component leads, solTask/implement and reviews explicitly select Medium;
 keep Sol effort stable across inherited forks. Original-root callers use `solTaskFrom label projectHead`
 or `componentLeadFrom label projectHead`. A Task's source hash records its accepted
 baseline; it does not override live checkout selection. Exomonad checkpoints eligible

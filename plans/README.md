@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Inherited-resource permissions](inherited-resource-permissions.md): active
+  implementation of shared observation with owner-controlled mutation, including
+  listener/release races and caller-relative checkout seeds.
+
 - [Structural performance ledger](structural-performance-a.md): matched
   measurements are complete; the remaining rows are questions, not scheduled
   implementation work.

@@ -16,7 +16,7 @@ use crate::ActorRef;
 #[derive(Debug, Clone)]
 pub enum ForkWorkspaceSeed {
     Explicit(WtWorktreeSpec),
-    BoundHead(WtDirtyPolicy),
+    CurrentCheckout(WtDirtyPolicy),
 }
 
 /// Already-attenuated filesystem and native-tool policy for early preparation.

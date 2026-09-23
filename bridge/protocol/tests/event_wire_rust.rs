@@ -42,7 +42,7 @@ const WIRE_COPY: &str = "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, Pa
 const WIRE_ID_ORD: &str =
     "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]";
 const WIRE_ID_ORD_HASH: &str =
-    "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]";
+    "#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]";
 const WIRE_RET_ONLY: &str = "#[derive(ToHaskell, Clone, Debug, PartialEq)]";
 
 /// `(rust_field_name, rust_field_type)` pairs inside `pub struct NAME { … }`.
@@ -160,7 +160,15 @@ fn event_wire_types_match_the_hand_written_block_field_for_field() {
         "SubscriptionId",
         WIRE_ID_ORD_HASH,
         true,
-        &[("raw", "i64")],
+        &[("raw", "String")],
+    );
+    assert_struct(
+        &module,
+        "EvMailboxId",
+        "MailboxId",
+        WIRE_ID_ORD_HASH,
+        true,
+        &[("raw", "String")],
     );
 
     assert_enum(
@@ -172,7 +180,7 @@ fn event_wire_types_match_the_hand_written_block_field_for_field() {
             "WatchHead(WtWorktreeId)",
             "WatchDeadline(i64)",
             "WatchAsync(i64)",
-            "WatchMailbox(i64)",
+            "WatchMailbox(EvMailboxId)",
         ],
     );
 
@@ -241,7 +249,7 @@ fn event_wire_types_match_the_hand_written_block_field_for_field() {
             "ObservedHeadChange(EvEventId, EvHeadChangeReceipt)",
             "ObservedTick(EvEventId, EvTickReceipt)",
             "ObservedAsyncDone(EvEventId, i64)",
-            "ObservedMessage(EvEventId, i64, serde_json::Value)",
+            "ObservedMessage(EvEventId, EvMailboxId, serde_json::Value)",
         ],
     );
 }

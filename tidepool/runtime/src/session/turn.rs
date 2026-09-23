@@ -3575,7 +3575,8 @@ mod ambiguity_advice_tests {
             "a seed where a spec was wanted should name the spec's constructors"
         );
         // The diagnostic survives: it says which types, which the advice does not.
-        let rendered = render_cell_compile_error(&cell_error(mismatch), "createWorktree boundHead");
+        let rendered =
+            render_cell_compile_error(&cell_error(mismatch), "createWorktree currentCheckout");
         assert!(rendered.contains("WorktreeSeed"), "{rendered}");
         assert!(
             rendered.ends_with(&constructor_advice(mismatch).unwrap()),

@@ -27,8 +27,8 @@ execution proposal. Descendant owners start their assigned work within that agre
 planning checkpoint. Escalate changed consequential assumptions.
 
 Use the solTask defaults for related implementation: inherited context
-and boundHead. Original-root source uses the corresponding From helper with
-projectHead. Fresh selected context suits unrelated mechanisms and independent
+and currentCheckout, resolving the caller's root or bound checkout. Explicit
+project-root source uses the corresponding From helper with projectHead. Fresh selected context suits unrelated mechanisms and independent
 reviews; reviewCandidate also selects its exact committed candidate. Fork before
 unrelated debugging fills the shared context. Agree shared wiring and obtain a
 real consumer path early. Use unique subgroup labels for successive local waves.

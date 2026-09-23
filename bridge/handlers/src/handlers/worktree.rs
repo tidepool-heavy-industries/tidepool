@@ -271,7 +271,7 @@ impl ActorWorktreeHandler {
                 }
                 WorktreeSource::CurrentRepository => {
                     return Err(WorktreeError::WorktreeAuthorityDenied(
-                                "projectHead requires repository authority. In a bound actor use boundHead (or solTask/componentLead without From); use atRef (GitRef commit) for exact committed source."
+                                "projectHead requires repository authority. In a bound actor use currentCheckout (or solTask/componentLead without From); use atRef (GitRef commit) for exact committed source."
                                     .into(),
                             ));
                 }
@@ -311,13 +311,17 @@ impl ActorWorktreeHandler {
                 spec
             }
             None => {
-                let Some(source) = self.authority.bound_worktree(principal) else {
-                    return Err(WorktreeError::WorktreeAuthorityDenied(
-                        "boundHead requires one active bound worktree".into(),
-                    ));
+                let source = match self.authority.bound_worktree(principal) {
+                    Some(source) => WorktreeSource::Worktree(source),
+                    None if self.authority.has_repository_access(principal) => {
+                        WorktreeSource::CurrentRepository
+                    }
+                    None => return Err(WorktreeError::WorktreeAuthorityDenied(
+                        "currentCheckout requires an active bound checkout or repository authority; ask the parent to restore your checkout binding".into(),
+                    )),
                 };
                 WorktreeSpec {
-                    source: WorktreeSource::Worktree(source),
+                    source,
                     label: actor_path.to_string(),
                     dirty_policy: dirty_policy_from_wire(bound_dirty_policy),
                 }
@@ -563,10 +567,14 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
                     });
                 return cx.respond(result);
             }
-            WorktreeReq::WorktreeLookup(id)
-            | WorktreeReq::WorktreeBranchOf(id)
-            | WorktreeReq::WorktreeHeadOf(id)
-            | WorktreeReq::WorktreeObserveSubmission(id) => Some(id),
+            WorktreeReq::WorktreeLookup(_)
+            | WorktreeReq::WorktreeBranchOf(_)
+            | WorktreeReq::WorktreeHeadOf(_)
+            | WorktreeReq::WorktreeObserveSubmission(_) => {
+                // A known checkout may be observed without transferring its
+                // binding or conferring authority to mutate it.
+                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+            }
             WorktreeReq::WorktreeCreateForActorPath(spec, path) if allocate => {
                 return cx.respond(self.admit_fork_workspace(
                     principal,
@@ -953,7 +961,7 @@ impl WorktreeHandler {
         _actor_path: String,
     ) -> Result<WtWorktreeHandle, WorktreeError> {
         Err(WorktreeError::WorktreeAuthorityDenied(
-            "boundHead is available only through an actor-scoped Worktree interpreter".into(),
+            "currentCheckout is available only through an actor-scoped Worktree interpreter".into(),
         ))
     }
 
@@ -1164,8 +1172,8 @@ pub fn render_worktree_error(error: &WorktreeError) -> String {
             id.raw
         ),
         WorktreeError::WorktreeUnauthorized(id) => format!(
-            "this actor holds no binding for worktree {}; only the actor that holds custody may \
-             act on it",
+            "worktree {} is observable, but this operation requires its binding or an explicit \
+             integration grant; ask the owning actor to perform it",
             id.raw
         ),
         WorktreeError::WorktreeAuthorityDenied(detail) => {
@@ -1258,6 +1266,27 @@ mod tests {
         let mut handler =
             ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority);
 
+        let root_seed = handler
+            .authorize_fork_workspace(
+                root,
+                "campaign/current/root".into(),
+                None,
+                WtDirtyPolicy::RequireClean,
+            )
+            .unwrap();
+        assert!(matches!(
+            root_seed.source(),
+            WorktreeSource::CurrentRepository
+        ));
+        assert!(handler
+            .authorize_fork_workspace(
+                tidepool_repr::PrincipalId::new(99, 1),
+                "campaign/current/unbound".into(),
+                None,
+                WtDirtyPolicy::RequireClean,
+            )
+            .is_err());
+
         let admitted = handler
             .admit_fork_workspace(
                 root,
@@ -1282,6 +1311,15 @@ mod tests {
             .lock()
             .bind(&tree, &WorktreePrincipal::exact_actor("run-1", 2, 1), 1)
             .unwrap();
+        let child_seed = handler
+            .authorize_fork_workspace(
+                worker,
+                "campaign/current/child".into(),
+                None,
+                WtDirtyPolicy::RequireClean,
+            )
+            .unwrap();
+        assert!(matches!(child_seed.source(), WorktreeSource::Worktree(id) if id == &tree));
         let committed = repository.writer().head().unwrap();
         repository
             .writer()
@@ -1374,6 +1412,24 @@ mod tests {
         }
         let captured = tidepool_mcp::CapturedOutput::new();
         let cx = EffectContext::with_principal(&table, worker, &captured);
+        // The same foreign checkout remains observable without granting merge
+        // authority. Decode the real dispatch result, not an authority helper.
+        let value = crate::test_support::response_value(
+            handler
+                .handle(
+                    WorktreeReq::WorktreeLookup(reviewed.handle_receipt.tree_id.clone()),
+                    &cx,
+                )
+                .unwrap(),
+            &table,
+        );
+        let observed = Result::<WtWorktreeHandle, WorktreeError>::from_value(&value, &table)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            observed.handle_receipt.tree_id,
+            reviewed.handle_receipt.tree_id
+        );
         let root_source = WtWorktreeSpec {
             spec_source: WtWorktreeSource::SourceCurrentRepository,
             spec_label: "forbidden-root-snapshot".into(),

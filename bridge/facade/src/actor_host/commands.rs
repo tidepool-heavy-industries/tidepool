@@ -365,6 +365,10 @@ pub(super) struct HostCommandBackend {
     ready: watch::Sender<OutputReadiness>,
 }
 
+fn command_directory(base: &std::path::Path, requested: Option<&str>) -> std::path::PathBuf {
+    requested.map_or_else(|| base.to_owned(), |path| base.join(path))
+}
+
 impl HostCommandBackend {
     pub(super) fn new(
         resources: Arc<CommandResourceClient>,
@@ -446,10 +450,7 @@ impl HostCommandBackend {
         // boundary rooted elsewhere would silently run the command elsewhere.
         // Naming a directory never widens what may be written there, and one
         // outside the actor's reach is refused rather than quietly redirected.
-        let directory = match &spec.directory {
-            Some(requested) => std::path::PathBuf::from(requested),
-            None => self.roots.directory.clone(),
-        };
+        let directory = command_directory(&self.roots.directory, spec.directory.as_deref());
         let boundary = match exomonad_node::ProcessMountBoundary::new(
             &directory,
             self.roots.protected.clone(),
@@ -698,6 +699,50 @@ impl CommandBackend for HostCommandBackend {
 #[cfg(test)]
 mod readiness_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn host_commands_resolve_relative_directories_in_the_executing_checkout() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("root");
+        let child = workspace.path().join("child");
+        let fixed = workspace.path().join("fixed");
+        for directory in [
+            root.clone(),
+            child.clone(),
+            fixed.clone(),
+            root.join("src"),
+            child.join("src"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let fixed_text = fixed.to_str().unwrap();
+        for (base, requested, expected) in [
+            (&root, None, root.clone()),
+            (&child, None, child.clone()),
+            (&root, Some("src"), root.join("src")),
+            (&child, Some("src"), child.join("src")),
+            (&root, Some(fixed_text), fixed.clone()),
+            (&child, Some(fixed_text), fixed.clone()),
+        ] {
+            let directory = command_directory(base, requested);
+            assert_eq!(directory, expected);
+            let command = HostCommand::spawn(HostCommandSpec {
+                argv: &["pwd".into()],
+                directory: &directory,
+                environment: &[],
+                stdin: HostStdin::Closed,
+                cgroup: None,
+                boundary: None,
+                bubblewrap: None,
+            })
+            .unwrap();
+            assert_eq!(command.wait().await.unwrap(), HostExit::Exited(0));
+            assert_eq!(
+                command.page(HostStream::Stdout, 0, u64::MAX).text.trim(),
+                expected.canonicalize().unwrap().to_str().unwrap()
+            );
+        }
+    }
 
     #[test]
     fn termination_before_stream_readiness_is_not_pending_or_fabricated_eof() {

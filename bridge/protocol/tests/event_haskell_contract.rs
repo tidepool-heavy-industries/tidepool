@@ -28,9 +28,10 @@ fn event_type_def_texts_are_pinned() {
         ev.type_def_texts(),
         vec![
             "data EventId = EventId Int deriving (Show, Eq)".to_string(),
-            "data SubscriptionId = SubscriptionId Int deriving (Show, Eq)".to_string(),
+            "data SubscriptionId = SubscriptionId Text deriving (Show, Eq)".to_string(),
+            "data MailboxId = MailboxId Text deriving (Show, Eq)".to_string(),
             "data EventWatch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | \
-             WatchAsync Int | WatchMailbox Int deriving (Show, Eq)"
+             WatchAsync Int | WatchMailbox MailboxId deriving (Show, Eq)"
                 .to_string(),
             "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten \
              [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)"
@@ -46,11 +47,13 @@ fn event_type_def_texts_are_pinned() {
             "data Tick = Tick { firedAtMs :: Int } deriving (Show, Eq)".to_string(),
             "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange \
              EventId HeadChangeReceipt | ObservedTick EventId Tick | ObservedAsyncDone EventId \
-             Int | ObservedMessage EventId Int Value deriving (Show, Eq)"
+             Int | ObservedMessage EventId MailboxId Value deriving (Show, Eq)"
                 .to_string(),
             concat!(
-                "data EventError = EventQueueOverflow Int Int | EventUnknownSubscription Int | ",
-                "EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int ",
+                "data EventError = EventQueueOverflow Text Int | EventUnknownSubscription Text | ",
+                "EventSubscriptionDenied Text Text Text Text | ",
+                "EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Text | ",
+                "EventMailboxDenied Text Text Text Text ",
                 "deriving (Show, Eq)\n",
                 "instance ToJSON EventError where\n",
                 "  toJSON e = case e of\n",
@@ -59,12 +62,18 @@ fn event_type_def_texts_are_pinned() {
                  .= dropped]\n",
                 "    EventUnknownSubscription unknownSub -> object [\"tag\" .= \
                  (\"EventUnknownSubscription\" :: Text), \"unknownSub\" .= unknownSub]\n",
+                "    EventSubscriptionDenied deniedOperation deniedSub deniedOwner deniedCaller -> object [\"tag\" .= \
+                 (\"EventSubscriptionDenied\" :: Text), \"deniedOperation\" .= deniedOperation, \
+                 \"deniedSub\" .= deniedSub, \"deniedOwner\" .= deniedOwner, \"deniedCaller\" .= deniedCaller]\n",
                 "    EventSourceLost lostDetail -> object [\"tag\" .= (\"EventSourceLost\" :: \
                  Text), \"lostDetail\" .= lostDetail]\n",
                 "    EventSourceFailed failedDetail -> object [\"tag\" .= \
                  (\"EventSourceFailed\" :: Text), \"failedDetail\" .= failedDetail]\n",
                 "    EventUnknownMailbox unknownMailbox -> object [\"tag\" .= \
                  (\"EventUnknownMailbox\" :: Text), \"unknownMailbox\" .= unknownMailbox]\n",
+                "    EventMailboxDenied mailboxOperation deniedMailbox mailboxOwner mailboxCaller -> object [\"tag\" .= \
+                 (\"EventMailboxDenied\" :: Text), \"mailboxOperation\" .= mailboxOperation, \
+                 \"deniedMailbox\" .= deniedMailbox, \"mailboxOwner\" .= mailboxOwner, \"mailboxCaller\" .= mailboxCaller]\n",
             )
             .to_string(),
         ]
@@ -83,9 +92,9 @@ fn event_constructor_signatures_are_pinned() {
             "RepoEventAwait :: SubscriptionId -> Int -> RepoEvent (Either EventError \
              [RepositoryEvent])",
             "RepoEventUnsubscribe :: SubscriptionId -> RepoEvent (Either EventError ())",
-            "MailboxNew :: RepoEvent (Either EventError Int)",
-            "MailboxSend :: Int -> Text -> Value -> RepoEvent (Either EventError ())",
-            "MailboxDrop :: Int -> RepoEvent (Either EventError ())",
+            "MailboxNew :: RepoEvent (Either EventError MailboxId)",
+            "MailboxSend :: MailboxId -> Text -> Value -> RepoEvent (Either EventError ())",
+            "MailboxDrop :: MailboxId -> RepoEvent (Either EventError ())",
         ]
     );
 }
@@ -109,19 +118,19 @@ fn event_helper_texts_are_pinned() {
             concat!(
                 "-- | Mint a fresh mailbox: an event source only the caller (and whoever\n",
                 "-- it hands the id to) can send into.\n",
-                "mailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError Int)\n",
+                "mailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError MailboxId)\n",
                 "mailboxNew = send MailboxNew",
             ),
             concat!(
                 "-- | Send never blocks: append and return. A burst of sends sharing\n",
                 "-- `key` coalesces to the LAST payload.\n",
-                "mailboxSend :: forall effs. Member RepoEvent effs => Int -> Text -> Value -> Eff effs (Either EventError ())\n",
+                "mailboxSend :: forall effs. Member RepoEvent effs => MailboxId -> Text -> Value -> Eff effs (Either EventError ())\n",
                 "mailboxSend mid key payload = send (MailboxSend mid key payload)",
             ),
             concat!(
                 "-- | Drop a mailbox. A later send against it is\n",
                 "-- `Left (EventUnknownMailbox _)`.\n",
-                "mailboxDrop :: forall effs. Member RepoEvent effs => Int -> Eff effs (Either EventError ())\n",
+                "mailboxDrop :: forall effs. Member RepoEvent effs => MailboxId -> Eff effs (Either EventError ())\n",
                 "mailboxDrop = send . MailboxDrop",
             ),
         ]
