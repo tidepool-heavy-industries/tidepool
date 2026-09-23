@@ -28,7 +28,7 @@ use crate::{
 
 use super::{
     construction::{ConstructionCore, ConstructionError, ConstructionNode},
-    CompiledProgram,
+    CompiledProgram, ConstructorObservation, DescriptorMeaning, DescriptorMetadata,
 };
 
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
@@ -36,61 +36,79 @@ const MAX_JSON_VALUE_DEPTH: usize = 128;
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
 pub(super) const ENCODE_JSON_HOST: &str = "prepared_encode_json";
 
-/// The JIT-facing form of the one authenticated JSON payload layout. Decode
-/// result constructors are deliberately not part of this object.
+/// The JIT-facing form of the one authenticated JSON payload layout. Each
+/// field is a constructor descriptor's header word: the interned descriptor's
+/// machine-wide identity. Generated code of any installed program may run
+/// inside another program's invocation, so a program-relative constructor
+/// index is never meaningful at the host boundary. Decode result
+/// constructors are deliberately not part of this object.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct JsonLayoutIds {
-    object: u32,
-    array: u32,
-    string: u32,
-    number: u32,
-    bool_: u32,
-    null: u32,
-    map_bin: u32,
-    map_tip: u32,
-    true_: u32,
-    false_: u32,
-    cons: u32,
-    nil: u32,
-    scientific: u32,
-    integer_small: u32,
-    integer_positive: u32,
-    integer_negative: u32,
-    text: u32,
-    int: u32,
+    object: u64,
+    array: u64,
+    string: u64,
+    number: u64,
+    bool_: u64,
+    null: u64,
+    map_bin: u64,
+    map_tip: u64,
+    true_: u64,
+    false_: u64,
+    cons: u64,
+    nil: u64,
+    scientific: u64,
+    integer_small: u64,
+    integer_positive: u64,
+    integer_negative: u64,
+    text: u64,
+    int: u64,
 }
 
-impl From<JsonLayout> for JsonLayoutIds {
-    fn from(layout: JsonLayout) -> Self {
-        Self {
-            object: layout.object.0,
-            array: layout.array.0,
-            string: layout.string.0,
-            number: layout.number.0,
-            bool_: layout.bool_.0,
-            null: layout.null.0,
-            map_bin: layout.map_bin.0,
-            map_tip: layout.map_tip.0,
-            true_: layout.true_.0,
-            false_: layout.false_.0,
-            cons: layout.cons.0,
-            nil: layout.nil.0,
-            scientific: layout.scientific.0,
-            integer_small: layout.integer_small.0,
-            integer_positive: layout.integer_positive.0,
-            integer_negative: layout.integer_negative.0,
-            text: layout.text.0,
-            int: layout.int.0,
-        }
+impl JsonLayoutIds {
+    fn from_layout(
+        layout: JsonLayout,
+        constructors: &[Arc<ObjectDescriptor>],
+    ) -> Result<Self, super::CompileError> {
+        let header = |id| constructor_header(constructors, id);
+        Ok(Self {
+            object: header(layout.object)?,
+            array: header(layout.array)?,
+            string: header(layout.string)?,
+            number: header(layout.number)?,
+            bool_: header(layout.bool_)?,
+            null: header(layout.null)?,
+            map_bin: header(layout.map_bin)?,
+            map_tip: header(layout.map_tip)?,
+            true_: header(layout.true_)?,
+            false_: header(layout.false_)?,
+            cons: header(layout.cons)?,
+            nil: header(layout.nil)?,
+            scientific: header(layout.scientific)?,
+            integer_small: header(layout.integer_small)?,
+            integer_positive: header(layout.integer_positive)?,
+            integer_negative: header(layout.integer_negative)?,
+            text: header(layout.text)?,
+            int: header(layout.int)?,
+        })
     }
 }
 
-fn emit_layout_ids(builder: &mut FunctionBuilder<'_>, slot: ir::StackSlot, layout: JsonLayout) {
-    let ids = JsonLayoutIds::from(layout);
+/// The interned descriptor header for one of this program's constructors.
+fn constructor_header(
+    constructors: &[Arc<ObjectDescriptor>],
+    id: tidepool_repr::execution_schema::ConstructorId,
+) -> Result<u64, super::CompileError> {
+    constructors
+        .get(id.0 as usize)
+        .map(|descriptor| descriptor.initial_header_word() as u64)
+        .ok_or(super::CompileError::UnknownJsonConstructor(id))
+}
+
+fn emit_layout_ids(builder: &mut FunctionBuilder<'_>, slot: ir::StackSlot, ids: JsonLayoutIds) {
     macro_rules! store {
         ($field:ident) => {{
-            let value = builder.ins().iconst(types::I32, i64::from(ids.$field));
+            let value = builder.ins().iconst(types::I64, ids.$field as i64);
             builder.ins().stack_store(
                 value,
                 slot,
@@ -157,8 +175,12 @@ pub(super) fn emit_parse_json(
         tidepool_repr::execution_schema::ConstructorId,
     ),
     arguments: &[Value],
+    constructors: &[Arc<ObjectDescriptor>],
 ) -> Result<Vec<Value>, super::CompileError> {
     let (left, right) = result_constructors;
+    let ids = JsonLayoutIds::from_layout(layout, constructors)?;
+    let left = constructor_header(constructors, left)?;
+    let right = constructor_header(constructors, right)?;
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params = vec![AbiParam::new(types::I64); 9];
     signature.returns = vec![AbiParam::new(types::I32)];
@@ -173,10 +195,10 @@ pub(super) fn emit_parse_json(
         std::mem::size_of::<JsonLayoutIds>() as u32,
         2,
     ));
-    emit_layout_ids(builder, layout_slot, layout);
+    emit_layout_ids(builder, layout_slot, ids);
     let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
-    let left = builder.ins().iconst(types::I64, i64::from(left.0));
-    let right = builder.ins().iconst(types::I64, i64::from(right.0));
+    let left = builder.ins().iconst(types::I64, left as i64);
+    let right = builder.ins().iconst(types::I64, right as i64);
     let owner = builder
         .ins()
         .iconst(types::I64, descriptor.initial_header_word() as i64);
@@ -208,7 +230,9 @@ pub(super) fn emit_encode_json(
     vmctx: Value,
     layout: JsonLayout,
     arguments: &[Value],
+    constructors: &[Arc<ObjectDescriptor>],
 ) -> Result<Vec<Value>, super::CompileError> {
+    let ids = JsonLayoutIds::from_layout(layout, constructors)?;
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params = vec![AbiParam::new(types::I64); 4];
     signature.returns = vec![AbiParam::new(types::I32)];
@@ -222,7 +246,7 @@ pub(super) fn emit_encode_json(
         std::mem::size_of::<JsonLayoutIds>() as u32,
         2,
     ));
-    emit_layout_ids(builder, layout_slot, layout);
+    emit_layout_ids(builder, layout_slot, ids);
     let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
     let output = super::arrays::output_slot(builder);
     builder.declare_value_needs_stack_map(arguments[0]);
@@ -580,10 +604,8 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
         let input_range = input_start..input_end;
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
         let descriptors = JsonDescriptors::resolve(&builder, layout)?;
-        let left =
-            builder.descriptor(u32::try_from(left).map_err(|_| RuntimeError::BadPointer)?)?;
-        let right =
-            builder.descriptor(u32::try_from(right).map_err(|_| RuntimeError::BadPointer)?)?;
+        let left = builder.descriptor(left)?;
+        let right = builder.descriptor(right)?;
         if descriptor_reps(&left) != [RuntimeRep::LiftedRef]
             || descriptor_reps(&right) != [RuntimeRep::LiftedRef]
         {
@@ -777,14 +799,7 @@ impl EncoderIds {
         layout: *const JsonLayoutIds,
     ) -> Result<Self, RuntimeError> {
         let layout = unsafe { layout.as_ref() }.ok_or(RuntimeError::BadPointer)?;
-        let id = |index: u32| {
-            builder
-                .program
-                .interned_constructors
-                .get(index as usize)
-                .map(|(decl, _)| decl.host_id)
-                .ok_or(RuntimeError::BadPointer)
-        };
+        let id = |header: u64| builder.constructor_identity(header);
         Ok(Self {
             object: id(layout.object)?,
             array: id(layout.array)?,
@@ -1773,12 +1788,34 @@ impl<'a> IntrinsicBuilder<'a> {
         })
     }
 
-    fn descriptor(&self, index: u32) -> Result<Arc<ObjectDescriptor>, RuntimeError> {
-        self.program
-            .interned_constructors
-            .get(index as usize)
-            .map(|(_, descriptor)| Arc::clone(descriptor))
-            .ok_or(RuntimeError::BadPointer)
+    /// Resolve a constructor descriptor by header word through the active
+    /// machine-wide registry. Generated code from any installed program can
+    /// reach this intrinsic inside another program's invocation, so lookup
+    /// never goes through the active program's own constructor table.
+    fn descriptor(&self, header: u64) -> Result<Arc<ObjectDescriptor>, RuntimeError> {
+        self.constructor_metadata(header)
+            .map(|(metadata, _)| Arc::clone(&metadata.descriptor))
+    }
+
+    fn constructor_identity(&self, header: u64) -> Result<DataConId, RuntimeError> {
+        self.constructor_metadata(header)
+            .map(|(_, observation)| observation.identity)
+    }
+
+    fn constructor_metadata(
+        &self,
+        header: u64,
+    ) -> Result<(&DescriptorMetadata, &ConstructorObservation), RuntimeError> {
+        let (_, registry) = unsafe { self.machine.active_intrinsic_observation() }
+            .ok_or(RuntimeError::BadPointer)?;
+        let metadata = usize::try_from(header)
+            .ok()
+            .and_then(|header| registry.get(&header))
+            .ok_or(RuntimeError::BadPointer)?;
+        match &metadata.meaning {
+            DescriptorMeaning::Constructor(observation) => Ok((metadata, observation)),
+            _ => Err(RuntimeError::BadPointer),
+        }
     }
 
     fn collect(
@@ -1993,7 +2030,7 @@ mod tests {
     use super::*;
     use crate::machine_state::MachineDisposition;
     use crate::prepared_program::safepoint::NativeStackBounds;
-    use crate::prepared_program::{ActiveIntrinsicScope, DescriptorMeaning};
+    use crate::prepared_program::ActiveIntrinsicScope;
     use tidepool_repr::execution_schema::{
         link_program, testing, CheckedLayout, ConstructorDecl, FieldLayout, MachineImports,
         StorageLayout,

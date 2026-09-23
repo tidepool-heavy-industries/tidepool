@@ -926,6 +926,7 @@ pub(super) fn emit_operation(
     mut_var: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     json_layout: Option<&tidepool_repr::execution_schema::JsonLayout>,
+    constructors: &[std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>],
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
         PrimitiveOperation::Fingerprint(operation) => {
@@ -1173,12 +1174,14 @@ pub(super) fn emit_operation(
                 *layout,
                 (left, right),
                 arguments,
+                constructors,
             )
             .map(Some)
         }
         PrimitiveOperation::EncodeJson => {
             let layout = json_layout.ok_or(super::CompileError::MissingJsonLayout)?;
-            super::json::emit_encode_json(builder, pipeline, vmctx, *layout, arguments).map(Some)
+            super::json::emit_encode_json(builder, pipeline, vmctx, *layout, arguments, constructors)
+                .map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(

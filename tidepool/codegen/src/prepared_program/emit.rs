@@ -476,6 +476,7 @@ fn emit_function_at(
                             &plan.mut_var,
                             &plan.bytes_array,
                             plan.program.json_layout(),
+                            &plan.constructors,
                         )?;
                         match (output, signature.results.returned_reps()) {
                             (Some(output), Some(reps)) => {

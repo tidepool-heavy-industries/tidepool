@@ -163,6 +163,8 @@ pub enum CompileError {
     MissingRepresentation(ValueId),
     #[error("JSON operation was admitted without a program JSON layout")]
     MissingJsonLayout,
+    #[error("JSON layout names constructor {0:?}, which this program does not declare")]
+    UnknownJsonConstructor(tidepool_repr::execution_schema::ConstructorId),
     #[error("the program's root block could not be allocated")]
     RootBlock,
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
