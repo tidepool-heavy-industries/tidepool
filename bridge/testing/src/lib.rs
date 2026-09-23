@@ -10,6 +10,5 @@
 //! keep driving the production compile→JIT→dispatch path. See that module's docs
 //! for the effectful and compile-only recipes.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effect_surface;
 pub mod eval_harness;

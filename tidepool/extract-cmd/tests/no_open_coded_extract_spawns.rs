@@ -14,6 +14,11 @@
 //!   not compiling through it.
 //! - [`ALLOWLIST`] carries the one production exemption, with its reason.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

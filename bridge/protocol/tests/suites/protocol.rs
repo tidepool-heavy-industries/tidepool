@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[path = "../emitted_rust_is_rustfmt_stable.rs"]
 mod emitted_rust_is_rustfmt_stable;
 #[path = "../event_haskell_contract.rs"]

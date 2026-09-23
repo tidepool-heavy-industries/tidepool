@@ -36,7 +36,6 @@
 //! struct MyRecord { field1: String, field2: i64 }
 //! ```
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 extern crate proc_macro;
 
 mod codegen;

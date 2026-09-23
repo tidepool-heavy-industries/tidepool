@@ -6,7 +6,6 @@
 //! The same mechanism carries project-owned defaults for `exomonad new`.
 //! Reusable workspace sources are cloned when the command runs.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::{Path, PathBuf};
 
 fn main() {

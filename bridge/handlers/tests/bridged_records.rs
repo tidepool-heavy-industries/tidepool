@@ -14,6 +14,11 @@
 //! `HttpError`, which can't go through the `HaskellRecord` pipeline above (see
 //! `bridge/mcp/src/fs_stable.rs`) but needs the exact same drift protection.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use tidepool_bridge::HaskellRecord;
 use tidepool_handlers::{
     bridged_records_module, GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry,

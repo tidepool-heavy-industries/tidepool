@@ -68,3 +68,6 @@ reqwest.workspace = true
 
 [dev-dependencies]
 tidepool-testing.workspace = true
+
+[lints]
+workspace = true

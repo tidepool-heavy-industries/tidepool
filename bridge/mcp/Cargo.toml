@@ -32,3 +32,6 @@ proptest.workspace = true
 [[test]]
 name = "mcp"
 path = "tests/suites/mcp.rs"
+
+[lints]
+workspace = true

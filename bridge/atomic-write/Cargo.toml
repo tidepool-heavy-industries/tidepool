@@ -11,3 +11,6 @@ description = "The one same-directory atomic write-then-rename helper: durable (
 
 [dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -11,7 +11,6 @@
 //! runner runs tests by construction. `--check` exists for a human who wants
 //! the answer without a test harness.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::PathBuf;
 use std::process::ExitCode;
 

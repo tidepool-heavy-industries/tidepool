@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[path = "../effect_roster_sentinel.rs"]
 mod effect_roster_sentinel;
 #[path = "../generated_surface_contracts.rs"]

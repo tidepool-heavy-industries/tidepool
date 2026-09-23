@@ -11,6 +11,11 @@
 //!    has no bridge impls; this file failing to compile would prove the bound
 //!    leaked.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::marker::PhantomData;
 
 use tidepool_bridge::HaskellValue;

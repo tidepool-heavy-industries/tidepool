@@ -1,5 +1,10 @@
 //! The public Exomonad actor surface.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::path::PathBuf;
 
 use tidepool_runtime::compile_haskell;

@@ -4,6 +4,11 @@
 //! (e.g. `Pattern.Memory.Read` and `Pattern.File.Read`). The derive must
 //! disambiguate by arity so decoding doesn't fail with "Unknown DataCon name".
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};

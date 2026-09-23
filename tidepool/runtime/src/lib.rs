@@ -13,7 +13,6 @@
 //! can't live below in `tidepool-toolchain`) that re-exports the rest of the
 //! classifier from there.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_bridge::HaskellValue;

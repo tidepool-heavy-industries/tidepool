@@ -3,6 +3,11 @@
 //! `scripts/` beside the manifest runner; this test makes it part of the
 //! ordinary default nextest tier without duplicating its parsing rules.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::path::PathBuf;
 use std::process::Command;
 

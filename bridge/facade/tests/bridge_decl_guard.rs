@@ -4,6 +4,11 @@
 //! `LspNode`; the bridge attr kept `"Node"`) was invisible for a day because
 //! nothing tied the two sources — this test is that tie.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[test]
 fn bridge_core_names_appear_in_effect_decls() {
     let handlers_src = include_str!("../../handlers/src/lib.rs");

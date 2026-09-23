@@ -31,3 +31,6 @@ rustix = { version = "1", features = ["fs"] }
 [[test]]
 name = "worktree"
 path = "tests/suites/worktree.rs"
+
+[lints]
+workspace = true

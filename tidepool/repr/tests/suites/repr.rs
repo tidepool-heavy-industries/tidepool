@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[path = "../execution_schema_codec.rs"]
 mod execution_schema_codec;
 #[path = "../execution_schema_contract.rs"]

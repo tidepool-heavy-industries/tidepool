@@ -1,6 +1,5 @@
 //! Shared schemas and metadata for Tidepool prepared-STG programs.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod actor_path;
 pub mod datacon;
 pub mod datacon_table;

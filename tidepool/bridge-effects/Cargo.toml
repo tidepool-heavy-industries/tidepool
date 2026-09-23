@@ -15,3 +15,6 @@ tidepool-repr.workspace = true
 inventory.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+
+[lints]
+workspace = true

@@ -10,7 +10,6 @@
 //! of fact — a numeric policy both backends must agree on bit-for-bit — so they
 //! live here too, one home instead of two hand-kept-in-sync copies.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 /// `__int_encodeDouble(mantissa, exp)`: the correctly-rounded value of
 /// `mantissa * 2^exp` as a `double` (GHC's `intEncodeDouble#`, an `ldexp`).
 /// Scaling by a power of two is exact, so we round `mantissa` to `f64` once and

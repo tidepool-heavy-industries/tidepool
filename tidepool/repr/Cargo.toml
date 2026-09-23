@@ -23,3 +23,6 @@ proptest.workspace = true
 [[test]]
 name = "repr"
 path = "tests/suites/repr.rs"
+
+[lints]
+workspace = true

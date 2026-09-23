@@ -1,5 +1,10 @@
 //! The standalone configuration checker uses its embedded library and performs
 //! no actor/provider startup, even when invoked from a development checkout.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::fs;
 use std::process::Command;
 

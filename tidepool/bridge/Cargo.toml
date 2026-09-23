@@ -25,3 +25,6 @@ tidepool-test-data.workspace = true
 [[test]]
 name = "bridge"
 path = "tests/suites/bridge.rs"
+
+[lints]
+workspace = true

@@ -20,7 +20,6 @@
 //! earlier admissions. Unacknowledged groups are cancelled on host reattachment
 //! or owner shutdown. Published children remain independently addressable.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub(crate) mod after_tool;
 pub(crate) mod agent_spec;

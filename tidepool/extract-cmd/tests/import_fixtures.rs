@@ -17,6 +17,11 @@
 //!   --test import_fixtures -- --ignored --nocapture
 //! ```
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::path::{Path, PathBuf};
 
 use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin, SymbolIdentity};

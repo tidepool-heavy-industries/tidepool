@@ -1,7 +1,6 @@
 //! Transport-neutral model tool contracts shared by actor policies and their
 //! concrete host projections.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod surface;
 

@@ -4,6 +4,11 @@
 //! (`TRYBUILD=overwrite cargo test --test compile_fail`), not to debug a
 //! diff.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[test]
 fn compile_fail_tokens() {
     let t = trybuild::TestCases::new();

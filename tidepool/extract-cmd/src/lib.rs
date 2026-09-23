@@ -15,7 +15,6 @@
 //! producer identity. Parsing JSON diagnostics and CBOR output belongs to
 //! callers; the content-addressed compile cache belongs to `tidepool-toolchain`.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Output;

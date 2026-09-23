@@ -3,6 +3,11 @@
 //! This is deliberately an integration test: the native input listener is owned
 //! by the packaged Codex TUI, while Tidepool owns the binding and delivery seam.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #![cfg(unix)]
 
 use axum::{

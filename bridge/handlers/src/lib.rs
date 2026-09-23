@@ -20,7 +20,6 @@
 //! assert_eq!(decls.last().map(|decl| decl.type_name), Some("RunLLMTurn"));
 //! ```
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::PathBuf;
 
 use tidepool_mcp::{CapturedOutput, CollectEffectDecls, EffectDecl};

@@ -7,7 +7,6 @@
 //! Neither writer creates its parent directory. Owners creating persistent storage
 //! use [`create_dir_all_durable`] before publishing entries beneath new directories.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

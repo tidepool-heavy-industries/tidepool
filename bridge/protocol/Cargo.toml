@@ -32,3 +32,6 @@ path = "src/bin/tidepool-protocol-gen.rs"
 [[test]]
 name = "protocol"
 path = "tests/suites/protocol.rs"
+
+[lints]
+workspace = true

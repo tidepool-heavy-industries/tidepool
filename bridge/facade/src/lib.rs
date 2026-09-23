@@ -12,7 +12,6 @@
 //!
 //! See the repo-root `CLAUDE.md` for the crate map.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod actor_host;
 pub mod compile_report;
 pub mod exomonad;

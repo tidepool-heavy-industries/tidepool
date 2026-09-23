@@ -8,7 +8,6 @@
 //! what its own downstream callers still reach through `tidepool_runtime::`
 //! paths).
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io;
 use std::path::PathBuf;

@@ -46,3 +46,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 [[test]]
 name = "actor"
 path = "tests/suites/actor.rs"
+
+[lints]
+workspace = true

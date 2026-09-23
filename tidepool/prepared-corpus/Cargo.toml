@@ -17,3 +17,6 @@ tidepool-toolchain.workspace = true
 tidepool-bridge.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[lints]
+workspace = true

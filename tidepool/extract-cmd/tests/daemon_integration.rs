@@ -11,6 +11,11 @@
 //! `scripts/battery.sh -p tidepool-extract-cmd -E 'binary(daemon_integration)'`
 //! (which builds/sets `$TIDEPOOL_EXTRACT` automatically) to actually exercise it.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};

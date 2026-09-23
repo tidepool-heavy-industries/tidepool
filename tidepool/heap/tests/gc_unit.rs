@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::collections::HashSet;
 use tidepool_heap::gc::raw::for_each_pointer_field;
 use tidepool_heap::layout::*;

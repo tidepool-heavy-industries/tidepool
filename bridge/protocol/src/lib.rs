@@ -35,7 +35,6 @@
 //! hand-written copy is deleted. [`effects::all`] is the migrated set;
 //! everything else still lives in `bridge/mcp/src/effect_defs.rs`.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effects;
 pub mod gen;
 pub mod hs;

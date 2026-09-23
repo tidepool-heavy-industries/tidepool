@@ -3,7 +3,6 @@
 //! Provides `EffectHandler` and `DispatchEffect` traits with HList-based
 //! handler composition for dispatching algebraic effects at runtime.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod dispatch;
 pub mod error;
 pub mod freer_names;

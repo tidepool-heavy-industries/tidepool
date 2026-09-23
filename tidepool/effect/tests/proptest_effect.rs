@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use frunk::hlist;
 use proptest::prelude::*;
 use tidepool_bridge::{BridgeError, FromHaskell, HaskellValue};

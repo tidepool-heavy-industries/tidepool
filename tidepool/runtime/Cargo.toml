@@ -50,3 +50,6 @@ path = "tests/compile_fail.rs"
 [[test]]
 name = "session"
 path = "tests/suites/session.rs"
+
+[lints]
+workspace = true

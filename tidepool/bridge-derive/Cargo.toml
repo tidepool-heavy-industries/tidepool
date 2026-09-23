@@ -21,3 +21,6 @@ proc-macro2.workspace = true
 tidepool-bridge.workspace = true
 tidepool-repr.workspace = true
 tidepool-test-data.workspace = true
+
+[lints]
+workspace = true

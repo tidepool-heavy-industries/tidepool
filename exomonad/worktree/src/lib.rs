@@ -25,7 +25,6 @@
 //! v1. A checkout a human removed by hand becomes
 //! [`WorktreeError::WorktreeLost`]; it is never silently recreated.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod binding;
 pub mod create;
 pub mod error;

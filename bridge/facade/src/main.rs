@@ -1,4 +1,3 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 #[derive(clap::Parser)]
 #[command(

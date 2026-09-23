@@ -1,4 +1,3 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 fn main() {
     println!("cargo:rerun-if-changed=csrc/prepared_md5/md5.c");
     println!("cargo:rerun-if-changed=csrc/prepared_md5/md5.h");

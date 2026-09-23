@@ -31,6 +31,19 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.clippy]
+# Production code never unwraps (tests may; see .clippy.toml).
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "deny"
+await_holding_lock = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
+disallowed_methods = "deny"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

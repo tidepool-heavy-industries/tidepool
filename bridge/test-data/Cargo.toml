@@ -11,3 +11,6 @@ publish = false
 
 [dependencies]
 tidepool-repr.workspace = true
+
+[lints]
+workspace = true

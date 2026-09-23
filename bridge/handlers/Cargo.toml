@@ -58,3 +58,6 @@ reqwest.workspace = true
 tidepool-testing.workspace = true
 tidepool-test-data.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

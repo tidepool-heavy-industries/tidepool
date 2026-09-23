@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 #[path = "../binding_uncertainty.rs"]
 mod binding_uncertainty;
 #[path = "../dirty_snapshot.rs"]

@@ -20,3 +20,6 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 frunk.workspace = true
+
+[lints]
+workspace = true

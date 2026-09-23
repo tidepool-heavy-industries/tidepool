@@ -4,7 +4,6 @@
 //! nursery and frame walker (in `tidepool-codegen`) drive collection on top
 //! of them.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod descriptor_region;
 pub mod execution_descriptor;
 pub mod external_storage;

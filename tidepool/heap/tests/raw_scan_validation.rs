@@ -12,6 +12,11 @@
 //! every field — the negative cases would prove nothing if validation also
 //! rejected legitimate objects.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use tidepool_heap::gc::raw::{
     clear_checked_scanning_override, for_each_pointer_field, set_checked_scanning,

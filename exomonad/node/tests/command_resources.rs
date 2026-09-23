@@ -1,5 +1,10 @@
 //! Run with `just test-command-resources-delegated`; the target needs an
 //! isolated delegated service cgroup with no other resident process.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use exomonad_node::command_resources::{
     CommandResourcePolicy, CommandResourceStatus, CommandResources,
 };

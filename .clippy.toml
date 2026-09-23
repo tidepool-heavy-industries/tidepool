@@ -4,3 +4,12 @@
 # gap those lints exist to catch.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Mechanisms with one owner (AGENTS.md ownership map). A site outside the
+# owner states why with #[allow(clippy::disallowed_methods, reason = "...")].
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "spawn long-lived children through the process launcher (exomonad-node process_scope/host_command, tidepool-extract-cmd process.rs) so they die with their owner; short synchronous probes allow this with a reason" },
+  { path = "tokio::process::Command::new", reason = "spawn through the process launcher (exomonad-node process_scope/host_command) so children die with their owner" },
+  { path = "tokio::task::spawn_blocking", reason = "use tidepool_runtime::spawn_blocking_in_span so request and compile context reaches blocking work" },
+  { path = "std::thread::sleep", reason = "blocks an executor thread in async code; use tokio::time::sleep, or allow with a reason on a dedicated sync thread" },
+]

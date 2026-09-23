@@ -3,7 +3,6 @@
 //! This crate validates prepared execution schemas, emits native code, and
 //! owns heap, collection, rooting, cancellation, and continuation mechanics.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod alloc;
 pub mod binding_table;
 pub mod context;

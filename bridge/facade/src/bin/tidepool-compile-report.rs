@@ -19,7 +19,6 @@
 //! A path that names no existing file and matches no glob is reported and
 //! skipped, never silently dropped.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
 

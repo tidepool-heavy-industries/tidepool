@@ -11,3 +11,6 @@ readme = "../../README.md"
 
 [dependencies]
 num-bigint = { workspace = true }
+
+[lints]
+workspace = true

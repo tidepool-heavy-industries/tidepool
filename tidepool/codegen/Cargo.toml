@@ -43,3 +43,6 @@ cc = "1"
 [[test]]
 name = "prepared_control"
 path = "tests/prepared_control.rs"
+
+[lints]
+workspace = true

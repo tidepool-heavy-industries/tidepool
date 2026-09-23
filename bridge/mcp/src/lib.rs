@@ -1,6 +1,5 @@
 //! Shared Haskell effect declarations, generated preambles, and output capture.
 
-#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod validate;
 
 mod eval_prep;

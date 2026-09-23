@@ -15,6 +15,11 @@
 //! in memory would pass an in-process assertion and lose a worktree to a dead
 //! agent across the next restart, which is the failure these gates exist for.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
 use std::path::{Path, PathBuf};
 
 use exomonad_agent::backend::mock::{MockBackend, MockFailure, MockStep};
