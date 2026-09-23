@@ -314,6 +314,9 @@
           doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.openssl ];
+          # Nix-built binaries carry no checkout to read bridge/haskell from at
+          # runtime, so this release build must embed it (see build.rs).
+          TIDEPOOL_EMBED_HASKELL = "1";
         };
 
         packages.exomonad = pkgs.symlinkJoin {

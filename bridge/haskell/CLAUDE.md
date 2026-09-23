@@ -48,7 +48,9 @@ Standard-library precedence:
 1. `$TIDEPOOL_PRELUDE_DIR`; it must contain `Tidepool/Prelude.hs`.
 2. A repository `bridge/haskell/lib` or `lib` found by walking upward from CWD.
 3. The library beside a worktree-built extractor's `dist-newstyle`.
-4. The library embedded in the server binary.
+4. The library embedded in the server binary (release builds only, when built
+   with `TIDEPOOL_EMBED_HASKELL=1`; a dev build embeds nothing and resolves
+   from the checkout at step 2 instead).
 5. The source tree from which the binary was built.
 
 Use `scripts/redeploy.sh` to deploy the extractor, Rust servers, embedded

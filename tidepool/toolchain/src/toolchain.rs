@@ -39,7 +39,7 @@
 //! | 1 | `$TIDEPOOL_PRELUDE_DIR` | Operator override. **Set-but-not-a-stdlib-root is a hard error**, never a silent fall-through — a typo'd override that quietly served a different stdlib is exactly the failure this module exists to kill. |
 //! | 2 | `./bridge/haskell/lib`, then `./lib` (from CWD) | In-repo development: the working tree you are editing wins over anything installed. Preserves the `tidepool` binary's historical behavior. |
 //! | 3 | Sibling of the extract's `dist-newstyle` | Absorbs the old `derive_stdlib_include`: walk `$TIDEPOOL_EXTRACT` up to a `dist-newstyle` component and take its sibling `lib/`. Pairs a worktree-built extract with that worktree's stdlib. |
-//! | 4 | [`StdlibFallbacks::bundle`] | Installed mode: the stdlib embedded in the server binary, materialized to a content-addressed cache dir. Immutable and guaranteed to match the binary. |
+//! | 4 | [`StdlibFallbacks::bundle`] | Installed mode: the stdlib embedded in the server binary, materialized to a content-addressed cache dir. Immutable and guaranteed to match the binary. Only release builds (`TIDEPOOL_EMBED_HASKELL=1`) embed anything here; a dev build's bundle is an empty materialized directory that never satisfies [`is_stdlib_root`], so this step falls through and step 2 (or 3) resolves instead. |
 //! | 5 | [`StdlibFallbacks::build_tree`] | Last resort: the source tree this binary was *built* from (`env!("CARGO_MANIFEST_DIR")`-derived). Keeps a repo-installed `tidepool-repl` working when launched outside the repo. |
 //! | — | otherwise | [`ToolchainError::StdlibNotFound`], listing every path tried. |
 //!

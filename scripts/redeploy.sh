@@ -95,7 +95,7 @@ fi
 
 # Steps 3+4: install Rust server binaries.
 #   Skippable with --no-servers (extract-only changes don't need these).
-#   Step 3 embeds the stdlib (bridge/haskell/lib/) into the binary at build time.
+#   Step 3 embeds the stdlib and actors trees (bridge/haskell/{lib,actors}/) into the binary at build time (TIDEPOOL_EMBED_HASKELL=1; unset, the facade would read the checkout on disk instead).
 
 if [ "$NO_SERVERS" -eq 0 ]; then
   # --locked: install from the workspace Cargo.lock instead of re-resolving —
@@ -103,7 +103,7 @@ if [ "$NO_SERVERS" -eq 0 ]; then
   # arrayref 0.3.x) and would silently deploy different dep versions than the
   # tree that passed the test suite.
   step "Step 3: cargo install tidepool (Exomonad + embedded Haskell)"
-  run cargo install --locked --path tidepool
+  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --path tidepool
 else
   echo; echo "(skipped: --no-servers)"
 fi
