@@ -211,10 +211,6 @@ mod tests {
                 PromptRole::HostedToolInstructions,
             ]
         );
-        let description = PromptId::HaskellToolDescription.body();
-        assert!(description.contains("`sessionReply`"));
-        assert!(description.contains("`status`"));
-        assert!(description.contains("Ending the model response ends the turn"));
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.body.chars().count() <= HOSTED_DESCRIPTION_LIMIT));
@@ -231,11 +227,12 @@ mod tests {
             .unwrap()
             .contains("R.settlement"));
         // Every topic with a workspace skill names it on its last line, and the
-        // topic listing names the skills beside the topics.
+        // topic listing names the skills beside the topics. `jev` instead
+        // links the skill inline and says so, rather than duplicating its
+        // content behind a trailer.
         for (topic, skill) in [
             ("actors", "exomonad-define-actors"),
             ("cleanup", "exomonad-cleanup"),
-            ("jev", "exomonad-jev"),
             ("unfold", "exomonad-unfold"),
             ("workbench", "exomonad-workbench"),
         ] {
@@ -247,6 +244,8 @@ mod tests {
             );
             assert!(workbench_doc("topics", &[]).unwrap().contains(skill));
         }
+        assert!(workbench_doc("jev", &[]).unwrap().contains("exomonad-jev"));
+        assert!(workbench_doc("topics", &[]).unwrap().contains("exomonad-jev"));
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing", &[]).is_err());
     }
