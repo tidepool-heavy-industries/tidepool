@@ -3,7 +3,7 @@ name = "jev-integration"
 description = "Isolated TypeSafe API contract experiments for the Tidepool Jev DSL"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 rust-version.workspace = true
 publish = false
 

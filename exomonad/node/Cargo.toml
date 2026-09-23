@@ -2,7 +2,7 @@
 name = "exomonad-node"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
