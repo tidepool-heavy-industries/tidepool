@@ -16,7 +16,7 @@ use exomonad_agent::{
     resolve_native_interactive_agent, BackendThreadId, InputAdmission, InputOperationId,
     InputProducerControlOutcome, InputProducerId, InputPurpose, InteractiveInputEnvelope,
     InteractiveInputMode, InteractiveInputTarget, InteractiveSessionBinding,
-    HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+    NativeCommandOperation, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use std::{
@@ -24,6 +24,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tidepool_bridge_effects::{CommandInput, CommandSpec};
 use tokio::net::{TcpListener, UnixListener};
 
 #[derive(Clone, Default)]
@@ -265,10 +266,30 @@ async fn pinned_full_tui_binds_and_accepts_exactly_one_owned_input() {
         .all(|byte| byte.is_ascii_hexdigit()));
     let lock_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../flake.lock");
     let lock: Value = serde_json::from_slice(&std::fs::read(lock_path).unwrap()).unwrap();
-    let source = lock
+    let source = if let Some(rev) = lock
         .pointer("/nodes/codex/locked/rev")
         .and_then(Value::as_str)
-        .unwrap();
+    {
+        rev.to_owned()
+    } else {
+        assert_eq!(
+            lock.pointer("/nodes/codex/locked/path")
+                .and_then(Value::as_str),
+            Some("./vendor/codex"),
+            "the local Codex input must point at the vendored gitlink"
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:vendor/codex"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "could not resolve the Codex gitlink"
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
     let package = installation
         .package_root()
         .expect("pinned executable must belong to a package");
@@ -282,7 +303,7 @@ async fn pinned_full_tui_binds_and_accepts_exactly_one_owned_input() {
         .unwrap_or_else(|error| panic!("parse {}: {error}", selection_path.display()));
         assert_eq!(
             selection.pointer("/codex").and_then(Value::as_str),
-            Some(source)
+            Some(source.as_str())
         );
         let selected_digest = installation.executable_sha256();
         assert!(
@@ -409,6 +430,7 @@ trust_level = "trusted"
         .arg("OPENAI_API_KEY=fixture")
         .arg(installation.executable())
         .arg("--no-alt-screen")
+        .arg("--no-daemon")
         .arg("--host-dynamic-tools-socket")
         .arg(&host_socket)
         .arg("-C")
@@ -474,6 +496,26 @@ trust_level = "trusted"
     assert_eq!(
         backend.bind_input(&thread).await.unwrap(),
         InputAdmission::Admitted
+    );
+    let command_rejection = backend
+        .command(
+            &thread,
+            "00000000-0000-4000-8000-000000000001",
+            NativeCommandOperation::Start(CommandSpec {
+                argv: vec!["/bin/pwd".into()],
+                directory: Some(work.display().to_string()),
+                environment: vec![],
+                memory: 256,
+                input: CommandInput::ClosedInput,
+            }),
+        )
+        .await
+        .expect_err("fixture has no managed command resources");
+    assert!(
+        command_rejection
+            .to_string()
+            .contains("hosted commands require managed command resources"),
+        "the TUI must parse the typed command request before refusing resources: {command_rejection}"
     );
     let operation = InputOperationId {
         producer: InputProducerId::new("fixture/interactive-applications".into()).unwrap(),

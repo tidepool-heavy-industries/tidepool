@@ -75,9 +75,13 @@ async fn request_with_deadlines(
         Err(controller::Failure::Unconfirmed(detail)) => return Err(unconfirmed(detail)),
     };
     if !response.status.is_success() {
+        let detail = String::from_utf8_lossy(&response.body)
+            .chars()
+            .take(512)
+            .collect::<String>();
         return Err(unconfirmed(format!(
-            "native command controller returned HTTP {}",
-            response.status
+            "native command controller returned HTTP {}: {detail}",
+            response.status,
         )));
     }
     let response: BoundResponse = serde_json::from_slice(&response.body).map_err(unconfirmed)?;
