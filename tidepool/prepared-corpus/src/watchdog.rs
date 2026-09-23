@@ -76,6 +76,10 @@ pub fn arm() {
             let mut last_epoch = EPOCH.load(Ordering::Relaxed);
             let mut stuck_secs = 0u64;
             loop {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "dedicated sync watchdog thread; it has no async runtime to yield to"
+                )]
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 let epoch = EPOCH.load(Ordering::Relaxed);
                 if epoch == last_epoch {
@@ -92,11 +96,14 @@ pub fn arm() {
                     #[allow(clippy::unwrap_used, reason = "watchdog lock is held only for a brief, panic-free assignment; it cannot poison in normal use")]
                     let name = CURRENT.lock().unwrap().clone();
                     use std::io::Write;
-                    let _ = writeln!(
+                    // best-effort: the process is aborting immediately after
+                    // this diagnostic regardless of whether the write lands.
+                    writeln!(
                         std::io::stderr(),
                         "\n[FIXTURE WATCHDOG] item '{name}' exceeded {limit_secs}s — \
                          suspected non-termination; aborting suite"
-                    );
+                    )
+                    .ok();
                     std::process::exit(101);
                 }
             }

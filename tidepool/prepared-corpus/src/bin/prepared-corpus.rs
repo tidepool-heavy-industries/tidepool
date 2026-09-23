@@ -330,6 +330,10 @@ fn run_corpus_with(
     for (index, row) in manifest.programs.iter().enumerate() {
         let child_output = child_report_path(&output, index);
         remove_stale_child_report(&child_output)?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "corpus CLI fan-out: spawns one short-lived child per manifest row and blocks on its exit status; not a resident process this crate leaves running"
+        )]
         let status = ProcessCommand::new(executable)
             .arg("child")
             .arg(&manifest_path)
