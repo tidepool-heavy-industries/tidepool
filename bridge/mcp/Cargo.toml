@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-mcp"
 version.workspace = true
 edition.workspace = true
@@ -27,3 +28,7 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest.workspace = true
+
+[[test]]
+name = "mcp"
+path = "tests/suites/mcp.rs"
