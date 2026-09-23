@@ -17,6 +17,14 @@ unconsumed proposals are removed; Git retains their history.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): live-machine code
   reclamation remains an open follow-up referenced by the actor guide. No
   reclamation design is accepted.
+- [Harness adoption](harness-adoption.md): how Exomonad moves from the forked
+  Codex backend to the standalone model harness (`~/dev/exomonad-harness`):
+  adapter, `spawnAgent`, hook placement, compaction, deletions, order.
+- [Dogfooding sweep](dogfood-sweep.md): the accepted decisions and open
+  checklist from the 2026-09-23 run audit (latency attribution, run-map
+  provenance, delivery and input-acknowledgement friction).
+- [Next-wave inputs](next-wave-inputs.md): structural follow-ups found in the
+  2026-09-23 review wave, each with its evidence and bug class.
 
 ## Referenced evidence
 
