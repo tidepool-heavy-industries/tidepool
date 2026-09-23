@@ -13,7 +13,21 @@ checkout admission; `PersistentSession` owns the resident execution contract;
 frontends choose whether admission waits or fails immediately. JIT resource
 ownership remains below this layer in `tidepool-codegen`.
 
+Checkout epochs fence stale timeout, panic, or cancellation settlement; every
+path settles exactly once. Temporary root chunks keep stable addresses;
+reusable DAG handles remain rooted until parent publication, and no borrowed
+heap view may survive collection or forcing. Static-region indices select
+candidates only; exact object/tag validation and transactional installation
+and retirement are authoritative.
+
 `session::workbench` owns frontend-neutral source classification,
 meta-command tokenization, canonical resident turn templates, and
 prefix-preserving ordered cursors. Frontends own command meaning, execution
 settlement, presentation, provider loops, and lifecycle policy.
+
+Ordered execution preserves committed prefixes. A later rejection does not
+roll back earlier external effects; preserve effect receipts rather than
+inferring that a missing binding means nothing happened. Exact transport
+retries return retained receipts, while newly submitted source is new intent.
+Keep workbench observation formatting separate from execution and authority;
+retain full results and expose expansion without rerunning effects.

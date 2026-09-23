@@ -1,43 +1,8 @@
-# Managed coding checkouts and repository observation
+# Contributor workflow
 
-This crate owns checkout creation/retention, its durable registry, repository
-inspection, coalesced events, snapshots, and the narrow typed merge primitive.
-`Worktree` remains the workflow term. Managed checkouts are native linked Git
-worktrees: working files, index, and HEAD are per actor; objects, refs, config,
-and administrative metadata share the source repository's namespace.
+For this crate's ownership boundaries and invariants, see [CLAUDE.md](CLAUDE.md).
 
-- Do not write runtime state into the source working tree. An explicitly
-  authorized source checkpoint may stage and commit source changes through
-  `GitCli`; registry state, managed repositories, journals, and temporary
-  indexes live outside it.
-- Shared Git metadata is intentional collaboration infrastructure, not an
-  isolation boundary. Do not add publication/import machinery between actors.
-- Retain first: no deletion, GC, or silent recreation of a missing managed
-  worktree without an explicit design decision.
-- Every git subprocess goes through `GitCli` so environment scrubbing and
-  failure receipts cannot drift.
-- Reconciled repository inspection is authoritative. Hooks and filesystem
-  events may wake polling but never supply facts.
-- Observations are coalesced state deltas, not causal histories. Degrade to
-  `UnknownChange` rather than inventing attribution.
-- Subscriptions start at the journal's current end. The durable journal is for
-  traceability and diagnosis, not handler replay.
-- Do not add general workflow verbs. `try_merge` is the one typed
-  merge/abort boundary; conflict resolution stays authored policy.
-- Test git behavior against real temporary repositories, never a mocked git.
-  This crate is GHC-free and suitable for focused ordinary Cargo tests.
-
-## Source provenance and integration
-
-- A committed seed and a dirty snapshot are different inputs. Select snapshots
-  explicitly; do not smuggle uncommitted parent changes into a committed seed.
-- Checkout write access is not an allocated worktree handle. Keep project-root
-  observation separate from operations requiring a registry-bound checkout.
-- `submission.rs` owns candidate observation; `merge.rs` owns merge receipts.
-  Publishing a candidate does not prove parent acceptance, successful merge,
-  or that another actor incorporated and checked the integrated revision.
-- Preserve user changes and report conflicts/dirty state explicitly. Do not
-  infer a clean worktree from a commit hash or a successful earlier command.
-- For focused verification use `just test-lib exomonad-worktree 'test(<name>)'`.
-  Exercise retained checkout, dirty/conflicting merge, and cleanup failures
-  when those owning paths change; avoid broad batteries across worktrees.
+For focused verification, use `just test-lib exomonad-worktree 'test(<name>)'`.
+Exercise retained-checkout, dirty/conflicting-merge, and cleanup failures when
+those paths change. This crate is GHC-free and suitable for ordinary Cargo
+tests.

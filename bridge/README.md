@@ -3,6 +3,8 @@
 This directory holds intact components whose Tidepool and Exomonad ownership
 cannot yet be separated without redesigning working interfaces. It is a
 transitional source root, not a package and not a new shared abstraction.
+Crates retain their `tidepool-*` package names while they live under `bridge/`
+during this transition.
 
 The `facade` crate currently combines Tidepool's public execution facade with
 the Exomonad CLI and actor-host composition. Its expected split is a Tidepool

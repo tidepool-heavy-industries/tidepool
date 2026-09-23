@@ -43,12 +43,7 @@ each crate after all its own workspace dependencies is valid; this is one
 such order, not the only one.
 
 `tidepool-eval` (the standalone tree-walking reference interpreter) has
-been removed from the workspace; it no longer appears above. `tidepool-repl`
-is not currently a Cargo workspace member (its directory exists on disk but
-carries no `Cargo.toml` workspace entry) despite still being named as an
-active area in `CLAUDE.md`'s workspace map — flagged here rather than
-resolved, since removing or restoring it is an architecture decision, not a
-docs fix.
+been removed from the workspace; it no longer appears above.
 
 `tidepool-testing` has `publish = false` — crates.io ignores it. Everything
 else in the workspace publishes, including the binary packages in the list

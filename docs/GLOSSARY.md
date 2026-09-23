@@ -22,6 +22,15 @@ many typed requests and model rounds. A root or child actor application becomes
 idle when a model round ends; it is not completed by ending that round or by
 settling one reply.
 
+## Model tiers
+
+**Sol**, **Luna**, and **Astra** name model tiers, not people or actor roles.
+Workspace configuration maps the `executor` alias to Sol for implementation
+and integration, `luna` to Luna for bounded low-cost work and judgment, and
+`planner` to Astra for initial planning and explicit hard questions. A person
+or actor may use a configured model without taking on that model tier's usual
+task.
+
 ## Survivors table (what to write instead)
 
 | Was | Write instead |
@@ -40,6 +49,7 @@ settling one reply.
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
 | session (bare, for runtime state) | **machine session** (`ResidentSession` — the resident JIT machine + heap + bindings) |
 | context fork / self-fork (Exomonad actor surface) | **context unfold** for the applicative expansion |
+| lane (model-facing work division) | **assignment**, **workstream**, or the actual named component |
 
 ## Reserved words (industry meaning only)
 

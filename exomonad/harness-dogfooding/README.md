@@ -42,7 +42,10 @@ authoring/running these *are the roadmap* for the next harness helpers.
   the larger playground: the typed resident REPL, capability rows, executable
   harness self-design, and ephemeral non-serializable values such as closures
   and records of functions alongside durable state.
-- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for the typed swarm**.
+- [`devswarm/`](devswarm/README.md) — **Haskell-native successor to `dev-tree/`**.
+  Its owner/delegate shape and typed candidate handoff are the current forward
+  dogfood; durable node storage and an integration workspace remain future work.
+- [`dev-tree/`](dev-tree/Harness.hs) — **retired predecessor to DevSwarm**.
   The tree is a monadic hylomorphism over `Tidepool.Swarm`'s `PlanF`: cognition
   enters at exactly two typed seams — a coalgebra that splits (the parent-first
   scaffold worker, then one child worktree per child plan seeded from the

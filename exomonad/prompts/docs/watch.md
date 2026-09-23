@@ -60,7 +60,7 @@ Inspect `joinedState` further when deciding integration or checking provenance.
 `responseWorktree` are runtime evidence. A successful reply does not establish
 review, acceptance, or integration: those remain the responsible coordinator's
 judgments about an exact candidate. Project task-specific report fields when
-even the report is large; no standard worker ledger is required.
+even the report is large; no fixed-format worker record is required.
 
 A wake notification is a reason to inspect, not a replacement for the handle's
 current state. A Ready notice does not reserve the result: release before your
