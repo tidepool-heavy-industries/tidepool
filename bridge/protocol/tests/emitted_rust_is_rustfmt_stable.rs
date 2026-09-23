@@ -19,7 +19,73 @@
 //! discover it at exactly the wrong moment.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+/// Resolve the `rustfmt` binary the same way `cargo fmt` resolves it for
+/// this workspace, so this test can't disagree with `cargo fmt --all --
+/// --check` (part of this crate's verify list) by picking up an unrelated
+/// `rustfmt` from `$PATH`.
+///
+/// Priority mirrors `cargo-fmt`/rustup precedence:
+/// 1. `$RUSTFMT`, an explicit override.
+/// 2. `rustup which rustfmt`, when rustup is managing the toolchain — this
+///    is what `cargo fmt` itself shells out to via the `cargo-fmt` proxy.
+/// 3. The `rustfmt` next to `$CARGO` (or `cargo` on PATH) — the layout the
+///    Nix dev shell uses, where `cargo` and `rustfmt` are sibling binaries
+///    from the same pinned `rust-bin` derivation and there is no rustup.
+/// 4. The `rustfmt` under `rustc --print sysroot`'s `bin/`, a last-resort
+///    fallback that also matches a component-complete toolchain.
+/// 5. Bare `rustfmt` on `PATH`, if nothing more specific resolved.
+fn rustfmt_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("RUSTFMT") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(out) = Command::new("rustup").args(["which", "rustfmt"]).output() {
+        if out.status.success() {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+
+    let cargo = std::env::var_os("CARGO")
+        .map(PathBuf::from)
+        .or_else(|| which_on_path("cargo"));
+    if let Some(cargo) = cargo {
+        if let Some(dir) = cargo.parent() {
+            let candidate = dir.join("rustfmt");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    if let Ok(out) = Command::new("rustc").args(["--print", "sysroot"]).output() {
+        if out.status.success() {
+            let sysroot = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sysroot.is_empty() {
+                let candidate = PathBuf::from(sysroot).join("bin").join("rustfmt");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    PathBuf::from("rustfmt")
+}
+
+/// Find `name` on `$PATH`, without relying on the shell.
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
 
 /// Format `src` with rustfmt at the workspace's edition, returning its output.
 ///
@@ -30,7 +96,7 @@ use std::process::{Command, Stdio};
 /// REJECTS is source that does not parse — which is a much more serious finding
 /// than a formatting difference.
 fn rustfmt(src: &str) -> String {
-    let mut child = Command::new("rustfmt")
+    let mut child = Command::new(rustfmt_bin())
         .args(["--emit", "stdout", "--edition", "2021", "--quiet"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
