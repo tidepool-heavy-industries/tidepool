@@ -4,9 +4,14 @@ Every module below is compiled into every session in this workspace, verified by
 `exomonad check --workspace .` from the run directory. `lookup <name>` browses any
 of them and is authoritative over this file.
 
-The shipped template is the canonical source for these modules. This repository's
-`.exomonad/config.toml` points at `exomonad/examples/workspace/.exomonad`, so the
-modules and recipe checks are maintained once and arrive in worktrees by checkout.
+The modules and recipe checks ship in the default workspace submodule,
+`.exomonad/workspace`, which this repository's `.exomonad/config.toml` names as
+its second source root and which `exomonad new` installs into a project at the
+revision pinned in `bridge/facade/src/exomonad/scaffold.rs`. A change to a
+Project module or check lands there. `exomonad/examples/workspace/.exomonad` is
+the in-repo template: `exomonad new` scaffolds its `AgentSpec.hs`, prompts and
+plans, and the facade tests exercise its modules; it is not what a project's
+sessions compile.
 
 ## Orchestration
 

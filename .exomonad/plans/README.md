@@ -47,45 +47,16 @@ and returns explicit corrections and release scope. Incorporate those decisions
 before dependent implementation. Later local work within the agreement proceeds
 without repeating this initial interview or inventing more approval stages.
 
-## Use the workbench
+## Use the shared workbench
 
-- [composition.md](composition.md): paired source/context forks, dependency frontiers,
-  checked integration and a continuation at every substantial node.
-- [operating.md](operating.md): readback progress, source-bearing decisions, parallel
-  branch expressions and the actual asynchronous control boundaries.
-- [run.md](run.md): concrete admission, watch, review and retained repair recipes.
-- [launch.md](launch.md): operator-only launch and package validation.
-- [language.md](language.md): compact shared distinctions; add project vocabulary
-  where it helps collaborators make the same consequential choices.
-- [examples/README.md](examples/README.md): eight worked Jev cells with the
-  real fixtures they read. Reference to copy from, not modules to import.
-
-## What is installed
-
-Eleven modules are compiled into every session here. `doc topics` lists them and
-`lookup` on a name browses its declarations, which is authoritative over this
-paragraph.
-
-`Project.Types` is the shared vocabulary — tasks, candidates, decisions,
-questions. `Project.Work` builds the implement/review/repair/incorporate
-requests; `Project.Routing` and `Project.Actors` carry the collection patterns;
-`Project.Observe` reports on work in flight without consuming it.
-
-`Project.Reflex` classifies compiler, lint and test output from a
-precedence-ordered table, with no model turn. `Project.Evidence` types what a
-check actually established, keeping what a child reported separate from what was
-run here. `Project.Contract` carries a task agreement. `Project.Investigate`
-reads a failed build. `Project.Merge` holds an integration worktree and checks a
-merged head before publishing, rolling a red one back. The caller supplies the
-check command for the change under review.
-`Project.Review` runs the loop around them.
-
-There is no `Project.Plan`: it generated assignments for one graph-UI feature and
-was retired rather than carried forward as if it were a general tool. Its
-campaign tree is in Git history.
-
-Use the actual task/result contracts and callable signatures. Importing a module
-or binding a composition starts no worker.
+The shared workbench plans, Project modules, prompts, skills and checks live in
+the default workspace submodule, `workspace/` beside this file, which is what
+this repository's sessions compile (`config.toml` lists the selected modules and
+checks) and what `exomonad new` installs elsewhere. The in-repo template at
+`../../exomonad/examples/workspace/.exomonad/` carries the scaffolded
+`AgentSpec.hs`, prompts and plans plus test copies of the modules. Use the
+actual task/result contracts and callable signatures. Importing a module or
+binding a composition starts no worker.
 
 There is one original-root runtime .exomonad and one frozen selection per swarm.
 This package is tracked in the repository, so a worktree gets it from git and
@@ -121,8 +92,6 @@ servers and is not part of testing a change.
 
 **This repository has 2,612 tracked files.** Bound every search — a pathspec on
 `git grep`, a pattern on `git ls-files` — rather than walking the tree.
-
-**`checkpointContext` remains proposed work**, not an installed capability.
 
 ## Opening a repository session
 
