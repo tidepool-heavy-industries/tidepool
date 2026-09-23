@@ -727,7 +727,12 @@ fn workspace_checkout_failure_reports_the_landed_merge() {
                 assert_eq!(target.as_str(), landed, "handoff names the landed commit");
                 assert!(reason.contains(&landed), "reason: {reason}");
                 assert!(reason.contains("workspace checkout"), "reason: {reason}");
-                assert!(reason.contains("local changes"), "reason: {reason}");
+                // Assert on the git invocation THIS CRATE issued (the
+                // `checkout --detach` in `update_initialized_workspace`),
+                // not on git's own English error text, which is
+                // version/locale-dependent and not something this crate
+                // controls.
+                assert!(reason.contains("git checkout --detach"), "reason: {reason}");
                 assert!(paths.is_empty(), "no merge conflicts: {paths:?}");
             }
             other => panic!("expected a workspace sync handoff, got {other:?}"),
