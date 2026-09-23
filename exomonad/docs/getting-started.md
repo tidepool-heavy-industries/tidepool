@@ -1,8 +1,8 @@
 # Getting started with Exomonad
 
-Two commands do two different jobs. `exomonad new` writes a workspace package into
-a project. `exomonad init` starts a run in a project that has one. Everything else
-on this page is what happens around those two.
+Two commands do two different jobs. `exomonad new` creates a project workspace
+with a pinned shared-source submodule. `exomonad init` starts a run in a project
+that has one. Everything else on this page is what happens around those two.
 
 ## What you need
 
@@ -26,29 +26,35 @@ workspace config names a different slice.
 
 ## Build
 
+For Tidepool development, clone the source and use the local recipes. They enter
+the Nix shell for dependencies and compile local source into
+`bridge/haskell/dist-newstyle/` and `target/`, which Cabal and Cargo reuse on
+later builds:
+
 ```bash
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
-nix build .#exomonad
-./result/bin/exomonad --help
+just exomonad-build          # incremental build only
+just exomonad-init           # incremental build, then start a run here
 ```
 
-There is no public binary cache yet, so the first build compiles everything,
-GHC-side and Rust-side, and takes a good while.
+Pass `exomonad init` flags through the second recipe, for example
+`just exomonad-init -- --no-attach`. To start a run in another project with the
+locally built tools, use `just exomonad-init -- --workspace /path/to/project`.
+
+For an isolated distribution build, run `nix build .#exomonad` and use
+`./result/bin/exomonad`. There is no public binary cache yet, so the first
+build compiles everything, GHC-side and Rust-side, and takes a good while.
+Nix reuses outputs for identical inputs, while a source edit creates a new
+input hash and does not reuse this checkout's Cabal and Cargo incremental
+outputs. The wrapper selects the matched extractor and client itself; it does
+not replace `codex` on your `PATH`.
+
 The matched Codex package uses its `local` Cargo profile: no LTO, no debug
 information, and unoptimized code with release runtime semantics. This reduces
 compiler memory and build work; runtime throughput may be lower than a release
 build. An optimized distribution build remains available with
 `nix build ./vendor/codex#codex-rs-release`.
-The wrapper selects the matched extractor and client itself; it does not replace
-`codex` on your `PATH`.
-
-Working on Tidepool itself, use the development entry points instead, which
-build this checkout and then run it:
-
-```bash
-just exomonad-init           # build, then `exomonad init` in this repository
-```
 
 ## `exomonad new`: write a workspace
 
@@ -57,23 +63,24 @@ cd /path/to/your/project
 /path/to/tidepool/result/bin/exomonad new
 ```
 
+With a local development build, use `/path/to/tidepool/target/debug/exomonad
+new` instead.
+
 `exomonad new` takes an empty directory, which it makes a Git repository, or an
 existing repository that has no `.exomonad/config.toml`. It refuses, and changes
 nothing, when a workspace is already there. It writes:
 
 | Path | What it is |
 |---|---|
-| `.exomonad/config.toml` | models, effort, the Haskell source roots, and the jev-dsl source pin |
-| `.exomonad/Jev/Operators.hs` | the Jev operators, fixed to Tidepool's value type; cells reach it as `J` |
-| `.exomonad/AgentSpec.hs` | the agent spec: which tools the agent is offered and what runs after each tool call |
-| `.exomonad/Project/Tools.hs` | the tools record: shell and lookup, extended with your own tools |
-| `.exomonad/Project/Lookup.hs` | lookup enrichment policy: Jev-selected related declarations and alternatives |
-| `.exomonad/skills/` | the workspace skills an agent loads by name |
-| `.agents/skills/` | links into `.exomonad/skills/`, which is where the client looks for skills |
+| `.exomonad/config.toml` | generated model defaults, source roots (`.` and `workspace`), modules, checks, and the jev-dsl flake source |
+| `.exomonad/AgentSpec.hs` | generated project agent spec: tool declarations and the after-tool hook |
+| `.exomonad/prompts/`, `.exomonad/plans/` | project-owned starter prompts and plans |
+| `.exomonad/workspace/` | pinned Git submodule from `tidepool-heavy-industries/exomonad-default-workspace` with shared Haskell modules, checks, and skills |
+| `.agents/skills/` | links into `.exomonad/workspace/skills/`, where the client looks for skills |
 | `flake.nix`, `flake.lock` | only when the project has none: one input, pinning jev-dsl |
 
-Nothing it writes is specific to your machine, so the package belongs in Git.
-A teammate who clones the project runs `exomonad init` and nothing else.
+The generated files and submodule pin belong in Git. After cloning, a teammate
+runs `git submodule update --init --recursive` and then `exomonad init`.
 
 Jev's operators are compiled from the jev-dsl revision the project's `flake.nix`
 pins. When the project already has a `flake.nix`, `exomonad new` leaves it alone
@@ -86,10 +93,9 @@ you ask an agent to delegate.
 ## Migrating an existing workspace lookup
 
 `lookup` is now supplied by the workspace agent spec rather than installed
-as a special hosted tool. Existing workspaces must copy `Project/Lookup.hs`
-from the shipped template and register its tool in their `Project.Tools` and
-`AgentSpec`, following the template
-[`Project.Tools`](../examples/workspace/.exomonad/Project/Tools.hs).
+as a special hosted tool. Existing workspaces must provide `Project.Lookup`
+and register its tool in their `Project.Tools` and `AgentSpec`, following the
+shared workspace's `Project.Tools`.
 Use the argument object `{"queries": ["name", "Module.name"]}`.
 The tool preserves original lookup results and may add up to four related
 declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`

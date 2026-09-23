@@ -104,9 +104,13 @@ probe-opacity-check:
 doctor:
     {{ nix }} scripts/toolchain-doctor.sh
 
-# Build a matched local extractor/worker/Exomonad set and start a fresh actor run.
+# Reuse local Cabal/Cargo outputs to build Exomonad and its matched compiler tools.
+exomonad-build:
+    {{ exomonad_nix }} bash exomonad/scripts/exomonad-build.sh
+
 # Pass Exomonad init flags after `--`, for example:
 #   just exomonad-init -- --session exomonad-tidepool-fresh --no-attach
+# Build the matched local tools incrementally, then start an actor run.
 [positional-arguments]
 exomonad-init *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"

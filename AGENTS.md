@@ -12,16 +12,26 @@ providers, scheduling, resources, persistence, and argument parsing.
    evidence.
 2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
    `CLAUDE.md`. They state that crate's boundaries and invariants.
-3. Build and test through the `justfile`, which enters the Nix shell itself:
-   `just test-lib <crate> 'test(<name>)'` runs one test and compiles only what
-   it needs. `just verify` is the full gate and takes about two hours; do not
-   run it as a routine check.
-4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` writes a workspace,
-   `exomonad init` starts a run, and in this repository `just exomonad-init` builds
-   the checkout first. To see the system from the model's side, read
+3. Build and test through the `justfile`, which enters the Nix shell itself.
+   `just exomonad-build` incrementally builds the matched local extractor,
+   Haskell worker, and Exomonad binary without starting a run. Cabal and Cargo
+   reuse this checkout's build outputs on later calls.
+   `just test-lib <crate> 'test(<name>)'` runs one test and compiles only what it
+   needs. `just verify` is the full gate and takes about two hours; do not run
+   it as a routine check.
+4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` creates a
+   project workspace with a pinned shared-source submodule, while `exomonad init`
+   starts a run. In this repository `just exomonad-init` builds incrementally
+   and then starts a run. To see the system from the model's side, read
    `exomonad/prompts/base.md` and the skills under
    `exomonad/examples/workspace/.exomonad/skills/`, and drive a session from a
    terminal with `exomonad proxy` (`exomonad/docs/operator-http.md`).
+
+For Tidepool development, use `just exomonad-build` after source edits or
+`just exomonad-init` when you also want a run. Both use the current checkout
+and the same local Cabal/Cargo outputs. `nix build .#exomonad` makes an isolated
+distribution build; Nix can reuse an identical input hash, but changed source
+starts a new build without reusing the checkout's incremental compilation.
 
 Most changes touch one of three layers, and it helps to know which:
 
