@@ -5315,6 +5315,16 @@ where
                                     let resolved = self
                                         .resolve_command(kernel, context, continuation, request)
                                         .await;
+                                    if let Some(job) = resolved.started_job {
+                                        // Record the job id against this
+                                        // item's fragment: on commit, a sole
+                                        // command-job-typed binder installed
+                                        // by this item is discoverable by
+                                        // this exact id, the same as a
+                                        // host-mounted binding. See
+                                        // `resident_workbench::settle_fragment`.
+                                        next_fragment.record_started_job(job);
+                                    }
                                     (resolved.outcome, Some(resolved.disposition))
                                 }
                                 boundary => (

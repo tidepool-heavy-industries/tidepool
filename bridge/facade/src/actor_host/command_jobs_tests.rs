@@ -1488,9 +1488,16 @@ async fn command_binding_failure_preserves_the_existing_job_without_claiming_an_
         Ok(value) => value.to_string(),
         Err(error) => error.to_string(),
     };
-    assert!(rendered.contains("automatic binding failed"), "{rendered}");
-    assert!(!rendered.contains("Available binding:"), "{rendered}");
-    assert!(!rendered.contains("Continue with:"), "{rendered}");
+    // The job was already named by the model's own `retainedBeforeFailure
+    // <- Cmd.start ...`; the backgrounded-command handoff must offer that
+    // exact name back, never mint a fresh alias for a job the model already
+    // owns a binding for.
+    assert!(
+        rendered.contains("Continue with: result <- Cmd.await retainedBeforeFailure"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("job3"), "{rendered}");
+    assert!(!rendered.contains("automatic binding failed"), "{rendered}");
     let status = committed(&campaign, "Cmd.status retainedBeforeFailure").await;
     assert!(status.to_string().contains("CommandExited 0"), "{status}");
     assert_eq!(backend.specs.lock().len(), 1);

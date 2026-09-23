@@ -22,7 +22,8 @@ use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
     run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
     CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
+    HostBindingAuthority, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
+    ResidentError, ResidentHole,
     ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
     TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
@@ -570,6 +571,12 @@ pub(crate) struct ResidentWorkbenchFragment {
     presented: Vec<String>,
     recovered_jobs: Vec<String>,
     warnings: Vec<String>,
+    /// Job ids returned by `Cmd.start` effects resolved while this exact
+    /// item's Haskell computation was running. A single unambiguous job here
+    /// against a single command-job-typed binder in `display` is the same
+    /// name-to-job fact the automatic-binding path already knows — see
+    /// `settle_fragment`'s tagging of `host_text_bindings` on completion.
+    started_jobs: Vec<String>,
 }
 
 impl ResidentWorkbenchFragment {
@@ -579,6 +586,14 @@ impl ResidentWorkbenchFragment {
 
     pub(crate) fn retain_job_binding(&mut self, binding: String) {
         self.recovered_jobs.push(binding);
+    }
+
+    /// Record that a `Cmd.start` effect resolved to this job id while this
+    /// item's computation was running. Only tagged onto a binding at
+    /// completion when it is the item's sole started job and its sole
+    /// command-job-typed binder — see `settle_fragment`.
+    pub(crate) fn record_started_job(&mut self, job: String) {
+        self.started_jobs.push(job);
     }
 
     /// Charge streamed output and the eventual value display to the same
@@ -611,7 +626,7 @@ impl ResidentWorkbenchFragment {
 }
 
 enum WorkbenchDisplay {
-    Binding(Vec<String>),
+    Binding(Vec<BoundBinder>),
     Opaque,
     Tool,
     Observation {
@@ -3718,7 +3733,7 @@ where
             } else if names.is_empty() {
                 WorkbenchDisplay::Opaque
             } else {
-                WorkbenchDisplay::Binding(names)
+                WorkbenchDisplay::Binding(bound)
             };
             start_fragment_settlement(
                 session,
@@ -3791,6 +3806,7 @@ where
                 presented: Vec::new(),
                 recovered_jobs: Vec::new(),
                 warnings,
+                started_jobs: Vec::new(),
             },
             outcome,
         ),
@@ -3840,14 +3856,44 @@ where
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
-            let mut installed_bindings = match &fragment.display {
-                WorkbenchDisplay::Binding(names) => names.clone(),
+            let mut installed_bindings: Vec<String> = match &fragment.display {
+                WorkbenchDisplay::Binding(binders) => {
+                    binders.iter().map(|binder| binder.name.clone()).collect()
+                }
                 WorkbenchDisplay::Observation { name, .. } => vec![name.clone()],
                 WorkbenchDisplay::Opaque | WorkbenchDisplay::Tool => Vec::new(),
             };
             installed_bindings.append(&mut fragment.recovered_jobs);
-            let receipt = match fragment.display {
-                WorkbenchDisplay::Binding(names) => format!("[bound {}]", names.join(", ")),
+            // The same name-to-job fact `mount_command_job` records for a
+            // host-minted binding, but for whatever name the model itself
+            // gave the job: one command-job-typed binder, resolved against
+            // the one `Cmd.start` effect this item ran, is unambiguous.
+            // `bind_command_job` then finds this name instead of minting a
+            // fresh alias for a job the model already named. A lost race
+            // over the exact live entry is tolerated; the automatic-binding
+            // path mints a fresh alias later, same as before this existed.
+            if let (WorkbenchDisplay::Binding(binders), [job]) =
+                (&fragment.display, fragment.started_jobs.as_slice())
+            {
+                if let [binder] = binders.as_slice() {
+                    if binder.host_authority == Some(HostBindingAuthority::CommandJob) {
+                        let _ = session.tag_host_text_binding_in(
+                            context.placement.lexical_scope,
+                            binder,
+                            job.clone(),
+                        );
+                    }
+                }
+            }
+            let receipt = match &fragment.display {
+                WorkbenchDisplay::Binding(binders) => format!(
+                    "[bound {}]",
+                    binders
+                        .iter()
+                        .map(|binder| binder.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 WorkbenchDisplay::Opaque => "<opaque value>".into(),
                 WorkbenchDisplay::Tool => {
                     // A bounded observation marks what it could not afford to
@@ -3872,7 +3918,7 @@ where
                     match render_cell_observation(
                         session, context, &source, &type_modules,
                         &name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
-                        presentation,
+                        *presentation,
                     ) {
                         Ok(text) => text,
                         Err(error) => format!("Display failed: {error}\nValue remains bound as {name}. Inspect a smaller field or projection; execution was not repeated."),
@@ -3892,14 +3938,22 @@ where
         }
         ResidentOutcome::BindingsCommitted { output } => {
             let bound_name = match &fragment.display {
-                WorkbenchDisplay::Binding(names) => Some(names.join(", ")),
+                WorkbenchDisplay::Binding(binders) => Some(
+                    binders
+                        .iter()
+                        .map(|binder| binder.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
                 | WorkbenchDisplay::Observation { .. } => None,
             };
             let receipt = projected_binding_receipt(bound_name.as_deref(), &output)?;
             let installed_bindings = match fragment.display {
-                WorkbenchDisplay::Binding(names) => names,
+                WorkbenchDisplay::Binding(binders) => {
+                    binders.into_iter().map(|binder| binder.name).collect()
+                }
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
                 | WorkbenchDisplay::Observation { .. } => Vec::new(),

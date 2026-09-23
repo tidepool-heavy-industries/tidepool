@@ -8,6 +8,12 @@ use tidepool_bridge_effects::CommandError;
 pub(super) struct CommandResolution {
     pub disposition: WorkbenchOperationDisposition,
     pub outcome: Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    /// The job id `Cmd.start` minted, when this resolution answered a
+    /// `CommandStartWith` request. The caller records it against the item's
+    /// fragment so a sole command-job-typed binder this item installs can be
+    /// tagged with the exact job it names — see
+    /// `resident_workbench::settle_fragment`.
+    pub started_job: Option<String>,
 }
 
 fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOperationDisposition {
@@ -42,6 +48,7 @@ where
         let jobs = self.environment.commands.clone();
         let owner = context.actor;
         let mut settled = WorkbenchOperationDisposition::Unknown;
+        let mut started_job = None;
         macro_rules! answer {
             ($action:expr) => {{
                 let result = if permitted {
@@ -73,6 +80,7 @@ where
                                     "native host unavailable".into(),
                                 )));
                             }
+                            started_job = Some(id.clone());
                             Ok(id)
                         }
                         Err(error) => Err(error),
@@ -206,6 +214,7 @@ where
         CommandResolution {
             disposition: settled,
             outcome,
+            started_job,
         }
     }
 }
