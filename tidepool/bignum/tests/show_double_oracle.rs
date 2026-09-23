@@ -30,6 +30,10 @@ fn formatting_matches_native_ghc_at_rounding_boundaries() {
         .iter()
         .map(|bits| format!("{bits}\n"))
         .collect::<String>();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: runs a GHC oracle script over piped input and exits, not a long-lived child"
+    )]
     let mut child = Command::new("runghc")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
