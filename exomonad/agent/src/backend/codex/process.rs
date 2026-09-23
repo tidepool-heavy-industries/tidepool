@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -34,9 +35,16 @@ use crate::backend::codex::transport::Transport;
 /// round-trip time.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long shutdown is allowed to take before we give up waiting for the
-/// child to be reaped and report it as a possible orphan.
+/// How long shutdown is allowed to take before it escalates to an
+/// identity-safe `SIGKILL` (see [`pidfd_kill_and_wait`]) and gives the
+/// process one last bounded chance to exit.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on the wait after escalation before giving up and reporting
+/// [`SessionError::OrphanedProcess`]. Short: escalation already sent the
+/// strongest signal there is, so this only accounts for reap latency, not a
+/// second grace period.
+const SHUTDOWN_ESCALATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Which side of the wire produced a [`RecordedFrame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +152,15 @@ pub struct Session<T = RawAsyncClient> {
     /// a new marker, which is what keeps `frames` bounded forever after.
     truncation_marker: Option<(usize, u64)>,
     pid: Option<u32>,
+    /// A pidfd bound to `pid`'s exact process instance, opened the moment the
+    /// pid becomes known — the same identity-safe handle
+    /// [`backend::codex::driver`](super::driver)'s `CodexCanceller` uses, so
+    /// [`shutdown`](Session::shutdown)'s escalation signals through it rather
+    /// than a bare pid. `None` when there is no process (a replay/mock
+    /// transport) or the pidfd could not be acquired — either way,
+    /// escalation then has nothing safe to signal and fails closed rather
+    /// than falling back to a raw pid.
+    pidfd: Option<OwnedFd>,
     /// State of the turn currently being pumped.
     turn: TurnState,
 }
@@ -156,12 +173,18 @@ impl<T: Transport> Session<T> {
     /// in a recorded conversation the caller wants the pump to pick up.
     pub fn over(client: T) -> Self {
         let pid = client.pid();
+        // Acquired NOW, bound to this exact process instance, for the same
+        // reason `driver.rs`'s `connected()` opens one the moment a live pid
+        // is known: opening it late (at shutdown-escalation time) would
+        // reopen the check-then-kill pid-reuse gap pidfd exists to close.
+        let pidfd = pid.and_then(|p| pidfd_open(p).ok());
         Self {
             client,
             request_ids: MonotonicIdIssuer::new("req"),
             frames: Vec::new(),
             truncation_marker: None,
             pid,
+            pidfd,
             turn: TurnState::default(),
         }
     }
@@ -510,8 +533,18 @@ impl<T: Transport> Session<T> {
     /// Kill the app-server process and confirm it no longer exists — never a
     /// bare "the kill call returned Ok", since that only proves the signal
     /// was sent.
+    ///
+    /// A process that survives the graceful path (e.g. a descendant holding
+    /// the group alive) is escalated with an identity-safe `SIGKILL` through
+    /// [`self.pidfd`](Session::pidfd) — the same mechanism
+    /// [`driver::CodexCanceller`](super::driver::CodexCanceller) signals
+    /// with — rather than only ever reporting the orphan. Only when
+    /// escalation itself cannot prove identity (no pidfd was acquirable) or
+    /// the process still survives that does this report
+    /// [`SessionError::OrphanedProcess`].
     pub async fn shutdown(self) -> Result<(), SessionError> {
         let pid = self.pid;
+        let pidfd = self.pidfd;
         self.client.shutdown().await?;
         let Some(pid) = pid else {
             return Ok(());
@@ -519,6 +552,32 @@ impl<T: Transport> Session<T> {
         let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
         while process_exists(pid) {
             if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        // Graceful shutdown timed out with the process still alive.
+        // Escalate through the pidfd, never a bare pid — see the field docs
+        // on `Session::pidfd` and `PidFdSlot` in `driver.rs` for why a
+        // numeric-pid fallback is refused rather than narrowed.
+        let Some(fd) = &pidfd else {
+            return Err(SessionError::OrphanedProcess {
+                timeout: SHUTDOWN_TIMEOUT,
+            });
+        };
+        // `pidfd_kill_and_wait`'s `POLLIN` confirms the process EXITED, not
+        // that it has been REAPED — a still-owning `Child` (this crate's own
+        // kill-on-drop path, or tokio's background orphan queue) needs a
+        // moment afterward to actually collect it before `/proc/<pid>`
+        // disappears, so the final check is a short bounded poll of its own
+        // rather than one instantaneous read.
+        pidfd_kill_and_wait(fd, SHUTDOWN_ESCALATION_TIMEOUT);
+        let escalation_deadline = tokio::time::Instant::now() + SHUTDOWN_ESCALATION_TIMEOUT;
+        while process_exists(pid) {
+            if tokio::time::Instant::now() >= escalation_deadline {
                 return Err(SessionError::OrphanedProcess {
                     timeout: SHUTDOWN_TIMEOUT,
                 });
@@ -527,6 +586,36 @@ impl<T: Transport> Session<T> {
         }
         Ok(())
     }
+}
+
+/// Open a pidfd for `pid` via the `pidfd_open(2)` syscall, or report why not.
+/// Shared by [`Session`]'s own shutdown escalation and
+/// [`driver::CodexCanceller`](super::driver::CodexCanceller) — one
+/// implementation of "how this crate binds to a process instance", not two
+/// that could drift.
+pub(crate) fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
+    let Some(rpid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return Err(std::io::Error::other(format!(
+            "pid {pid} is not a valid non-zero pid to open a pidfd for"
+        )));
+    };
+    rustix::process::pidfd_open(rpid, rustix::process::PidfdFlags::empty()).map_err(Into::into)
+}
+
+/// Send `SIGKILL` through a pidfd — identity-safe, since the fd is bound to
+/// the exact process instance rather than a pid number that can be reused —
+/// and wait up to `timeout` for the signalled process to exit (`POLLIN` on
+/// the fd; see `pidfd_open(2)`). Best effort: `ESRCH` from a process that
+/// already exited is not an error, and this reports no confirmed reap —
+/// callers that need one re-check liveness themselves afterward.
+pub(crate) fn pidfd_kill_and_wait(fd: &OwnedFd, timeout: Duration) {
+    let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
+    let mut pfd = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
+    let ts = rustix::event::Timespec {
+        tv_sec: timeout.as_secs() as _,
+        tv_nsec: timeout.subsec_nanos() as _,
+    };
+    let _ = rustix::event::poll(&mut pfd, Some(&ts));
 }
 
 /// One observed `item/tool/call`: the correlation triple as the server sent
@@ -977,6 +1066,72 @@ mod tests {
             }
             assert_peer_reaped(directory.path()).await;
         }
+    }
+
+    /// A `Transport` whose own `shutdown()` does nothing — standing in for a
+    /// graceful shutdown that did not actually terminate the child (e.g. a
+    /// descendant that kept its process group alive). `Session::shutdown`
+    /// must still escalate through the pidfd it acquired in `over()`, rather
+    /// than only reporting the process as orphaned.
+    struct NoKillTransport {
+        pid: u32,
+    }
+
+    impl Transport for NoKillTransport {
+        async fn next_line(&mut self) -> Result<Option<String>, codex_codes::Error> {
+            Ok(None)
+        }
+        async fn send(&mut self, _frame: &Value) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+        fn pid(&self) -> Option<u32> {
+            Some(self.pid)
+        }
+        async fn shutdown(self) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_escalates_to_sigkill_when_the_transport_leaves_the_process_alive() {
+        // Ignores SIGTERM outright; only SIGKILL (never trappable) ends it.
+        // Since the transport's own `shutdown()` above is a no-op, the only
+        // thing that can reap this child is `Session::shutdown`'s escalation.
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 60"])
+            .kill_on_drop(false)
+            .spawn()
+            .expect("sh must spawn");
+        let pid = child.id().expect("spawned child has a pid");
+        assert!(process_exists(pid));
+
+        let session = Session::over(NoKillTransport { pid });
+        assert!(
+            session.pidfd.is_some(),
+            "a real, live pid must yield an armed pidfd"
+        );
+
+        // A `SIGKILL`ed process is only reaped — and its `/proc` entry only
+        // disappears — once its owning `Child` handle is waited on. In
+        // production that is `RawAsyncClient`'s own kill-on-drop/orphan-queue
+        // machinery running alongside the pump; here it is this concurrent
+        // `wait()`, standing in for it so the test observes the same "signal
+        // now, reap shortly after" shape rather than a hand-reaped process
+        // this session never actually had to kill.
+        let reap = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(20), session.shutdown())
+            .await
+            .expect("escalation must not hang")
+            .expect("escalation must reap a process the transport left alive");
+
+        assert!(
+            !process_exists(pid),
+            "SIGKILL through the pidfd must have ended the process"
+        );
+        reap.await.unwrap();
     }
 
     #[tokio::test]

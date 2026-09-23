@@ -40,7 +40,9 @@ use parking_lot::Mutex;
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
 };
-use crate::backend::codex::process::{last_agent_message_text, Session, SessionError, TurnStop};
+use crate::backend::codex::process::{
+    last_agent_message_text, pidfd_kill_and_wait, pidfd_open, Session, SessionError, TurnStop,
+};
 use crate::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -425,16 +427,6 @@ enum PidFdSlot {
     IdentityUnprovable,
 }
 
-/// Open a pidfd for `pid` via the `pidfd_open(2)` syscall, or report why not.
-fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
-    let Some(rpid) = rustix::process::Pid::from_raw(pid as i32) else {
-        return Err(std::io::Error::other(format!(
-            "pid {pid} is not a valid non-zero pid to open a pidfd for"
-        )));
-    };
-    rustix::process::pidfd_open(rpid, rustix::process::PidfdFlags::empty()).map_err(Into::into)
-}
-
 /// What [`CodexAgentBackend::pidfd`] (or a test) should hold for `pid`: a
 /// live pidfd, or [`PidFdSlot::IdentityUnprovable`] when one could not be
 /// acquired — the exact classification [`connected`](CodexAgentBackend::connected)
@@ -488,18 +480,13 @@ impl BackendCanceller for CodexCanceller {
             // numeric-pid fallback — see `PidFdSlot`'s docs.
             return;
         };
-        // `ESRCH` from a process that exited in the gap between acquiring
-        // the pidfd and this call is the outcome cancellation wanted, so it
-        // is ignored.
-        let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
-        // POLLIN indicates exit, not reaping; this void best-effort path
+        // Same pidfd-bound kill `Session::shutdown`'s own escalation uses —
+        // one implementation of "how this crate SIGKILLs a process instance",
+        // not two that could drift. `ESRCH` from a process that exited in
+        // the gap between acquiring the pidfd and this call is the outcome
+        // cancellation wanted, so it is ignored; this void best-effort path
         // does not provide a confirmed cleanup receipt.
-        let mut pfd = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
-        let timeout = rustix::event::Timespec {
-            tv_sec: CANCEL_CONFIRM_TIMEOUT.as_secs() as _,
-            tv_nsec: CANCEL_CONFIRM_TIMEOUT.subsec_nanos() as _,
-        };
-        let _ = rustix::event::poll(&mut pfd, Some(&timeout));
+        pidfd_kill_and_wait(fd, CANCEL_CONFIRM_TIMEOUT);
     }
 }
 
