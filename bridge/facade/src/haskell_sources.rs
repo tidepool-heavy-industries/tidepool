@@ -44,11 +44,9 @@ pub(crate) fn source_identity() -> String {
 /// actors trees and hash them with the same source-revision identity the
 /// runtime uses elsewhere, rather than inventing a second content digest.
 fn dev_source_identity() -> String {
-    let stdlib = tidepool_toolchain::toolchain::locate_stdlib(
-        &tidepool_toolchain::toolchain::StdlibFallbacks::default(),
-    )
-    .map(|location| location.dir)
-    .ok();
+    let stdlib = tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
+        .map(|location| location.dir)
+        .ok();
     let actors = locate_exomonad_haskell();
     dev_source_identity_from(stdlib, actors)
 }
@@ -64,6 +62,19 @@ fn dev_source_identity_from(stdlib: Option<PathBuf>, actors: Option<PathBuf>) ->
     tidepool_toolchain::cache::source_roots_identity(b"tidepool-facade-dev-source-identity", &roots)
 }
 
+/// The stdlib fallbacks a dev build carries: the source tree this binary was
+/// built from (step 5 of the precedence table), so that every process of one
+/// run, whatever its working directory, resolves the same trees. The CLI runs
+/// from the checkout and the host runs in the project's directory; before
+/// this, the two hashed different trees into `source_identity` and a fresh
+/// run refused its own frozen workspace.
+fn dev_fallbacks() -> tidepool_toolchain::toolchain::StdlibFallbacks {
+    tidepool_toolchain::toolchain::StdlibFallbacks {
+        bundle: None,
+        build_tree: Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../haskell/lib")),
+    }
+}
+
 /// Locate `bridge/haskell/actors` on disk, mirroring
 /// `tidepool_toolchain::toolchain::locate_stdlib`'s in-repo walk-up: try every
 /// ancestor of the current directory, then fall back to the `actors` sibling
@@ -75,10 +86,7 @@ fn locate_exomonad_haskell() -> Option<PathBuf> {
             return Some(found);
         }
     }
-    let stdlib = tidepool_toolchain::toolchain::locate_stdlib(
-        &tidepool_toolchain::toolchain::StdlibFallbacks::default(),
-    )
-    .ok()?;
+    let stdlib = tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks()).ok()?;
     let candidate = stdlib.dir.parent()?.join("actors");
     is_actors_root(&candidate).then_some(candidate)
 }
@@ -140,7 +148,7 @@ fn materialize(
 pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
         bundle: Some(ensure_embedded_stdlib()?),
-        build_tree: None,
+        ..dev_fallbacks()
     };
     Ok(tidepool_toolchain::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
@@ -155,11 +163,9 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// [`source_identity`]'s dev path does.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if EMBEDDED_STDLIB.is_empty() {
-        return tidepool_toolchain::toolchain::locate_stdlib(
-            &tidepool_toolchain::toolchain::StdlibFallbacks::default(),
-        )
-        .map(|location| location.dir)
-        .map_err(Into::into);
+        return tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
+            .map(|location| location.dir)
+            .map_err(Into::into);
     }
     let hash = content_hash(EMBEDDED_STDLIB);
     materialize(
