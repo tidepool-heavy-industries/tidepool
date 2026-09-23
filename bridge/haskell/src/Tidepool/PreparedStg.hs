@@ -23,7 +23,6 @@ import Control.Exception
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Set (Set)
 import Data.Word (Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -80,7 +79,6 @@ data PreparedElaboration = PreparedElaboration
   , pePreparedSites :: [PreparedSite]
   , peTypeGraph :: TypeGraph
   , peSiteRejections :: [SiteRejection]
-  , peEffectRequestTypeIds :: Set Word64
   }
 
 -- | The migration state used until the production elaborator is installed.
@@ -95,7 +93,6 @@ unelaboratedModule guts = PreparedElaboration
   , pePreparedSites = []
   , peTypeGraph = TypeGraph []
   , peSiteRejections = []
-  , peEffectRequestTypeIds = mempty
   }
 
 -- | An executable record of the selected GHC 9.12 preparation policy.
@@ -131,7 +128,6 @@ data PreparedModule = PreparedModule
   -- | Typed sites that failed elaboration, raised only if projection
   -- reaches their top binder. Empty for recovered package bodies.
   , pmSiteRejections :: [SiteRejection]
-  , pmEffectRequestTypeIds :: Set Word64
   , pmFacts :: PreparedFacts
   }
 
@@ -148,7 +144,6 @@ prepareModule hscEnv summary elaboration = do
     { pmPreparedSites = pePreparedSites elaboration
     , pmTypeGraph = peTypeGraph elaboration
     , pmSiteRejections = peSiteRejections elaboration
-    , pmEffectRequestTypeIds = peEffectRequestTypeIds elaboration
     }
 
 -- | Exact optimized bindings retain their defining module and interface
@@ -370,6 +365,5 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , pmPreparedSites = []
     , pmTypeGraph = TypeGraph []
     , pmSiteRejections = []
-    , pmEffectRequestTypeIds = mempty
     , pmFacts = extractPreparedFacts thisModule tagSigs (map fst preparedBindings)
     }

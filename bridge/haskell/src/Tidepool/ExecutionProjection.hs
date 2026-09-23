@@ -62,7 +62,7 @@ import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
-import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName, nameUnique)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
@@ -748,8 +748,7 @@ lowerPreparedEvidence context modules = do
   (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
   (verbNodes, verbRows, verbSites) <-
-    lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
-      (length moduleNodes + length auxNodes)
+    lowerVerbEvidence (length moduleNodes + length auxNodes)
   let sites = moduleSites <> verbRows
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
@@ -853,18 +852,19 @@ auxiliaryRootTypeGraph context modules = do
         TypePolicy.emptyTypeGraphBuilder
   pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
--- | One synthetic 'HostAnswer' row per interned constructor with a closed
--- reply index ('requestReplyIndex'), and the table naming it. Only the index
--- is interned; the row has no inputs, since the host answer is built from the
--- wire type alone. These are declared effect types, not membership in a
--- particular actor row; runtime installations still refuse unhandled effects.
-lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerVerbEvidence effectRequestTypeIds base = do
+-- | One synthetic 'HostAnswer' row per observed request constructor defined
+-- by the generated effect universe with a closed reply index. The generated
+-- module is the universal effect vocabulary shared by actor and MCP surfaces;
+-- the installed row is enforced at runtime. Only the index is interned, since
+-- the host constructs its answer from the wire type alone.
+lowerVerbEvidence :: Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerVerbEvidence base = do
   known <- gets constructors
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
-        , getKey (nameUnique (GHC.tyConName (dataConTyCon constructor))) `Set.member` effectRequestTypeIds
+        , Just owner <- [nameModule_maybe (GHC.tyConName (dataConTyCon constructor))]
+        , moduleNameString (moduleName owner) == "Tidepool.Effects.Core"
         , Just index <- [requestReplyIndex constructor]
         , let symbol = nameSymbol "constructor" (dataConName constructor)
               qualified = symbolModule symbol <> "." <> symbolOccurrence symbol

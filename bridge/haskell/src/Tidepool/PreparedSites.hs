@@ -3,7 +3,6 @@ module Tidepool.PreparedSites
   , PreparedSite(..)
   , SiteAuthority
   , resolveSiteAuthority
-  , siteAuthorityEffectRequestTypeIds
   , SiteRejection(..)
   , elaboratePreparedSites
   , lookupPreparedVerb
@@ -18,12 +17,9 @@ import Data.Bits ((.&.), (.|.), xor)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core
-import GHC.Core.Class (className)
-import GHC.Core.InstEnv (ClsInst, instEnvElts, is_cls, is_tys)
 import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
@@ -35,15 +31,14 @@ import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqF
 import GHC.Core.Type
   ( mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView
   , isLiftedTypeKind, typeKind )
-import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName)
+import GHC.Core.TyCon (TyCon, tyConArity)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy)
-import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, lookupType)
-import GHC.Types.Unique (getKey)
+import GHC.Driver.Env (HscEnv, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
-import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName, nameUnique)
+import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
@@ -53,10 +48,7 @@ import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt)
 import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString)
-import GHC.Unit.Module.ModDetails (md_insts)
-import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
@@ -71,35 +63,19 @@ data SiteAuthority = SiteAuthority
   { eitherTyCon :: Maybe TyCon
   , invocationExitTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
-  , effectRequestTypeIds :: Set.Set Word64
   }
 
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.
-resolveSiteAuthority :: HscEnv -> [ClsInst] -> IO SiteAuthority
-resolveSiteAuthority env currentInstances = do
+resolveSiteAuthority :: HscEnv -> IO SiteAuthority
+resolveSiteAuthority env = do
   eitherType <- exactTyCon "GHC.Internal.Data.Either" "Either"
   invocationExit <- exactTyCon "Tidepool.Effects.Core" "InvocationExit"
   responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
-  effectRequests <- do
-    declared <- knownEffectTypeIds
-    -- These two protocol families are runtime-private implementation
-    -- requests. They participate in prepared execution but are intentionally
-    -- absent from ActorEffectKey, so their TyCons are explicit compiler
-    -- authority rather than fabricated actor capabilities.
-    privateFamilies <- traverse (uncurry exactTyCon)
-      [ ("Tidepool.Effects.Core", "AgentSession")
-      , ("Tidepool.Effects.Core", "AgentTools")
-      ]
-    pure (declared <> Set.fromList
-      [ getKey (nameUnique (tyConName tycon))
-      | Just tycon <- privateFamilies
-      ])
   pure SiteAuthority
     { eitherTyCon = eitherType
     , invocationExitTyCon = invocationExit
     , responseResultTyCon = responseResult
-    , effectRequestTypeIds = effectRequests
     }
  where
   -- Resolve the defining module's interface and ask its declaration loader
@@ -121,49 +97,6 @@ resolveSiteAuthority env currentInstances = do
               Succeeded _ -> Nothing
               Failed _ -> Nothing
       _ -> pure Nothing
-
-  knownEffectTypeIds = do
-    found <- findImportedModule env (mkModuleName "Tidepool.Effects.Row") NoPkgQual
-    case found of
-      Found _ owner -> do
-        className' <- initIfaceLoad env (lookupOrig owner (mkTcOcc "KnownEffect"))
-        knownEffect <- lookupType env className' >>= \case
-          Just (ATyCon tycon) | isClassTyCon tycon -> pure True
-          Nothing -> do
-            imported <- initIfaceLoad env (importDecl className')
-            pure $ case imported of
-              Succeeded (ATyCon tycon) -> isClassTyCon tycon
-              _ -> False
-          _ -> pure False
-        if not knownEffect
-          then pure Set.empty
-          else do
-            eps <- hscEPS env
-            let packageInstances = instEnvElts (eps_inst_env eps)
-                homeInstances = concatMap (instEnvElts . md_insts . hm_details)
-                  (eltsHpt (hsc_HPT env))
-                effectInstances = filter
-                  ((== className') . className . is_cls)
-                  (currentInstances <> homeInstances <> packageInstances)
-                ids = Set.fromList
-                  [ getKey (nameUnique (tyConName effectTyCon))
-                  | instance' <- effectInstances
-                  , [effectType] <- [is_tys instance']
-                  , Just (effectTyCon, _) <- [splitTyConApp_maybe effectType]
-                  ]
-            -- Class identity comes from Row's defining module; only its explicit
-            -- instance heads are authority. With no visible instances the set is
-            -- empty, which fails closed for request constructors.
-            pure ids
-      -- Standalone Haskell inputs need not depend on Tidepool's effect
-      -- library. With no marker module available, no constructor is eligible
-      -- for a synthetic host-answer row. A module stub without the marker
-      -- class likewise carries no authority; zero visible instances is also
-      -- a valid empty roster.
-      _ -> pure Set.empty
-
-siteAuthorityEffectRequestTypeIds :: SiteAuthority -> Set.Set Word64
-siteAuthorityEffectRequestTypeIds = effectRequestTypeIds
 
 data PreparedSite = PreparedSite
   { psOwner :: Id
@@ -398,28 +331,12 @@ syntheticSiteId identity =
   let Fingerprint high low = fingerprintString (T.unpack identity)
   in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
 
--- | The reply index of a request constructor: the last argument of its
--- saturated original result type (@Print :: Text -> Console ()@ gives @()@).
--- A polymorphic index remains useful only when it has a normalized nominal
--- outer constructor. Its enclosing algebraic constructors are authenticated,
--- while the unresolved field remains an explicit unconstructible node. This
--- permits fieldless states such as @ProgressPending@ and @ProgressClosed@
--- without claiming a way to construct the polymorphic payload. A bare type
--- variable has no evidence: admitting it could replace a real dynamic site
--- with an unconstructible synthetic one. A nullary result type also has no
--- index. Only the index is interned; the request type itself is a GADT the
--- type policy refuses.
--- Indices of other kinds, such as an effect-profile witness's effect list,
--- are not reply values and must not acquire host-answer sites.
--- | A reachable constructor with a lifted, nominal final result argument may
--- carry synthetic answer evidence even when it is not itself an effect
--- request (for example, an alternatives constructor). This keeps the table
--- independent of effect authority: the caller separately admits constructors
--- only when their effect type has a KnownEffect instance or is one of the
--- runtime-private request families above. Polymorphic parts of an admitted
--- request index remain explicitly unconstructible in the type graph, and
--- their diagnostic rendering must therefore be stable across compiler
--- sessions.
+-- | The reply index of a generated effect request is the last argument of
+-- its saturated result type (@Print :: Text -> Console ()@ gives @()@).
+-- Projection admits only constructors defined in Tidepool.Effects.Core.
+-- Require a lifted, nominal outer constructor so a bare type variable or an
+-- effect-profile index cannot acquire a synthetic host-answer site. Fields
+-- inside an admitted index may remain unconstructible in the type graph.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)
