@@ -339,6 +339,10 @@ pub(crate) struct DaemonConfig {
     pub persistent: bool,
     pub run_id: Option<String>,
     pub log_path: Option<PathBuf>,
+    /// Concurrent GHC worker slots (`daemon::DEFAULT_WORKER_COUNT` when
+    /// unset). Only `--persistent` runs more than one; see that constant's
+    /// doc comment.
+    pub workers: Option<usize>,
 }
 
 fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
@@ -350,6 +354,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
     let mut persistent = false;
     let mut run_id = None;
     let mut log_path = None;
+    let mut workers = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let option = arg
@@ -371,6 +376,17 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
                 )
             }
             "--log-path" => log_path = Some(PathBuf::from(next(&mut args, option)?)),
+            "--workers" => {
+                let count = number(&mut args, option)?;
+                let count = usize::try_from(count)
+                    .map_err(|_| FrontendError::Usage("--workers is too large".to_owned()))?;
+                if count == 0 {
+                    return Err(FrontendError::Usage(
+                        "--workers must be at least 1".to_owned(),
+                    ));
+                }
+                workers = Some(count);
+            }
             _ => {
                 return Err(FrontendError::Usage(format!(
                     "unknown daemon option: {option}"
@@ -387,6 +403,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
         persistent,
         run_id,
         log_path,
+        workers,
     })
 }
 
@@ -497,6 +514,7 @@ mod tests {
             persistent: false,
             run_id: None,
             log_path: None,
+            workers: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -563,6 +581,7 @@ mod tests {
             persistent: true,
             run_id: None,
             log_path: None,
+            workers: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);

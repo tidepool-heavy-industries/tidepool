@@ -38,6 +38,36 @@ default 15 minutes); a worker that never replies is killed at expiry and the
 daemon recovers it through the same worker-replacement path a crash uses,
 which only `--persistent` survives.
 
+A `--persistent` daemon serves `--workers N` concurrent GHC workers
+(`daemon::DEFAULT_WORKER_COUNT`, 2 by default) rather than one: a single
+accept thread still owns every fence check (epoch, watched-stamp) and
+PREFLIGHT/STOP handling, but hands each accepted, fenced connection to a free
+worker slot over a bounded (rendezvous) queue — an over-subscribed daemon
+backs up in the kernel's own listen backlog, never in an unbounded set of
+spawned threads. Each slot is a full pinned worker with its own transaction
+pinning, request deadline, peer-disconnect kill, and served/RSS rotation;
+rotation replaces a slot's worker in place, same as the single-worker case.
+`STOP` and a watched-stamp change stop accepting, let every slot finish its
+current job (bounded by that job's own request deadline), and only then
+drain and reject whatever is left queued. Ordinary (non-`--persistent`)
+daemon mode always runs one worker and ignores `--workers`: it retires the
+whole endpoint, not just a slot, the first time any request's rotation bound
+is reached, which only suits the single short-lived worker that mode was
+designed around.
+
+`--rss-ceiling-mb` keeps its historical meaning, a per-worker RSS ceiling;
+only its *default* changed, from a fixed figure to a shared total budget
+(`daemon::DEFAULT_MEMORY_BUDGET_MB`, 20 GiB) divided across the daemon's
+worker count — a persistent daemon running more workers does not multiply
+its default total RSS footprint. The default worker count (2) and budget are
+sized from measurement, not headroom arithmetic: a real warm GHC worker's RSS
+runs 6.1-6.5 GiB, so the ceiling stays at 10 GiB per worker (unchanged from
+the single-worker daemon) rather than being divided down further, which would
+rotate workers on almost every request and defeat the module-memo cache the
+ceiling protects. See `daemon::DEFAULT_WORKER_COUNT`'s and
+`DEFAULT_MEMORY_BUDGET_MB`'s doc comments for the exact sizing and the
+matching `.config/nextest.toml` `[test-groups.ghc-heavy] max-threads`.
+
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
 counter.

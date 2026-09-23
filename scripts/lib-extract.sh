@@ -375,7 +375,9 @@ start_battery_daemon() {
   # it also carries each phase and every memo miss.
   local compiler_log="$BATTERY_DAEMON_SOCKET_DIR/compiler.log"
   echo "==> starting per-run resident compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
-  # Rotation and RSS flags are omitted so the frontend owns their defaults.
+  # Rotation, RSS, and worker-count flags are omitted so the frontend owns
+  # their defaults (a persistent daemon defaults to several concurrent GHC
+  # workers; see tidepool/extract-cmd/CLAUDE.md).
   "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   BATTERY_DAEMON_OWNED=1
@@ -583,9 +585,9 @@ daemon_start_persistent() {
   # The extractor arms PDEATHSIG against its launcher (tidepool/extract-cmd
   # process.rs), so it cannot be detached directly: it would die with the
   # `just daemon-start` shell. A setsid'd bash keeper stays as its parent
-  # and waits on it; the pid file records the daemon itself. Rotation/RSS
-  # flags are omitted so the frontend owns their defaults, matching
-  # start_battery_daemon above.
+  # and waits on it; the pid file records the daemon itself. Rotation, RSS,
+  # and worker-count flags are omitted so the frontend owns their defaults,
+  # matching start_battery_daemon above.
   rm -f "$pidfile"
   PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
     persistent-daemon-keeper \

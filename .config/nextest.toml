@@ -24,8 +24,13 @@ default-filter = 'all()'
 # GHC-heavy tests run below full core count so concurrent extractor requests do
 # not oversubscribe CPU and memory. This is a per-run limit; callers running
 # several batteries concurrently must budget their aggregate load.
+#
+# The persistent compile daemon serves `daemon::DEFAULT_WORKER_COUNT` (2)
+# concurrent GHC workers (tidepool/extract-cmd/src/daemon.rs); this is that
+# plus one, so ghc-heavy tests can keep every worker slot busy without piling
+# up more waiting nextest processes than the daemon can even dispatch to.
 [test-groups.ghc-heavy]
-max-threads = 4
+max-threads = 3
 
 # Default-deny: everything is GHC-heavy unless it appears in the exemption
 # filter below. An entry is removed from the cap only after showing

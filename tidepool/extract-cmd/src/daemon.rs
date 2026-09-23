@@ -82,13 +82,38 @@ pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 /// request-count rotation out of the common session length; the RSS ceiling
 /// remains the tighter bound when a worker grows quickly.
 const DEFAULT_ROTATE_AFTER: u64 = 1024;
-/// Worker RSS above which the daemon replaces it after a request. A warm
-/// prepared-route worker holds its module memo at roughly 2.5 GiB; a lower
-/// bound replaces it after nearly every request and discards that memo.
-/// Logs showed warm workers crossing 6 GiB and rotating long before 1024
-/// requests, discarding the memo; 10 GiB fits beside a 10-job cargo build on
-/// a 31 GiB box.
-const DEFAULT_RSS_CEILING_MB: u64 = 10 * 1024;
+/// Number of concurrent GHC worker slots a `--persistent` daemon runs by
+/// default (`--workers`). Each slot is a full `Worker`: its own transaction
+/// pinning, request deadline, peer-disconnect kill, and served/RSS rotation.
+/// A single accept thread hands each accepted connection to a free slot
+/// (`serve_pooled`'s rendezvous channel — never an unbounded per-connection
+/// thread); with N slots, up to N ghc-heavy nextest processes stop queuing
+/// behind one compiler worker. `.config/nextest.toml`'s
+/// `[test-groups.ghc-heavy] max-threads` is sized at `DEFAULT_WORKER_COUNT + 1`
+/// to match.
+///
+/// Ordinary (non-`--persistent`) daemon mode ignores `--workers` and always
+/// runs one worker: it retires the whole endpoint (not just a slot) the
+/// first time any request's rotation bound is reached, which only makes
+/// sense for the single short-lived worker that mode was designed around
+/// (see `tidepool/extract-cmd/CLAUDE.md`).
+const DEFAULT_WORKER_COUNT: usize = 2;
+/// Total resident-worker RSS budget a `--persistent` daemon divides evenly
+/// across its worker slots for each slot's default rotation ceiling
+/// (`worker_rss_ceiling_mb = DEFAULT_MEMORY_BUDGET_MB / worker_count`).
+/// `--rss-ceiling-mb` keeps its old meaning — a per-worker ceiling — and, when
+/// given explicitly, overrides that derived figure instead of the total.
+///
+/// Sized for a 31 GiB box: at the default `DEFAULT_WORKER_COUNT` (2) this is
+/// 10 GiB per worker — unchanged from the single-worker daemon's old fixed
+/// ceiling. That figure came from measurement, not headroom arithmetic: a
+/// real warm GHC worker's RSS runs 6.1-6.5 GiB, so a lower ceiling (e.g. the
+/// 6 GiB two extra slots at a fixed 18 GiB budget would have given each
+/// worker) rotates on almost every request and discards the module memo the
+/// ceiling exists to protect. Two 10 GiB workers (20 GiB) leaves roughly
+/// 11 GiB for the concurrent cargo/nextest build issuing those `ghc-heavy`
+/// requests alongside the pool.
+const DEFAULT_MEMORY_BUDGET_MB: u64 = 20 * 1024;
 /// Absolute wall-clock bound on a single compiler request served by the
 /// pinned GHC worker (begin_transaction/request/end_transaction are cheap;
 /// this bounds the request itself). The daemon's accept loop is
@@ -584,6 +609,7 @@ enum ConnectionOutcome {
 fn service_transaction(
     mut connection: UnixStream,
     worker: &mut Worker,
+    worker_slot: usize,
     prepared: &PreparedWorker,
     config: &DaemonConfig,
     run_id: &str,
@@ -613,6 +639,7 @@ fn service_transaction(
                     followed_rotation = *followed_rotation,
                     served = *served,
                     transaction,
+                    worker = worker_slot,
                 );
                 let _entered = request_span.enter();
                 *followed_rotation = false;
@@ -725,7 +752,21 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         .transpose()
         .map_err(FrontendError::Io)?;
     let rotate_after = config.rotate_after.unwrap_or(DEFAULT_ROTATE_AFTER);
-    let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(DEFAULT_RSS_CEILING_MB);
+    // Ordinary (non-`--persistent`) daemon mode always runs a single worker
+    // and ignores `--workers` — see `DEFAULT_WORKER_COUNT`'s doc comment for
+    // why a worker pool only makes sense for a long-lived persistent
+    // endpoint.
+    let worker_count = if config.persistent {
+        config.workers.unwrap_or(DEFAULT_WORKER_COUNT).max(1)
+    } else {
+        1
+    };
+    // `--rss-ceiling-mb` keeps its historical per-worker meaning; only its
+    // *default* changes, from a fixed figure to the shared budget split
+    // across this run's worker count (see `DEFAULT_MEMORY_BUDGET_MB`).
+    let rss_ceiling_mb = config
+        .rss_ceiling_mb
+        .unwrap_or(DEFAULT_MEMORY_BUDGET_MB / worker_count as u64);
     let request_deadline = config
         .request_deadline_secs
         .map(Duration::from_secs)
@@ -733,7 +774,6 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
     let socket = OwnedSocket::bind(&config.socket)?;
     let listener = &socket.listener;
-    let mut worker = Worker::spawn(&prepared)?;
     let run_id = config.run_id.as_deref().unwrap_or("standalone");
     tracing::info!(
         run_id,
@@ -742,6 +782,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         worker = %prepared.selection().display(),
         producer = %hex(&producer),
         socket = %config.socket.display(),
+        workers = worker_count,
+        rss_ceiling_mb,
         detailed_log = %config
             .log_path
             .as_deref()
@@ -750,6 +792,67 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         "compiler daemon ready"
     );
 
+    let result = if worker_count <= 1 {
+        serve_single(
+            config,
+            &prepared,
+            listener,
+            &socket,
+            run_id,
+            &boot_stamp,
+            &epoch,
+            &producer,
+            rotate_after,
+            rss_ceiling_mb,
+            request_deadline,
+        )
+    } else {
+        serve_pooled(
+            config,
+            &prepared,
+            listener,
+            run_id,
+            &boot_stamp,
+            &epoch,
+            &producer,
+            worker_count,
+            rotate_after,
+            rss_ceiling_mb,
+            request_deadline,
+        )
+    };
+
+    // Every exit, orderly or not, drains connected clients with an explicit
+    // rejection before the endpoint closes. Retirement is idempotent: both
+    // branches above already retire the socket on their own orderly exits;
+    // this also covers early returns via `?`.
+    let retired = socket.retire();
+    drop(socket);
+    match (result, retired) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(code), Ok(())) => Ok(code),
+    }
+}
+
+/// The single-worker daemon loop: one worker, one accept thread, exactly the
+/// original (pre-pool) daemon behavior. Used whenever the daemon runs with
+/// one worker slot — always for ordinary (non-`--persistent`) mode, and for
+/// `--persistent --workers 1`.
+#[allow(clippy::too_many_arguments)]
+fn serve_single(
+    config: &DaemonConfig,
+    prepared: &PreparedWorker,
+    listener: &UnixListener,
+    socket: &OwnedSocket,
+    run_id: &str,
+    boot_stamp: &Option<Option<Vec<u8>>>,
+    epoch: &[u8; 32],
+    producer: &[u8; 32],
+    rotate_after: u64,
+    rss_ceiling_mb: u64,
+    request_deadline: Duration,
+) -> Result<u8, FrontendError> {
+    let mut worker = Worker::spawn(prepared)?;
     let result = (|| {
         let mut served = 0;
         // Set whenever the worker is replaced, and read by the next request's
@@ -768,14 +871,14 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 continue;
             }
             if &kind == PREFLIGHT {
-                if stamp_changed(config, &boot_stamp)? {
+                if stamp_changed(config, boot_stamp)? {
                     socket.retire()?;
                     break;
                 }
                 let mut response = Vec::with_capacity(72);
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
-                response.extend_from_slice(&producer);
-                response.extend_from_slice(&epoch);
+                response.extend_from_slice(producer);
+                response.extend_from_slice(epoch);
                 log_send_failure(
                     run_id,
                     "preflight response",
@@ -795,7 +898,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     Ok(bytes) => bytes,
                     Err(_) => continue,
                 };
-                if expected_epoch != epoch {
+                if expected_epoch != *epoch {
                     log_reject_failure(
                         run_id,
                         "stale epoch (transaction)",
@@ -803,7 +906,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     );
                     continue;
                 }
-                match stamp_changed(config, &boot_stamp) {
+                match stamp_changed(config, boot_stamp) {
                     Ok(false) => {}
                     Ok(true) => {
                         log_reject_failure(
@@ -834,7 +937,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 let outcome = service_transaction(
                     connection,
                     &mut worker,
-                    &prepared,
+                    0,
+                    prepared,
                     config,
                     run_id,
                     request_deadline,
@@ -892,7 +996,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            if expected_epoch != epoch {
+            if expected_epoch != *epoch {
                 tracing::warn!(run_id, "rejected compiler request for stale daemon epoch");
                 log_reject_failure(
                     run_id,
@@ -928,7 +1032,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             // The second stamp check is the acceptance fence. If it passes,
             // the acknowledgement is flushed before work begins; every later
             // transport failure is therefore indeterminate and never replayed.
-            match stamp_changed(config, &boot_stamp) {
+            match stamp_changed(config, boot_stamp) {
                 Ok(false) => {}
                 Ok(true) => {
                     log_reject_failure(
@@ -960,7 +1064,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             let outcome = service_transaction(
                 connection,
                 &mut worker,
-                &prepared,
+                0,
+                prepared,
                 config,
                 run_id,
                 request_deadline,
@@ -985,15 +1090,353 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         Ok(0)
     })();
 
-    // Every exit, orderly or not, drains connected clients with an explicit
-    // rejection before the endpoint closes. Retirement is idempotent.
-    let retired = socket.retire();
-    drop(socket);
     worker.shutdown();
-    match (result, retired) {
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        (Ok(code), Ok(())) => Ok(code),
-    }
+    result
+}
+
+/// One connection handed from the accept thread to a free worker slot. Only
+/// the parts a slot's thread needs to keep servicing: the fence checks
+/// (epoch, watched-stamp) and the initial typed-argv decode already happened
+/// on the accept thread, exactly as they did before pooling, so a rejection
+/// never crosses into a worker thread.
+enum Job {
+    Transaction(UnixStream),
+    Request(UnixStream, std::path::PathBuf, Vec<OsString>),
+}
+
+/// The N-worker daemon loop. One accept thread performs every fence check
+/// (epoch, watched-stamp) and PREFLIGHT/STOP handling exactly as
+/// `serve_single` does, then hands an accepted, already-fenced connection to
+/// a free worker slot over a rendezvous channel (`sync_channel(0)`): the
+/// accept thread's `send` blocks until some idle slot's thread calls `recv`,
+/// which is the bounded queue of depth one the design calls for — an
+/// over-subscribed daemon backs up in the kernel's own listen backlog, never
+/// in an unbounded set of spawned threads.
+///
+/// Only reachable with `config.persistent` set (see `serve`): every rotation
+/// and transaction-failure path in `service_transaction` replaces a
+/// persistent worker in place and returns `ConnectionOutcome::Continue`,
+/// never `Retire` — a persistent slot never asks to retire the whole
+/// endpoint, so no cross-thread signal back to the accept loop is needed for
+/// that case.
+///
+/// STOP and a watched-stamp change are handled the same way: the accept
+/// thread stops accepting, drops the job sender (each slot's thread then
+/// exits its loop once its current job, if any, finishes — bounded by that
+/// job's own request deadline, so this never blocks past the existing
+/// per-request bound), joins every slot thread, and only then calls
+/// `socket.retire()` to drain and reject whatever is left queued — exactly
+/// the "stop accepting, let in-flight finish, reject queued, then exit"
+/// order the design calls for, built entirely from mechanisms this module
+/// already had.
+#[allow(clippy::too_many_arguments)]
+fn serve_pooled(
+    config: &DaemonConfig,
+    prepared: &PreparedWorker,
+    listener: &UnixListener,
+    run_id: &str,
+    boot_stamp: &Option<Option<Vec<u8>>>,
+    epoch: &[u8; 32],
+    producer: &[u8; 32],
+    worker_count: usize,
+    rotate_after: u64,
+    rss_ceiling_mb: u64,
+    request_deadline: Duration,
+) -> Result<u8, FrontendError> {
+    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Job>(0);
+    let job_rx = Mutex::new(job_rx);
+    std::thread::scope(|scope| -> Result<u8, FrontendError> {
+        let mut slots = Vec::with_capacity(worker_count);
+        for slot in 0..worker_count {
+            let job_rx = &job_rx;
+            slots.push(scope.spawn(move || -> Result<(), FrontendError> {
+                let mut worker = Worker::spawn(prepared)?;
+                let mut served = 0u64;
+                // The first request this slot ever serves is cold, exactly
+                // like a freshly rotated single-worker daemon.
+                let mut followed_rotation = true;
+                loop {
+                    let job = {
+                        let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
+                        receiver.recv()
+                    };
+                    let Ok(job) = job else {
+                        // The accept thread dropped the sender: shutting down.
+                        break;
+                    };
+                    let (connection, transaction, mut first_request) = match job {
+                        Job::Transaction(connection) => (connection, true, None),
+                        Job::Request(connection, cwd, argv) => {
+                            (connection, false, Some((cwd, argv)))
+                        }
+                    };
+                    let outcome = service_transaction(
+                        connection,
+                        &mut worker,
+                        slot,
+                        prepared,
+                        config,
+                        run_id,
+                        request_deadline,
+                        rotate_after,
+                        rss_ceiling_mb,
+                        transaction,
+                        &mut served,
+                        &mut followed_rotation,
+                        |connection| {
+                            if transaction {
+                                let mut command = [0u8; 1];
+                                if connection.read_exact(&mut command).is_err() {
+                                    return RequestStep::Malformed;
+                                }
+                                match command[0] {
+                                    TRANSACTION_END => RequestStep::End,
+                                    TRANSACTION_REQUEST => {
+                                        let (cwd, argv) = match read_request(connection) {
+                                            Ok(request) => request,
+                                            Err(error) => {
+                                                tracing::warn!(run_id, %error, "compiler transaction request was malformed");
+                                                return RequestStep::Malformed;
+                                            }
+                                        };
+                                        match normalize_worker_argv(argv) {
+                                            Ok(argv) => RequestStep::Request(cwd, argv),
+                                            Err(error) => {
+                                                tracing::warn!(run_id, %error, "compiler transaction request was invalid");
+                                                RequestStep::Malformed
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        tracing::warn!(
+                                            run_id,
+                                            command = other,
+                                            "unknown compiler transaction command"
+                                        );
+                                        RequestStep::Malformed
+                                    }
+                                }
+                            } else {
+                                match first_request.take() {
+                                    Some((cwd, argv)) => RequestStep::Request(cwd, argv),
+                                    None => RequestStep::End,
+                                }
+                            }
+                        },
+                    );
+                    match outcome {
+                        Ok(ConnectionOutcome::Continue) => {}
+                        Ok(ConnectionOutcome::Retire) => unreachable!(
+                            "a persistent worker slot never retires the whole endpoint \
+                             (rotation always replaces it in place under config.persistent)"
+                        ),
+                        Err(error) => {
+                            // The worker itself could not be replaced (e.g. the
+                            // replacement process failed to spawn). This slot
+                            // cannot keep serving; the remaining slots keep the
+                            // daemon alive at reduced capacity rather than
+                            // taking the whole endpoint down over one slot.
+                            tracing::error!(run_id, slot, %error, "compiler worker slot failed and is retiring");
+                            worker.abort();
+                            return Err(error);
+                        }
+                    }
+                }
+                worker.shutdown();
+                Ok(())
+            }));
+        }
+
+        let outcome: Result<(), FrontendError> = 'accept: loop {
+            let (mut connection, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) => break 'accept Err(FrontendError::Io(error)),
+            };
+            if connection
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .is_err()
+            {
+                continue;
+            }
+            let mut kind = [0u8; 8];
+            if connection.read_exact(&mut kind).is_err() {
+                continue;
+            }
+            if &kind == PREFLIGHT {
+                match stamp_changed(config, boot_stamp) {
+                    Ok(false) => {}
+                    Ok(true) => break 'accept Ok(()),
+                    Err(error) => break 'accept Err(error),
+                }
+                let mut response = Vec::with_capacity(72);
+                response.extend_from_slice(PREFLIGHT_RESPONSE);
+                response.extend_from_slice(producer);
+                response.extend_from_slice(epoch);
+                log_send_failure(
+                    run_id,
+                    "preflight response",
+                    connection.write_all(&response),
+                );
+                continue;
+            }
+            if &kind == STOP {
+                tracing::info!(run_id, "compiler daemon stopping on request");
+                log_send_failure(run_id, "stop ack", connection.write_all(&[STOP_ACK]));
+                log_send_failure(run_id, "stop ack flush", connection.flush());
+                break 'accept Ok(());
+            }
+            if &kind == TRANSACTION {
+                let expected_epoch = match read_exact_or_crash(&mut connection, 32) {
+                    Ok(bytes) => bytes,
+                    Err(_) => continue,
+                };
+                if expected_epoch != *epoch {
+                    log_reject_failure(
+                        run_id,
+                        "stale epoch (transaction)",
+                        write_rejected(&mut connection, "daemon boot epoch changed"),
+                    );
+                    continue;
+                }
+                match stamp_changed(config, boot_stamp) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        log_reject_failure(
+                            run_id,
+                            "deployment changed (transaction)",
+                            write_rejected(&mut connection, "watched deployment changed"),
+                        );
+                        break 'accept Ok(());
+                    }
+                    Err(error) => {
+                        log_reject_failure(
+                            run_id,
+                            "daemon stopping (transaction)",
+                            write_rejected(&mut connection, "daemon stopping"),
+                        );
+                        break 'accept Err(error);
+                    }
+                }
+                if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
+                    continue;
+                }
+                log_send_failure(
+                    run_id,
+                    "transaction read timeout",
+                    connection.set_read_timeout(Some(IO_TIMEOUT)),
+                );
+                if job_tx.send(Job::Transaction(connection)).is_err() {
+                    // Every slot has already exited (each hit a fatal,
+                    // unrecoverable error); nothing left can serve requests.
+                    break 'accept Ok(());
+                }
+                continue;
+            }
+            if &kind != REQUEST {
+                continue;
+            }
+            let expected_epoch = match read_exact_or_crash(&mut connection, 32) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            if expected_epoch != *epoch {
+                tracing::warn!(run_id, "rejected compiler request for stale daemon epoch");
+                log_reject_failure(
+                    run_id,
+                    "stale epoch (request)",
+                    write_rejected(&mut connection, "daemon boot epoch changed"),
+                );
+                continue;
+            }
+            let (cwd, argv) = match read_request(&mut connection) {
+                Ok(request) => request,
+                Err(_) => {
+                    tracing::warn!(run_id, "rejected malformed compiler request");
+                    log_reject_failure(
+                        run_id,
+                        "malformed request",
+                        write_rejected(&mut connection, "invalid compiler request"),
+                    );
+                    continue;
+                }
+            };
+            let worker_argv = match normalize_worker_argv(argv) {
+                Ok(argv) => argv,
+                Err(_) => {
+                    tracing::warn!(run_id, "rejected invalid typed compiler request");
+                    log_reject_failure(
+                        run_id,
+                        "invalid typed request",
+                        write_rejected(&mut connection, "invalid typed worker request"),
+                    );
+                    continue;
+                }
+            };
+            // The second stamp check is the acceptance fence. If it passes,
+            // the acknowledgement is flushed before work begins; every later
+            // transport failure is therefore indeterminate and never replayed.
+            match stamp_changed(config, boot_stamp) {
+                Ok(false) => {}
+                Ok(true) => {
+                    log_reject_failure(
+                        run_id,
+                        "deployment changed (request)",
+                        write_rejected(&mut connection, "watched deployment changed"),
+                    );
+                    break 'accept Ok(());
+                }
+                Err(error) => {
+                    log_reject_failure(
+                        run_id,
+                        "daemon stopping (request)",
+                        write_rejected(&mut connection, "daemon stopping"),
+                    );
+                    break 'accept Err(error);
+                }
+            }
+            if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
+                continue;
+            }
+            log_send_failure(
+                run_id,
+                "request read timeout",
+                connection.set_read_timeout(Some(IO_TIMEOUT)),
+            );
+            if job_tx
+                .send(Job::Request(connection, cwd, worker_argv))
+                .is_err()
+            {
+                break 'accept Ok(());
+            }
+        };
+
+        // Stop accepting, then let every slot finish whatever job it is
+        // currently on (bounded by that request's own deadline) before this
+        // thread rejects anything still queued behind the accept loop.
+        drop(job_tx);
+        let mut first_error = outcome.err();
+        for slot in slots {
+            match slot.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error = Some(FrontendError::Daemon(
+                            "compiler worker slot thread panicked".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(0),
+        }
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1609,8 +2052,14 @@ mod tests {
     #[test]
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
         assert_eq!(DEFAULT_ROTATE_AFTER, 1024);
-        assert_eq!(DEFAULT_RSS_CEILING_MB, 10 * 1024);
         assert_eq!(DEFAULT_REQUEST_DEADLINE, Duration::from_secs(15 * 60));
+        assert_eq!(DEFAULT_WORKER_COUNT, 2);
+        assert_eq!(DEFAULT_MEMORY_BUDGET_MB, 20 * 1024);
+        assert_eq!(
+            DEFAULT_MEMORY_BUDGET_MB / DEFAULT_WORKER_COUNT as u64,
+            10 * 1024,
+            "the default per-worker RSS ceiling is the total budget split across the default worker count"
+        );
     }
 
     #[derive(Clone, Default)]
@@ -2407,6 +2856,10 @@ fn main() {{
             persistent: true,
             run_id: None,
             log_path: None,
+            // Pin one worker slot: this test relies on the single fake
+            // worker's sentinel-file trick to deterministically hang on its
+            // first invocation and answer on its second.
+            workers: Some(1),
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -2531,6 +2984,10 @@ fn main() {{
             persistent: true,
             run_id: None,
             log_path: None,
+            // Pin one worker slot: this test dispatches the in-flight and
+            // queued requests in a specific order relative to `STOP` and
+            // relies on there being exactly one worker to serve them.
+            workers: Some(1),
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -2614,6 +3071,389 @@ fn main() {{
         let error = queued_result.unwrap_err();
         assert!(error.is_not_accepted(), "{error}");
 
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Compile a fake worker (rustc, matching the style of the fixtures
+    /// above) that acks `begin_transaction`, reads exactly one request,
+    /// sleeps `sleep_ms`, and answers successfully — once. A `--workers 2`
+    /// daemon spawns one of these per slot; two connections dispatched to
+    /// two distinct slots therefore run this sleep concurrently in two
+    /// separate OS processes.
+    fn compile_sleepy_fake_worker(
+        dir: &Path,
+        argv: &[OsString],
+        sleep_ms: u64,
+    ) -> std::path::PathBuf {
+        let worker_argv = normalize_worker_argv(argv.to_vec()).unwrap();
+        let payload_len = encode_request(dir, &worker_argv).len();
+        let source = dir.join("fake_worker.rs");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+use std::io::{{Read, Write}};
+
+fn main() {{
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut one = [0u8; 1];
+
+    stdin.read_exact(&mut one).unwrap(); // begin_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // request prefix
+    let mut payload = vec![0u8; {payload_len}];
+    stdin.read_exact(&mut payload).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis({sleep_ms}));
+
+    stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // end_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+}}
+"#,
+                payload_len = payload_len,
+                sleep_ms = sleep_ms,
+            ),
+        )
+        .unwrap();
+        let worker_bin = dir.join("fake-worker");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&worker_bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+        worker_bin
+    }
+
+    /// Two clients, two worker slots: each request is served by its own OS
+    /// process, so the combined wall time for both is close to one sleep,
+    /// not two — the daemon-wide serialization the redesign removes.
+    #[test]
+    fn two_requests_with_two_workers_are_served_in_parallel() {
+        let dir = std::env::temp_dir().join(format!("tp-parallel-{}", std::process::id()));
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        const SLEEP_MS: u64 = 600;
+        let worker_bin = compile_sleepy_fake_worker(&dir, &argv, SLEEP_MS);
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(2),
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let started = Instant::now();
+        let clients: Vec<_> = (0..2)
+            .map(|_| {
+                let socket = socket.clone();
+                let epoch = binding.epoch;
+                let dir = dir.clone();
+                let argv = argv.clone();
+                std::thread::spawn(move || execute(&socket, &epoch, &dir, &argv))
+            })
+            .collect();
+        for client in clients {
+            let output = client.join().unwrap().unwrap();
+            assert_eq!(output.status.code(), Some(0));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(SLEEP_MS * 3 / 2),
+            "two concurrent requests on two worker slots took {elapsed:?}, \
+             close to twice the {SLEEP_MS}ms sleep — they were not served in parallel"
+        );
+
+        assert!(request_stop(&socket).is_ok());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `STOP` with two requests in flight across two worker slots lets both
+    /// finish before the daemon exits — the pooled daemon's drain applies to
+    /// every slot, not just whichever one happened to accept the connection.
+    #[test]
+    fn stop_with_two_workers_lets_both_in_flight_requests_finish() {
+        let dir = std::env::temp_dir().join(format!("tp-stop-pool-{}", std::process::id()));
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        const SLEEP_MS: u64 = 500;
+        let worker_bin = compile_sleepy_fake_worker(&dir, &argv, SLEEP_MS);
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(2),
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // Both in-flight requests, on their own threads: each blocks on its
+        // slot's sleep and is only expected to return once its worker
+        // replies.
+        let in_flight: Vec<_> = (0..2)
+            .map(|_| {
+                let socket = socket.clone();
+                let epoch = binding.epoch;
+                let dir = dir.clone();
+                let argv = argv.clone();
+                std::thread::spawn(move || execute(&socket, &epoch, &dir, &argv))
+            })
+            .collect();
+
+        // Give both requests time to reach their worker slots before STOP is
+        // sent — generous relative to the daemon's own local dispatch cost,
+        // well short of the fake workers' own sleep.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: bounded settle time before sending STOP, not a retry loop"
+        )]
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut stop_connection = UnixStream::connect(&socket).unwrap();
+        stop_connection.write_all(STOP).unwrap();
+
+        // Both in-flight requests complete successfully, unaffected by the
+        // `STOP` that arrived while they were still running.
+        for client in in_flight {
+            let output = client.join().unwrap().unwrap();
+            assert_eq!(output.status.code(), Some(0));
+        }
+
+        let mut ack = [0u8; 1];
+        stop_connection.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, [STOP_ACK]);
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One worker slot's hung request is killed at its own deadline without
+    /// blocking the other slot: with two concurrent requests and exactly one
+    /// hung worker process, one request finishes fast (its own slot was
+    /// never touched by the other's hang) and the other is killed at the
+    /// deadline — never serialized behind it.
+    #[test]
+    fn a_hung_worker_deadline_kill_does_not_block_the_other_slot() {
+        let dir = std::env::temp_dir().join(format!("tp-deadline-pool-{}", std::process::id()));
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let sentinel = dir.join("hung-once");
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let payload_len = encode_request(&dir, &worker_argv).len();
+        let source = dir.join("fake_worker.rs");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+use std::io::{{Read, Write}};
+
+fn main() {{
+    let sentinel = std::path::Path::new(r"{sentinel}");
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut one = [0u8; 1];
+
+    // Exactly one of the two worker processes spawned at daemon boot wins
+    // this race and hangs; the other behaves normally. Which client request
+    // lands on which slot is not controlled by this fixture — the test only
+    // asserts the *pattern* (one fast success, one deadline-killed failure).
+    // Atomic: `create_new` fails if the file already exists, so exactly one
+    // of the two racing processes observes `hang == true`, even if both
+    // reach this line at nearly the same instant.
+    let hang = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(sentinel)
+        .is_ok();
+
+    stdin.read_exact(&mut one).unwrap(); // begin_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // request prefix
+    let mut payload = vec![0u8; {payload_len}];
+    stdin.read_exact(&mut payload).unwrap();
+
+    if hang {{
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+        return;
+    }}
+
+    stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // end_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+}}
+"#,
+                sentinel = sentinel.display(),
+                payload_len = payload_len,
+            ),
+        )
+        .unwrap();
+        let worker_bin = dir.join("fake-worker");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&worker_bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: Some(1),
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(2),
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let results: Vec<_> = (0..2)
+            .map(|_| {
+                let socket = socket.clone();
+                let epoch = binding.epoch;
+                let dir = dir.clone();
+                let argv = argv.clone();
+                std::thread::spawn(move || {
+                    let started = Instant::now();
+                    let result = execute(&socket, &epoch, &dir, &argv);
+                    (started.elapsed(), result)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|client| client.join().unwrap())
+            .collect();
+
+        let mut fast = None;
+        let mut slow = None;
+        for (elapsed, result) in results {
+            if result.is_ok() {
+                fast = Some((elapsed, result));
+            } else {
+                slow = Some((elapsed, result));
+            }
+        }
+        let (fast_elapsed, fast_result) = fast.expect("the healthy slot's request must succeed");
+        let (slow_elapsed, slow_result) =
+            slow.expect("the hung slot's request must be killed at its deadline");
+
+        assert_eq!(fast_result.unwrap().status.code(), Some(0));
+        assert!(
+            fast_elapsed < Duration::from_millis(800),
+            "the healthy slot's request should not be delayed by the other \
+             slot's hang: {fast_elapsed:?}"
+        );
+
+        let slow_error = slow_result.unwrap_err();
+        assert!(slow_error.was_accepted(), "{slow_error}");
+        assert!(
+            slow_elapsed < Duration::from_secs(8),
+            "the deadline did not bound the hung request: {slow_elapsed:?}"
+        );
+
+        assert!(request_stop(&socket).is_ok());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
         // best-effort: test cleanup of a temp path.
         std::fs::remove_dir_all(&dir).ok();
     }
