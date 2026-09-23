@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
     Noul {
@@ -19,6 +19,89 @@ pub enum Answer {
         probabilities: BTreeMap<String, f64>,
         confidence: f64,
     },
+}
+
+/// Hand-written rather than `#[derive(Deserialize)]` with the same
+/// internally-tagged `type` attribute used for `Serialize` above.
+///
+/// `serde`'s internally-tagged representation reads an object ahead of time
+/// into its own generic `Content` buffer so it can inspect the `type` field
+/// before picking a variant. This workspace enables `serde_json`'s
+/// `arbitrary_precision` feature (needed elsewhere, e.g. `bridge/mcp`, for
+/// exact numeric round-tripping) — Cargo unifies that feature across every
+/// workspace member built together, so it is active here too even though
+/// this crate never asked for it. Under `arbitrary_precision`, a JSON number
+/// decodes as a private one-key map rather than a plain number, and the
+/// generic `Content` buffer (from the `serde` crate, not `serde_json`) does
+/// not know how to unwrap that marker — so any internally-tagged enum with a
+/// numeric field fails with "invalid type: map, expected f64", even on
+/// perfectly ordinary input. Parsing into a `serde_json::Value` first and
+/// dispatching by hand sidesteps `Content` entirely: `Value`'s own decoder is
+/// the one place that DOES understand `arbitrary_precision`'s marker, so the
+/// resulting `Value::Number` is a normal number and `from_value` on each
+/// concrete variant struct deserializes it as such.
+impl<'de> Deserialize<'de> for Answer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Noul {
+            noul: f64,
+        }
+        #[derive(Deserialize)]
+        struct Choice {
+            choice: String,
+            probabilities: BTreeMap<String, f64>,
+            confidence: f64,
+        }
+        #[derive(Deserialize)]
+        struct Score {
+            score: f64,
+            legend: BTreeMap<String, Value>,
+            probabilities: BTreeMap<String, f64>,
+            confidence: f64,
+        }
+
+        let value = Value::deserialize(deserializer)?;
+        let kind = value.get("type").and_then(Value::as_str).map(str::to_string);
+        match kind.as_deref() {
+            Some("noul") => serde_json::from_value::<Noul>(value)
+                .map(|Noul { noul }| Answer::Noul { noul })
+                .map_err(serde::de::Error::custom),
+            Some("choice") => serde_json::from_value::<Choice>(value)
+                .map(
+                    |Choice {
+                         choice,
+                         probabilities,
+                         confidence,
+                     }| Answer::Choice {
+                        choice,
+                        probabilities,
+                        confidence,
+                    },
+                )
+                .map_err(serde::de::Error::custom),
+            Some("score") => serde_json::from_value::<Score>(value)
+                .map(
+                    |Score {
+                         score,
+                         legend,
+                         probabilities,
+                         confidence,
+                     }| Answer::Score {
+                        score,
+                        legend,
+                        probabilities,
+                        confidence,
+                    },
+                )
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown or missing Answer \"type\": {other:?}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
