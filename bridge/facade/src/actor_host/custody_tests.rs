@@ -370,7 +370,19 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         installed.push(child);
     }
     // Neither child can run before the whole fork boundary is acknowledged.
-    campaign.assert_no_deployment("fork boundary not yet acknowledged", |_| true);
+    // A child may already park and queue its activation (SessionReady only
+    // appends to its durable inbox); its provider session is bound, and so
+    // reads that inbox, only after the gate commits (the host's binding
+    // discovery waits on `wait_committed`). What must not happen yet is any
+    // child finishing or retiring.
+    let children: Vec<_> = installed.iter().map(|child| child.actor.identity()).collect();
+    campaign.assert_no_deployment("fork boundary not yet acknowledged", |event| match event {
+        LocalResidentDeployment::ChildExited { notice } => {
+            children.contains(&notice.child.identity())
+        }
+        LocalResidentDeployment::Retired { actor, .. } => children.contains(actor),
+        _ => false,
+    });
     for child in &installed {
         child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     }
@@ -590,10 +602,12 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     for event in campaign.drain_ready() {
         match event {
             LocalResidentDeployment::Retired { actor, terminal } => {
+                // Owner stop and forest shutdown race to cancel each actor;
+                // the terminal kind is the contract, not its summary text.
                 assert_eq!(
-                    expected.get(&actor),
-                    Some(&terminal),
-                    "unexpected retirement {actor:?}"
+                    expected.get(&actor).map(|expected| &expected.kind),
+                    Some(&terminal.kind),
+                    "unexpected retirement {actor:?}: {terminal:?}"
                 );
                 assert!(
                     retired.insert(actor, terminal).is_none(),
@@ -608,9 +622,10 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                     "unexpected child exit owner"
                 );
                 assert_eq!(
-                    expected.get(&child),
-                    Some(&notice.terminal),
-                    "unexpected child exit terminal"
+                    expected.get(&child).map(|expected| &expected.kind),
+                    Some(&notice.terminal.kind),
+                    "unexpected child exit terminal: {:?}",
+                    notice.terminal
                 );
                 assert!(
                     child_exits.insert(child, notice.terminal).is_none(),
@@ -628,14 +643,17 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                     "unexpected settlement notice label {}",
                     notification.label
                 );
-                assert_eq!(
-                    notification.transition,
-                    exomonad_actor::SettlementTransition::Unavailable(
-                        exomonad_actor::ResponseFailure::TargetCancelled(
-                            "owner actor stopped".into()
+                // Which teardown path cancels first (owner stop or forest
+                // shutdown) is a race; the invariant is the cancelled target.
+                assert!(
+                    matches!(
+                        notification.transition,
+                        exomonad_actor::SettlementTransition::Unavailable(
+                            exomonad_actor::ResponseFailure::TargetCancelled(_)
                         )
                     ),
-                    "settlement notice transition"
+                    "settlement notice transition: {:?}",
+                    notification.transition
                 );
                 assert!(
                     settlement_notices.insert(notification.request),
@@ -648,8 +666,12 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
             ),
         }
     }
+    let mut retired_ids: Vec<_> = retired.keys().copied().collect();
+    let mut expected_ids: Vec<_> = expected.keys().copied().collect();
+    retired_ids.sort_by_key(|actor| (actor.id.0, actor.incarnation.0));
+    expected_ids.sort_by_key(|actor| (actor.id.0, actor.incarnation.0));
     assert_eq!(
-        retired, expected,
+        retired_ids, expected_ids,
         "every exact root/sibling/leaf must retire"
     );
     assert_eq!(campaign.actor.terminal().get().as_ref(), retired.get(&root));
