@@ -580,14 +580,27 @@ daemon_start_persistent() {
   fi
 
   echo "==> starting persistent compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
-  # setsid detaches into a new session so the daemon outlives the invoking
-  # `just daemon-start` shell instead of dying with it. Rotation/RSS flags
-  # are omitted so the frontend owns their defaults, matching
+  # The extractor arms PDEATHSIG against its launcher (tidepool/extract-cmd
+  # process.rs), so it cannot be detached directly: it would die with the
+  # `just daemon-start` shell. A setsid'd bash keeper stays as its parent
+  # and waits on it; the pid file records the daemon itself. Rotation/RSS
+  # flags are omitted so the frontend owns their defaults, matching
   # start_battery_daemon above.
-  setsid "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" \
+  rm -f "$pidfile"
+  PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
+    persistent-daemon-keeper \
+    "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" \
     </dev/null >"$log" 2>&1 &
-  local pid=$!
-  echo "$pid" >"$pidfile"
+  local pid=""
+  local pid_wait=0
+  while [ -z "$pid" ] && [ "$pid_wait" -lt 50 ]; do
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ -n "$pid" ] || { sleep 0.1; pid_wait=$((pid_wait + 1)); }
+  done
+  if [ -z "$pid" ]; then
+    echo "error: persistent compile daemon keeper did not report a pid (see $log)" >&2
+    return 1
+  fi
 
   local started_at=$SECONDS
   while ! _battery_daemon_socket_alive "$sock"; do
