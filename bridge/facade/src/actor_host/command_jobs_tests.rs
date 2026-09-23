@@ -1096,10 +1096,11 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
     let completed = dispatch_haskell_script(observer.policy.as_ref(), "Cmd.await createdJob").await;
     assert_eq!(completed["status"], "committed", "{completed}");
     assert_eq!(backend.executions(), 1);
-    let specs = backend.specs.lock();
-    assert_eq!(specs[0].argv, ["pwd"]);
-    assert!(specs[0].directory.is_none());
-    drop(specs);
+    {
+        let specs = backend.specs.lock();
+        assert_eq!(specs[0].argv, ["pwd"]);
+        assert!(specs[0].directory.is_none());
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
