@@ -13,7 +13,7 @@
 //! or replaced while work is in flight, stale settlement drops the returned
 //! machine instead of resurrecting or overwriting the newer entry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -63,6 +63,15 @@ pub enum CheckoutError<H> {
     /// checkout. `label` is [`Slot::label`]'s string.
     #[error("session {session}: {label}")]
     Terminal { session: SessionId, label: String },
+    /// This id WAS a session, but it was retired (removed from the registry
+    /// with a known cause — [`SessionRegistry::remove_because`] or
+    /// [`SessionRegistry::settle_retire_because`]) rather than never having
+    /// existed. Distinguished from [`Self::Unknown`] so the reader — often a
+    /// coding model driving a resident session — can tell a lost machine
+    /// from a typo'd id: the reason names what happened instead of leaving
+    /// the caller to guess.
+    #[error("session {session} ended earlier: {reason}; start a new session or re-run from the last committed unit")]
+    Retired { session: SessionId, reason: String },
 }
 
 /// Resident-session registry slot. `Idle`/`Running`/`Suspended` are the
@@ -153,6 +162,22 @@ struct Entry<M, H> {
     slot: Slot<M, H>,
 }
 
+/// How many retired sessions the registry remembers why they left — see
+/// [`CheckoutError::Retired`]. A ring, not a growing log: long-running
+/// residents retire many sessions over their life, and only a checkout
+/// arriving shortly after the fact needs the reason.
+const TOMBSTONE_CAPACITY: usize = 64;
+
+/// One retired session's cause, kept just long enough for a subsequent
+/// checkout against the same id to explain itself instead of reporting a
+/// bare [`CheckoutError::Unknown`].
+struct Tombstone {
+    id: SessionId,
+    reason: String,
+    #[allow(dead_code, reason = "diagnostic timestamp; not yet read anywhere")]
+    when: Instant,
+}
+
 #[derive(Default)]
 struct SessionAvailability {
     /// Tokio's mutex admits lock waiters in FIFO order. The guard is held
@@ -168,6 +193,9 @@ pub struct SessionRegistry<M, H> {
     slots: Mutex<HashMap<SessionId, Entry<M, H>>>,
     next_epoch: AtomicU64,
     availability: Mutex<HashMap<SessionId, std::sync::Arc<SessionAvailability>>>,
+    /// Bounded memory of why recently-removed sessions left — see
+    /// [`Tombstone`] and [`CheckoutError::Retired`].
+    tombstones: Mutex<VecDeque<Tombstone>>,
 }
 
 impl<M, H> Default for SessionRegistry<M, H> {
@@ -176,6 +204,7 @@ impl<M, H> Default for SessionRegistry<M, H> {
             slots: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(1),
             availability: Mutex::new(HashMap::new()),
+            tombstones: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -193,6 +222,41 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// A fresh, empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record why `id` left the registry, evicting the oldest tombstone once
+    /// the bound is reached.
+    fn tombstone(&self, id: SessionId, reason: String) {
+        let mut tombstones = self.tombstones.lock();
+        if tombstones.len() >= TOMBSTONE_CAPACITY {
+            tombstones.pop_front();
+        }
+        tombstones.push_back(Tombstone {
+            id,
+            reason,
+            when: Instant::now(),
+        });
+    }
+
+    /// The most recent tombstoned reason for `id`, if it was ever retired
+    /// with a known cause and hasn't since aged out of the bound.
+    fn retirement_reason(&self, id: SessionId) -> Option<String> {
+        self.tombstones
+            .lock()
+            .iter()
+            .rev()
+            .find(|tombstone| tombstone.id == id)
+            .map(|tombstone| tombstone.reason.clone())
+    }
+
+    /// The refusal for a checkout against an id with no live entry — names
+    /// the retirement cause when one is remembered, otherwise the plain
+    /// [`CheckoutError::Unknown`] (never seen, or aged out of the bound).
+    fn unknown_or_retired(&self, id: SessionId) -> CheckoutError<H> {
+        match self.retirement_reason(id) {
+            Some(reason) => CheckoutError::Retired { session: id, reason },
+            None => CheckoutError::Unknown(id),
+        }
     }
 
     /// Register a freshly-bootstrapped session as `Idle`, minting a fresh
@@ -227,6 +291,23 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     pub fn remove(&self, id: SessionId) -> Option<Slot<M, H>> {
         let removed = self.slots.lock().remove(&id).map(|e| e.slot);
         if removed.is_some() {
+            self.availability_for(id).changed.notify_waiters();
+        }
+        removed
+    }
+
+    /// [`Self::remove`], with a known cause recorded in the tombstone ring —
+    /// a subsequent checkout against `id` reports
+    /// [`CheckoutError::Retired`] naming `reason` instead of the bare
+    /// [`CheckoutError::Unknown`] a plain [`Self::remove`] leaves behind. Use
+    /// this whenever the caller actually knows why the session is going away
+    /// (a machine fault, an operator teardown with a stated cause); reserve
+    /// [`Self::remove`] for paths with no reason worth keeping (e.g. a
+    /// caller that immediately reinstalls under the same id).
+    pub fn remove_because(&self, id: SessionId, reason: impl Into<String>) -> Option<Slot<M, H>> {
+        let removed = self.slots.lock().remove(&id).map(|e| e.slot);
+        if removed.is_some() {
+            self.tombstone(id, reason.into());
             self.availability_for(id).changed.notify_waiters();
         }
         removed
@@ -281,7 +362,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     pub fn checkout_run(&self, id: SessionId) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
-            None => Err(CheckoutError::Unknown(id)),
+            None => Err(self.unknown_or_retired(id)),
             Some(entry) => match &entry.slot {
                 Slot::Running { .. } => Err(CheckoutError::Running(id)),
                 Slot::Wedged { .. } => Err(CheckoutError::Terminal {
@@ -362,7 +443,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
-            None => Err(CheckoutError::Unknown(id)),
+            None => Err(self.unknown_or_retired(id)),
             Some(entry) => match &entry.slot {
                 Slot::Running { .. } => Err(CheckoutError::Running(id)),
                 Slot::Wedged { .. } => Err(CheckoutError::Terminal {
@@ -403,7 +484,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     pub fn checkout_child(&self, id: SessionId) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
-            None => Err(CheckoutError::Unknown(id)),
+            None => Err(self.unknown_or_retired(id)),
             Some(entry) => match &entry.slot {
                 Slot::Running { .. } => Err(CheckoutError::Running(id)),
                 Slot::Wedged { .. } => Err(CheckoutError::Terminal {
@@ -692,6 +773,25 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         drop(slots);
         self.availability_for(id).changed.notify_waiters();
     }
+
+    /// [`Self::settle_retire`], with a known cause recorded in the
+    /// tombstone ring — see [`Self::remove_because`]. Use this whenever the
+    /// turn that is retiring itself knows WHY (a machine fault, an
+    /// integrity failure) rather than merely that it is not resuming.
+    pub fn settle_retire_because(&self, receipt: CheckoutReceipt, reason: impl Into<String>) {
+        let id = receipt.session_id();
+        let epoch = receipt.into_epoch();
+        let mut slots = self.slots.lock();
+        let removed = slots.get(&id).is_some_and(|e| e.epoch == epoch);
+        if removed {
+            slots.remove(&id);
+        }
+        drop(slots);
+        if removed {
+            self.tombstone(id, reason.into());
+        }
+        self.availability_for(id).changed.notify_waiters();
+    }
 }
 
 /// A [`SessionRegistry`] restricted to holding AT MOST one entry at a time —
@@ -959,6 +1059,88 @@ mod tests {
         assert_eq!(
             err(reg.checkout_run(SessionId(9))),
             CheckoutError::Unknown(SessionId(9))
+        );
+    }
+
+    #[test]
+    fn retired_session_reports_why_it_ended() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(50);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        let co = reg.checkout_run(id).expect("idle -> run");
+        let (machine, receipt) = co.into_parts();
+        drop(machine);
+        reg.settle_retire_because(receipt, "machine became unavailable after a runtime fault");
+
+        assert_eq!(
+            err(reg.checkout_run(id)),
+            CheckoutError::Retired {
+                session: id,
+                reason: "machine became unavailable after a runtime fault".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn remove_because_also_tombstones_the_reason() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(51);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        reg.remove_because(id, "operator teardown: environment reset");
+
+        assert_eq!(
+            err(reg.checkout_run(id)),
+            CheckoutError::Retired {
+                session: id,
+                reason: "operator teardown: environment reset".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plain_remove_and_settle_retire_leave_no_reason() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(52);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        reg.remove(id);
+
+        assert_eq!(err(reg.checkout_run(id)), CheckoutError::Unknown(id));
+    }
+
+    #[test]
+    fn never_seen_session_is_unknown_not_retired() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        assert_eq!(
+            err(reg.checkout_run(SessionId(53))),
+            CheckoutError::Unknown(SessionId(53))
+        );
+    }
+
+    #[test]
+    fn tombstone_ring_evicts_the_oldest_reason_once_bound_is_reached() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let first = SessionId(1000);
+        reg.insert_idle(first, Box::new(FakeMachine { turns: 0 }));
+        reg.remove_because(first, "the first retirement, about to age out");
+
+        // Fill the ring past its bound with fresh retirements.
+        for offset in 1..=TOMBSTONE_CAPACITY {
+            let id = SessionId(1000 + offset as u64);
+            reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+            reg.remove_because(id, format!("retirement {offset}"));
+        }
+
+        // The oldest tombstone (`first`) has been evicted: back to Unknown.
+        assert_eq!(err(reg.checkout_run(first)), CheckoutError::Unknown(first));
+
+        // The most recent retirement is still remembered.
+        let last = SessionId(1000 + TOMBSTONE_CAPACITY as u64);
+        assert_eq!(
+            err(reg.checkout_run(last)),
+            CheckoutError::Retired {
+                session: last,
+                reason: format!("retirement {TOMBSTONE_CAPACITY}"),
+            }
         );
     }
 

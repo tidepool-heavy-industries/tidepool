@@ -2534,7 +2534,15 @@ where
             match outcome {
                 Ok(outcome) => {
                     if session.compilation_failed() {
-                        machines.settle_retire(receipt);
+                        let reason = match &outcome {
+                            Err(detail) => format!(
+                                "machine became unavailable after a runtime fault: {detail}"
+                            ),
+                            Ok(_) => "machine became unavailable after a runtime fault \
+                                       (no further detail was reported)"
+                                .to_string(),
+                        };
+                        machines.settle_retire_because(receipt, reason);
                         return outcome;
                     }
 
@@ -2547,7 +2555,17 @@ where
                     outcome
                 }
                 Err(payload) => {
-                    machines.settle_retire(receipt);
+                    // Peek at the panic message without consuming the
+                    // payload — `resume_unwind` below still needs it intact.
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic payload".to_string());
+                    machines.settle_retire_because(
+                        receipt,
+                        format!("machine became unavailable: a resident turn panicked ({message})"),
+                    );
                     std::panic::resume_unwind(payload);
                 }
             }
