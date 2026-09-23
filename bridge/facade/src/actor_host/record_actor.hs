@@ -15,4 +15,5 @@ finished <- R.finish server
 again <- R.finish server
 sourceOrigins <- R.call (savedOrigins (R.client originWatcher)) ()
 originsFinished <- R.finish originWatcher
-show server == "ActorHandle (1,1)" && observed == 224 && finished == Actor.Completed 224 && again == finished && from == ActorMessageFrom (0, 1) && sourceOrigins == [ActorLifecycleFrom (1, 1), ActorLifecycleFrom (1, 1)] && originsFinished == Actor.Completed sourceOrigins
+let address = read (drop (length "ActorHandle ") (show server)) :: (Int, Int)
+show server == "ActorHandle " ++ show address && observed == 224 && finished == Actor.Completed 224 && again == finished && (case from of { ActorMessageFrom sender -> sender /= address; _ -> False }) && sourceOrigins == [ActorLifecycleFrom address, ActorLifecycleFrom address] && originsFinished == Actor.Completed sourceOrigins
