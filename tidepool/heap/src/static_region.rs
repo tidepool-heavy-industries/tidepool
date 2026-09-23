@@ -369,6 +369,55 @@ impl Default for StaticRegionCatalog {
     }
 }
 
+/// Opt-in lookup work, accumulated for one collector or observation view.
+/// Disabled counters do not perform atomic operations on the pointer path.
+pub struct StaticLookupMetrics {
+    enabled: bool,
+    owner: &'static str,
+    calls: std::sync::atomic::AtomicUsize,
+    probes: std::sync::atomic::AtomicUsize,
+    hits: std::sync::atomic::AtomicUsize,
+    max_regions: std::sync::atomic::AtomicUsize,
+}
+
+impl StaticLookupMetrics {
+    pub fn new(owner: &'static str) -> Self {
+        Self {
+            enabled: std::env::var("TIDEPOOL_MEMORY_DETAIL").as_deref() == Ok("1"),
+            owner,
+            calls: Default::default(),
+            probes: Default::default(),
+            hits: Default::default(),
+            max_regions: Default::default(),
+        }
+    }
+
+    pub fn record(&self, regions: usize, probes: usize, hit: bool) {
+        if self.enabled {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.calls.fetch_add(1, Relaxed);
+            self.probes.fetch_add(probes, Relaxed);
+            self.hits.fetch_add(usize::from(hit), Relaxed);
+            self.max_regions.fetch_max(regions, Relaxed);
+        }
+    }
+}
+
+impl Drop for StaticLookupMetrics {
+    fn drop(&mut self) {
+        if self.enabled {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!(
+                "tidepool-static-lookup-lifetime owner={} lifetime_lookup_calls={} lifetime_region_probes={} lifetime_static_hits={} lifetime_max_regions={}",
+                self.owner,
+                self.calls.load(Relaxed),
+                self.probes.load(Relaxed),
+                self.hits.load(Relaxed),
+                self.max_regions.load(Relaxed)
+            );
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,52 +629,3 @@ mod tests {
     }
 }
 
-/// Opt-in lookup work, accumulated for one collector or observation view.
-/// Disabled counters do not perform atomic operations on the pointer path.
-pub struct StaticLookupMetrics {
-    enabled: bool,
-    owner: &'static str,
-    calls: std::sync::atomic::AtomicUsize,
-    probes: std::sync::atomic::AtomicUsize,
-    hits: std::sync::atomic::AtomicUsize,
-    max_regions: std::sync::atomic::AtomicUsize,
-}
-
-impl StaticLookupMetrics {
-    pub fn new(owner: &'static str) -> Self {
-        Self {
-            enabled: std::env::var("TIDEPOOL_MEMORY_DETAIL").as_deref() == Ok("1"),
-            owner,
-            calls: Default::default(),
-            probes: Default::default(),
-            hits: Default::default(),
-            max_regions: Default::default(),
-        }
-    }
-
-    pub fn record(&self, regions: usize, probes: usize, hit: bool) {
-        if self.enabled {
-            use std::sync::atomic::Ordering::Relaxed;
-            self.calls.fetch_add(1, Relaxed);
-            self.probes.fetch_add(probes, Relaxed);
-            self.hits.fetch_add(usize::from(hit), Relaxed);
-            self.max_regions.fetch_max(regions, Relaxed);
-        }
-    }
-}
-
-impl Drop for StaticLookupMetrics {
-    fn drop(&mut self) {
-        if self.enabled {
-            use std::sync::atomic::Ordering::Relaxed;
-            eprintln!(
-                "tidepool-static-lookup-lifetime owner={} lifetime_lookup_calls={} lifetime_region_probes={} lifetime_static_hits={} lifetime_max_regions={}",
-                self.owner,
-                self.calls.load(Relaxed),
-                self.probes.load(Relaxed),
-                self.hits.load(Relaxed),
-                self.max_regions.load(Relaxed)
-            );
-        }
-    }
-}

@@ -77,7 +77,7 @@ impl DescriptorSpace {
 
     /// Keep every registration made since `mark` and close the log.
     pub fn commit_owners(&mut self, mark: OwnersMark) {
-        let _ = mark;
+        drop(mark);
         self.owner_log = None;
     }
 
