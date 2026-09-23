@@ -12,6 +12,13 @@ pub(super) enum PromptId {
 impl PromptId {
     pub(super) const CATALOG_VERSION: u32 = 24;
 
+    /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
+    /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
+    /// the correct new value, whenever a prompt body changes without a
+    /// matching `CATALOG_VERSION` bump.
+    pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
+        "39259882d3cfcde52c7d22910579a43565fd6761a1f16cbb844381785cbbef0d";
+
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
         Self::ExomonadBase,
@@ -62,12 +69,9 @@ impl PromptId {
         body: &str,
         hosted_tool_fingerprint: &str,
     ) -> String {
-        let mut hasher = blake3::Hasher::new();
-        for part in [base, body, hosted_tool_fingerprint] {
-            hasher.update(&(part.len() as u64).to_le_bytes());
-            hasher.update(part.as_bytes());
-        }
-        hasher.finalize().to_hex().to_string()
+        tidepool_toolchain::digest::of_parts(
+            [base, body, hosted_tool_fingerprint].map(str::as_bytes),
+        )
     }
 }
 
@@ -244,6 +248,17 @@ mod tests {
         assert_ne!(
             PromptId::composed_fingerprint("ab", "c", "d"),
             PromptId::composed_fingerprint("a", "bc", "d")
+        );
+    }
+
+    #[test]
+    fn catalog_body_fingerprint_matches_prompt_bodies() {
+        let bodies = PromptId::ALL.map(PromptId::body);
+        let computed = tidepool_toolchain::digest::of_parts(bodies.map(str::as_bytes));
+        assert_eq!(
+            computed,
+            PromptId::CATALOG_BODY_FINGERPRINT,
+            "prompt bodies changed: bump CATALOG_VERSION and update CATALOG_BODY_FINGERPRINT to {computed}"
         );
     }
 

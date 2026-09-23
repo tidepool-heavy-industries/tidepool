@@ -394,6 +394,34 @@ pub struct StdlibFallbacks {
     pub build_tree: Option<PathBuf>,
 }
 
+/// Walk `start` and each of its ancestors (git-style), testing
+/// `dir.join(candidate)` against `is_root` for each `candidate` in order.
+/// Returns the first joined path that passes, or `None` if no ancestor has
+/// one. Independent of which directory the caller happened to launch from —
+/// a process started deep inside a checkout finds the same root as one
+/// started at its top.
+///
+/// The one walk-up primitive shared by every in-repo tree locator (the
+/// stdlib root here, the actors root in `bridge/facade`); do not hand-copy
+/// this loop for a new candidate tree.
+pub fn walk_up_for(
+    start: &Path,
+    candidates: &[&Path],
+    is_root: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        for candidate in candidates {
+            let joined = dir.join(candidate);
+            if is_root(&joined) {
+                return Some(joined);
+            }
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
 /// Resolve the Haskell stdlib root by the precedence table in the module docs.
 ///
 /// # Errors
@@ -419,14 +447,9 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
     //    with CWD=<repo>/tidepool-runtime finds the same stdlib as a server
     //    launched from the repo root.
     if let Ok(cwd) = std::env::current_dir() {
-        let mut cur = Some(cwd.as_path());
-        while let Some(dir) = cur {
-            for candidate in [dir.join("haskell").join("lib"), dir.join("lib")] {
-                if is_stdlib_root(&candidate) {
-                    return Ok(StdlibLocation { dir: candidate });
-                }
-            }
-            cur = dir.parent();
+        let candidates = [Path::new("haskell/lib"), Path::new("lib")];
+        if let Some(found) = walk_up_for(&cwd, &candidates, is_stdlib_root) {
+            return Ok(StdlibLocation { dir: found });
         }
         tried.push(("repo tree above cwd", cwd.join("haskell").join("lib")));
     }

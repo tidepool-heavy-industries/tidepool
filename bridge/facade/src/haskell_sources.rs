@@ -13,16 +13,13 @@ include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_exomonad_haskell.rs"));
 
 fn content_hash(entries: &[(&str, &str)]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for (relative, content) in entries {
-        // Length-prefix both fields so different path/content partitions
-        // cannot produce the same byte stream.
-        hasher.update(&(relative.len() as u64).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        hasher.update(&(content.len() as u64).to_le_bytes());
-        hasher.update(content.as_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
+    // Length-prefix both fields so different path/content partitions cannot
+    // produce the same byte stream.
+    tidepool_toolchain::digest::of_parts(
+        entries
+            .iter()
+            .flat_map(|(relative, content)| [relative.as_bytes(), content.as_bytes()]),
+    )
 }
 
 /// Identity of the library interfaces embedded in this build. Workspace
@@ -87,15 +84,11 @@ fn locate_exomonad_haskell() -> Option<PathBuf> {
 }
 
 fn find_actors_from(start: &Path) -> Option<PathBuf> {
-    let mut cur = Some(start);
-    while let Some(dir) = cur {
-        let candidate = dir.join("haskell").join("actors");
-        if is_actors_root(&candidate) {
-            return Some(candidate);
-        }
-        cur = dir.parent();
-    }
-    None
+    tidepool_toolchain::toolchain::walk_up_for(
+        start,
+        &[Path::new("haskell/actors")],
+        is_actors_root,
+    )
 }
 
 /// `Tidepool/Check.hs` is an ordinary production module directly under the

@@ -6,11 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Hash a length-prefixed field: unambiguous framing regardless of content.
-fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
-}
+use crate::digest::frame;
 
 /// Source snapshot identity, independent from compiler dependency selection.
 struct DependencyManifest {
