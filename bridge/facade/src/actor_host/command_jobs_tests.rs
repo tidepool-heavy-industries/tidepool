@@ -20,6 +20,7 @@ pub(super) struct TestCommands {
     fail_close: std::sync::atomic::AtomicBool,
     output_entered: tokio::sync::Notify,
     hold_output: watch::Sender<bool>,
+    output_budgets: Mutex<Vec<usize>>,
     slice_reads: std::sync::atomic::AtomicUsize,
     short_slice_read: std::sync::atomic::AtomicUsize,
 }
@@ -42,7 +43,19 @@ impl TestCommands {
         self.specs.lock().len()
     }
 
-    fn new() -> Arc<Self> {
+    pub(super) fn control_count(&self) -> usize {
+        self.controls.lock().len()
+    }
+
+    pub(super) fn output_budgets(&self) -> Vec<usize> {
+        self.output_budgets.lock().clone()
+    }
+
+    pub(super) fn finish(&self) {
+        self.finish.send_replace(true);
+    }
+
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             specs: Mutex::new(Vec::new()),
             stdout: Mutex::new("result".into()),
@@ -58,6 +71,7 @@ impl TestCommands {
             fail_close: false.into(),
             output_entered: tokio::sync::Notify::new(),
             hold_output: watch::channel(false).0,
+            output_budgets: Mutex::new(Vec::new()),
             slice_reads: 0.into(),
             short_slice_read: 0.into(),
         })
@@ -198,9 +212,9 @@ impl CommandBackend for TestCommands {
     fn output<'a>(
         &'a self,
         _id: &'a str,
-        _bytes: usize,
+        bytes: usize,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandOutput, CommandError>> {
-        Box::pin(async {
+        Box::pin(async move {
             self.output_entered.notify_one();
             let mut held = self.hold_output.subscribe();
             while *held.borrow_and_update() {
@@ -214,12 +228,26 @@ impl CommandBackend for TestCommands {
                     "output transport lost".into(),
                 ));
             }
+            self.output_budgets.lock().push(bytes);
             Ok(CommandOutput {
-                stdout: test_page(&self.stdout.lock()),
-                stderr: test_page(&self.stderr.lock()),
+                stdout: test_initial_page(&self.stdout.lock(), bytes),
+                stderr: test_initial_page(&self.stderr.lock(), bytes),
             })
         })
     }
+}
+
+fn test_initial_page(text: &str, bytes: usize) -> CommandPage {
+    let mut page = test_page(text);
+    if page.text.len() > bytes {
+        let mut end = bytes;
+        while !page.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        page.text.truncate(end);
+        page.end = end as i64;
+    }
+    page
 }
 
 fn test_page(text: &str) -> CommandPage {

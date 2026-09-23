@@ -259,7 +259,10 @@ observeWith ::
   Eff effects (CommandStatus, Text)
 observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
   current <- checked <$> send (CommandAwaitWith key milliseconds)
-  output <- send (CommandOutputWith key (1024 * 1024))
+  -- Bound the first materialized pages by the caller's display budget.  Each
+  -- page still carries the frozen stream endpoints, so a presenter can make
+  -- an explicit, independently bounded page request when it needs more.
+  output <- send (CommandOutputWith key (max 0 (min (16 * 1024) (outputBytes options))))
   prepared <- prepare (PresentedObservation retained current output (outputBytes options))
   send
     ( CommandPresentWith

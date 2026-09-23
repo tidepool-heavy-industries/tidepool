@@ -187,16 +187,20 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
         Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
           pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
         Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
-        Right () -> do
-          shown <- presenter Nothing Nothing options (Job key)
+        Right () ->
           let receipt =
-                if eof
-                  then "Stdin is closed."
-                  else
-                    if T.null text
-                      then ""
-                      else "Input acknowledged by backend; child consumption is unknown."
-          pure $ T.intercalate "\n" (filter (not . T.null) [receipt, shown])
+                if T.null text
+                  then ""
+                  else "Input acknowledged by backend; child consumption is unknown."
+              closed = if eof then "Stdin is closed." else ""
+           in -- Sending bytes (or EOF) is an irreversible action. Return its
+              -- acknowledgment directly: a later, optional output presentation
+              -- must not turn a successful write into an apparent failed call.
+              if not (T.null text) || eof
+                then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
+                -- Empty input is an observation poll and keeps the configured
+                -- presenter behavior.
+                else presenter Nothing Nothing options (Job key)
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
