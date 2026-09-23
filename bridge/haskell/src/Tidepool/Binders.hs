@@ -451,6 +451,7 @@ data CellAnalysisItem = CellAnalysisItem
   , cellAnalysisSource :: String
   , cellAnalysisVerdict :: StmtBinders
   , cellAnalysisSourceItems :: [CellAnalysisSourceItem]
+  , cellAnalysisPrologueOnly :: Bool
   } deriving (Eq, Show)
 
 data ExpressionLiftPlan = ExpressionEffectful | ExpressionPure
@@ -548,6 +549,7 @@ analyzeCellWithFlags dflags template source = do
               , cellAnalysisSourceKind = sbKind verdict
               }
           ]
+      , cellAnalysisPrologueOnly = False
       }
     groupDeclarations headerItems classified generated =
       case partition isDeclaration classified of
@@ -577,6 +579,7 @@ analyzeCellWithFlags dflags template source = do
                 (nub (concatMap sbBinders verdicts))
                 (concatMap sbDeclItems verdicts)
             , cellAnalysisSourceItems = sourceItems
+            , cellAnalysisPrologueOnly = not (null headerItems) && null declarations
             }
     locatedDeclaration item =
       "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item))

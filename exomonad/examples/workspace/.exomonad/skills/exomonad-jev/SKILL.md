@@ -101,7 +101,7 @@ answer cannot be built or matched, and what it decides is reached through
 with the bound `answer` shows every distribution — do that the first few times
 you write a packet, then project what the next decision needs.
 
-`.key` is for logs and ledgers, never for dispatch: a `case` on it is unchecked,
+`.key` is for logs and journals, never for dispatch: a `case` on it is unchecked,
 and the compiler cannot tell you when the alternatives change. `.margin` is the
 winner's mass less the runner-up's, and equals the mass when nothing competes,
 so a margin near 1.0 usually means the alternatives were not really rivals.
@@ -157,36 +157,9 @@ correct.
   state, wording, selection, and resulting action when a program fails. Early lab
   outcomes are examples to learn from, not universal restrictions on Jev.
 
-## What measurement showed
-
-These came from live calls, each on a particular fixture. Treat them as what to
-test on your own decisions, not as laws.
-
-- **Keys are read.** Identical descriptions under different keys split 0.88 to
-  0.12 one way and 0.06 to 0.94 another. Give alternatives keys that mean
-  something, and merge alternatives that say the same thing.
-- **Build a gate's state from your own view.** A checklist gate given state
-  rebuilt from a child's report answered `all_present` at 0.95 for a commit that
-  also touched a file the report left out. Given the parent's own `git diff` of
-  the same commit it answered `item_missing` at 1.00.
-- **Combine judgments by the minimum, and name the weakest.** A product of
-  confidences falls as you add inputs whether or not any of them is shaky.
-- **Reword every alternative or none.** Rewriting two of three alternatives
-  lowered confidence across the whole packet, including answers that had been
-  right, from 0.74 to 0.52.
-- **Cut evidence by what it says, not where it sits.** "The errors are at the
-  end" was true of one fixture. Filter for the lines that matter.
-- **`J.strict` is not a proof.** A candidate with no diff at all was called
-  `item_missing` at mass 0.91, margin 0.82 and confidence 0.88, where the right
-  answer was `insufficient_evidence`, and `J.strict` accepted it. A separate
-  noul asking whether the evidence covers the question scored 0.48 there against
-  0.87 to 0.93 elsewhere. Ask that question beside any gate that matters.
-- **With long history, watch confidence.** With a contradiction buried in six
-  thousand characters of history the winning key stayed wrong, but confidence
-  fell from 0.64 to 0.36 and every named policy then declined. The drop was the
-  usable signal.
-- A correct answer's masses can sum slightly off 1.0. Never reject one on
-  arithmetic.
+Treat measurements as evidence about their particular fixtures; test your
+own wording, evidence and decisions rather than treating outcomes as general
+rules.
 
 ## A checklist example
 
@@ -283,14 +256,14 @@ after fetching evidence the first selection identifies.
 For alternatives ordered by cost or urgency, `J.score` grades against a rubric
 of one to ten `J.level`s, lowest first, each carrying the result `J.grade floor`
 returns when the score lands on it, so there is no list of outcomes to keep in
-step; `J.graded` adds the level's label for a ledger line and `J.massAtOrAbove
+step; `J.graded` adds the level's label for a journal entry and `J.massAtOrAbove
 #level` gives the raw number. A score is right only for a genuinely ordered,
 mutually exclusive situation; reach for a noul or a choice first.
 
 When the answer resolves nothing useful, return to ordinary reasoning with the
 packet's evidence still bound in the cell. Nothing is recomputed, and a
-recurring handback is the signal to write that branch by hand. `doc jev` is the
-same material in fallback form.
+recurring handback is the signal to write that branch by hand. The `doc jev`
+topic points back to this skill as its canonical reference.
 
 ## Reusable working patterns
 

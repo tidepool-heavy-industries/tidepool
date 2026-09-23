@@ -688,7 +688,7 @@ impl<H, O> Clone for ResidentActorRunner<H, O> {
 
 /// A private readiness continuation validated while its actor is still
 /// unpublished. Construction proves both the nominal request and owning
-    /// runtime resource scope; consuming it is the only way the runner enters the
+/// runtime resource scope; consuming it is the only way the runner enters the
 /// installed program.
 pub(crate) struct ResidentActorReadiness {
     hole: ResidentHole,
@@ -3339,13 +3339,10 @@ where
             PreparedCellStep::Declaration {
                 generation,
                 binders,
+                prologue_only,
             } => {
                 return Ok(ResidentWorkbenchStep::Committed {
-                    output: format!(
-                        "defined {} at generation {}",
-                        binders.join(", "),
-                        generation.0
-                    ),
+                    output: declaration_receipt(&binders, prologue_only, generation.0),
                     warnings: Vec::new(),
                     installed_bindings: binders,
                 });
@@ -3588,15 +3585,7 @@ where
                 &declaration_imports,
             ) {
                 Ok(generation) => ResidentWorkbenchStep::Committed {
-                    output: format!(
-                        "defined {} at generation {}",
-                        if receipt.binders.is_empty() {
-                            "declaration".to_string()
-                        } else {
-                            receipt.binders.join(", ")
-                        },
-                        generation.0
-                    ),
+                    output: declaration_receipt(&receipt.binders, false, generation.0),
                     warnings: Vec::new(),
                     installed_bindings: receipt.binders.clone(),
                 },
@@ -3680,6 +3669,38 @@ where
         TurnResult::Expr { .. } => Err(ResidentActorWorkbenchError::ActorProtocol(
             "workbench expression compiled without its observation binding".into(),
         )),
+    }
+}
+
+fn declaration_receipt(binders: &[String], prologue_only: bool, generation: u64) -> String {
+    let description = if !binders.is_empty() {
+        format!("defined {}", binders.join(", "))
+    } else if prologue_only {
+        "accepted cell prologue".to_owned()
+    } else {
+        "committed declaration".to_owned()
+    };
+    format!("{description} at generation {generation}")
+}
+
+#[cfg(test)]
+mod declaration_receipt_tests {
+    use super::declaration_receipt;
+
+    #[test]
+    fn import_and_pragma_only_cells_have_truthful_receipts() {
+        assert_eq!(
+            declaration_receipt(&[], true, 7),
+            "accepted cell prologue at generation 7"
+        );
+        assert_eq!(
+            declaration_receipt(&[], false, 7),
+            "committed declaration at generation 7"
+        );
+        assert_eq!(
+            declaration_receipt(&["watchdogProbe".to_owned()], false, 7),
+            "defined watchdogProbe at generation 7"
+        );
     }
 }
 
@@ -6513,6 +6534,7 @@ enum PreparedCellStep {
     Declaration {
         generation: tidepool_repr::Generation,
         binders: Vec<String>,
+        prologue_only: bool,
     },
 }
 
@@ -6699,6 +6721,7 @@ where
                 items[0].ready = PreparedCellStep::Declaration {
                     generation,
                     binders: declaration.verdict.binders.clone(),
+                    prologue_only: declaration.prologue_only,
                 };
             }
         }
@@ -8284,5 +8307,76 @@ mod request_tests {
             })
             .count();
         assert_eq!(observations, 1, "one selected expression wrapper");
+
+        for cell_text in ["import Data.List\n", "{-# LANGUAGE NoLambdaCase #-}\n"] {
+            let compile_view =
+                actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+            let prepared = source.prepare(&compile_view);
+            let module = session
+                .next_declaration_module()
+                .expect("declaration plane");
+            let check_preamble = cell_module_preamble(&prepared.preamble, &module.module_name())
+                .expect("preamble names a module");
+            let template = resident_cell_check_template(
+                &check_preamble,
+                &context.haskell_effects_alias,
+                &prepared.imports,
+            );
+            let evidence = cell_check_evidence(&compile_view, &template, &prepared);
+            let include_refs = prepared
+                .include
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            let checked = check_cell(CellCheckRequest {
+                cell_text,
+                template: &template,
+                include: &include_refs,
+                session_root: compile_view.session_root(),
+                inject_modules: &prepared.injected,
+                compile_generation: compile_view.next_value_generation().0,
+                compile_view_evidence: &evidence,
+            })
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "prologue-only cell should classify: {}",
+                    tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_text)
+                )
+            });
+            let item = checked.items.first().expect("one grouped prologue item");
+            assert!(item.prologue_only, "{cell_text:?}: {item:?}");
+            assert_eq!(item.verdict.kind, tidepool_runtime::session::TurnKind::Decl);
+            let prepared_cell = tidepool_runtime::with_compiler_transaction(|| {
+                prepare_cell_in_session(
+                    &mut session,
+                    &context,
+                    &source,
+                    &context.haskell_effects_alias,
+                    &[],
+                    &checked,
+                    cell_text,
+                    &evidence,
+                    compile_view,
+                )
+            })
+            .expect("prepare prologue-only cell");
+            let PreparedCell::Ready { mut items, .. } = prepared_cell else {
+                panic!("prologue-only cell should prepare");
+            };
+            let PreparedCellStep::Declaration {
+                generation,
+                binders,
+                prologue_only,
+            } = items.remove(0).ready
+            else {
+                panic!("prologue-only cell should use declaration plane");
+            };
+            assert!(prologue_only);
+            assert!(binders.is_empty());
+            assert_eq!(
+                declaration_receipt(&binders, prologue_only, generation.0),
+                format!("accepted cell prologue at generation {}", generation.0)
+            );
+        }
     }
 }

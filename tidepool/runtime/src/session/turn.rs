@@ -133,6 +133,9 @@ pub struct CellAnalysisItem {
     /// Original source items represented by this execution item. A declaration
     /// group contains every declaration's ordinal and span.
     pub source_items: Vec<CellAnalysisSourceItem>,
+    /// The grouped declaration item contains only the cell's leading
+    /// pragmas/imports, with no authored declaration body.
+    pub prologue_only: bool,
 }
 
 /// GHC-owned execution choice for one expression in a checked cell.
@@ -2493,6 +2496,13 @@ fn cbor_expect_text<'a>(v: &'a CborValue, what: &str) -> Result<&'a str, Compile
     }
 }
 
+fn cbor_expect_bool(v: &CborValue, what: &str) -> Result<bool, CompileError> {
+    match v {
+        CborValue::Bool(value) => Ok(*value),
+        other => Err(cbor_shape_error(what, "boolean", other)),
+    }
+}
+
 fn cbor_as_u64(v: &CborValue, what: &str) -> Result<u64, CompileError> {
     match v {
         CborValue::Integer(i) => u64::try_from(*i).map_err(|_| cbor_shape_error(what, "u64", v)),
@@ -2799,6 +2809,16 @@ fn validate_cell_source_items(items: &[CellAnalysisItem]) -> Result<(), CompileE
             "CellOut CBOR: source item kind does not match its execution item".into(),
         ));
     }
+    if items.iter().any(|item| {
+        item.prologue_only
+            && (item.verdict.kind != TurnKind::Decl
+                || !item.verdict.binders.is_empty()
+                || !item.source.is_empty())
+    }) {
+        return Err(CompileError::ExtractFailed(
+            "CellOut CBOR: prologue-only item carries a declaration body or binder".into(),
+        ));
+    }
     let mut ordinals = items
         .iter()
         .flat_map(|item| item.source_items.iter().map(|source| source.ordinal))
@@ -2823,7 +2843,7 @@ fn decode_cell_span(value: &CborValue) -> Result<CellSourceSpan, CompileError> {
 }
 
 fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError> {
-    let fields = cbor_expect_array_len(value, 5, "cell item")?;
+    let fields = cbor_expect_array_len(value, 6, "cell item")?;
     let span = decode_cell_span(&fields[0])?;
     let kind = match cbor_expect_text(&fields[1], "cell item kind")? {
         "decl" => TurnKind::Decl,
@@ -2849,6 +2869,7 @@ fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError>
             .iter()
             .map(decode_cell_source_item)
             .collect::<Result<Vec<_>, _>>()?,
+        prologue_only: cbor_expect_bool(&fields[5], "cell prologue-only flag")?,
     })
 }
 

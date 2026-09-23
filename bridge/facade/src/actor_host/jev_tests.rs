@@ -833,8 +833,9 @@ noted call result
         Left _ -> Annotated (T.pack "after-tool branch: jev unavailable")
         Right a ->
           Annotated
-            ( J.handle
-                a
+            ( T.pack "ordinal=" <> T.pack (show (toolResultOrdinal result))
+                <> T.pack " handle=" <> toolResultHandle result
+                <> T.pack " branch=" <> J.handle a
                 ( #yes (\_ -> T.pack "after-tool branch: complete")
                     J..| #no (\_ -> T.pack "after-tool branch: incomplete")
                 )
@@ -959,6 +960,7 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
         result.contains("Derived context, not part of the tool's output"),
         "{result}"
     );
+    assert!(result.contains("ordinal=1 handle=toolResult1"), "{result}");
     assert!(result.contains("after-tool branch: complete"), "{result}");
 
     // (3) The fake backend saw two independent Jev requests: one from the

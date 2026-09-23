@@ -1272,9 +1272,7 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
 #[tokio::test]
 async fn command_skill_examples_execute_in_the_resident_workbench() {
     let mut campaign = TestCampaign::start().await;
-    let skill = include_str!(
-        "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-command/SKILL.md"
-    );
+    let skill = include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md");
     let mut examples = skill
         .split("```haskell\n")
         .skip(1)

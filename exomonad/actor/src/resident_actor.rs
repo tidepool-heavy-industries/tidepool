@@ -354,7 +354,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             jev: Arc::clone(&self.jev),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
-            usage_pointers: self.usage_pointers,
+            usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
     }
@@ -2636,7 +2636,7 @@ where
                         context.clone(),
                         continuation,
                         request,
-                        self.environment.usage_pointers,
+                        self.environment.usage_pointers.clone(),
                     )
                     .await
             }),
@@ -5379,7 +5379,12 @@ where
             let handle = format!("toolResult{ordinal}");
             let payload = serde_json::json!({
                 "call": { "name": call.name, "arguments": call.arguments },
-                "result": { "name": call.name, "handle": handle, "output": output },
+                "result": {
+                    "name": call.name,
+                    "handle": handle,
+                    "ordinal": ordinal,
+                    "output": output,
+                },
             });
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
@@ -7903,7 +7908,7 @@ where
             jev: Arc::new(crate::jev::UnconfiguredJev),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
-            usage_pointers: &[],
+            usage_pointers: crate::UsagePointerTable::default(),
             recovery: None,
         };
         (
@@ -8612,7 +8617,13 @@ fn lookup_response(
     live_modules: &[String],
     workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
-    crate::lookup_tool::resolve(prepared, inspected, live_modules, workspace_modules, &[])
+    crate::lookup_tool::resolve(
+        prepared,
+        inspected,
+        live_modules,
+        workspace_modules,
+        crate::UsagePointerTable::default(),
+    )
 }
 
 #[cfg(test)]
@@ -9302,6 +9313,7 @@ mod tests {
             CellAnalysisItem {
                 span,
                 source: String::new(),
+                prologue_only: false,
                 verdict: TurnClassification {
                     kind,
                     binders: Vec::new(),

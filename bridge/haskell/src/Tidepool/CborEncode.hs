@@ -199,8 +199,9 @@ encodeCellItem CellAnalysisItem
   , cellAnalysisSource = source
   , cellAnalysisVerdict = StmtBinders kind binders items
   , cellAnalysisSourceItems = sourceItems
+  , cellAnalysisPrologueOnly = prologueOnly
   } =
-  encodeListLen 5
+  encodeListLen 6
   <> encodeListLen 4
   <> encodeInt startLine
   <> encodeInt startColumn
@@ -213,6 +214,7 @@ encodeCellItem CellAnalysisItem
       <> encodeExportItems items)
   <> encodeListLen (fromIntegral (length sourceItems))
   <> foldMap encodeCellSourceItem sourceItems
+  <> encodeBool prologueOnly
 
 encodeCellSourceItem :: CellAnalysisSourceItem -> Encoding
 encodeCellSourceItem CellAnalysisSourceItem

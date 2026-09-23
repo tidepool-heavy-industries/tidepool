@@ -745,6 +745,8 @@ prologuePlans flags = do
         (map locatedImportSource (prologueImports prologue))
       case cellPlanItems plan of
         declaration : _ -> do
+          assertEqual "prologue plus a declaration is not prologue-only" False
+            (cellAnalysisPrologueOnly declaration)
           assertEqual "grouped source ordinals" [0..3]
             (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems declaration))
           let body = cellAnalysisSource declaration
@@ -761,6 +763,8 @@ prologuePlans flags = do
     Right (CellSourcePlan { cellPlanItems = [item] }) -> do
       assertEqual "import-only kind" KDecl (sbKind (cellAnalysisVerdict item))
       assertEqual "import-only body" "" (cellAnalysisSource item)
+      assertEqual "import-only item is classified as prologue, not a definition" True
+        (cellAnalysisPrologueOnly item)
       assertEqual "import-only ordinals" [0]
         (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems item))
     other -> fail ("import-only plan: " ++ show other)
@@ -780,6 +784,8 @@ prologuePlans flags = do
     Right (CellSourcePlan { cellPlanItems = [item] }) -> do
       assertEqual "pragma-only kind" KDecl (sbKind (cellAnalysisVerdict item))
       assertEqual "pragma-only body" "" (cellAnalysisSource item)
+      assertEqual "pragma-only item is classified as prologue, not a definition" True
+        (cellAnalysisPrologueOnly item)
     other -> fail ("pragma-only plan: " ++ show other)
   disabled <- analyzeCellWithFlags flags checkTemplate
     "{-# LANGUAGE NoQuasiQuotes #-}\nf = [bash|echo hello|]\n"
