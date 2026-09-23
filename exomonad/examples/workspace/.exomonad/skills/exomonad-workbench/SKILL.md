@@ -85,14 +85,15 @@ the cell runs. Bind the short preview, not the file:
 ```haskell
 previews <- forM ["README.md", "Justfile"] $ \path ->
   (path,) . fmap (T.take 2000) . Cmd.stdout
-    <$> Cmd.quiet (Cmd.run (Cmd.withArguments [path] [bash|sed -n '1,40p' -- "$1"|]))
+    <$> Cmd.run (Cmd.withArguments [path] [bash|sed -n '1,40p' -- "$1"|])
 map fst previews
 ```
 
 The preview retains read failures as `Left`; fetch complete text before judgments
 that require it. Display the keys and keep the previews for the next statement. A truncated display offers `cellDisplay.more`, which reads
-the next retained page without repeating the effect, and `Cmd.quiet action`
-suppresses routine command presentation when only the data matters.
+the next retained page without repeating the effect. Bound command results show
+a compact summary while retaining the full observation; `Cmd.quiet action`
+suppresses routine presentation for unbound commands when only data matters.
 
 ## Multi-line chains
 

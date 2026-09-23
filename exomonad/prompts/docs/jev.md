@@ -133,8 +133,9 @@ leads to new evidence. Keep raw judgments available for inspection and reuse.
 
 Preserve full evidence or recoverable references. Excerpts need scope and source
 addresses. A display budget must not silently delete the fact a judgment needs.
-Use Cmd.quiet and small output projections to keep large retained values out of
-the conversation.
+Bound command results show a compact summary while retaining the full observation.
+Use Cmd.quiet for unbound command observations and small output projections to
+keep large retained values out of the conversation.
 
 See exomonad-jev for worked patterns. Historical lab results apply to their fixtures;
 they are not universal rules about question wording, thresholds, or candidate count.
@@ -188,7 +189,7 @@ is what you want the first few times you write a packet.
 
 One shell command lists the candidates and one read per candidate gathers
 evidence, bound as ordinary values. Use bounded previews when suitable, retain their paths for expansion, and use
-Cmd.quiet when gathering evidence for code. Keep complete results available where
+Cmd.quiet for unbound commands when gathering evidence for code. Keep complete results available where
 needed; display limits and evidence completeness are different contracts.
 
 ```haskell

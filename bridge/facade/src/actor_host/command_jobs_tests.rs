@@ -837,7 +837,7 @@ async fn read_command_captures_both_streams_of_a_failed_command() {
 }
 
 #[tokio::test]
-async fn command_result_pages_retained_stdout_without_launching_again() {
+async fn bound_command_result_is_summarized_and_remains_readable() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
@@ -851,22 +851,41 @@ async fn command_result_pages_retained_stdout_without_launching_again() {
     assert_eq!(run["status"], "committed", "{run}");
     assert_eq!(backend.specs.lock().len(), 1);
 
+    let bound_output = run["items"][0]["output"].as_str().unwrap();
+    assert!(bound_output.contains("command "), "{run}");
+    assert!(bound_output.contains("exit 0"), "{run}");
+    assert!(bound_output.contains("stdout 10000 bytes"), "{run}");
+    assert!(bound_output.contains("stderr 0 bytes"), "{run}");
+    assert!(!bound_output.contains(&"Q".repeat(100)), "{run}");
     let first = committed(&campaign, "paged").await;
-    let first_output = first["items"][0]["output"].as_str().unwrap();
     assert!(
-        first_output.contains("; display continues: cellDisplay.more]"),
+        first["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("stdout"),
         "{first}"
     );
-    assert!(!first_output.contains("Display failed"), "{first}");
-    let second = committed(&campaign, "cellDisplay.more").await;
-    let second_output = second["items"][0]["output"].as_str().unwrap();
-    assert!(!second_output.contains("Display failed"), "{second}");
-    assert_eq!(
-        first_output.matches('Q').count() + second_output.matches('Q').count(),
-        10000,
-        "{first}\n{second}"
-    );
-    assert_eq!(backend.specs.lock().len(), 1, "paging reran the command");
+    let recovered = committed(
+        &campaign,
+        "Cmd.stdout paged == Right (T.replicate 10000 \"Q\")",
+    )
+    .await;
+    assert_eq!(recovered["items"][0]["output"], "True", "{recovered}");
+
+    let policy = campaign.root_installation.policy.clone();
+    let unbound_run = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), "Cmd.run [bash|printf U|]").await
+    });
+    let unbound_backend = TestCommands::completed("U");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(unbound_backend.clone()));
+    let unbound = unbound_run.await.unwrap();
+    let unbound_output = unbound["items"][0]["output"].as_str().unwrap();
+    assert!(unbound_output.contains("session_id:"), "{unbound}");
+    assert!(unbound_output.contains('U'), "{unbound}");
+    assert_eq!(backend.specs.lock().len(), 1, "reading reran the command");
+    assert_eq!(unbound_backend.specs.lock().len(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

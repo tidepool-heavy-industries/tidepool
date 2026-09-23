@@ -5146,6 +5146,44 @@ where
                                 _ => None,
                             };
                             if let Some((job, mut presentation)) = presentation {
+                                if !unit.named_tool
+                                    && next_fragment.summarizes_bound_commands()
+                                    && matches!(
+                                        presentation,
+                                        CommandPresentation::CommandVisible(_, _)
+                                    )
+                                {
+                                    let status =
+                                        self.environment.commands.status(context.actor, &job).await;
+                                    let output = self
+                                        .environment
+                                        .commands
+                                        .output(context.actor, &job, 1024 * 1024)
+                                        .await;
+                                    let exit = match status {
+                                        Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => match result.outcome {
+                                            tidepool_bridge_effects::CommandOutcome::CommandExited(code) => format!("exit {code}"),
+                                            other => format!("{:?}", other),
+                                        },
+                                        Ok(tidepool_bridge_effects::CommandStatus::CommandQueued) => "queued".into(),
+                                        Ok(tidepool_bridge_effects::CommandStatus::CommandStarting) => "starting".into(),
+                                        Ok(tidepool_bridge_effects::CommandStatus::CommandRunning) => "running".into(),
+                                        Ok(tidepool_bridge_effects::CommandStatus::CommandStopping) => "stopping".into(),
+                                        Err(_) => "status unavailable".into(),
+                                    };
+                                    let counts = match output {
+                                        Ok(output) => format!(
+                                            "stdout {} bytes · stderr {} bytes",
+                                            output.stdout.available_end,
+                                            output.stderr.available_end
+                                        ),
+                                        Err(_) => "stdout/stderr byte counts unavailable".into(),
+                                    };
+                                    presentation = CommandPresentation::CommandVisible(
+                                        format!("command {job}: {exit} · {counts}"),
+                                        512,
+                                    );
+                                }
                                 let limit = match &presentation {
                                     CommandPresentation::CommandVisible(_, bytes) => {
                                         usize::try_from(*bytes)

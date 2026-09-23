@@ -91,7 +91,7 @@ command output. Exit failure is handled in code; Jev unavailability stays explic
 import Tidepool.Effects.Core (Jev, Commands)
 judgeChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
 judgeChanges task = do
-  result <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "diff", "--stat"]))
+  result <- Cmd.run (Cmd.argv ["git", "diff", "--stat"])
   case Cmd.stdout result of
     Left issue -> pure ("Cannot read changes: " <> T.pack (show issue))
     Right changes -> do
@@ -103,7 +103,9 @@ judgeChanges task = do
 ```
 
 `Cmd.stdout` returns complete successful stdout or an explicit issue. For failed
-commands, inspect outcome and stderr; `Cmd.quiet` suppresses routine display.
+commands, inspect outcome and stderr. Bound command results show a job, exit
+status and stream-byte summary; the full observation remains available through
+the binding. `Cmd.quiet` suppresses routine display for unbound commands.
 `reflect n` returns your latest `n` conversation turns including the active turn,
 oldest first; reuse that evidence across questions. `me` is lexically captured; `parentAgent`
 is the spawning actor or `Nothing` for a root.

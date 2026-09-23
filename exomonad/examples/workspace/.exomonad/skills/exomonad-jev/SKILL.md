@@ -76,7 +76,8 @@ given, for a shape the field packet leaves out; its fields cannot be named.
 
 Use previews when they contain the evidence the question needs; label their scope
 and retain paths for expansion. Keep complete values or recoverable references.
-Use Cmd.quiet and small display projections to avoid flooding the conversation;
+Bound command results show a compact summary. Use Cmd.quiet for unbound command
+observations and small display projections to avoid flooding the conversation;
 do not discard deciding evidence merely to shorten its display.
 
 ## Reading the answer
