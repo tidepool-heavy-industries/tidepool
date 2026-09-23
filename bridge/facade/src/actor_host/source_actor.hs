@@ -1,4 +1,4 @@
-import Tidepool.Actor
+import Tidepool.Actor hiding (Source)
 let collectProgress event = case event of
       ProgressUpdate _ (ProgressNote _ f) -> (f 3, ())
       ProgressClosed -> (-1, ())

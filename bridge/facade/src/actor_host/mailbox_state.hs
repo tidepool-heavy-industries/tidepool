@@ -1,4 +1,4 @@
-import Tidepool.Actor
+import Tidepool.Actor hiding (Source)
 let definition = (ActorDefinition
       { label = "stateful-mailbox"
       , effectProfile = ReadOnly

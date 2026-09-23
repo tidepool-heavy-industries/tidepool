@@ -1,4 +1,4 @@
-import Tidepool.Actor
+import Tidepool.Actor hiding (Source)
 let owner = me
 let messenger = (ActorDefinition
       { label = "message-handler"

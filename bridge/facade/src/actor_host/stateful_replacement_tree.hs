@@ -1,4 +1,4 @@
-import Tidepool.Actor
+import Tidepool.Actor hiding (Source)
 data Counter result = Counter Int (Int -> result)
 let counter = (stateful "owned-counter" ReadOnly (\state (Counter delta answer) -> pure (answer state, state + delta)) :: ActorDefinition Int Counter Int)
 data Ownership result = SpawnOwned (ActorRef Counter Int -> result)

@@ -1,4 +1,4 @@
-import Tidepool.Actor
+import Tidepool.Actor hiding (Source)
 let counter = (stateful "drain-counter" ReadOnly (\state (delta, reply) -> pure (reply, state + delta)) :: ActorDefinition Int ((,) Int) Int)
 server <- startActor counter 7
 mapM_ (\delta -> cast server (delta, ())) [1..20]

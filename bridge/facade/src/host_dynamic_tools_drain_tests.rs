@@ -562,8 +562,18 @@ mod actual_seal {
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
         include.push(crate::haskell_sources::ensure_exomonad_haskell().unwrap());
+        // `Include` would auto-add an unqualified `import Tidepool.Actor` for
+        // `actor_local_decl`'s companion module, which collides with the
+        // always-present `Tidepool.Effects`'s reload `Source` GADT (the
+        // universal Core vocabulary is not row-scoped — see
+        // `companion_import`). Production's own driver preamble
+        // (`actor_host::driver_sources`) uses `Omit` for exactly this reason.
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble(&declarations, false),
+            &tidepool_mcp::build_preamble_with_companions(
+                &declarations,
+                false,
+                tidepool_mcp::CompanionImports::Omit,
+            ),
             "Tidepool.Actors.Internal.ExomonadDriver",
         );
         let templates = resident_workbench_templates(&preamble, "RootEffects", "");

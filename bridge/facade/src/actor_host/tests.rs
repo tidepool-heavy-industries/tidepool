@@ -3079,7 +3079,8 @@ async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
 async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
     let campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let imports = dispatch_haskell_script(root.as_ref(), "import Tidepool.Actor").await;
+    let imports =
+        dispatch_haskell_script(root.as_ref(), "import Tidepool.Actor hiding (Source)").await;
     assert_eq!(imports["status"], "committed", "{imports:?}");
     for (script, expected_types) in [
         (
