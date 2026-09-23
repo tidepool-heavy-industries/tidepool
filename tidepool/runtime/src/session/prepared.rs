@@ -961,6 +961,53 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
     }
 }
 
+/// The constructor `response` visits as exactly one field-less constructor,
+/// or `None` for any other shape (fields, literals, byte arrays, nesting).
+fn nullary_constructor_of(
+    response: &dyn tidepool_bridge::ToHaskell,
+    table: &DataConTable,
+) -> Option<DataConId> {
+    #[derive(Default)]
+    struct Nullary {
+        id: Option<DataConId>,
+        open: bool,
+    }
+    impl Nullary {
+        fn reject(got: &str) -> BridgeError {
+            BridgeError::TypeMismatch {
+                expected: "one field-less constructor".into(),
+                got: got.into(),
+            }
+        }
+    }
+    impl HaskellVisitor for Nullary {
+        fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
+            if fields != 0 || self.id.is_some() {
+                return Err(Self::reject("a constructor with fields"));
+            }
+            self.id = Some(id);
+            self.open = true;
+            Ok(())
+        }
+        fn end_constructor(&mut self) -> Result<(), BridgeError> {
+            if !self.open {
+                return Err(Self::reject("an unmatched constructor end"));
+            }
+            self.open = false;
+            Ok(())
+        }
+        fn literal(&mut self, _: Literal) -> Result<(), BridgeError> {
+            Err(Self::reject("a literal"))
+        }
+        fn byte_array(&mut self, _: Vec<u8>) -> Result<(), BridgeError> {
+            Err(Self::reject("a byte array"))
+        }
+    }
+    let mut visitor = Nullary::default();
+    response.visit(table, &mut visitor).ok()?;
+    (!visitor.open).then_some(visitor.id).flatten()
+}
+
 fn build_structural_node(
     response: &dyn tidepool_bridge::ToHaskell,
     table: &DataConTable,
@@ -2789,7 +2836,7 @@ impl PreparedEngine {
         ))?;
         let evidence = *evidence;
         if evidence.site == UNSITED {
-            return Err(PreparedRuntimeError::UnsitedAnswer);
+            return self.resume_unsited_with_nullary(id, realm, response, table);
         }
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
@@ -2816,6 +2863,38 @@ impl PreparedEngine {
             .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
         let root = build_structural_node(response, table, site, row.wire, owner, &mut builder)?;
+        let answer = builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, answer)
+    }
+
+    /// The one host-built answer an open-reply frame ([`UNSITED`]) accepts:
+    /// a field-less constructor. The frame carries no wire evidence, so the
+    /// constructor is built from the machine's authenticated descriptors
+    /// alone; anything with a field is [`PreparedRuntimeError::UnsitedAnswer`]
+    /// and the frame stays parked. `Tidepool.Actor.statefulLoop` parks its
+    /// receive this way on purpose (its reply type `Maybe state` is open
+    /// until the handler runs) and a drain resumes it with `Nothing`.
+    fn resume_unsited_with_nullary(
+        &mut self,
+        id: ContinuationId,
+        realm: RealmId,
+        response: &dyn tidepool_bridge::ToHaskell,
+        table: &DataConTable,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let host_id =
+            nullary_constructor_of(response, table).ok_or(PreparedRuntimeError::UnsitedAnswer)?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let root = builder
+            .constructor(host_id, &[])
+            .map_err(PreparedRuntimeError::Run)?;
         let answer = builder
             .finish(realm, root)
             .map_err(PreparedRuntimeError::Run)?;
