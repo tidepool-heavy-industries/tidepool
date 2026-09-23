@@ -52,7 +52,7 @@ execute :: Member Lookup effects => Bool -> Selection effects -> LookupArguments
 execute discover select (LookupArguments names)
   | null names = pure "lookup requires at least one query"
   | otherwise = do
-      original <- lookupRaw (LookupRequest names discover Nothing 128 [])
+      original <- lookupRaw ((lookupRequest names) {lookupDiscover = discover})
       let primary = renderBatch original
           candidates = packCandidates (lookupCandidates original)
       if null candidates || lookupIssue original /= Nothing

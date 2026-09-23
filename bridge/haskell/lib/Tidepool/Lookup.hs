@@ -5,8 +5,14 @@ module Tidepool.Lookup
     LookupOutcome (..), LookupEntry (..), LookupKind (..),
     LookupAvailability (..), LookupOrigin (..), LookupQuality (..),
     LookupCandidate (..), LookupReference (..), LookupNamespace (..),
-    lookupRaw,
+    lookupRaw, lookupRequest,
   ) where
 
+import Data.Text (Text)
 import Tidepool.Effects (lookupRaw)
 import Tidepool.Effects.Core
+
+-- | Build a raw request with the same bounded discovery defaults as the
+-- hosted lookup tool.
+lookupRequest :: [Text] -> LookupRequest
+lookupRequest queries' = LookupRequest queries' True Nothing 128 []

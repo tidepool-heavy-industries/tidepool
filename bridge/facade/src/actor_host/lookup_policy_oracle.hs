@@ -48,6 +48,15 @@ check name value = unless value (fail name)
 
 main :: IO ()
 main = do
+  let expectedDefaults = lookupRequest ["Cmd.quiet"]
+      (cellRequests, _) = observe (lookupRaw (lookupRequest ["Cmd.quiet"]))
+  check "cell lookup constructor uses hosted defaults"
+    (cellRequests == [expectedDefaults]
+      && lookupQueries expectedDefaults == ["Cmd.quiet"]
+      && lookupDiscover expectedDefaults
+      && lookupExpectedView expectedDefaults == Nothing
+      && lookupCandidateLimit expectedDefaults == 128
+      && null (lookupReferences expectedDefaults))
   let select _ values = pure (Tools.rankCandidates (zip values [2,3,1,3,2,3]))
       (requests, output) = observe (Tools.executeWith select (Tools.LookupArguments ["root"]))
   check "one original batch and one nonrecursive follow-up" (length requests == 2)

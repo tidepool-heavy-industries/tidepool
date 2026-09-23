@@ -30,6 +30,18 @@ Leading `LANGUAGE` and `OPTIONS_GHC` pragmas apply to this cell only and must
 come first; imports persist. No pragmas or imports after executable source, no
 colon commands, no `:{` / `:}`.
 
+## Look up a name from a cell
+
+The hosted `lookup` tool is not a Haskell function. In a cell, use the raw
+effect with the default request constructor:
+
+```haskell
+lookupRaw (lookupRequest ["Cmd.quiet"])
+```
+
+`lookupRequest` applies the hosted lookup defaults; use `LookupRequest` directly
+when a request needs custom discovery, view, candidate limit, or references.
+
 ## Text, not String
 
 `Text` is the currency of this workbench: paths, labels, output, messages. The
