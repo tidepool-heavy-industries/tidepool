@@ -192,7 +192,8 @@ let from = GitRef "exomonad/integration"
 ```
 
 `atRef (GitRef "exomonad/integration")` is the deliberate committed seed for a
-fork; `projectHead` and `boundHead` are the live ones. If your build carries
+fork; `projectHead` and `currentCheckout` are the live ones. `currentCheckout`
+resolves for the executing actor. If your build carries
 `IsString` for these types, a bare literal works too — the constructor form
 works either way.
 

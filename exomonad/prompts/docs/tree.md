@@ -6,9 +6,9 @@ not guaranteed. Choose depth and width from the actual obligations.
 
 Commit a useful interface, example, test, or partial implementation in your
 owned worktree. Name each obligation's scope, acceptance condition, and allowed
-holes. Use `boundHead` for an allocated child checkout and `projectHead` for the source
-project. The hosted root writes the project checkout directly and has no bound
-worktree handle: seed its children with `projectHead`. Before a live-source fork,
+holes. Use `currentCheckout` to select the executing actor's checkout: the root
+project checkout or a child's bound checkout. Use `projectHead` for the source
+project explicitly. Before a live-source fork,
 Exomonad checkpoints eligible edits on the source's current branch. The child starts
 from that committed source. If the optional overlay capture is busy or unavailable,
 the child starts from the checkpointed HEAD with an omission notice. If native
@@ -30,7 +30,7 @@ manage allocated checkouts; `worktreeBranch` and `worktreeHead` read one;
 integrates an exact source OID into a managed target worktree, and merges the
 OID rather than a branch label so a retained child branch cannot move between
 review and fold. `atRef (GitRef "…")` seeds a fork from a deliberate committed
-ref; `projectHead` and `boundHead` seed it from live source. A commit you cannot
+ref; `projectHead` and `currentCheckout` seed it from live source. A commit you cannot
 resolve means the child has not checkpointed it yet, not that the work is gone.
 Load `exomonad-unfold` for the worked cells.
 

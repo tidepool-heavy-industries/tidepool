@@ -32,9 +32,11 @@ cancellation pending, ready, and unavailable. Progress uses `childWithProgress`
 and `pollProgress`; snapshots are not replies. Record actors (`R.*`) collect
 and route events without model inference.
 
-Seed root children with `projectHead`, bound children with `boundHead`, or use
-`atRef` for an explicit commit. Live-source admission checkpoints eligible edits
-on the source branch without hooks or checks; inspect omission/fallback receipts.
+Seed children from your executing checkout with `currentCheckout`: the root
+project checkout or a child's bound checkout. Use `projectHead` to select the
+project source explicitly, or `atRef` for an explicit commit. Live-source
+admission checkpoints eligible edits on the source branch without hooks or
+checks; inspect omission/fallback receipts.
 Commit useful units without mistaking checkpoints for accepted delivery.
 
 `withModel "executor"` selects a workspace alias; `withModel (Literal "provider-model")`
@@ -51,6 +53,14 @@ assigns follow-up work. `pollRequestUpdate` inspects an accepted update handle.
 Requests notify their owner unless a watch/route takes over; record actor
 settlement sources require `report = Silent`.
 
+Inherited bindings keep their values and handles. You may inspect another
+actor's response, command output, progress, or worktree state. Create your own
+watch to receive a pending response; do not drain or unsubscribe another actor's
+listener. Reads do not transfer control: ask the owner to cancel, publish,
+release, write stdin, or mutate its worktree. A Ready notice means inspect the
+handle; release may make it unavailable before your read. A value already
+extracted from a successful read remains yours after release.
+
 ## Review and integrate
 
 A reply identifies a candidate, not an integrated result. Recover its exact
@@ -66,6 +76,7 @@ compiled project review/repair recipe and `exomonad-unfold` for submission evide
 
 ```haskell signatures
 assignment :: Label -> input -> Assignment input
+currentCheckout :: WorktreeSeed
 coding :: WorktreeSeed -> Assignment input -> Branch CodingEffects input result
 researching :: WorktreeSeed -> Assignment input -> Branch ResearchEffects input result
 child :: (KnownEffects child, Subset child parent)

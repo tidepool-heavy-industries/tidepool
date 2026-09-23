@@ -1,6 +1,7 @@
 `request` submits one typed assignment to a retained actor. The `Response a`
-handle is durable while its resident Haskell machine lives; readiness alone
-does not spend another model turn.
+handle can be inherited while its resource is available; readiness alone does
+not spend another model turn. Inspect an inherited response or register your
+own watch. The owner still controls updates, cancellation, and release.
 
 ```haskell
 response <- request @Report worker (assignment [label|review-change|] task)

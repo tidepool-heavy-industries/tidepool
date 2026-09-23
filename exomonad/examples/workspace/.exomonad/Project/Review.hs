@@ -72,7 +72,7 @@ import Jev.Operators (Packet ((:=), (:&)), Settled (Settled))
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
-import Tidepool.Actors.Exomonad
+import Tidepool.Actors.Exomonad hiding (record)
 import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (GitRef (..), Jev, Commands)
 import Tidepool.Worktree (renderGitOid)

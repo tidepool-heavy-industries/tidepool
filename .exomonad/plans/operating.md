@@ -117,8 +117,8 @@ completes when the tool block returns; do not await its new child in that same b
 `inherited` chooses the caller's current completed context boundary. Use it when
 shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask uses inherited
-context and boundHead, as does implement. Original-root callers use solTaskFrom
-with projectHead. Select a fresh taskContext
+context and currentCheckout, as does implement. This resolves the caller's project
+or bound checkout; explicit project-root selection uses solTaskFrom with projectHead. Select a fresh taskContext
 explicitly for unrelated work; select withEffort Medium for substantial engineering
 when the default Low would underspecify the assignment. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants

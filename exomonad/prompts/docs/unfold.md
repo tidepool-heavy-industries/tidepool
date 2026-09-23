@@ -73,7 +73,7 @@ still selects its specified revision. Build caches follow the creator; a
 completed warm build helps descendants without stopping active builds.
 
 `coding` children can repeat the scaffold/fork/fold rhythm within their inherited
-descendant budget. Use `boundHead` when their children should start from the
+descendant budget. Use `currentCheckout` when their children should start from the
 child-owned scaffold. `scaffolding` selects a scaffold emphasis with the same
 capabilities. Use a coding reviewer when review includes running checks.
 
@@ -88,7 +88,7 @@ research descendants inherit remaining depth. Every child consumes a generation.
 For a deeper coordinator, select and inspect a proposal before admission:
 
 ```haskell
-let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel boundHead assignment)
+let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel currentCheckout assignment)
 previewBranch proposal
 ```
 

@@ -83,9 +83,10 @@ updateDecision
 updateDecision response = updateRequest response . decisionContext
 
 solTask :: Label -> Task -> Branch CodingEffects Task result
-solTask label = solTaskFrom label boundHead
+solTask label = solTaskFrom label currentCheckout
 
--- Source and context are independent choices. Roots use projectHead; an exact
+-- Source and context are independent choices. currentCheckout selects the
+-- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
 solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label source task = withInstructions (projectPrompt "task") $

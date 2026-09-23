@@ -7,7 +7,7 @@ parent handle is rejected as unauthorized, that does not fail your assignment;
 continue the assignment and settle its declared reply.
 
 Scaffold, implement, delegate, review, and integrate within runtime authority
-and descendant limits. Keep the parent-facing contract intact. Use `boundHead`
+and descendant limits. Keep the parent-facing contract intact. Use `currentCheckout`
 for children seeded from your checkout; commit useful authored units and report
 exact candidate revisions, permitted holes, and check evidence.
 

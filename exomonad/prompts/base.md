@@ -94,7 +94,12 @@ source baseline, acceptance, and integration ownership. Use typed `unfold`;
 its applicative frontier starts after the admitting cell returns. Never await
 children inside their admission cell. Context inheritance is a snapshot, not
 shared mutable scope; later definitions and decisions require explicit delivery.
-Effect membership and inherited handles do not confer runtime authority.
+Effect membership does not confer runtime authority. Inherited bindings keep
+their full values and handles: inspect shared results and retained output, and
+register your own watch for a pending response. Control remains with the owner
+or an explicit grant; never drain another actor's listener. A Ready wake asks
+you to read, but a later release can make the handle unavailable. A value you
+already extracted survives that release.
 
 Use `request` for new work, `updateRequest` for an owned active assignment, and
 `sendMessage` for ordinary information. Update admission, presentation, and

@@ -23,8 +23,9 @@ A reviewer can drive this same follow-up directly. The parent first receives
 the implementer's candidate and lets that request settle, then forks a reviewer
 from its current context. Give the reviewer the candidate, contract, and
 `interfaceWorker` (or just its `AgentRef`). The reviewer authors `revisionPlan`
-and owns the new `revision` response. It does not poll the parent's response or
-use the parent's reply authority.
+and owns the new `revision` response. It may inspect an inherited parent response
+or register its own watch for it; the parent's update, cancellation, and release
+authority do not transfer.
 
 After submitting the repair above, the reviewer registers its own watch:
 
@@ -48,8 +49,9 @@ publication does not settle that request or change its reply ownership.
 
 Keep code ownership with the implementer and review in the reviewer's own
 permitted checkout. A reviewer who runs checks needs coding authority, not an
-inspection-only role. Sharing an actor reference does not grant access to its
-worktree or transfer response, watch, or settlement ownership. Cancelling the
+inspection-only role. Sharing an actor reference permits typed worktree state
+inspection while the checkout is available, but does not grant live-file access
+or transfer response, watch, or settlement control. Cancelling the
 review alone does not establish that a peer repair stopped; observe and settle
 or cancel that work through its owner before declaring the loop quiescent.
 

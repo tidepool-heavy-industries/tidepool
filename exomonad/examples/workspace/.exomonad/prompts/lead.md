@@ -29,8 +29,8 @@ Retain reviewers for repairs; another review does not itself discharge
 their obligation or establish safe retirement.
 
 Use solTask/componentLead defaults for related implementation: inherited context
-and boundHead. Original-root source uses the corresponding From helper with
-projectHead. Fresh selected context suits unrelated mechanisms and independent
+and currentCheckout, resolved for the executing actor. Use a From helper with
+projectHead to select the project source explicitly. Fresh selected context suits unrelated mechanisms and independent
 reviews; reviewCandidate also selects its exact committed candidate. Fork before
 unrelated debugging fills the shared context. Use unique subgroup labels for successive local waves.
 

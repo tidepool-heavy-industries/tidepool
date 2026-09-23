@@ -39,7 +39,7 @@ unavailable dependency should fail the watch, and `awaitAnySettled` to wake on
 the first. Register the watch, then end the model round; a wake is a reason to
 inspect retained handles, not proof of success.
 
-## The child's checkout is not yours to read
+## Observe a child's submission
 
 A `Response` carries an immutable launch receipt on its launch request, and
 that receipt's `cwd` names the child's own checkout. **It is not a path the
@@ -47,8 +47,9 @@ parent can read while the child lives.** The child owns that worktree; its
 contents are mid-edit, and a path that resolves in your shell is a different
 directory or a stale one. Nothing about holding the handle grants file access.
 
-What you may use is the identity in the receipt — the branch and the commit —
-resolved against the repository from your own view:
+Use the identity in the receipt — the branch and the commit — resolved against
+the repository from your own view. Typed worktree observations are also readable
+through an inherited handle while its checkout remains available:
 
 ```haskell
 let launch = launchedWorktree <$> responseAdmission worker
@@ -118,8 +119,9 @@ check over uncommitted files does not establish a submitted candidate.
 
 ## Source admission and follow-up
 
-`projectHead` selects live root source; `boundHead` requires an allocated child
-worktree. Admission checkpoints eligible edits on the source branch, including
+`currentCheckout` selects the executing actor's checkout: root project source or
+child's bound worktree. `projectHead` selects the project source explicitly.
+Admission checkpoints eligible edits on the source branch, including
 root main, without hooks or checks. Runtime `.exomonad/`, configured exclusions, and
 recognized caches are excluded. Git checkpoint failure preserves working files
 and refuses the fork. A busy native source uses existing committed HEAD and

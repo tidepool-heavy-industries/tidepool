@@ -33,6 +33,11 @@ its receipt distinguishes the request from terminal outcome and cleanup. Repeate
 close/cancel is safe; cancellation preserves an already-finished outcome.
 `read_output` with that ID and `stream: "Stderr"`
 reads diagnostics from the beginning; continue at the returned `next_offset`.
+An inherited job can be inspected with `Cmd.status`, `Cmd.await`, `Cmd.output`,
+and positioned reads without moving the owner's display cursor. Input, EOF,
+resize, and cancellation remain with the owner. A fresh command constructed
+from an inherited helper runs in the calling actor's checkout; an explicit
+directory stays fixed.
 Recovery reads are contiguous, with an 8 KiB default display budget;
 `max_output_bytes` selects 1024..32768 bytes including metadata. They never use a
 head/tail preview. Positions are original bytes, even for lossy UTF-8.
@@ -184,7 +189,7 @@ terminal event, including attachment after completion. To continue automatically
    stdout alone is not a complete diagnostic bundle for commands using stderr.
 5. Retain the result and finish the collector when its obligations are settled.
 
-Use `exomonad-define-actors` for handler construction. Captured handles do not
-transfer authority.
+Use `exomonad-define-actors` for handler construction. Captured jobs permit
+inspection while available; they do not transfer command control.
 
 For project-authored direct tools, see [Defining compiled tools](references/hosted-tools.md).
