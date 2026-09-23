@@ -323,9 +323,6 @@ impl ToHaskell for RequestAnswer {
             Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::TargetStillActive)) => {
                 emit!("ResponseForgetTargetActive")
             }
-            Self::ForgetResponse(Ok(crate::ForgetResponseOutcome::RetainedByWatches(watches))) => {
-                emit!("ResponseRetainedByWatches", watches)
-            }
             Self::ForgetResponse(Err(error)) => emit!("ResponseForgetRejected", error),
             Self::Reply(Ok(ReplyObservation::Open)) => emit!("RawReplyOpen"),
             Self::Reply(Ok(ReplyObservation::CancellationRequested(reason))) => {
@@ -388,6 +385,7 @@ impl ToHaskell for ResponseFailure {
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
         let (name, detail) = match self {
+            Self::Released => ("ResponseReleased", None),
             Self::TargetUnavailable => ("ResponseTargetUnavailable", None),
             Self::TargetFailed(summary) => ("ResponseTargetFailed", Some(summary)),
             Self::TargetCancelled(summary) => ("ResponseTargetCancelled", Some(summary)),

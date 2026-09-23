@@ -76,7 +76,7 @@ module Tidepool.Actors.Exomonad
   , ForkGroupPath
   , WorktreeSeed
   , projectHead
-  , boundHead
+  , currentCheckout
   , existingWorktree
   , atRef
   , snapshotDirty

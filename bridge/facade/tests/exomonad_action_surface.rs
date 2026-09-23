@@ -39,6 +39,26 @@ fn exomonad_include_paths() -> Vec<PathBuf> {
 }
 
 #[test]
+fn node_mailboxes_compile_with_opaque_ids() {
+    eval_harness::require_extract();
+    let effects = tidepool_mcp::ensure_effects_module(&[
+        tidepool_mcp::worktree_decl(),
+        tidepool_mcp::event_decl(),
+        tidepool_mcp::green_decl(),
+    ])
+    .expect("materialize Node effects");
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    compile_haskell(
+        include_str!("exomonad_action_surface/node_mailbox_surface.hs"),
+        "result",
+        &refs,
+    )
+    .expect("Node mailboxes use the generated opaque MailboxId surface");
+}
+
+#[test]
 fn resident_deliberation_module_is_not_available() {
     eval_harness::require_extract();
     let include = exomonad_include_paths();

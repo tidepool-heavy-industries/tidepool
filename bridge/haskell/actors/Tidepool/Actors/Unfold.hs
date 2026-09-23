@@ -1,7 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -18,7 +20,7 @@ module Tidepool.Actors.Unfold
   , NameError (..)
   , WorktreeSeed
   , projectHead
-  , boundHead
+  , currentCheckout
   , existingWorktree
   , atRef
   , snapshotDirty
@@ -150,6 +152,7 @@ import Tidepool.Effects.Core
   , WorktreeSpec (..)
   )
 import Tidepool.Worktree (worktreeId)
+import Tidepool.Inspection (WorkbenchDisplay (..), PageDisplay (..), compactDisplayPage)
 
 -- Data makes the constructor match force its IsString validator before the fork effect.
 data CampaignLabel = CampaignLabel Text
@@ -197,14 +200,16 @@ validateSegment value
 
 data WorktreeSeed
   = WorktreeSeed WorktreeSource DirtyPolicy
-  | BoundHeadSeed DirtyPolicy
+  | CurrentCheckoutSeed DirtyPolicy
   deriving (Show, Eq)
 
 projectHead :: WorktreeSeed
 projectHead = WorktreeSeed SourceCurrentRepository RequireClean
 
-boundHead :: WorktreeSeed
-boundHead = BoundHeadSeed RequireClean
+-- | Resolve the executing actor's project or bound checkout at admission.
+-- Inheriting this recipe does not pin it to the actor that defined it.
+currentCheckout :: WorktreeSeed
+currentCheckout = CurrentCheckoutSeed RequireClean
 
 existingWorktree :: WorktreeHandle -> WorktreeSeed
 existingWorktree tree = WorktreeSeed (SourceWorktree (worktreeId tree)) RequireClean
@@ -214,7 +219,7 @@ atRef ref = WorktreeSeed (SourceRef ref) RequireClean
 
 snapshotDirty :: WorktreeSeed -> WorktreeSeed
 snapshotDirty (WorktreeSeed source _) = WorktreeSeed source AllowDirtySnapshot
-snapshotDirty (BoundHeadSeed _) = BoundHeadSeed AllowDirtySnapshot
+snapshotDirty (CurrentCheckoutSeed _) = CurrentCheckoutSeed AllowDirtySnapshot
 
 data Branch (childEffects :: [Type -> Type]) input result where
   Branch
@@ -262,6 +267,26 @@ data BranchPreview = BranchPreview
   , previewLaunch :: Maybe WorkerLaunchPreview
   , previewDelegation :: DelegationAuthority
   } deriving (Show, Eq)
+
+instance WorkbenchDisplay BranchPreview where
+  workbenchDisplay preview =
+    let summary = "BranchPreview (prospective, not reserved) · "
+          <> Text.pack (show (previewRole preview))
+          <> " · source=" <> Text.pack (show (previewSource preview))
+          <> " · budget=" <> Text.pack (show (previewEffectiveBudget preview))
+          <> " · " <> Text.pack (show (previewDelegation preview))
+        (rendered, _) = workbenchDisplay summary
+     in (rendered, True)
+
+instance WorkbenchDisplay (Either Text BranchPreview) where
+  workbenchDisplay (Left reason) = workbenchDisplay ("Preview refused: " <> reason)
+  workbenchDisplay (Right preview) = workbenchDisplay preview
+
+instance PageDisplay effects BranchPreview where
+  displayPage = compactDisplayPage
+
+instance PageDisplay effects (Either Text BranchPreview) where
+  displayPage = compactDisplayPage
 
 withForkBudget :: ForkBudget -> Branch child input result -> Branch child input result
 withForkBudget budget (Branch role seed effects options assigned) =
@@ -722,7 +747,7 @@ startBranch groupId allocated (Branch role seed effects options _) = do
 seedRequest :: Text -> WorktreeSeed -> (Maybe WorktreeSpec, DirtyPolicy)
 seedRequest allocated (WorktreeSeed source dirtyPolicy) =
   (Just (WorktreeSpec source allocated dirtyPolicy), dirtyPolicy)
-seedRequest _ (BoundHeadSeed dirtyPolicy) = (Nothing, dirtyPolicy)
+seedRequest _ (CurrentCheckoutSeed dirtyPolicy) = (Nothing, dirtyPolicy)
 
 launchRoleFor :: ForkRole -> Actor.LaunchRole
 launchRoleFor ResearchFork = Actor.ResearchRole

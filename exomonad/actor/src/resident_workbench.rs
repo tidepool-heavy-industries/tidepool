@@ -4396,7 +4396,7 @@ where
                                 fork_group: Some(crate::ForkGroupId(group)),
                                 fork_workspace: Some(match worktree_spec {
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
-                                    None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
+                                    None => crate::ForkWorkspaceSeed::CurrentCheckout(bound_dirty_policy),
                                 }),
                                 effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, lifetime,
                                 session_id: context.placement.session, parent_actor: context.actor,
@@ -5228,7 +5228,9 @@ where
                 input,
                 ResidentRequest::ActorKernel(ActorKernelReq::ActorLifecycleInputWith)
             ),
-            SourceEvent::Progress(_) | SourceEvent::ProgressClosed => matches!(
+            SourceEvent::Progress(_)
+            | SourceEvent::ProgressClosed
+            | SourceEvent::ProgressRejected(_) => matches!(
                 input,
                 ResidentRequest::Replies(RepliesReq::ObserveProgressWith(_))
             ),
@@ -5268,6 +5270,10 @@ where
             }
             SourceEvent::ProgressClosed => {
                 self.resume_progress_observation(context.clone(), hole, Ok((None, true)))
+                    .await?
+            }
+            SourceEvent::ProgressRejected(error) => {
+                self.resume_progress_observation(context.clone(), hole, Err(error))
                     .await?
             }
             SourceEvent::Settled(result) => {

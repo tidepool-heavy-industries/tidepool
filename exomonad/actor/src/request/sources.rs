@@ -28,6 +28,7 @@ pub(crate) struct SourceBinding {
 pub(crate) enum SourceEvent {
     Progress(ProgressSnapshot),
     ProgressClosed,
+    ProgressRejected(ReplyError),
     Settled(Result<(), ResponseFailure>),
     Lifecycle(crate::ActorLifecycle),
     Command(tidepool_bridge_effects::CommandResult),
@@ -166,6 +167,25 @@ impl Drop for ActorSourceConnections {
 }
 
 impl RequestRegistry {
+    /// A queued delivery becomes an accepted read only here, when the source
+    /// actor takes it for mapping. Publication alone does not keep a released
+    /// request available. The captured value survives release after this lock.
+    pub(crate) fn accept_source_delivery(&self, mut delivery: SourceDelivery) -> SourceDelivery {
+        let SourceTarget::Request(request, kind) = delivery.target else {
+            return delivery;
+        };
+        let state = self.state.lock();
+        if !state.requests.contains_key(&request) {
+            delivery.event = match kind {
+                RequestSourceKind::Progress => SourceEvent::ProgressRejected(ReplyError::Stale),
+                RequestSourceKind::Settlement => {
+                    SourceEvent::Settled(Err(ResponseFailure::Released))
+                }
+            };
+        }
+        delivery
+    }
+
     /// Validation, retained-current capture, and connection installation share
     /// the publication lock. Ractor's mailbox owns all accepted deliveries.
     pub(crate) fn attach_sources(
@@ -188,7 +208,9 @@ impl RequestRegistry {
         }
         for (_, request, _) in sources {
             let record = state.requests.get(request).ok_or(ReplyError::Stale)?;
-            super::authorize_owner(record, owner)?;
+            if state.cleaning.contains(&record.target) {
+                return Err(ReplyError::CancellationRequested);
+            }
         }
         let recipient = SourceDestination(Arc::new(parking_lot::Mutex::new(recipient)));
         for (slot, request, kind) in sources {
@@ -220,6 +242,22 @@ impl RequestRegistry {
 }
 
 impl RequestRecord {
+    pub(super) fn publish_source_release(&mut self) {
+        for source in &mut self.sources {
+            if source.closed {
+                continue;
+            }
+            let event = match source.kind {
+                RequestSourceKind::Progress => SourceEvent::ProgressRejected(ReplyError::Stale),
+                RequestSourceKind::Settlement => {
+                    SourceEvent::Settled(Err(ResponseFailure::Released))
+                }
+            };
+            source.send(event);
+            source.closed = true;
+        }
+    }
+
     pub(super) fn publish_source_progress(&mut self) {
         let Some(snapshot) = &self.progress else {
             return;
@@ -381,6 +419,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_source_read_after_release_reports_unavailable() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let owner = actor(100);
+        let target = actor(101);
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let _sources = registry
+            .attach_sources(
+                owner,
+                recipient,
+                &[
+                    (0, request, RequestSourceKind::Progress),
+                    (1, request, RequestSourceKind::Settlement),
+                ],
+            )
+            .unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        let queued_progress = receive(&mut events).await;
+        let queued_settlement = receive(&mut events).await;
+        assert!(matches!(queued_progress.event, SourceEvent::ProgressClosed));
+        assert!(matches!(
+            queued_settlement.event,
+            SourceEvent::Settled(Ok(()))
+        ));
+        assert!(matches!(
+            registry
+                .accept_source_delivery(queued_settlement.clone())
+                .event,
+            SourceEvent::Settled(Ok(()))
+        ));
+
+        registry.forget_response(owner, request).unwrap();
+        assert!(matches!(
+            registry.accept_source_delivery(queued_progress).event,
+            SourceEvent::ProgressRejected(ReplyError::Stale)
+        ));
+        assert!(matches!(
+            registry.accept_source_delivery(queued_settlement).event,
+            SourceEvent::Settled(Err(ResponseFailure::Released))
+        ));
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_unsubmitted_wakes_open_sources_without_replaying_closed_settlements() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let owner = actor(100);
+        let target = actor(101);
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let abandoned = registry.reserve(owner, target);
+        let _sources = registry
+            .attach_sources(
+                owner,
+                recipient,
+                &[
+                    (0, abandoned, RequestSourceKind::Progress),
+                    (1, abandoned, RequestSourceKind::Settlement),
+                ],
+            )
+            .unwrap();
+        assert_eq!(registry.abort_unsubmitted(owner).0, vec![abandoned]);
+        let progress = receive(&mut events).await;
+        let settlement = receive(&mut events).await;
+        assert_eq!((progress.slot, settlement.slot), (0, 1));
+        assert!(matches!(
+            registry.accept_source_delivery(progress).event,
+            SourceEvent::ProgressRejected(ReplyError::Stale)
+        ));
+        assert!(matches!(
+            registry.accept_source_delivery(settlement).event,
+            SourceEvent::Settled(Err(ResponseFailure::Released))
+        ));
+
+        let completed = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, completed).unwrap();
+        registry.present(target, completed).unwrap();
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let _sources = registry
+            .attach_sources(
+                owner,
+                recipient,
+                &[(2, completed, RequestSourceKind::Settlement)],
+            )
+            .unwrap();
+        registry.begin_reply(target, completed).unwrap();
+        registry.finish_reply(completed);
+        assert!(matches!(
+            receive(&mut events).await.event,
+            SourceEvent::Settled(Ok(()))
+        ));
+        registry.forget_response(owner, completed).unwrap();
+        address.stop(None);
+        task.await.unwrap();
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn replacement_moves_request_and_watch_authority_without_changing_target() {
         let registry = RequestRegistry::default();
         let (send, _) = mpsc::unbounded_channel();
@@ -395,11 +538,11 @@ mod tests {
         registry.transfer_owner(predecessor, &successor);
         assert_eq!(
             registry.observe_response(predecessor, request),
-            Err(ReplyError::Unauthorized)
+            Ok(super::super::ResponseObservation::Pending)
         );
         assert_eq!(
             registry.observe_watch(predecessor, watch),
-            Err(ReplyError::Unauthorized)
+            Ok(super::super::WatchObservation::Pending)
         );
         assert_eq!(registry.state.lock().requests[&request].target, target);
         registry.begin_reply(target, request).unwrap();
@@ -503,17 +646,17 @@ mod tests {
         registry.present(actor(101), own).unwrap();
         registry.begin_reply(actor(101), own).unwrap();
         registry.finish_reply(own);
-        let foreign = registry.reserve(actor(102), actor(101));
+        let missing = RequestId(u64::MAX);
         assert!(matches!(
             registry.attach_sources(
                 actor(100),
                 recipient.clone(),
                 &[
                     (0, own, RequestSourceKind::Settlement),
-                    (1, foreign, RequestSourceKind::Progress),
+                    (1, missing, RequestSourceKind::Progress),
                 ]
             ),
-            Err(ReplyError::Unauthorized)
+            Err(ReplyError::Stale)
         ));
         assert!(registry
             .state

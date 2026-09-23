@@ -2,7 +2,7 @@
 
 -- | Capability-handle mailboxes over a green thread.
 --
--- __Handles are capabilities: possession is permission.__ There is no
+-- __Handles carry a send capability; receiving stays with the creator actor.__ There is no
 -- registry, no node ids, no addressing scheme, and no lookup-by-name or
 -- enumeration anywhere in this module. A child gets its 'Uplink' and its
 -- 'inbox' as ARGUMENTS to its own body ('NodeCtx') because it was handed
@@ -102,7 +102,7 @@ import Tidepool.Aeson.FromJSON (FromJSON, Result (..), fromJSON)
 import Tidepool.Aeson.Value (ToJSON (..), Value (..))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Async (Async, async)
-import Tidepool.Effects (M, liftEither, mailboxNew, mailboxSend)
+import Tidepool.Effects (M, MailboxId, liftEither, mailboxNew, mailboxSend)
 -- `Event`/`mailbox` are DEFINITIONS in `Tidepool.Event`, not
 -- the generated `Tidepool.Effects` module.
 import Tidepool.Event (Event, mailbox, waitEvent)
@@ -113,8 +113,8 @@ import Tidepool.Event (Event, mailbox, waitEvent)
 -- implementation detail; there is no way to construct one except by
 -- 'forkNode'.
 data NodeHandle up down r = NodeHandle
-  { nhDown :: !Int
-  , nhUp :: !Int
+  { nhDown :: !MailboxId
+  , nhUp :: !MailboxId
   , nhThread :: !(Async r)
   }
 
@@ -122,7 +122,7 @@ data NodeHandle up down r = NodeHandle
 -- mailbox 'forkNode' minted for this direction; there is no accessor to its
 -- raw id and no way to construct one except by being handed a value of this
 -- type.
-newtype Uplink up = Uplink Int
+newtype Uplink up = Uplink MailboxId
 
 -- | What a forked node's body runs with: its send capability ('uplink') and
 -- its receive source ('inbox'), both scoped to the ONE fork that created
@@ -182,7 +182,7 @@ folded h = waitEvent (nhThread h)
 -- payload that fails to decode is a Tidepool bug (the sender and receiver
 -- disagreeing on a type), not an authored-code condition to recover from —
 -- it fails loudly rather than silently dropping the message.
-decodeMailbox :: FromJSON a => Int -> Event a
+decodeMailbox :: FromJSON a => MailboxId -> Event a
 decodeMailbox mid = fmap decodeOrFail (mailbox mid)
   where
     decodeOrFail v = case fromJSON v of

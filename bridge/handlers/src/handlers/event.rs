@@ -54,7 +54,7 @@
 //!
 //! ## Blocking await, and deadlines
 //!
-//! [`RepoEventHandler::repo_event_await`] is [`RepoEventHandler::repo_event_drain`]
+//! [`RepoEventHandler::repo_event_await_for`] is [`RepoEventHandler::repo_event_drain`]
 //! plus a timeout: it loops \[reconcile pass, check the queue, sleep bounded
 //! by [`EventConfig::poll_interval`]\] until the subscription has queued at
 //! least one observation or the timeout elapses. An elapsed timeout returns
@@ -111,10 +111,12 @@ use std::time::{Duration, Instant};
 
 use exomonad_worktree::storage::now_ms;
 use tidepool_bridge_effects::{
-    EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
-    EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
+    EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvMailboxId,
+    EvRepositoryEvent, EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid,
+    WtWorktreeId,
 };
 use tidepool_repr::MonotonicIdIssuer;
+use tidepool_repr::PrincipalId;
 
 // Wall-clock epoch milliseconds for `Tick`'s `firedAtMs` — an observability
 // stamp only; internal deadline SCHEDULING uses the monotonic `Instant` clock
@@ -180,6 +182,7 @@ struct Subscription {
     /// driver always installs an explicit owner and closes it on every cycle
     /// exit, including an error path that bypasses Haskell's unsubscribe.
     owner: Option<u64>,
+    principal: PrincipalId,
     watches: Vec<EvWatch>,
     queue: VecDeque<EvRepositoryEvent>,
     /// Observations this subscription lost to the bound. Nonzero means
@@ -198,7 +201,7 @@ struct Subscription {
     /// whenever `queue` drains to empty: a fresh epoch has nothing left to
     /// coalesce against. Indices stay valid between drains because entries
     /// are only ever appended or replaced in place, never removed singly.
-    mailbox_slots: HashMap<(i64, String), usize>,
+    mailbox_slots: HashMap<(EvMailboxId, String), usize>,
 }
 
 impl Subscription {
@@ -212,6 +215,7 @@ impl Subscription {
 /// on its own.
 #[derive(Debug)]
 pub struct SubscriptionRegistry {
+    namespace: String,
     /// Monotonic. An id is NEVER reused, so a spent id is a lookup miss rather
     /// than an alias of some later subscription.
     sub_ids: MonotonicIdIssuer,
@@ -221,17 +225,22 @@ pub struct SubscriptionRegistry {
     /// produces one. Starts at 2 (not 1) to preserve the original
     /// pre-increment counter's first-minted value.
     event_ids: MonotonicIdIssuer,
-    subs: Vec<(i64, Subscription)>,
+    subs: Vec<(String, Subscription)>,
     bound: usize,
 }
 
 impl SubscriptionRegistry {
     pub fn new(bound: usize) -> Self {
+        Self::with_namespace(bound, uuid::Uuid::new_v4().to_string())
+    }
+
+    fn with_namespace(bound: usize, namespace: String) -> Self {
         assert!(
             bound > 0,
             "the per-subscription queue bound must be positive"
         );
         Self {
+            namespace,
             sub_ids: MonotonicIdIssuer::new("sub"),
             event_ids: MonotonicIdIssuer::starting_at("event", 2),
             subs: Vec::new(),
@@ -243,6 +252,26 @@ impl SubscriptionRegistry {
         self.bound
     }
 
+    fn check_caller(
+        &self,
+        id: &EvSubscriptionId,
+        caller: PrincipalId,
+        operation: &str,
+    ) -> Result<(), EventError> {
+        let Some((_, sub)) = self.subs.iter().find(|(raw, _)| raw == &id.raw) else {
+            return Err(EventError::EventUnknownSubscription(id.raw.clone()));
+        };
+        if sub.principal != caller {
+            return Err(EventError::EventSubscriptionDenied(
+                operation.to_owned(),
+                id.raw.clone(),
+                format!("{}:{}", sub.principal.identity, sub.principal.incarnation),
+                format!("{}:{}", caller.identity, caller.incarnation),
+            ));
+        }
+        Ok(())
+    }
+
     /// Register `watches` and return a fresh id. The queue starts EMPTY: this
     /// call is the subscription's start point, and nothing observed before it
     /// is ever visible through it. A `WatchDeadline` entry carries a RELATIVE
@@ -250,10 +279,15 @@ impl SubscriptionRegistry {
     /// own, so THIS call is where "now" is read and the absolute deadline is
     /// fixed.
     pub fn subscribe(&mut self, watches: Vec<EvWatch>) -> EvSubscriptionId {
-        self.subscribe_owned(watches, None)
+        self.subscribe_owned(watches, None, PrincipalId::SYSTEM)
     }
 
-    fn subscribe_owned(&mut self, watches: Vec<EvWatch>, owner: Option<u64>) -> EvSubscriptionId {
+    fn subscribe_owned(
+        &mut self,
+        watches: Vec<EvWatch>,
+        owner: Option<u64>,
+        principal: PrincipalId,
+    ) -> EvSubscriptionId {
         let now = Instant::now();
         let pending_deadlines = watches
             .iter()
@@ -264,11 +298,18 @@ impl SubscriptionRegistry {
                 _ => None,
             })
             .collect();
-        let raw = self.sub_ids.next_raw() as i64;
+        let raw = format!(
+            "{}:{}:{}:{}",
+            self.namespace,
+            principal.identity,
+            principal.incarnation,
+            self.sub_ids.next_raw()
+        );
         self.subs.push((
-            raw,
+            raw.clone(),
             Subscription {
                 owner,
+                principal,
                 watches,
                 queue: VecDeque::new(),
                 dropped: 0,
@@ -285,7 +326,7 @@ impl SubscriptionRegistry {
     fn queue_retained_mailbox(
         &mut self,
         id: EvSubscriptionId,
-        mailbox: i64,
+        mailbox: EvMailboxId,
         key: String,
         payload: serde_json::Value,
     ) {
@@ -293,7 +334,7 @@ impl SubscriptionRegistry {
         let event_id = EvEventId {
             raw: self.event_ids.next_raw() as i64,
         };
-        let Some(sub) = self.lookup_mut(id.raw) else {
+        let Some(sub) = self.lookup_mut(&id.raw) else {
             return;
         };
         if sub.poisoned() || sub.queue.len() >= bound {
@@ -302,7 +343,9 @@ impl SubscriptionRegistry {
         }
         let idx = sub.queue.len();
         sub.queue.push_back(EvRepositoryEvent::ObservedMessage(
-            event_id, mailbox, payload,
+            event_id,
+            mailbox.clone(),
+            payload,
         ));
         sub.mailbox_slots.insert((mailbox, key), idx);
     }
@@ -315,7 +358,7 @@ impl SubscriptionRegistry {
         let event_id = EvEventId {
             raw: self.event_ids.next_raw() as i64,
         };
-        let Some(sub) = self.lookup_mut(id.raw) else {
+        let Some(sub) = self.lookup_mut(&id.raw) else {
             return;
         };
         if !sub
@@ -342,18 +385,18 @@ impl SubscriptionRegistry {
     /// queue had overflowed while live; retained messages are not presented
     /// as a deceptively complete prefix.
     fn poison_from_retained_mailbox(&mut self, id: EvSubscriptionId, dropped: i64) {
-        if let Some(sub) = self.lookup_mut(id.raw) {
+        if let Some(sub) = self.lookup_mut(&id.raw) {
             sub.dropped += dropped;
         }
     }
 
-    fn has_healthy_mailbox_receiver(&self, mailbox: i64) -> bool {
+    fn has_healthy_mailbox_receiver(&self, mailbox: &EvMailboxId) -> bool {
         self.subs.iter().any(|(_, sub)| {
             !sub.poisoned()
                 && sub
                     .watches
                     .iter()
-                    .any(|w| matches!(w, EvWatch::WatchMailbox(m) if *m == mailbox))
+                    .any(|w| matches!(w, EvWatch::WatchMailbox(m) if m == mailbox))
         })
     }
 
@@ -439,12 +482,17 @@ impl SubscriptionRegistry {
     /// poison-on-overflow rule: a poisoned subscription only ever counts the
     /// loss, and a coalesced replacement never itself grows the queue, so
     /// coalescing can never be the thing that overflows it.
-    pub fn publish_mailbox_message(&mut self, mailbox: i64, key: &str, payload: serde_json::Value) {
+    pub fn publish_mailbox_message(
+        &mut self,
+        mailbox: &EvMailboxId,
+        key: &str,
+        payload: serde_json::Value,
+    ) {
         for (_, sub) in self.subs.iter_mut() {
             if !sub
                 .watches
                 .iter()
-                .any(|w| matches!(w, EvWatch::WatchMailbox(m) if *m == mailbox))
+                .any(|w| matches!(w, EvWatch::WatchMailbox(m) if m == mailbox))
             {
                 continue;
             }
@@ -452,13 +500,13 @@ impl SubscriptionRegistry {
                 sub.dropped += 1;
                 continue;
             }
-            let slot_key = (mailbox, key.to_string());
+            let slot_key = (mailbox.clone(), key.to_string());
             if let Some(&idx) = sub.mailbox_slots.get(&slot_key) {
                 sub.queue[idx] = EvRepositoryEvent::ObservedMessage(
                     EvEventId {
                         raw: self.event_ids.next_raw() as i64,
                     },
-                    mailbox,
+                    mailbox.clone(),
                     payload.clone(),
                 );
                 continue;
@@ -472,7 +520,7 @@ impl SubscriptionRegistry {
                 EvEventId {
                     raw: self.event_ids.next_raw() as i64,
                 },
-                mailbox,
+                mailbox.clone(),
                 payload.clone(),
             ));
             sub.mailbox_slots.insert(slot_key, idx);
@@ -482,8 +530,8 @@ impl SubscriptionRegistry {
     /// Take everything queued, in observation order, leaving the queue empty.
     pub fn drain(&mut self, id: EvSubscriptionId) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let sub = self
-            .lookup_mut(id.raw)
-            .ok_or(EventError::EventUnknownSubscription(id.raw))?;
+            .lookup_mut(&id.raw)
+            .ok_or_else(|| EventError::EventUnknownSubscription(id.raw.clone()))?;
         if sub.poisoned() {
             // No recovery, ever. Reporting the count on every drain (rather
             // than once) means the failure cannot be swallowed by whichever
@@ -512,7 +560,7 @@ impl SubscriptionRegistry {
     pub fn live_ids(&self) -> Vec<EvSubscriptionId> {
         self.subs
             .iter()
-            .map(|(raw, _)| EvSubscriptionId { raw: *raw })
+            .map(|(raw, _)| EvSubscriptionId { raw: raw.clone() })
             .collect()
     }
 
@@ -552,7 +600,7 @@ impl SubscriptionRegistry {
             .iter()
             .find(|(raw, _)| *raw == id.raw)
             .map(|(_, sub)| sub)
-            .ok_or(EventError::EventUnknownSubscription(id.raw))?;
+            .ok_or_else(|| EventError::EventUnknownSubscription(id.raw.clone()))?;
         let mut out = Vec::new();
         for watch in &sub.watches {
             let source = match watch {
@@ -568,7 +616,7 @@ impl SubscriptionRegistry {
         Ok(out)
     }
 
-    fn lookup_mut(&mut self, raw: i64) -> Option<&mut Subscription> {
+    fn lookup_mut(&mut self, raw: &str) -> Option<&mut Subscription> {
         self.subs
             .iter_mut()
             .find(|(id, _)| *id == raw)
@@ -819,26 +867,27 @@ fn domain_kind_to_wire(k: &exomonad_worktree::HeadChangeKind) -> EvHeadChangeKin
 /// Mailbox identity and its undelivered keyed messages. A mailbox is a
 /// capability source, not an alias for a currently-live subscription: sends
 /// made before a receiver registers remain here until one matching receiver
-/// consumes them. Possession of the minted `Int` is the whole capability;
-/// this is never an address space the authored surface reasons about.
+/// consumes them. The minted `MailboxId` is a shareable send capability; receiving
+/// and dropping remain with the exact creator principal.
 #[derive(Debug)]
 struct MailboxTable {
+    namespace: String,
     ids: MonotonicIdIssuer,
-    live: HashSet<i64>,
+    live: HashMap<EvMailboxId, PrincipalId>,
     bound: usize,
     /// Global first-arrival order across mailboxes. A same-key replacement
     /// updates the payload in place, retaining that first position.
     pending: VecDeque<PendingMailboxMessage>,
-    pending_slots: HashMap<(i64, String), usize>,
+    pending_slots: HashMap<(EvMailboxId, String), usize>,
     /// Unique-key sends rejected after a mailbox's retained backlog reached
     /// `bound`. Kept until a receiver claims (and is poisoned by) that
     /// mailbox, or the capability is dropped.
-    overflowed: HashMap<i64, i64>,
+    overflowed: HashMap<EvMailboxId, i64>,
 }
 
 #[derive(Debug)]
 struct PendingMailboxMessage {
-    mailbox: i64,
+    mailbox: EvMailboxId,
     key: String,
     payload: serde_json::Value,
 }
@@ -849,10 +898,11 @@ struct MailboxClaim {
 }
 
 impl MailboxTable {
-    fn new(bound: usize) -> Self {
+    fn new(bound: usize, namespace: String) -> Self {
         Self {
+            namespace,
             ids: MonotonicIdIssuer::new("mailbox"),
-            live: HashSet::new(),
+            live: HashMap::new(),
             bound,
             pending: VecDeque::new(),
             pending_slots: HashMap::new(),
@@ -860,31 +910,54 @@ impl MailboxTable {
         }
     }
 
-    fn mint(&mut self) -> i64 {
-        let id = self.ids.next_raw() as i64;
-        self.live.insert(id);
+    fn mint(&mut self, principal: PrincipalId) -> EvMailboxId {
+        let id = EvMailboxId {
+            raw: format!("{}:{}", self.namespace, self.ids.next_raw()),
+        };
+        self.live.insert(id.clone(), principal);
         id
     }
 
-    fn is_live(&self, id: i64) -> bool {
-        self.live.contains(&id)
+    fn is_live(&self, id: &EvMailboxId) -> bool {
+        self.live.contains_key(id)
+    }
+
+    fn check_creator(
+        &self,
+        id: &EvMailboxId,
+        caller: PrincipalId,
+        operation: &str,
+    ) -> Result<(), EventError> {
+        let owner = self
+            .live
+            .get(&id)
+            .ok_or_else(|| EventError::EventUnknownMailbox(id.raw.clone()))?;
+        if *owner != caller {
+            return Err(EventError::EventMailboxDenied(
+                operation.to_owned(),
+                id.raw.clone(),
+                format!("{}:{}", owner.identity, owner.incarnation),
+                format!("{}:{}", caller.identity, caller.incarnation),
+            ));
+        }
+        Ok(())
     }
 
     /// `true` when `id` was live and is now dropped; `false` when it was
     /// never minted or already dropped — the caller turns that into a typed
     /// `EventUnknownMailbox`.
-    fn drop_mailbox(&mut self, id: i64) -> bool {
-        if !self.live.remove(&id) {
+    fn drop_mailbox(&mut self, id: &EvMailboxId) -> bool {
+        if self.live.remove(id).is_none() {
             return false;
         }
-        self.pending.retain(|message| message.mailbox != id);
-        self.overflowed.remove(&id);
+        self.pending.retain(|message| &message.mailbox != id);
+        self.overflowed.remove(id);
         self.reindex_pending();
         true
     }
 
-    fn retain(&mut self, mailbox: i64, key: String, payload: serde_json::Value) {
-        let slot = (mailbox, key.clone());
+    fn retain(&mut self, mailbox: EvMailboxId, key: String, payload: serde_json::Value) {
+        let slot = (mailbox.clone(), key.clone());
         if let Some(&idx) = self.pending_slots.get(&slot) {
             self.pending[idx].payload = payload;
             return;
@@ -911,10 +984,10 @@ impl MailboxTable {
     /// single-consumer while idle; once a receiver is live, later sends use
     /// Event's normal broadcast delivery to every live receiver.
     fn take_matching(&mut self, watches: &[EvWatch]) -> MailboxClaim {
-        let claimed_mailboxes: HashSet<i64> = watches
+        let claimed_mailboxes: HashSet<EvMailboxId> = watches
             .iter()
             .filter_map(|watch| match watch {
-                EvWatch::WatchMailbox(mailbox) => Some(*mailbox),
+                EvWatch::WatchMailbox(mailbox) => Some(mailbox.clone()),
                 _ => None,
             })
             .collect();
@@ -943,7 +1016,7 @@ impl MailboxTable {
         self.pending_slots.clear();
         for (idx, message) in self.pending.iter().enumerate() {
             self.pending_slots
-                .insert((message.mailbox, message.key.clone()), idx);
+                .insert((message.mailbox.clone(), message.key.clone()), idx);
         }
     }
 }
@@ -1022,18 +1095,35 @@ impl RepoEventHandler {
         )
     }
 
+    /// Bind subscription ids to the exact run whose actor handlers share
+    /// inherited Haskell values. The actor principal is added when minted.
+    pub fn with_registry_namespace(
+        monitor: exomonad_worktree::WorktreeMonitor,
+        registry: exomonad_worktree::WorktreeRegistry,
+        config: EventConfig,
+        namespace: String,
+    ) -> Self {
+        let mut handler = Self::with_registry(monitor, registry, config);
+        let issuer_namespace = format!("{}:{}", namespace, uuid::Uuid::new_v4());
+        handler.registry.namespace = issuer_namespace.clone();
+        handler.mailboxes.namespace = issuer_namespace;
+        handler
+    }
+
     /// Any other observation source. [`MonitorObservations`] is the real
     /// production adapter; the acceptance harness supplies a second source
     /// that reads a real temporary repository directly, scoped to that
     /// harness's single-loop-iteration/process-memory baseline — not because the
     /// production adapter doesn't exist.
     pub fn with_source(source: Box<dyn ObservationSource>, config: EventConfig) -> Self {
+        let registry = SubscriptionRegistry::new(config.queue_bound);
+        let mailbox_namespace = registry.namespace.clone();
         Self {
-            registry: SubscriptionRegistry::new(config.queue_bound),
+            registry,
             source,
             poll_interval: config.poll_interval,
             sources: Vec::new(),
-            mailboxes: MailboxTable::new(config.queue_bound),
+            mailboxes: MailboxTable::new(config.queue_bound, mailbox_namespace),
             active_owner: None,
         }
     }
@@ -1072,6 +1162,9 @@ impl RepoEventHandler {
     /// to the observer's durable baseline, so a skipped pass is a delayed
     /// report, not a dropped one.
     fn reconcile(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
+        // Validate membership before changing any deadline, source state, or
+        // queue. A refused drain must leave every live subscription intact.
+        let watched = self.registry.subscription_worktrees(subscription)?;
         // Deadlines cost no I/O, so they are checked on EVERY pass —
         // unconditionally, ahead of the git-read rate limit below, and even
         // when nothing is watched for commits/heads at all.
@@ -1079,7 +1172,6 @@ impl RepoEventHandler {
         // Git I/O is scoped to the subscription whose drain/await caused this
         // pass. In particular, an A-only operation must not register, observe,
         // or retry an unrelated B merely because B is watched elsewhere.
-        let watched = self.registry.subscription_worktrees(subscription)?;
         if watched.is_empty() {
             return Ok(());
         }
@@ -1164,6 +1256,21 @@ impl RepoEventHandler {
         &mut self,
         watches: Vec<EvWatch>,
     ) -> Result<EvSubscriptionId, EventError> {
+        self.repo_event_subscribe_for(PrincipalId::SYSTEM, watches)
+    }
+
+    fn repo_event_subscribe_for(
+        &mut self,
+        principal: PrincipalId,
+        watches: Vec<EvWatch>,
+    ) -> Result<EvSubscriptionId, EventError> {
+        // Validate every mailbox before source registration or a retained
+        // first-claim can change state. Sends remain shareable by mailbox id.
+        for watch in &watches {
+            if let EvWatch::WatchMailbox(id) = watch {
+                self.mailboxes.check_creator(id, principal, "subscribe")?;
+            }
+        }
         // Establish every never-before-seen source cutoff BEFORE making the
         // subscription live. This reads only the baseline; it neither
         // reconciles nor publishes journal rows, so historical rows never
@@ -1195,15 +1302,15 @@ impl RepoEventHandler {
         }
         let sub = self
             .registry
-            .subscribe_owned(watches.clone(), self.active_owner);
+            .subscribe_owned(watches.clone(), self.active_owner, principal);
         let claim = self.mailboxes.take_matching(&watches);
         if claim.dropped > 0 {
             self.registry
-                .poison_from_retained_mailbox(sub, claim.dropped);
+                .poison_from_retained_mailbox(sub.clone(), claim.dropped);
         } else {
             for message in claim.messages {
                 self.registry.queue_retained_mailbox(
-                    sub,
+                    sub.clone(),
                     message.mailbox,
                     message.key,
                     message.payload,
@@ -1224,7 +1331,7 @@ impl RepoEventHandler {
     ) -> Result<EvSubscriptionId, EventError> {
         let sub = self.repo_event_subscribe(watches)?;
         for tid in terminal_async {
-            self.registry.observe_terminal_async(sub, tid);
+            self.registry.observe_terminal_async(sub.clone(), tid);
         }
         Ok(sub)
     }
@@ -1240,50 +1347,86 @@ impl RepoEventHandler {
         &mut self,
         subscription: EvSubscriptionId,
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.repo_event_drain_for(PrincipalId::SYSTEM, subscription)
+    }
+
+    pub fn repo_event_drain_for(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.registry
+            .check_caller(&subscription, principal, "drain")?;
         // A drain is where polling happens: `withHandler`'s interposition sends
         // one before every effect its body performs, so this is the natural —
         // and rate-limited — heartbeat.
-        self.reconcile(subscription)?;
-        if let Some(error) = self.failure_for(subscription)? {
+        self.reconcile(subscription.clone())?;
+        if let Some(error) = self.failure_for(subscription.clone())? {
             return Err(error);
         }
         self.registry.drain(subscription)
     }
 
+    #[cfg(test)]
     pub(crate) fn repo_event_unsubscribe(
         &mut self,
         subscription: EvSubscriptionId,
     ) -> Result<(), EventError> {
+        self.repo_event_unsubscribe_for(PrincipalId::SYSTEM, subscription)
+    }
+
+    fn repo_event_unsubscribe_for(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+    ) -> Result<(), EventError> {
+        self.registry
+            .check_caller(&subscription, principal, "unsubscribe")?;
         self.registry.unsubscribe(subscription)
     }
 
-    pub(crate) fn mailbox_new(&mut self) -> Result<i64, EventError> {
-        Ok(self.mailboxes.mint())
+    #[cfg(test)]
+    pub(crate) fn mailbox_new(&mut self) -> Result<EvMailboxId, EventError> {
+        self.mailbox_new_for(PrincipalId::SYSTEM)
+    }
+
+    fn mailbox_new_for(&mut self, principal: PrincipalId) -> Result<EvMailboxId, EventError> {
+        Ok(self.mailboxes.mint(principal))
     }
 
     pub(crate) fn mailbox_send(
         &mut self,
-        mailbox: i64,
+        mailbox: EvMailboxId,
         key: String,
         payload: crate::effect_glue::JsonArg,
     ) -> Result<(), EventError> {
-        if !self.mailboxes.is_live(mailbox) {
-            return Err(EventError::EventUnknownMailbox(mailbox));
+        if !self.mailboxes.is_live(&mailbox) {
+            return Err(EventError::EventUnknownMailbox(mailbox.raw));
         }
-        if self.registry.has_healthy_mailbox_receiver(mailbox) {
+        if self.registry.has_healthy_mailbox_receiver(&mailbox) {
             self.registry
-                .publish_mailbox_message(mailbox, &key, payload.0);
+                .publish_mailbox_message(&mailbox, &key, payload.0);
         } else {
             self.mailboxes.retain(mailbox, key, payload.0);
         }
         Ok(())
     }
 
-    pub(crate) fn mailbox_drop(&mut self, mailbox: i64) -> Result<(), EventError> {
-        if self.mailboxes.drop_mailbox(mailbox) {
+    #[cfg(test)]
+    pub(crate) fn mailbox_drop(&mut self, mailbox: EvMailboxId) -> Result<(), EventError> {
+        self.mailbox_drop_for(PrincipalId::SYSTEM, mailbox)
+    }
+
+    fn mailbox_drop_for(
+        &mut self,
+        principal: PrincipalId,
+        mailbox: EvMailboxId,
+    ) -> Result<(), EventError> {
+        self.mailboxes.check_creator(&mailbox, principal, "drop")?;
+        if self.mailboxes.drop_mailbox(&mailbox) {
             Ok(())
         } else {
-            Err(EventError::EventUnknownMailbox(mailbox))
+            Err(EventError::EventUnknownMailbox(mailbox.raw))
         }
     }
 
@@ -1296,11 +1439,23 @@ impl RepoEventHandler {
     /// so it is distinguishable from a real (non-empty) observation without
     /// a second signal. Poison/overflow still fail loudly via `drain`'s own
     /// `Err`, exactly as `repo_event_drain` does.
+    #[cfg(test)]
     pub(crate) fn repo_event_await(
         &mut self,
         subscription: EvSubscriptionId,
         timeout_ms: i64,
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.repo_event_await_for(PrincipalId::SYSTEM, subscription, timeout_ms)
+    }
+
+    fn repo_event_await_for(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+        timeout_ms: i64,
+    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.registry
+            .check_caller(&subscription, principal, "await")?;
         let deadline = if timeout_ms < 0 {
             // The no-deadline SENTINEL, not a bug to guard against: this is
             // `nextEvent`'s own calling convention (`awaitFirst` passes `-1`),
@@ -1315,11 +1470,11 @@ impl RepoEventHandler {
             Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
         };
         loop {
-            self.reconcile(subscription)?;
-            if let Some(error) = self.failure_for(subscription)? {
+            self.reconcile(subscription.clone())?;
+            if let Some(error) = self.failure_for(subscription.clone())? {
                 return Err(error);
             }
-            let batch = self.registry.drain(subscription)?;
+            let batch = self.registry.drain(subscription.clone())?;
             if !batch.is_empty() {
                 return Ok(batch);
             }
@@ -1346,6 +1501,64 @@ impl RepoEventHandler {
             )]
             std::thread::sleep(step);
         }
+    }
+
+    pub(crate) fn repo_event_subscribe_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        watches: Vec<EvWatch>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.repo_event_subscribe_for(cx.principal(), watches))
+    }
+
+    pub(crate) fn repo_event_drain_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        subscription: EvSubscriptionId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.repo_event_drain_for(cx.principal(), subscription))
+    }
+
+    pub(crate) fn repo_event_await_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        subscription: EvSubscriptionId,
+        timeout_ms: i64,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.repo_event_await_for(cx.principal(), subscription, timeout_ms))
+    }
+
+    pub(crate) fn repo_event_unsubscribe_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        subscription: EvSubscriptionId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.repo_event_unsubscribe_for(cx.principal(), subscription))
+    }
+
+    pub(crate) fn mailbox_new_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_new_for(cx.principal()))
+    }
+
+    pub(crate) fn mailbox_send_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        mailbox: EvMailboxId,
+        key: String,
+        payload: crate::effect_glue::JsonArg,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_send(mailbox, key, payload))
+    }
+
+    pub(crate) fn mailbox_drop_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        mailbox: EvMailboxId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_drop_for(cx.principal(), mailbox))
     }
 }
 
@@ -1399,7 +1612,7 @@ mod tests {
                 EvRepositoryEvent::ObservedHeadChange(_, r) => r.new_head.raw.clone(),
                 EvRepositoryEvent::ObservedTick(_, t) => format!("tick@{}", t.fired_at_ms),
                 EvRepositoryEvent::ObservedAsyncDone(_, tid) => format!("async@{tid}"),
-                EvRepositoryEvent::ObservedMessage(_, mid, v) => format!("msg@{mid}:{v}"),
+                EvRepositoryEvent::ObservedMessage(_, mid, v) => format!("msg@{}:{v}", mid.raw),
             })
             .collect()
     }
@@ -1409,9 +1622,9 @@ mod tests {
         let mut reg = SubscriptionRegistry::new(8);
         reg.publish(&commit_event(1, "a", "old"));
         let sub = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
-        assert_eq!(reg.drain(sub).unwrap(), vec![]);
+        assert_eq!(reg.drain(sub.clone()).unwrap(), vec![]);
         reg.publish(&commit_event(2, "a", "new"));
-        assert_eq!(oids(&reg.drain(sub).unwrap()), vec!["new"]);
+        assert_eq!(oids(&reg.drain(sub.clone()).unwrap()), vec!["new"]);
     }
 
     #[test]
@@ -1420,8 +1633,8 @@ mod tests {
         let a = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
         let b = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
         reg.publish(&commit_event(1, "a", "c1"));
-        assert_eq!(oids(&reg.drain(a).unwrap()), vec!["c1"]);
-        assert_eq!(oids(&reg.drain(b).unwrap()), vec!["c1"]);
+        assert_eq!(oids(&reg.drain(a.clone()).unwrap()), vec!["c1"]);
+        assert_eq!(oids(&reg.drain(b.clone()).unwrap()), vec!["c1"]);
     }
 
     #[test]
@@ -1432,9 +1645,9 @@ mod tests {
         let commits_b = reg.subscribe(vec![EvWatch::WatchCommit(wt("b"))]);
         reg.publish(&commit_event(1, "a", "c1"));
         reg.publish(&head_event(1, "a", "c1"));
-        assert_eq!(oids(&reg.drain(commits_a).unwrap()), vec!["c1"]);
-        assert_eq!(oids(&reg.drain(heads_a).unwrap()), vec!["c1"]);
-        assert_eq!(reg.drain(commits_b).unwrap(), vec![]);
+        assert_eq!(oids(&reg.drain(commits_a.clone()).unwrap()), vec!["c1"]);
+        assert_eq!(oids(&reg.drain(heads_a.clone()).unwrap()), vec!["c1"]);
+        assert_eq!(reg.drain(commits_b.clone()).unwrap(), vec![]);
     }
 
     #[test]
@@ -1449,7 +1662,7 @@ mod tests {
         reg.publish(&commit_event(1, "a", "c1"));
         reg.publish(&head_event(2, "b", "h1"));
         reg.publish(&commit_event(3, "b", "ignored"));
-        assert_eq!(oids(&reg.drain(sub).unwrap()), vec!["c1", "h1"]);
+        assert_eq!(oids(&reg.drain(sub.clone()).unwrap()), vec!["c1", "h1"]);
     }
 
     #[test]
@@ -1459,22 +1672,25 @@ mod tests {
         for (i, oid) in ["c1", "c2", "c3"].iter().enumerate() {
             reg.publish(&commit_event(i as i64, "a", oid));
         }
-        assert_eq!(oids(&reg.drain(sub).unwrap()), vec!["c1", "c2", "c3"]);
-        assert_eq!(reg.drain(sub).unwrap(), vec![]);
+        assert_eq!(
+            oids(&reg.drain(sub.clone()).unwrap()),
+            vec!["c1", "c2", "c3"]
+        );
+        assert_eq!(reg.drain(sub.clone()).unwrap(), vec![]);
     }
 
     #[test]
     fn an_unsubscribed_id_is_an_error_not_a_silent_empty() {
         let mut reg = SubscriptionRegistry::new(8);
         let sub = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
-        assert_eq!(reg.unsubscribe(sub), Ok(()));
+        assert_eq!(reg.unsubscribe(sub.clone()), Ok(()));
         assert_eq!(
-            reg.drain(sub),
-            Err(EventError::EventUnknownSubscription(sub.raw))
+            reg.drain(sub.clone()),
+            Err(EventError::EventUnknownSubscription(sub.raw.clone()))
         );
         assert_eq!(
-            reg.unsubscribe(sub),
-            Err(EventError::EventUnknownSubscription(sub.raw))
+            reg.unsubscribe(sub.clone()),
+            Err(EventError::EventUnknownSubscription(sub.raw.clone()))
         );
     }
 
@@ -1482,7 +1698,7 @@ mod tests {
     fn subscription_ids_are_never_reused() {
         let mut reg = SubscriptionRegistry::new(8);
         let a = reg.subscribe(vec![]);
-        reg.unsubscribe(a).unwrap();
+        reg.unsubscribe(a.clone()).unwrap();
         let b = reg.subscribe(vec![]);
         assert_ne!(a.raw, b.raw, "a spent id must never be handed out again");
     }
@@ -1495,8 +1711,8 @@ mod tests {
             reg.publish(&commit_event(0, "a", oid));
         }
         assert_eq!(
-            reg.drain(sub),
-            Err(EventError::EventQueueOverflow(sub.raw, 2))
+            reg.drain(sub.clone()),
+            Err(EventError::EventQueueOverflow(sub.raw.clone(), 2))
         );
     }
 
@@ -1506,18 +1722,18 @@ mod tests {
         let sub = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
         reg.publish(&commit_event(0, "a", "c1"));
         reg.publish(&commit_event(0, "a", "c2"));
-        assert!(reg.drain(sub).is_err());
+        assert!(reg.drain(sub.clone()).is_err());
         // A quiet period does not heal it: the commit it dropped is still
         // dropped, and a drain that started succeeding again would say
         // otherwise.
         assert_eq!(
-            reg.drain(sub),
-            Err(EventError::EventQueueOverflow(sub.raw, 1))
+            reg.drain(sub.clone()),
+            Err(EventError::EventQueueOverflow(sub.raw.clone(), 1))
         );
         reg.publish(&commit_event(0, "a", "c3"));
         assert_eq!(
-            reg.drain(sub),
-            Err(EventError::EventQueueOverflow(sub.raw, 2))
+            reg.drain(sub.clone()),
+            Err(EventError::EventQueueOverflow(sub.raw.clone(), 2))
         );
     }
 
@@ -1527,11 +1743,11 @@ mod tests {
         let slow = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
         let fast = reg.subscribe(vec![EvWatch::WatchCommit(wt("a"))]);
         reg.publish(&commit_event(0, "a", "c1"));
-        assert_eq!(oids(&reg.drain(fast).unwrap()), vec!["c1"]);
+        assert_eq!(oids(&reg.drain(fast.clone()).unwrap()), vec!["c1"]);
         reg.publish(&commit_event(0, "a", "c2"));
-        assert!(reg.drain(slow).is_err(), "the slow one overflowed");
+        assert!(reg.drain(slow.clone()).is_err(), "the slow one overflowed");
         assert_eq!(
-            oids(&reg.drain(fast).unwrap()),
+            oids(&reg.drain(fast.clone()).unwrap()),
             vec!["c2"],
             "its neighbour keeps working"
         );
@@ -1546,7 +1762,7 @@ mod tests {
         ]);
         reg.subscribe(vec![EvWatch::WatchCommit(wt("b"))]);
         assert_eq!(reg.watched_worktrees(), vec![wt("a"), wt("b")]);
-        reg.unsubscribe(a).unwrap();
+        reg.unsubscribe(a.clone()).unwrap();
         assert_eq!(reg.watched_worktrees(), vec![wt("b")]);
     }
 
@@ -1626,7 +1842,7 @@ mod tests {
             "registration establishes cutoffs but must not reconcile"
         );
         assert_eq!(
-            oids(&h.repo_event_drain(sub).unwrap()),
+            oids(&h.repo_event_drain(sub.clone()).unwrap()),
             vec!["c1"],
             "movement from the gap with no subscriber must not be swallowed \
              by the act of registering"
@@ -1649,19 +1865,22 @@ mod tests {
         let first = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
-        assert_eq!(oids(&h.repo_event_drain(first).unwrap()), vec!["c1"]);
+        assert_eq!(
+            oids(&h.repo_event_drain(first.clone()).unwrap()),
+            vec!["c1"]
+        );
         h.repo_event_unsubscribe(first).unwrap();
 
         let second = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
         assert_eq!(
-            oids(&h.repo_event_drain(second).unwrap()),
+            oids(&h.repo_event_drain(second.clone()).unwrap()),
             Vec::<String>::new(),
             "a fact the previous registration already consumed must not replay"
         );
         assert_eq!(
-            oids(&h.repo_event_drain(second).unwrap()),
+            oids(&h.repo_event_drain(second.clone()).unwrap()),
             vec!["c2"],
             "and the new registration still tracks everything after it"
         );
@@ -1674,7 +1893,7 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
         for _ in 0..5 {
-            h.repo_event_drain(sub).unwrap();
+            h.repo_event_drain(sub.clone()).unwrap();
         }
         assert_eq!(
             passes_run(&calls),
@@ -1690,7 +1909,7 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
         for _ in 0..3 {
-            h.repo_event_drain(sub).unwrap();
+            h.repo_event_drain(sub.clone()).unwrap();
         }
         assert_eq!(passes_run(&calls), 3);
     }
@@ -1701,14 +1920,14 @@ mod tests {
         let sub = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
-        h.repo_event_drain(sub).unwrap();
-        h.repo_event_unsubscribe(sub).unwrap();
+        h.repo_event_drain(sub.clone()).unwrap();
+        h.repo_event_unsubscribe(sub.clone()).unwrap();
         let before = passes_run(&calls);
         // Nothing is watched, so a would-be pass has nothing to read — and the
         // spent id still fails loudly rather than answering empty.
         assert_eq!(
-            h.repo_event_drain(sub),
-            Err(EventError::EventUnknownSubscription(sub.raw))
+            h.repo_event_drain(sub.clone()),
+            Err(EventError::EventUnknownSubscription(sub.raw.clone()))
         );
         assert_eq!(passes_run(&calls), before);
     }
@@ -1759,14 +1978,14 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("b"))])
             .unwrap();
 
-        assert_eq!(oids(&h.repo_event_drain(a).unwrap()), vec!["a1"]);
+        assert_eq!(oids(&h.repo_event_drain(a.clone()).unwrap()), vec!["a1"]);
         assert_eq!(
-            h.repo_event_drain(b),
+            h.repo_event_drain(b.clone()),
             Err(EventError::EventSourceLost("b".into()))
         );
         assert_eq!(b_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
-            h.repo_event_drain(a).unwrap(),
+            h.repo_event_drain(a.clone()).unwrap(),
             Vec::<EvRepositoryEvent>::new(),
             "B's persistent failure does not poison A"
         );
@@ -1826,7 +2045,7 @@ mod tests {
         let a = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
-        h.repo_event_drain(a).unwrap();
+        h.repo_event_drain(a.clone()).unwrap();
 
         let b = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("b"))])
@@ -1837,7 +2056,7 @@ mod tests {
             "B's cutoff is established during subscription"
         );
         b_moved.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(oids(&h.repo_event_drain(b).unwrap()), vec!["b1"]);
+        assert_eq!(oids(&h.repo_event_drain(b.clone()).unwrap()), vec!["b1"]);
         assert_eq!(
             observed.lock().unwrap().as_slice(),
             &["a".to_string(), "b".to_string()],
@@ -1898,11 +2117,11 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("registration"))])
             .unwrap();
         assert_eq!(
-            registration.repo_event_drain(reg_sub),
+            registration.repo_event_drain(reg_sub.clone()),
             Err(EventError::EventSourceLost("registration".into()))
         );
         assert_eq!(
-            oids(&registration.repo_event_drain(reg_sub).unwrap()),
+            oids(&registration.repo_event_drain(reg_sub.clone()).unwrap()),
             vec!["recovered"],
             "a registration failure retries immediately after being reported"
         );
@@ -1912,13 +2131,13 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("observation"))])
             .unwrap();
         assert_eq!(
-            observation.repo_event_drain(obs_sub),
+            observation.repo_event_drain(obs_sub.clone()),
             Err(EventError::EventSourceFailed(
                 "temporarily unavailable".into()
             ))
         );
         assert_eq!(
-            oids(&observation.repo_event_drain(obs_sub).unwrap()),
+            oids(&observation.repo_event_drain(obs_sub.clone()).unwrap()),
             vec!["recovered"],
             "an observation failure is not held behind the successful-poll cooldown"
         );
@@ -1940,7 +2159,7 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
         let start = Instant::now();
-        let batch = h.repo_event_await(sub, 5_000).unwrap();
+        let batch = h.repo_event_await(sub.clone(), 5_000).unwrap();
         assert_eq!(oids(&batch), vec!["c1"]);
         assert!(
             start.elapsed() < Duration::from_millis(500),
@@ -1955,12 +2174,12 @@ mod tests {
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
         assert_eq!(
-            h.repo_event_await(sub, 30).unwrap(),
+            h.repo_event_await(sub.clone(), 30).unwrap(),
             vec![],
             "an elapsed timeout is an empty batch, not an error"
         );
         // The subscription itself is unharmed — an ordinary drain still works.
-        assert_eq!(h.repo_event_drain(sub).unwrap(), vec![]);
+        assert_eq!(h.repo_event_drain(sub.clone()).unwrap(), vec![]);
     }
 
     #[test]
@@ -1969,7 +2188,7 @@ mod tests {
         let sub = h
             .repo_event_subscribe(vec![EvWatch::WatchDeadline(0)])
             .unwrap();
-        let first = h.repo_event_await(sub, 200).unwrap();
+        let first = h.repo_event_await(sub.clone(), 200).unwrap();
         assert_eq!(first.len(), 1);
         assert!(
             matches!(first[0], EvRepositoryEvent::ObservedTick(_, _)),
@@ -1977,7 +2196,7 @@ mod tests {
         );
         // No second tick — it fired exactly once, so a later await on the
         // SAME subscription times out empty rather than re-delivering it.
-        assert_eq!(h.repo_event_await(sub, 30).unwrap(), vec![]);
+        assert_eq!(h.repo_event_await(sub.clone(), 30).unwrap(), vec![]);
     }
 
     #[test]
@@ -1988,12 +2207,12 @@ mod tests {
         let watches: Vec<EvWatch> = (0..9).map(|_| EvWatch::WatchDeadline(0)).collect();
         let sub = h.repo_event_subscribe(watches).unwrap();
         assert_eq!(
-            h.repo_event_await(sub, 200),
-            Err(EventError::EventQueueOverflow(sub.raw, 1))
+            h.repo_event_await(sub.clone(), 200),
+            Err(EventError::EventQueueOverflow(sub.raw.clone(), 1))
         );
         // No recovery: a later await on the same subscription still fails,
         // loudly, rather than quietly answering empty.
-        assert!(h.repo_event_await(sub, 30).is_err());
+        assert!(h.repo_event_await(sub.clone(), 30).is_err());
     }
 
     #[test]
@@ -2002,7 +2221,7 @@ mod tests {
         let sub = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
             .unwrap();
-        assert_eq!(h.repo_event_await(sub, 50).unwrap(), vec![]);
+        assert_eq!(h.repo_event_await(sub.clone(), 50).unwrap(), vec![]);
         assert_eq!(
             passes_run(&calls),
             1,
@@ -2030,12 +2249,143 @@ mod tests {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!("hello")))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!("hello")))
             .unwrap();
-        let batch = h.repo_event_drain(sub).unwrap();
+        let batch = h.repo_event_drain(sub.clone()).unwrap();
         assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!("hello")]);
+    }
+
+    #[test]
+    fn foreign_receive_and_drop_leave_retained_mailbox_for_its_creator() {
+        let (mut handler, _) = handler_with(vec![], Duration::ZERO);
+        let owner = PrincipalId::new(4, 1);
+        let foreign = PrincipalId::new(5, 1);
+        let mailbox = handler.mailbox_new_for(owner).unwrap();
+        handler
+            .mailbox_send(
+                mailbox.clone(),
+                "k".into(),
+                payload(serde_json::json!("retained")),
+            )
+            .unwrap();
+
+        assert_eq!(
+            handler.repo_event_subscribe_for(foreign, vec![EvWatch::WatchMailbox(mailbox.clone())]),
+            Err(EventError::EventMailboxDenied(
+                "subscribe".into(),
+                mailbox.raw.clone(),
+                "4:1".into(),
+                "5:1".into(),
+            ))
+        );
+        assert!(handler.registry.live_ids().is_empty());
+        assert_eq!(handler.mailboxes.pending.len(), 1);
+        assert_eq!(
+            handler.mailbox_drop_for(foreign, mailbox.clone()),
+            Err(EventError::EventMailboxDenied(
+                "drop".into(),
+                mailbox.raw.clone(),
+                "4:1".into(),
+                "5:1".into(),
+            ))
+        );
+        assert!(handler.mailboxes.is_live(&mailbox));
+        handler
+            .mailbox_send(
+                mailbox.clone(),
+                "later".into(),
+                payload(serde_json::json!("later")),
+            )
+            .unwrap();
+
+        let own = handler
+            .repo_event_subscribe_for(owner, vec![EvWatch::WatchMailbox(mailbox.clone())])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&handler.repo_event_drain_for(owner, own).unwrap()),
+            vec![serde_json::json!("retained"), serde_json::json!("later")]
+        );
+        handler.mailbox_drop_for(owner, mailbox.clone()).unwrap();
+        assert!(!handler.mailboxes.is_live(&mailbox));
+    }
+
+    #[test]
+    fn first_mailboxes_from_fresh_handlers_never_alias() {
+        let (mut first, _) = handler_with(vec![], Duration::ZERO);
+        let (mut second, _) = handler_with(vec![], Duration::ZERO);
+        first.mailboxes.namespace = "run-one:handler-one".into();
+        second.mailboxes.namespace = "run-two:handler-two".into();
+        let owner = PrincipalId::new(4, 1);
+        let old = first.mailbox_new_for(owner).unwrap();
+        let current = second.mailbox_new_for(owner).unwrap();
+        assert_ne!(old, current);
+
+        assert_eq!(
+            second.mailbox_send(old.clone(), "wrong".into(), payload(serde_json::json!(1))),
+            Err(EventError::EventUnknownMailbox(old.raw.clone()))
+        );
+        assert_eq!(
+            second.repo_event_subscribe_for(owner, vec![EvWatch::WatchMailbox(old.clone())]),
+            Err(EventError::EventUnknownMailbox(old.raw.clone()))
+        );
+        assert_eq!(
+            second.mailbox_drop_for(owner, old.clone()),
+            Err(EventError::EventUnknownMailbox(old.raw.clone()))
+        );
+        assert!(second.mailboxes.is_live(&current));
+        assert!(second.mailboxes.pending.is_empty());
+
+        second
+            .mailbox_send(current.clone(), "own".into(), payload(serde_json::json!(2)))
+            .unwrap();
+        let sub = second
+            .repo_event_subscribe_for(owner, vec![EvWatch::WatchMailbox(current)])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&second.repo_event_drain_for(owner, sub).unwrap()),
+            vec![serde_json::json!(2)]
+        );
+    }
+
+    #[test]
+    fn mixed_mailbox_watch_validates_every_creator_before_any_claim() {
+        let (mut handler, _) = handler_with(vec![], Duration::ZERO);
+        let owner = PrincipalId::new(6, 1);
+        let foreign = PrincipalId::new(7, 1);
+        let own_mailbox = handler.mailbox_new_for(owner).unwrap();
+        let foreign_mailbox = handler.mailbox_new_for(foreign).unwrap();
+        handler
+            .mailbox_send(
+                own_mailbox.clone(),
+                "own".into(),
+                payload(serde_json::json!("own")),
+            )
+            .unwrap();
+        assert_eq!(
+            handler.repo_event_subscribe_for(
+                owner,
+                vec![
+                    EvWatch::WatchMailbox(own_mailbox.clone()),
+                    EvWatch::WatchMailbox(foreign_mailbox.clone()),
+                ],
+            ),
+            Err(EventError::EventMailboxDenied(
+                "subscribe".into(),
+                foreign_mailbox.raw.clone(),
+                "7:1".into(),
+                "6:1".into(),
+            ))
+        );
+        assert!(handler.registry.live_ids().is_empty());
+        let own = handler
+            .repo_event_subscribe_for(owner, vec![EvWatch::WatchMailbox(own_mailbox.clone())])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&handler.repo_event_drain_for(owner, own).unwrap()),
+            vec![serde_json::json!("own")]
+        );
     }
 
     #[test]
@@ -2044,11 +2394,11 @@ mod tests {
         let a = h.mailbox_new().unwrap();
         let b = h.mailbox_new().unwrap();
         let sub_b = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(b)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(b.clone())])
             .unwrap();
-        h.mailbox_send(a, "k".into(), payload(serde_json::json!(1)))
+        h.mailbox_send(a.clone(), "k".into(), payload(serde_json::json!(1)))
             .unwrap();
-        assert_eq!(h.repo_event_drain(sub_b).unwrap(), vec![]);
+        assert_eq!(h.repo_event_drain(sub_b.clone()).unwrap(), vec![]);
     }
 
     #[test]
@@ -2056,15 +2406,15 @@ mod tests {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(1)))
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(2)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(2)))
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(3)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(3)))
             .unwrap();
-        let batch = h.repo_event_drain(sub).unwrap();
+        let batch = h.repo_event_drain(sub.clone()).unwrap();
         assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!(3)]);
     }
 
@@ -2072,18 +2422,18 @@ mod tests {
     fn retained_mailbox_burst_is_consumed_by_a_later_receiver() {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(1)))
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(2)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(2)))
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(3)))
+        h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(3)))
             .unwrap();
 
         let first = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
         assert_eq!(
-            mailbox_payloads(&h.repo_event_drain(first).unwrap()),
+            mailbox_payloads(&h.repo_event_drain(first.clone()).unwrap()),
             vec![serde_json::json!(3)]
         );
 
@@ -2091,17 +2441,17 @@ mod tests {
         // broadcast log. Once it is handed off, a later subscriber cannot
         // replay it; later sends still broadcast to all live receivers.
         let second = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        assert_eq!(h.repo_event_drain(second).unwrap(), vec![]);
-        h.mailbox_send(mid, "next".into(), payload(serde_json::json!(4)))
+        assert_eq!(h.repo_event_drain(second.clone()).unwrap(), vec![]);
+        h.mailbox_send(mid.clone(), "next".into(), payload(serde_json::json!(4)))
             .unwrap();
         assert_eq!(
-            mailbox_payloads(&h.repo_event_drain(first).unwrap()),
+            mailbox_payloads(&h.repo_event_drain(first.clone()).unwrap()),
             vec![serde_json::json!(4)]
         );
         assert_eq!(
-            mailbox_payloads(&h.repo_event_drain(second).unwrap()),
+            mailbox_payloads(&h.repo_event_drain(second.clone()).unwrap()),
             vec![serde_json::json!(4)]
         );
     }
@@ -2110,17 +2460,17 @@ mod tests {
     fn retained_mailbox_keys_keep_first_arrival_order() {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!("a1")))
             .unwrap();
-        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+        h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!("b1")))
             .unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a2")))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!("a2")))
             .unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
         assert_eq!(
-            mailbox_payloads(&h.repo_event_drain(sub).unwrap()),
+            mailbox_payloads(&h.repo_event_drain(sub.clone()).unwrap()),
             vec![serde_json::json!("a2"), serde_json::json!("b1")]
         );
     }
@@ -2130,15 +2480,15 @@ mod tests {
         let mut h = handler_with_mailbox_bound(2);
         let mid = h.mailbox_new().unwrap();
         for key in ["a", "b", "c"] {
-            h.mailbox_send(mid, key.into(), payload(serde_json::json!(key)))
+            h.mailbox_send(mid.clone(), key.into(), payload(serde_json::json!(key)))
                 .unwrap();
         }
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
         assert_eq!(
-            h.repo_event_drain(sub),
-            Err(EventError::EventQueueOverflow(sub.raw, 1)),
+            h.repo_event_drain(sub.clone()),
+            Err(EventError::EventQueueOverflow(sub.raw.clone(), 1)),
             "the third unique retained key is named loss, never silently omitted"
         );
     }
@@ -2147,17 +2497,17 @@ mod tests {
     fn retained_same_key_coalesces_within_the_mailbox_bound() {
         let mut h = handler_with_mailbox_bound(2);
         let mid = h.mailbox_new().unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(1)))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!(1)))
             .unwrap();
-        h.mailbox_send(mid, "b".into(), payload(serde_json::json!(2)))
+        h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!(2)))
             .unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(3)))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!(3)))
             .unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
         assert_eq!(
-            mailbox_payloads(&h.repo_event_drain(sub).unwrap()),
+            mailbox_payloads(&h.repo_event_drain(sub.clone()).unwrap()),
             vec![serde_json::json!(3), serde_json::json!(2)]
         );
     }
@@ -2166,16 +2516,16 @@ mod tests {
     fn dropping_a_mailbox_releases_its_retained_backlog_and_overflow_accounting() {
         let mut h = handler_with_mailbox_bound(1);
         let mid = h.mailbox_new().unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(1)))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!(1)))
             .unwrap();
-        h.mailbox_send(mid, "b".into(), payload(serde_json::json!(2)))
+        h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!(2)))
             .unwrap();
-        h.mailbox_drop(mid).unwrap();
+        h.mailbox_drop(mid.clone()).unwrap();
         assert!(h.mailboxes.pending.is_empty());
         assert!(!h.mailboxes.overflowed.contains_key(&mid));
         assert_eq!(
-            h.mailbox_send(mid, "c".into(), payload(serde_json::json!(3))),
-            Err(EventError::EventUnknownMailbox(mid))
+            h.mailbox_send(mid.clone(), "c".into(), payload(serde_json::json!(3))),
+            Err(EventError::EventUnknownMailbox(mid.raw.clone()))
         );
     }
 
@@ -2186,7 +2536,7 @@ mod tests {
             .repo_event_subscribe_with_terminal_async(vec![EvWatch::WatchAsync(7)], [7])
             .unwrap();
         assert!(matches!(
-            h.repo_event_drain(sub).unwrap().as_slice(),
+            h.repo_event_drain(sub.clone()).unwrap().as_slice(),
             [EvRepositoryEvent::ObservedAsyncDone(_, 7)]
         ));
     }
@@ -2194,19 +2544,128 @@ mod tests {
     #[test]
     fn closing_an_owner_removes_its_abandoned_subscriptions_only() {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mailbox = h.mailbox_new().unwrap();
         h.begin_owner(10);
         let abandoned = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(1)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mailbox.clone())])
             .unwrap();
         h.end_owner(10);
         assert_eq!(
-            h.repo_event_drain(abandoned),
-            Err(EventError::EventUnknownSubscription(abandoned.raw))
+            h.repo_event_drain(abandoned.clone()),
+            Err(EventError::EventUnknownSubscription(abandoned.raw.clone()))
         );
         let unowned = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(1)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mailbox.clone())])
             .unwrap();
-        assert!(h.repo_event_drain(unowned).is_ok());
+        assert!(h.repo_event_drain(unowned.clone()).is_ok());
+    }
+
+    #[test]
+    fn inherited_subscription_cannot_drain_or_unsubscribe_another_actors_local_first() {
+        let (mut parent, _) = handler_with(vec![], Duration::ZERO);
+        let (mut child, _) = handler_with(vec![], Duration::ZERO);
+        parent.registry.namespace = "same-run".into();
+        child.registry.namespace = "same-run".into();
+        let parent_principal = PrincipalId::new(1, 1);
+        let child_principal = PrincipalId::new(2, 1);
+        let parent_sub = parent
+            .repo_event_subscribe_for(parent_principal, vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        let child_sub = child
+            .repo_event_subscribe_for(child_principal, vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        assert_ne!(parent_sub, child_sub);
+
+        assert_eq!(
+            child.repo_event_drain_for(child_principal, parent_sub.clone()),
+            Err(EventError::EventUnknownSubscription(parent_sub.raw.clone()))
+        );
+        assert_eq!(
+            child.repo_event_unsubscribe_for(child_principal, parent_sub.clone()),
+            Err(EventError::EventUnknownSubscription(parent_sub.raw.clone()))
+        );
+        assert!(matches!(
+            child
+                .repo_event_drain_for(child_principal, child_sub)
+                .unwrap()
+                .as_slice(),
+            [EvRepositoryEvent::ObservedTick(..)]
+        ));
+        assert!(matches!(
+            parent
+                .repo_event_drain_for(parent_principal, parent_sub)
+                .unwrap()
+                .as_slice(),
+            [EvRepositoryEvent::ObservedTick(..)]
+        ));
+    }
+
+    #[test]
+    fn wrong_principal_is_denied_before_firing_or_removing_a_subscription() {
+        let (mut handler, _) = handler_with(vec![], Duration::ZERO);
+        let owner = PrincipalId::new(3, 4);
+        let caller = PrincipalId::new(3, 5);
+        let sub = handler
+            .repo_event_subscribe_for(owner, vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        assert_eq!(
+            handler.repo_event_drain_for(caller, sub.clone()),
+            Err(EventError::EventSubscriptionDenied(
+                "drain".into(),
+                sub.raw.clone(),
+                "3:4".into(),
+                "3:5".into(),
+            ))
+        );
+        assert_eq!(
+            handler.repo_event_unsubscribe_for(caller, sub.clone()),
+            Err(EventError::EventSubscriptionDenied(
+                "unsubscribe".into(),
+                sub.raw.clone(),
+                "3:4".into(),
+                "3:5".into(),
+            ))
+        );
+        assert_eq!(
+            handler.repo_event_await_for(caller, sub.clone(), 0),
+            Err(EventError::EventSubscriptionDenied(
+                "await".into(),
+                sub.raw.clone(),
+                "3:4".into(),
+                "3:5".into(),
+            ))
+        );
+        assert!(matches!(
+            handler.repo_event_drain_for(owner, sub).unwrap().as_slice(),
+            [EvRepositoryEvent::ObservedTick(..)]
+        ));
+    }
+
+    #[test]
+    fn same_principal_and_local_counter_from_another_run_cannot_retarget() {
+        let (mut first, _) = handler_with(vec![], Duration::ZERO);
+        let (mut second, _) = handler_with(vec![], Duration::ZERO);
+        first.registry.namespace = "run-one:handler-one".into();
+        second.registry.namespace = "run-two:handler-two".into();
+        let principal = PrincipalId::new(1, 1);
+        let inherited = first
+            .repo_event_subscribe_for(principal, vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        let own = second
+            .repo_event_subscribe_for(principal, vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        assert_ne!(inherited, own);
+        assert_eq!(
+            second.repo_event_drain_for(principal, inherited.clone()),
+            Err(EventError::EventUnknownSubscription(inherited.raw))
+        );
+        assert!(matches!(
+            second
+                .repo_event_drain_for(principal, own)
+                .unwrap()
+                .as_slice(),
+            [EvRepositoryEvent::ObservedTick(..)]
+        ));
     }
 
     #[test]
@@ -2214,13 +2673,13 @@ mod tests {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!("a1")))
             .unwrap();
-        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+        h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!("b1")))
             .unwrap();
-        let batch = h.repo_event_drain(sub).unwrap();
+        let batch = h.repo_event_drain(sub.clone()).unwrap();
         assert_eq!(
             mailbox_payloads(&batch),
             vec![serde_json::json!("a1"), serde_json::json!("b1")]
@@ -2232,17 +2691,17 @@ mod tests {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!("a1")))
             .unwrap();
-        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+        h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!("b1")))
             .unwrap();
         // Replaces "a"'s entry in place — "a" must stay FIRST, not move to
         // the back behind "b".
-        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a2")))
+        h.mailbox_send(mid.clone(), "a".into(), payload(serde_json::json!("a2")))
             .unwrap();
-        let batch = h.repo_event_drain(sub).unwrap();
+        let batch = h.repo_event_drain(sub.clone()).unwrap();
         assert_eq!(
             mailbox_payloads(&batch),
             vec![serde_json::json!("a2"), serde_json::json!("b1")]
@@ -2261,12 +2720,16 @@ mod tests {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
         let sub = h
-            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid.clone())])
             .unwrap();
-        h.mailbox_send(mid, "k".into(), payload(serde_json::json!("queued")))
-            .unwrap();
+        h.mailbox_send(
+            mid.clone(),
+            "k".into(),
+            payload(serde_json::json!("queued")),
+        )
+        .unwrap();
         let batch = h
-            .repo_event_await(sub, -1)
+            .repo_event_await(sub.clone(), -1)
             .expect("a negative timeout is accepted, never a validation error");
         assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!("queued")]);
     }
@@ -2275,10 +2738,10 @@ mod tests {
     fn send_to_a_dropped_mailbox_is_a_typed_error() {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         let mid = h.mailbox_new().unwrap();
-        h.mailbox_drop(mid).unwrap();
+        h.mailbox_drop(mid.clone()).unwrap();
         assert_eq!(
-            h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1))),
-            Err(EventError::EventUnknownMailbox(mid))
+            h.mailbox_send(mid.clone(), "k".into(), payload(serde_json::json!(1))),
+            Err(EventError::EventUnknownMailbox(mid.raw.clone()))
         );
     }
 
@@ -2286,8 +2749,14 @@ mod tests {
     fn send_to_a_never_minted_mailbox_is_a_typed_error() {
         let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
         assert_eq!(
-            h.mailbox_send(999, "k".into(), payload(serde_json::json!(1))),
-            Err(EventError::EventUnknownMailbox(999))
+            h.mailbox_send(
+                EvMailboxId {
+                    raw: "never-minted".into()
+                },
+                "k".into(),
+                payload(serde_json::json!(1))
+            ),
+            Err(EventError::EventUnknownMailbox("never-minted".into()))
         );
     }
 
@@ -2295,7 +2764,9 @@ mod tests {
     fn a_mailbox_watch_is_skipped_by_worktree_reconciliation() {
         let mut reg = SubscriptionRegistry::new(8);
         reg.subscribe(vec![
-            EvWatch::WatchMailbox(1),
+            EvWatch::WatchMailbox(EvMailboxId {
+                raw: "mailbox".into(),
+            }),
             EvWatch::WatchCommit(wt("a")),
         ]);
         assert_eq!(
@@ -2370,7 +2841,7 @@ mod tests {
             .commit_file("a.txt", "later", "after subscription")
             .unwrap();
         assert_eq!(
-            oids(&h.repo_event_drain(sub).unwrap()),
+            oids(&h.repo_event_drain(sub.clone()).unwrap()),
             vec![moved.as_str()],
             "subscription-time registration fixes the cutoff before later movement"
         );
@@ -2387,7 +2858,7 @@ mod tests {
             .unwrap();
         assert!(
             matches!(
-                h.repo_event_drain(sub),
+                h.repo_event_drain(sub.clone()),
                 Err(EventError::EventSourceFailed(_))
             ),
             "an id the registry also does not know must still fail the \

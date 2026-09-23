@@ -297,7 +297,7 @@ impl BindingTable {
     }
 
     /// The exact worktree currently owned by `agent`, if any. Actor admission
-    /// uses this to resolve the typed `boundHead` placement without exposing
+    /// uses this to resolve the typed `currentCheckout` placement without exposing
     /// filesystem paths or asking Haskell to rediscover ownership. An uncertain
     /// table returns no authority, even when it retains Active diagnostic rows.
     pub fn active_for_agent(&self, agent: &AgentRef) -> Option<&WorktreeId> {

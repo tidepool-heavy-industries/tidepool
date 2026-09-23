@@ -6,8 +6,8 @@ import qualified Tidepool.Inspection as Inspection
 let response = fst (Inspection.workbenchDisplay (Reply.ResponseUnavailable (Reply.ResponseRejected Reply.ReplyUnauthorized) :: Reply.ResponseState Text))
 let watch = fst (Inspection.workbenchDisplay (Watch.WatchUnavailable (Watch.WatchRejected Reply.ReplyWrongIncarnation) :: Watch.WatchState Text))
 let direct = fst (Inspection.displayWith 512 (Left Reply.ReplyUnauthorized :: Either Reply.ReplyError ()))
-if all (Text.isInfixOf "actor-scoped") [response, direct]
-    && all (Text.isInfixOf "your assignment can continue") [response, direct]
+if all (Text.isInfixOf "control operation requires the resource owner") [response, direct]
+    && all (Text.isInfixOf "ask that actor") [response, direct]
     && Text.isInfixOf "different actor incarnation" watch
-  then ("actor-scoped handle guidance rendered" :: Text)
-  else error "actor-scoped handle guidance missing"
+  then ("resource control guidance rendered" :: Text)
+  else error "resource control guidance missing"

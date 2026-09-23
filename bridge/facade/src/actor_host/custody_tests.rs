@@ -76,7 +76,7 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
     let mut preparation = admission.admit(
         owner,
         "root/async-child".into(),
-        ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+        ForkWorkspaceSeed::CurrentCheckout(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
         exomonad_actor::ForkWorkspacePolicy {
             native_tools: exomonad_actor::NativeToolClass::Coding,
             workspace: exomonad_actor::WorkspaceAccess::WritableBound,
@@ -316,6 +316,176 @@ async fn custody_assert_request(
 }
 
 #[tokio::test]
+async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let first = tests::dispatch_haskell_script(
+        root.as_ref(),
+        include_str!("inherited_response_producer.hs"),
+    )
+    .await;
+    assert_eq!(first["status"], "committed", "{first:?}");
+    let producer = campaign
+        .next_deployment(
+            "producer installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        producer.actor.identity().into(),
+        worktree_grant(producer.effective_role.role()),
+    );
+    producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    custody_activation(&mut campaign).await;
+
+    // The observer's inherited source tip includes `worker`, whose typed
+    // ExitCell is still pending at this fork boundary.
+    let second = tests::dispatch_haskell_script(
+        root.as_ref(),
+        include_str!("inherited_response_observer.hs"),
+    )
+    .await;
+    assert_eq!(second["status"], "committed", "{second:?}");
+    let observer = campaign
+        .next_deployment(
+            "observer installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        observer.actor.identity().into(),
+        worktree_grant(observer.effective_role.role()),
+    );
+    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    custody_activation(&mut campaign).await;
+
+    let watch = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "inheritedWatch <- watch (\"inherited-ready\" :: WatchLabel) (awaitResponse worker)",
+    )
+    .await;
+    assert_eq!(watch["status"], "committed", "{watch:?}");
+    let pending =
+        tests::dispatch_haskell_script(observer.policy.as_ref(), "pollWatch inheritedWatch").await;
+    assert_eq!(pending["status"], "committed", "{pending:?}");
+    assert!(pending.to_string().contains("WatchPending"), "{pending:?}");
+
+    let reply = tests::dispatch_haskell_script(
+        producer.policy.as_ref(),
+        "respond ((sessionInput :: Text), (\\x -> x + (1 :: Int)))",
+    )
+    .await;
+    assert_eq!(reply["status"], "replied", "{reply:?}");
+    let observer_id = observer.actor.identity();
+    campaign
+        .next_deployment(
+            "foreign watch readiness",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.owner == observer_id
+                        && notification.label == "inherited-ready" =>
+                {
+                    assert_eq!(
+                        notification.transition,
+                        exomonad_actor::WatchTransition::Ready
+                    );
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let root_id = campaign.root_installation.actor.identity();
+    campaign
+        .next_deployment(
+            "owner settlement notice",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SettlementChanged { notification }
+                    if notification.owner == root_id =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let extracted = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        include_str!("inherited_response_read.hs"),
+    )
+    .await;
+    assert_eq!(extracted["status"], "committed", "{extracted:?}");
+    assert!(extracted.to_string().contains("custody"), "{extracted:?}");
+    assert!(extracted.to_string().contains("42"), "{extracted:?}");
+
+    let queued = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "queuedWatch <- watch (\"queued-ready\" :: WatchLabel) (awaitResponse worker)",
+    )
+    .await;
+    assert_eq!(queued["status"], "committed", "{queued:?}");
+
+    let handoff = tests::dispatch_haskell_script(observer.policy.as_ref(), "respond worker").await;
+    assert_eq!(handoff["status"], "replied", "{handoff:?}");
+    let returned = tests::dispatch_haskell_script(
+        root.as_ref(),
+        "forwardedState <- pollResponse observer\nlet forwarded = case forwardedState of { ResponseReady answer -> responseValue answer; _ -> error \"typed handoff was not ready\" }\nforwardedState2 <- pollResponse forwarded\ninspectFull (case forwardedState2 of { ResponseReady answer -> let (label, run) = responseValue answer in (label, run 41); _ -> error \"forwarded response was not ready\" })",
+    ).await;
+    assert_eq!(returned["status"], "committed", "{returned:?}");
+    assert!(returned.to_string().contains("42"), "{returned:?}");
+
+    let released = tests::dispatch_haskell_script(root.as_ref(), "forgetResponse worker").await;
+    assert_eq!(released["status"], "committed", "{released:?}");
+    assert!(
+        released.to_string().contains("ResponseForgotten"),
+        "{released:?}"
+    );
+    let expired = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "expired <- pollResponse worker\ninspectFull expired\ninspectFull (fst retained, snd retained 41)",
+    )
+    .await;
+    assert_eq!(expired["status"], "committed", "{expired:?}");
+    assert!(expired.to_string().contains("ReplyStale"), "{expired:?}");
+    assert!(expired.to_string().contains("custody"), "{expired:?}");
+    assert!(expired.to_string().contains("42"), "{expired:?}");
+    let forwarded_expired =
+        tests::dispatch_haskell_script(root.as_ref(), "pollResponse forwarded").await;
+    assert_eq!(
+        forwarded_expired["status"], "committed",
+        "{forwarded_expired:?}"
+    );
+    assert!(
+        forwarded_expired.to_string().contains("ReplyStale"),
+        "{forwarded_expired:?}"
+    );
+    let queued_after_release =
+        tests::dispatch_haskell_script(observer.policy.as_ref(), "pollWatch queuedWatch").await;
+    assert_eq!(
+        queued_after_release["status"], "committed",
+        "{queued_after_release:?}"
+    );
+    assert!(
+        queued_after_release
+            .to_string()
+            .contains("ResponseReleased"),
+        "{queued_after_release:?}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     let (entered, mut installing) = mpsc::unbounded_channel();
     let mut campaign = test_campaign::TestCampaign::start_with_admission(
@@ -424,7 +594,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     }
     assert_eq!(seen, [true, true]);
 
-    // Give boundHead a distinguishable source, not the root/sibling seed.
+    // Give currentCheckout a distinguishable source, not the root/sibling seed.
     let parent_tree = campaign
         .worktrees
         .lookup(&WorktreeId::from_raw(&installed[0].launch_worktrees[0]))

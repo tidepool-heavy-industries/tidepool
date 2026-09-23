@@ -158,6 +158,19 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     let preview =
         dispatch_haskell_script(root.as_ref(), include_str!("research_policy_preview.hs")).await;
     assert_eq!(preview["status"], "committed", "{preview:?}");
+    let outputs = preview["items"].as_array().unwrap();
+    assert!(
+        outputs.iter().any(|item| item["output"]
+            .as_str()
+            .is_some_and(|text| text.contains("BranchPreview (prospective, not reserved)"))),
+        "{preview:?}"
+    );
+    assert!(
+        outputs.iter().any(|item| item["output"]
+            .as_str()
+            .is_some_and(|text| text.contains("previewRequestedBudget"))),
+        "full inspection lost preview fields: {preview:?}"
+    );
     assert_eq!(
         preview["items"].as_array().unwrap().last().unwrap()["output"],
         "True",

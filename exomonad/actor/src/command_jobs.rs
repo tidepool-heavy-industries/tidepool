@@ -245,6 +245,16 @@ impl Shared {
         });
         cleanup
     }
+
+    async fn status(&self, caller: ActorRef, id: &str) -> CommandStatus {
+        // Cleanup can contact and update the backend. An observer only reads
+        // the phase already retained by the job owner.
+        if caller == self.owner {
+            let _ = self.cleanup(id).await;
+        }
+        self.phase.borrow().clone()
+    }
+
     fn complete(&self, result: CommandResult) {
         let mut sinks = self.sinks.lock();
         if matches!(*self.phase.borrow(), CommandStatus::CommandFinished(_)) {
@@ -356,7 +366,7 @@ fn validate_spec(spec: &CommandSpec) -> Result<(), CommandError> {
 }
 
 impl CommandJobs {
-    /// The job is owned — started, observed, cancelled — by the exact actor
+    /// The job is owned — started and controlled — by the exact actor
     /// that raised it. Where it then *runs* is the deployment owner's
     /// decision: an actor with a native application of its own runs it there,
     /// and one without runs it in the host, inside its own owned resources.
@@ -460,27 +470,22 @@ impl CommandJobs {
             .collect()
     }
 
-    fn shared(&self, owner: ActorRef, id: &str) -> Result<Arc<Shared>, CommandError> {
+    fn shared(&self, id: &str) -> Result<Arc<Shared>, CommandError> {
         let entries = self.entries.lock();
         let entry = entries
             .get(id)
             .ok_or_else(|| CommandError::CommandUnavailable("unknown command job".into()))?;
-        if entry.shared.owner != owner && !entry.shared.observers.lock().contains_key(&owner) {
-            return Err(CommandError::CommandUnauthorized);
-        }
         Ok(entry.shared.clone())
     }
 
-    pub async fn status(&self, owner: ActorRef, id: &str) -> Result<CommandStatus, CommandError> {
-        let shared = self.shared(owner, id)?;
-        let _ = shared.cleanup(id).await;
-        let phase = shared.phase.borrow().clone();
-        Ok(phase)
+    pub async fn status(&self, caller: ActorRef, id: &str) -> Result<CommandStatus, CommandError> {
+        let shared = self.shared(id)?;
+        Ok(shared.status(caller, id).await)
     }
 
     pub async fn wait(
         &self,
-        owner: ActorRef,
+        _caller: ActorRef,
         id: &str,
         milliseconds: i64,
     ) -> Result<CommandStatus, CommandError> {
@@ -489,7 +494,7 @@ impl CommandJobs {
                 "wait must be -1 or nonnegative milliseconds".into(),
             ));
         }
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         let mut phase = shared.phase.subscribe();
         let wait = async {
             loop {
@@ -525,7 +530,7 @@ impl CommandJobs {
                 | CommandControl::InputAndClose(_)
                 | CommandControl::CloseInput
         );
-        let shared = self.shared(owner, id).map_err(|error| {
+        let shared = self.shared(id).map_err(|error| {
             if input {
                 CommandError::CommandInputRejected(format!("{error:?}"))
             } else {
@@ -598,7 +603,7 @@ impl CommandJobs {
 
     pub async fn output(
         &self,
-        owner: ActorRef,
+        _caller: ActorRef,
         id: &str,
         bytes: usize,
     ) -> Result<CommandOutput, CommandError> {
@@ -607,7 +612,7 @@ impl CommandJobs {
                 "read at most 1048576 output bytes per stream".into(),
             ));
         }
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         let Some(backend) = shared.backend.lock().clone() else {
             if let Some(page) = shared.unstarted_output() {
                 return Ok(CommandOutput {
@@ -622,7 +627,7 @@ impl CommandJobs {
 
     pub async fn read(
         &self,
-        owner: ActorRef,
+        _caller: ActorRef,
         id: &str,
         stream: CommandStream,
         position: CommandPosition,
@@ -639,7 +644,7 @@ impl CommandJobs {
                 "output position must be nonnegative".into(),
             ));
         }
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         let Some(backend) = shared.backend.lock().clone() else {
             return shared
                 .unstarted_output()
@@ -655,7 +660,7 @@ impl CommandJobs {
         owner: ActorRef,
         id: &str,
     ) -> Result<Vec<(CommandStream, CommandPage)>, CommandError> {
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         let cursors = shared
             .displayed
             .lock()
@@ -709,7 +714,7 @@ impl CommandJobs {
         id: &str,
         pages: &[(CommandStream, CommandPage)],
     ) -> Result<(), CommandError> {
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         let mut displayed = shared.displayed.lock();
         let cursors = displayed.entry(owner).or_default();
         for (stream, page) in pages {
@@ -724,12 +729,12 @@ impl CommandJobs {
 
     pub(crate) fn connect(
         &self,
-        owner: ActorRef,
+        _caller: ActorRef,
         observer: ActorRef,
         id: &str,
         sink: impl Fn(CommandResult) -> bool + Send + Sync + 'static,
     ) -> Result<CommandConnection, CommandError> {
-        let shared = self.shared(owner, id)?;
+        let shared = self.shared(id)?;
         *shared.observers.lock().entry(observer).or_default() += 1;
         let sink: Arc<CompletionSink> = Arc::new(sink);
         let mut sinks = shared.sinks.lock();
@@ -1171,5 +1176,35 @@ mod bounded_backend_tests {
             BACKEND_CALL_TIMEOUT,
             "a paused clock should advance exactly to the bound, not hang past it"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreign_status_does_not_probe_backend_cleanup() {
+        let shared = finished_shared_with_hanging_backend();
+        let foreign = ActorRef::first(ActorId(2));
+        let started = tokio::time::Instant::now();
+
+        let status = shared.status(foreign, "job-under-test").await;
+
+        assert!(matches!(status, CommandStatus::CommandFinished(_)));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(matches!(
+            &*shared.phase.borrow(),
+            CommandStatus::CommandFinished(CommandResult {
+                cleanup: CommandCleanup::CommandRetained,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_status_still_probes_backend_cleanup() {
+        let shared = finished_shared_with_hanging_backend();
+        let started = tokio::time::Instant::now();
+
+        let status = shared.status(shared.owner, "job-under-test").await;
+
+        assert!(matches!(status, CommandStatus::CommandFinished(_)));
+        assert_eq!(started.elapsed(), BACKEND_CALL_TIMEOUT);
     }
 }

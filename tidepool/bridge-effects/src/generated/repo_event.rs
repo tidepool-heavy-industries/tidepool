@@ -13,11 +13,18 @@ pub struct EvEventId {
     pub raw: i64,
 }
 
-/// Haskell `SubscriptionId` — one live `withHandler` registration.
-#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Haskell `SubscriptionId` — one live caller-owned registration.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[haskell(name = "SubscriptionId")]
 pub struct EvSubscriptionId {
-    pub raw: i64,
+    pub raw: String,
+}
+
+/// Haskell `MailboxId` — one live, issuer-bound mailbox capability.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[haskell(name = "MailboxId")]
+pub struct EvMailboxId {
+    pub raw: String,
 }
 
 /// Haskell `EventWatch` — one (worktree, kind) pair a subscription observes, or a
@@ -25,15 +32,14 @@ pub struct EvSubscriptionId {
 /// subscription over several watches rather than several subscriptions.
 /// `WatchDeadline` carries a RELATIVE millisecond duration: the runtime fixes
 /// the absolute deadline at `subscribe()` time, `now + ms`. `WatchAsync`/
-/// `WatchMailbox` name no worktree either — a raw `Int` rather than a
-/// newtype, since this row must stand alone without `Green`.
+/// `WatchMailbox` names no worktree either; it carries a mailbox handle.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum EvWatch {
     WatchCommit(WtWorktreeId),
     WatchHead(WtWorktreeId),
     WatchDeadline(i64),
     WatchAsync(i64),
-    WatchMailbox(i64),
+    WatchMailbox(EvMailboxId),
 }
 
 /// Haskell `HeadChangeKind`. `UnknownChange` is a correct answer, not a
@@ -90,7 +96,7 @@ pub struct EvTickReceipt {
 /// the SHARING is the information. `ObservedTick` is never broadcast — a fired
 /// deadline is queued directly onto the ONE subscription that armed it.
 /// `ObservedAsyncDone` carries only the settled thread's `Int` id, never its
-/// result. `ObservedMessage` carries a mailbox `Int` and a bare JSON payload;
+/// result. `ObservedMessage` carries a mailbox handle and a bare JSON payload;
 /// the coalesce key does not ride the wire.
 /// Ret-only (never decoded from Haskell) — it appears exclusively as
 /// `ret "[RepositoryEvent]"`, never in an `args { .. }` clause, so `FromHaskell`
@@ -101,7 +107,7 @@ pub enum EvRepositoryEvent {
     ObservedHeadChange(EvEventId, EvHeadChangeReceipt),
     ObservedTick(EvEventId, EvTickReceipt),
     ObservedAsyncDone(EvEventId, i64),
-    ObservedMessage(EvEventId, i64, serde_json::Value),
+    ObservedMessage(EvEventId, EvMailboxId, serde_json::Value),
 }
 
 impl EvEventId {
@@ -120,16 +126,31 @@ impl EvEventId {
 }
 
 impl EvSubscriptionId {
-    /// An untrusted raw value becomes a wire id here — infallibly: an
-    /// integer identity carries no policy.
+    /// An untrusted raw value becomes a wire id here — infallibly:
+    /// this identity carries no string policy.
     #[must_use]
-    pub fn new(raw: i64) -> Self {
-        Self { raw }
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
     }
 
-    /// The payload.
+    /// The validated payload.
     #[must_use]
-    pub fn as_i64(&self) -> i64 {
-        self.raw
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl EvMailboxId {
+    /// An untrusted raw value becomes a wire id here — infallibly:
+    /// this identity carries no string policy.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
+    /// The validated payload.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
     }
 }

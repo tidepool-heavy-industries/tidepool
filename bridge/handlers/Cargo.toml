@@ -43,6 +43,7 @@ url.workspace = true
 libc.workspace = true
 # Direct deps for handler implementations
 serde_json.workspace = true
+uuid.workspace = true
 # Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
 # matches the cache layer's blake3 choice (tidepool-runtime).
 blake3.workspace = true

@@ -10,15 +10,19 @@ use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 #[derive(ToHaskell, FromHaskell, Debug, PartialEq, Eq)]
 pub enum EventError {
     /// the per-subscription queue bound was exceeded — the scope fails rather than dropping commits
-    EventQueueOverflow(i64, i64),
+    EventQueueOverflow(String, i64),
     /// no such live subscription (already unregistered)
-    EventUnknownSubscription(i64),
+    EventUnknownSubscription(String),
+    /// the caller cannot control this subscription; create an independent subscription
+    EventSubscriptionDenied(String, String, String, String),
     /// a watched worktree is no longer observable
     EventSourceLost(String),
     /// reconciliation against git failed
     EventSourceFailed(String),
     /// no such live mailbox — never minted, or already dropped
-    EventUnknownMailbox(i64),
+    EventUnknownMailbox(String),
+    /// only the mailbox creator may receive or drop it; ask that actor to act or use a mailbox you created
+    EventMailboxDenied(String, String, String, String),
 }
 
 /// One variant per `RepoEvent` GADT constructor, named EXACTLY as in Haskell.
@@ -30,8 +34,12 @@ pub enum RepoEventReq {
     RepoEventAwait(tidepool_bridge_effects::EvSubscriptionId, i64),
     RepoEventUnsubscribe(tidepool_bridge_effects::EvSubscriptionId),
     MailboxNew,
-    MailboxSend(i64, String, crate::effect_glue::JsonArg),
-    MailboxDrop(i64),
+    MailboxSend(
+        tidepool_bridge_effects::EvMailboxId,
+        String,
+        crate::effect_glue::JsonArg,
+    ),
+    MailboxDrop(tidepool_bridge_effects::EvMailboxId),
 }
 
 impl tidepool_mcp::DescribeEffect for RepoEventHandler {
@@ -50,22 +58,22 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
             RepoEventReq::RepoEventSubscribe(watches) => {
-                cx.respond(self.repo_event_subscribe(watches))
+                self.repo_event_subscribe_effect(cx, watches)
             }
             RepoEventReq::RepoEventDrain(subscription) => {
-                cx.respond(self.repo_event_drain(subscription))
+                self.repo_event_drain_effect(cx, subscription)
             }
             RepoEventReq::RepoEventAwait(subscription, timeout_ms) => {
-                cx.respond(self.repo_event_await(subscription, timeout_ms))
+                self.repo_event_await_effect(cx, subscription, timeout_ms)
             }
             RepoEventReq::RepoEventUnsubscribe(subscription) => {
-                cx.respond(self.repo_event_unsubscribe(subscription))
+                self.repo_event_unsubscribe_effect(cx, subscription)
             }
-            RepoEventReq::MailboxNew => cx.respond(self.mailbox_new()),
+            RepoEventReq::MailboxNew => self.mailbox_new_effect(cx),
             RepoEventReq::MailboxSend(mailbox, key, payload) => {
-                cx.respond(self.mailbox_send(mailbox, key, payload))
+                self.mailbox_send_effect(cx, mailbox, key, payload)
             }
-            RepoEventReq::MailboxDrop(mailbox) => cx.respond(self.mailbox_drop(mailbox)),
+            RepoEventReq::MailboxDrop(mailbox) => self.mailbox_drop_effect(cx, mailbox),
         }
     }
 }

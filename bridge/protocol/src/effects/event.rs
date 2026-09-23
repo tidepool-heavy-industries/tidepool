@@ -24,7 +24,7 @@
 //!    HASKELL side needs nothing new; only the WIRE Rust emitter's per-effect
 //!    `wire_rust_of` lookup needed a fallback.
 //! 2. `HsType::Value` as a wire record field type (`RepositoryEvent`'s
-//!    `ObservedMessage EventId Int Value`), rendering as `serde_json::Value` —
+//!    `ObservedMessage EventId MailboxId Value`), rendering as `serde_json::Value` —
 //!    the same spelling `AgCyclePayload`/`AgAgentStep` already use for a
 //!    ret-only JSON payload.
 //!
@@ -89,13 +89,12 @@ const WIRE_COPY: WireDerives = WireDerives(&[
     DPartialEq,
     DEq,
 ]);
-/// `SubscriptionId` alone additionally derives `PartialOrd, Ord, Hash` — it is
-/// used as a map/set key in `SubscriptionRegistry`.
+/// Opaque handle identities additionally derive `PartialOrd`, `Ord`, and `Hash` so
+/// callers can index their own handles.
 const WIRE_ID_ORD_HASH: WireDerives = WireDerives(&[
     DToHaskell,
     DFromHaskell,
     DClone,
-    DCopy,
     DDebug,
     DPartialEq,
     DEq,
@@ -121,10 +120,9 @@ const WIRE_ID_ORD: WireDerives = WireDerives(&[
 /// `serde_json::Value` field (`ObservedMessage`'s payload), which has no `Eq`.
 const WIRE_RET_ONLY: WireDerives = WireDerives(&[DToHaskell, DClone, DDebug, DPartialEq]);
 
-/// `data X = X Int` — an opaque runtime-minted identity. Both Event identities
-/// carry no string policy (`IdentityPayload::Int` requires
-/// `Validation::None` — [`TypeDef::validate`]) and neither has a domain type of
-/// its own: `SubscriptionRegistry` mints and compares the wire struct directly.
+/// `EventId` is an opaque, runtime-minted integer with no validation policy or
+/// separate domain type. `SubscriptionId` and `MailboxId` use text for their
+/// issuer-bound identities and are declared separately below.
 fn identity(
     name: &'static str,
     wire_rust: &'static str,
@@ -205,11 +203,11 @@ pub fn event() -> Effect {
         helpers: helpers(),
         polymorphism: Polymorphism::None,
         generated_handler: true,
-        caller_principal: false,
+        caller_principal: true,
     }
 }
 
-/// The eight supporting declarations, in the order they are emitted — every
+/// The nine supporting declarations, in the order they are emitted — every
 /// `data` decl in schema order, then (none here — see the module doc) every
 /// `ToJSON` instance, then the derived error ADT. Reproduces
 /// `event_effect_def!`'s `type_defs` list exactly, MINUS `Observed a`/`Event
@@ -227,12 +225,36 @@ fn type_defs() -> Vec<TypeDef> {
                 "change from two changes.",
             ],
         ),
-        identity(
-            "SubscriptionId",
-            "EvSubscriptionId",
-            WIRE_ID_ORD_HASH,
-            &["Haskell `SubscriptionId` — one live `withHandler` registration."],
-        ),
+        TypeDef {
+            name: "SubscriptionId",
+            wire_rust: Some("EvSubscriptionId"),
+            haskell_module: None,
+            shape: TypeShape::Identity {
+                payload: IdentityPayload::Text,
+                hs_binder: "i",
+                rust_field: "raw",
+                validation: Validation::None,
+            },
+            json: JsonInstance::None,
+            derives: WIRE_ID_ORD_HASH,
+            domain: None,
+            doc: &["Haskell `SubscriptionId` — one live caller-owned registration."],
+        },
+        TypeDef {
+            name: "MailboxId",
+            wire_rust: Some("EvMailboxId"),
+            haskell_module: None,
+            shape: TypeShape::Identity {
+                payload: IdentityPayload::Text,
+                hs_binder: "i",
+                rust_field: "raw",
+                validation: Validation::None,
+            },
+            json: JsonInstance::None,
+            derives: WIRE_ID_ORD_HASH,
+            domain: None,
+            doc: &["Haskell `MailboxId` — one live, issuer-bound mailbox capability."],
+        },
         TypeDef {
             name: "EventWatch",
             wire_rust: Some("EvWatch"),
@@ -261,7 +283,7 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     SumVariant {
                         ctor: "WatchMailbox",
-                        fields: positional_fields![HsType::Int],
+                        fields: positional_fields![HsType::Named("MailboxId")],
                         doc: &[],
                     },
                 ],
@@ -275,8 +297,7 @@ fn type_defs() -> Vec<TypeDef> {
                 "subscription over several watches rather than several subscriptions.",
                 "`WatchDeadline` carries a RELATIVE millisecond duration: the runtime fixes",
                 "the absolute deadline at `subscribe()` time, `now + ms`. `WatchAsync`/",
-                "`WatchMailbox` name no worktree either — a raw `Int` rather than a",
-                "newtype, since this row must stand alone without `Green`.",
+                "`WatchMailbox` names no worktree either; it carries a mailbox handle.",
             ],
         },
         TypeDef {
@@ -489,7 +510,7 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     SumVariant {
                         ctor: "ObservedMessage",
-                        fields: positional_fields![HsType::Named("EventId"), HsType::Int, HsType::Value],
+                        fields: positional_fields![HsType::Named("EventId"), HsType::Named("MailboxId"), HsType::Value],
                         doc: &[],
                     },
                 ],
@@ -503,7 +524,7 @@ fn type_defs() -> Vec<TypeDef> {
                 "the SHARING is the information. `ObservedTick` is never broadcast — a fired",
                 "deadline is queued directly onto the ONE subscription that armed it.",
                 "`ObservedAsyncDone` carries only the settled thread's `Int` id, never its",
-                "result. `ObservedMessage` carries a mailbox `Int` and a bare JSON payload;",
+                "result. `ObservedMessage` carries a mailbox handle and a bare JSON payload;",
                 "the coalesce key does not ride the wire.",
                 "Ret-only (never decoded from Haskell) — it appears exclusively as",
                 "`ret \"[RepositoryEvent]\"`, never in an `args { .. }` clause, so `FromHaskell`",
@@ -522,7 +543,7 @@ fn errors() -> ErrorAdt {
                 fields: vec![
                     ErrorField {
                         name: "overflowSub",
-                        ty: HsType::Int,
+                        ty: HsType::Text,
                         rust: RustBinding::Derived,
                     },
                     ErrorField {
@@ -537,10 +558,36 @@ fn errors() -> ErrorAdt {
                 ctor: "EventUnknownSubscription",
                 fields: vec![ErrorField {
                     name: "unknownSub",
-                    ty: HsType::Int,
+                    ty: HsType::Text,
                     rust: RustBinding::Derived,
                 }],
                 doc: "no such live subscription (already unregistered)",
+            },
+            ErrorVariant {
+                ctor: "EventSubscriptionDenied",
+                fields: vec![
+                    ErrorField {
+                        name: "deniedOperation",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "deniedSub",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "deniedOwner",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "deniedCaller",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                ],
+                doc: "the caller cannot control this subscription; create an independent subscription",
             },
             ErrorVariant {
                 ctor: "EventSourceLost",
@@ -564,10 +611,36 @@ fn errors() -> ErrorAdt {
                 ctor: "EventUnknownMailbox",
                 fields: vec![ErrorField {
                     name: "unknownMailbox",
-                    ty: HsType::Int,
+                    ty: HsType::Text,
                     rust: RustBinding::Derived,
                 }],
                 doc: "no such live mailbox — never minted, or already dropped",
+            },
+            ErrorVariant {
+                ctor: "EventMailboxDenied",
+                fields: vec![
+                    ErrorField {
+                        name: "mailboxOperation",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "deniedMailbox",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "mailboxOwner",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    ErrorField {
+                        name: "mailboxCaller",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                ],
+                doc: "only the mailbox creator may receive or drop it; ask that actor to act or use a mailbox you created",
             },
         ],
     }
@@ -591,7 +664,7 @@ fn verbs() -> Vec<Verb> {
     vec![
         Verb {
             ctor: "RepoEventSubscribe",
-            method: "repo_event_subscribe",
+            method: "repo_event_subscribe_effect",
             args: vec![Arg {
                 name: "watches",
                 ty: HsType::list(HsType::Named("EventWatch")),
@@ -604,7 +677,7 @@ fn verbs() -> Vec<Verb> {
         },
         Verb {
             ctor: "RepoEventDrain",
-            method: "repo_event_drain",
+            method: "repo_event_drain_effect",
             args: vec![subscription_arg()],
             ret: HsType::list(HsType::Named("RepositoryEvent")),
             errors: Some("EventError"),
@@ -616,7 +689,7 @@ fn verbs() -> Vec<Verb> {
         // motivating bug — see the module doc.
         Verb {
             ctor: "RepoEventAwait",
-            method: "repo_event_await",
+            method: "repo_event_await_effect",
             args: vec![
                 subscription_arg(),
                 Arg {
@@ -632,7 +705,7 @@ fn verbs() -> Vec<Verb> {
         },
         Verb {
             ctor: "RepoEventUnsubscribe",
-            method: "repo_event_unsubscribe",
+            method: "repo_event_unsubscribe_effect",
             args: vec![subscription_arg()],
             ret: HsType::Unit,
             errors: Some("EventError"),
@@ -643,21 +716,21 @@ fn verbs() -> Vec<Verb> {
         // RepoEvent rather than Green.
         Verb {
             ctor: "MailboxNew",
-            method: "mailbox_new",
+            method: "mailbox_new_effect",
             args: vec![],
-            ret: HsType::Int,
+            ret: HsType::Named("MailboxId"),
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
             extract: None,
         },
         Verb {
             ctor: "MailboxSend",
-            method: "mailbox_send",
+            method: "mailbox_send_effect",
             args: vec![
                 Arg {
                     name: "mailbox",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
+                    ty: HsType::Named("MailboxId"),
+                    rust: RustBinding::Bridged("EvMailboxId"),
                 },
                 Arg {
                     name: "key",
@@ -677,11 +750,11 @@ fn verbs() -> Vec<Verb> {
         },
         Verb {
             ctor: "MailboxDrop",
-            method: "mailbox_drop",
+            method: "mailbox_drop_effect",
             args: vec![Arg {
                 name: "mailbox",
-                ty: HsType::Int,
-                rust: RustBinding::Derived,
+                ty: HsType::Named("MailboxId"),
+                rust: RustBinding::Bridged("EvMailboxId"),
             }],
             ret: HsType::Unit,
             errors: Some("EventError"),

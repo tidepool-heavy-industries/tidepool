@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Workbench presentation. Summaries describe observations, never acceptance.
@@ -23,6 +24,7 @@ module Tidepool.Inspection
     pageHasMore,
     pageUnavailable,
     PageDisplay (..),
+    compactDisplayPage,
     pageWithContinuation,
     emptyPage,
     cellDisplay,
@@ -36,7 +38,9 @@ import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Tree
-import Tidepool.Effects.Core (Console (Print))
+import Tidepool.Effects.Core
+  ( Console (Print), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude hiding (print)
 
 -- | Bounded Display-based output in execution order; unlike Prelude.print,
@@ -108,13 +112,17 @@ instance Display Text where
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =
-    TextLeaf "ReplyUnauthorized (this handle is actor-scoped; your assignment can continue with this actor's own handles)"
+    TextLeaf "ReplyUnauthorized (this control operation requires the resource owner or producer; ask that actor to perform it)"
   displayTree ReplyWrongIncarnation =
     TextLeaf "ReplyWrongIncarnation (this handle belongs to a different actor incarnation)"
+  displayTree ReplyStale =
+    TextLeaf "ReplyStale (the resource is unavailable or this reference is invalid; use a retained value or request fresh work)"
   displayTree error = TextLeaf (Text.pack (show error))
 
 instance Display ResponseFailure where
   displayTree = displayTreePrec 0
+  displayTreePrec _ ResponseReleased =
+    TextLeaf "ResponseReleased (the response is no longer available; a previously extracted value remains usable)"
   displayTreePrec precedence (ResponseRejected error) =
     application precedence "ResponseRejected" [displayTreePrec 11 error]
   displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
@@ -225,7 +233,30 @@ instance WorkbenchDisplay FullInspection where
 
 instance WorkbenchDisplay (ResponseResult a) where
   workbenchDisplay value =
-    ("ResponseReady · " <> Text.pack (show (responseExecution value)), True)
+    let summary = "ResponseReady · " <> Text.pack (show (responseExecution value))
+          <> " · " <> responseWorktreeSummary (responseWorktree value)
+        (rendered, _) = rawText 512 summary
+     in (rendered, True)
+
+responseWorktreeSummary :: WorktreeEvidence -> Text
+responseWorktreeSummary NoBoundWorktree = "no bound worktree evidence"
+responseWorktreeSummary (WorktreeObservationFailed failure) =
+  "worktree observation failed: " <> renderWorktreeError failure
+responseWorktreeSummary (WorktreeObserved _ submitted observation) =
+  let working = observation.workingState
+      dirty = working.changes
+      observedHead = case observation.submittedHead of
+        OnBranch _ oid -> oid
+        Detached oid -> oid
+      counts = Text.pack . show
+   in "base=" <> renderGitOid observation.baseHead
+      <> " submitted=" <> renderGitOid submitted
+      <> " observed=" <> renderGitOid observedHead
+      <> " dirty=" <> counts (length dirty.staged) <> "/"
+      <> counts (length dirty.unstaged) <> "/"
+      <> counts (length dirty.untracked)
+      <> " ignored=" <> counts dirty.ignoredExcluded
+      <> maybe "" (\operation -> " operation=" <> Text.pack (show operation)) working.operation
 
 instance WorkbenchDisplay (ResponseState a) where
   workbenchDisplay ResponsePending = ("ResponsePending", False)
@@ -317,6 +348,26 @@ instance PageDisplay effects (DisplayPage effects) where
         rendered = pageWithContinuation budget (TextLeaf (text page)) continuation
     in DisplayPage (\() -> (text rendered, more rendered, pageHasMore rendered,
                             pageUnavailable page || pageUnavailable rendered))
+
+-- | Present a compact first page while retaining the ordinary structural
+-- rendering as a continuation whenever the summary omits detail.
+compactDisplayPage :: (WorkbenchDisplay a, Display a) => Int -> a -> DisplayPage effects
+compactDisplayPage budget value =
+  let (summary, omitted) = workbenchDisplay value
+      full = if omitted then Just (pure (pageWithContinuation 8192 (displayTree value) Nothing)) else Nothing
+   in pageWithContinuation budget (TextLeaf summary) full
+
+instance Display a => PageDisplay effects (ResponseResult a) where
+  displayPage = compactDisplayPage
+
+instance Display a => PageDisplay effects (ResponseState a) where
+  displayPage = compactDisplayPage
+
+instance Display a => PageDisplay effects (WatchState a) where
+  displayPage = compactDisplayPage
+
+instance Display a => PageDisplay effects (ProgressState a) where
+  displayPage = compactDisplayPage
 
 pageWithContinuation :: Int -> DisplayTree -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
 pageWithContinuation budget tree continuation =

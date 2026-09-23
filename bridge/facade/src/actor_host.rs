@@ -405,7 +405,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                         let dirty_policy = spec.spec_dirty_policy;
                         (Some(spec), dirty_policy)
                     }
-                    ForkWorkspaceSeed::BoundHead(dirty_policy) => (None, dirty_policy),
+                    ForkWorkspaceSeed::CurrentCheckout(dirty_policy) => (None, dirty_policy),
                 };
                 worktrees
                     .lock()
@@ -2785,10 +2785,11 @@ fn compile_root(
     let event_registry =
         WorktreeRegistry::open(actor_worktree_storage_root(&config.workspace).join("registry"))?;
     let event_journal = EventJournal::open(run_root.join("repo-events.jsonl"))?;
-    let event_handler = RepoEventHandler::with_registry(
+    let event_handler = RepoEventHandler::with_registry_namespace(
         WorktreeMonitor::new(GitCli::new(), event_journal),
         event_registry,
         EventConfig::default(),
+        runtime_namespace(run_root),
     );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
@@ -10679,7 +10680,7 @@ mod tests {
         let nested_submitted = tokio::spawn(async move {
             dispatch_haskell_script(
                 scaffold_policy.as_ref(),
-                "nested <- unfold (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport boundHead (assignment [label|implementation|] (7 :: Int))) <*> child (coding @EchoReport boundHead (assignment [label|verification|] (\"nested\" :: Text))))",
+                "nested <- unfold (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport currentCheckout (assignment [label|implementation|] (7 :: Int))) <*> child (coding @EchoReport currentCheckout (assignment [label|verification|] (\"nested\" :: Text))))",
             )
             .await
         });

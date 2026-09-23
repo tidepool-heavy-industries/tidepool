@@ -27,6 +27,9 @@
 --   rebase onto commits they were already built from.
 -- * Events broadcast to all registered handlers.  They are not consumed by the
 --   first one to see them.
+-- * A subscription belongs to the actor that registered it. A copied
+--   'SubscriptionId' cannot drain or unsubscribe that actor's queue; call
+--   'subscribe' on the same 'Event' to create an independent listener.
 -- * Each subscription invokes one handler at a time.  Later matches queue in
 --   observation order, so a handler that suspends does not race its own next
 --   invocation.
@@ -80,9 +83,10 @@
 --
 -- == Capability mailboxes and the green-thread completion watch
 --
--- 'mailbox'/'asyncDone' are event sources like 'commit'/'headChanged': possession
--- of the 'Int' is the only capability check, and both payloads stay BARE (like
--- 'Tick'), so 'nextEvent' yields a single 'Observed', never a double wrap.
+-- 'mailbox'/'asyncDone' are event sources like 'commit'/'headChanged'. A
+-- 'MailboxId' may be shared for sending; only its creator may subscribe
+-- to receive or drop it. Both payloads stay BARE (like 'Tick'), so
+-- 'nextEvent' yields a single 'Observed', never a double wrap.
 --
 -- A mailbox retains its keyed, coalesced sends until the FIRST matching
 -- subscription consumes them, in first-arrival order (a same-key replacement
@@ -126,6 +130,7 @@ module Tidepool.Event
   , Tick (..)
   , EventId
   , SubscriptionId
+  , MailboxId
   , EventWatch (..)
   , RepositoryEvent (..)
   , eventIdOf
@@ -176,6 +181,7 @@ import Tidepool.Effects
   , RepoEvent (RepoEventDrain, RepoEventSubscribe, RepoEventUnsubscribe)
   , RepositoryEvent (..)
   , SubscriptionId
+  , MailboxId
   , Tick (..)
   , EventWatch (..)
   , WorktreeHandle
@@ -391,12 +397,12 @@ projectTick _ = Nothing
 -- `Tick`, unlike `commit`/`headChanged`), so `nextEvent` yields
 -- a single `Observed`, not a double wrap.
 
--- | Observe messages sent into a mailbox this caller holds. Possession
--- of the Int is permission — there is no lookup-by-name or enumeration.
-mailbox :: Int -> Event Value
+-- | Observe messages sent into a mailbox this actor created. Its handle may be
+-- shared for sending, but does not grant another actor permission to receive.
+mailbox :: MailboxId -> Event Value
 mailbox mid = Event [WatchMailbox mid] (projectMailbox mid)
 
-projectMailbox :: Int -> RepositoryEvent -> Maybe Value
+projectMailbox :: MailboxId -> RepositoryEvent -> Maybe Value
 projectMailbox mid (ObservedMessage _ m v) = if m == mid then Just v else Nothing
 projectMailbox _ _ = Nothing
 

@@ -797,6 +797,314 @@ async fn command_jobs_retain_completion_and_route_to_record_actors() {
 }
 
 #[tokio::test]
+async fn inherited_command_is_readable_without_transferring_control_or_display_position() {
+    let mut campaign = TestCampaign::start().await;
+    committed(
+        &campaign,
+        "job <- Cmd.start (Cmd.withStdin [bash|printf inherited|])",
+    )
+    .await;
+    let backend = TestCommands::new();
+    *backend.stdout.lock() = "first-line\n".into();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+
+    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    let child = campaign
+        .next_deployment(
+            "inherited command observer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    let _custody = child
+        .worktree_custody
+        .clone()
+        .expect("child checkout binding remains live for this test");
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign
+        .next_deployment(
+            "inherited command observer ready",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+    let observer = child.policy.as_ref();
+
+    // The inherited job is the same handle, but presentation state belongs to
+    // each caller. The first observer cannot consume the owner's first page.
+    let observed =
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 1000 65536) job").await;
+    assert_eq!(observed["status"], "committed", "{observed}");
+    assert!(observed.to_string().contains("first-line"), "{observed}");
+    let repeated =
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    assert_eq!(repeated["status"], "committed", "{repeated}");
+    assert!(!repeated.to_string().contains("first-line"), "{repeated}");
+    let owner_first = committed(&campaign, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    assert!(
+        owner_first.to_string().contains("first-line"),
+        "{owner_first}"
+    );
+
+    *backend.stdout.lock() = "first-line\nsecond-line\n".into();
+    let owner_next = committed(&campaign, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    assert!(
+        owner_next.to_string().contains("second-line"),
+        "{owner_next}"
+    );
+    assert!(
+        !owner_next.to_string().contains("first-line"),
+        "{owner_next}"
+    );
+    let observer_next =
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    assert_eq!(observer_next["status"], "committed", "{observer_next}");
+    assert!(
+        observer_next.to_string().contains("second-line"),
+        "{observer_next}"
+    );
+    assert!(
+        !observer_next.to_string().contains("first-line"),
+        "{observer_next}"
+    );
+
+    let status = dispatch_haskell_script(observer, "Cmd.status job").await;
+    assert_eq!(status["status"], "committed", "{status}");
+    let output = dispatch_haskell_script(observer, "Cmd.pageText <$> Cmd.output job").await;
+    assert_eq!(output["status"], "committed", "{output}");
+    assert!(output.to_string().contains("first-line"), "{output}");
+    assert!(output.to_string().contains("second-line"), "{output}");
+
+    for operation in [
+        "Cmd.sendInput job \"foreign\"",
+        "Cmd.closeInput job",
+        "Cmd.resize job 40 80",
+        "Cmd.cancel job",
+    ] {
+        let denial = super::tests::dispatch_haskell_script_result(observer, operation).await;
+        let rendered = match denial {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            rendered.contains("not authorized"),
+            "{operation}: {rendered}"
+        );
+    }
+    assert_eq!(
+        backend.control_count(),
+        0,
+        "foreign control reached backend"
+    );
+    committed(&campaign, "Cmd.sendInput job \"owner\"").await;
+    assert_eq!(backend.control_count(), 1, "owner lost command control");
+
+    backend.finish();
+    let completed = dispatch_haskell_script(observer, "Cmd.await job").await;
+    assert_eq!(completed["status"], "committed", "{completed}");
+    assert!(
+        completed.to_string().contains("CommandExited 0"),
+        "{completed}"
+    );
+    assert_eq!(backend.executions(), 1, "foreign reads reran the command");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
+    let mut campaign = TestCampaign::start().await;
+    let fixed = campaign._repository.path().join("fixed-source");
+    let fixed_text = fixed.to_string_lossy().into_owned();
+    committed(
+        &campaign,
+        &format!("let fixedPath = {:?} :: Text", fixed_text),
+    )
+    .await;
+    committed(&campaign, include_str!("inherited_command_helpers.hs")).await;
+    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    let child = campaign
+        .next_deployment(
+            "inherited helper observer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign
+        .next_deployment(
+            "inherited helper observer ready",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+
+    let launches =
+        "freshJob <- launchFresh ()\nrelativeJob <- launchRelative ()\nfixedJob <- launchFixed ()";
+    let awaits = "Cmd.await freshJob\nCmd.await relativeJob\nCmd.await fixedJob";
+    for (policy, owner) in [
+        (
+            campaign.root_installation.policy.clone(),
+            campaign.actor.identity(),
+        ),
+        (child.policy.clone(), child.actor.identity()),
+    ] {
+        let launched = dispatch_haskell_script(policy.as_ref(), launches).await;
+        assert_eq!(launched["status"], "committed", "{launched}");
+        let backend = TestCommands::completed("cwd captured");
+        for _ in 0..3 {
+            let request = backend_request(&mut campaign).await;
+            assert_eq!(request.owner, owner);
+            request.supply(Ok(backend.clone()));
+        }
+        let awaited = dispatch_haskell_script(policy.as_ref(), awaits).await;
+        assert_eq!(awaited["status"], "committed", "{awaited}");
+        let mut directories = backend
+            .specs
+            .lock()
+            .iter()
+            .map(|spec| spec.directory.clone())
+            .collect::<Vec<_>>();
+        directories.sort();
+        let mut expected = vec![None, Some("subdir".into()), Some(fixed_text.clone())];
+        expected.sort();
+        assert_eq!(directories, expected);
+    }
+    let root_checkout = resident_command_roots(
+        &campaign.authority,
+        &campaign.worktrees,
+        campaign._repository.path(),
+        campaign.actor.identity(),
+    );
+    let child_checkout = resident_command_roots(
+        &campaign.authority,
+        &campaign.worktrees,
+        campaign._repository.path(),
+        child.actor.identity(),
+    );
+    assert_eq!(root_checkout.directory, campaign._repository.path());
+    assert_ne!(child_checkout.directory, root_checkout.directory);
+    assert!(child_checkout.custody);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn extracted_effectful_closure_starts_work_in_receiver_after_response_release() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, include_str!("inherited_effectful_producer.hs")).await;
+    let producer = campaign
+        .next_deployment(
+            "effectful producer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        producer.actor.identity().into(),
+        worktree_grant(producer.effective_role.role()),
+    );
+    producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign
+        .next_deployment(
+            "effectful producer ready",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+
+    committed(&campaign, include_str!("inherited_effectful_observer.hs")).await;
+    let observer = campaign
+        .next_deployment(
+            "effectful observer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        observer.actor.identity().into(),
+        worktree_grant(observer.effective_role.role()),
+    );
+    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign
+        .next_deployment(
+            "effectful observer ready",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+
+    let replied = dispatch_haskell_script(
+        producer.policy.as_ref(),
+        "respond ((\\() -> Cmd.start (Cmd.argv [\"pwd\"])) :: () -> Eff CodingEffects Cmd.Job)",
+    )
+    .await;
+    assert_eq!(replied["status"], "replied", "{replied}");
+    let extracted = dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "observed <- pollResponse worker\nlet freshClosure = case observed of { ResponseReady answer -> responseValue answer; _ -> error \"effectful response was not ready\" }",
+    )
+    .await;
+    assert_eq!(extracted["status"], "committed", "{extracted}");
+    let released = committed(&campaign, "forgetResponse worker").await;
+    assert!(
+        released.to_string().contains("ResponseForgotten"),
+        "{released}"
+    );
+
+    let started =
+        dispatch_haskell_script(observer.policy.as_ref(), "createdJob <- freshClosure ()").await;
+    assert_eq!(started["status"], "committed", "{started}");
+    let backend = TestCommands::completed("receiver checkout");
+    let request = backend_request(&mut campaign).await;
+    assert_eq!(request.owner, observer.actor.identity());
+    request.supply(Ok(backend.clone()));
+    let completed = dispatch_haskell_script(observer.policy.as_ref(), "Cmd.await createdJob").await;
+    assert_eq!(completed["status"], "committed", "{completed}");
+    assert_eq!(backend.executions(), 1);
+    let specs = backend.specs.lock();
+    assert_eq!(specs[0].argv, ["pwd"]);
+    assert!(specs[0].directory.is_none());
+    drop(specs);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() {
     let mut campaign = TestCampaign::start().await;
     committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;

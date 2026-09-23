@@ -237,19 +237,12 @@ enum ObservationShareResult {
     Unauthorized,
 }
 
-/// Why a watch was refused, said in terms of what the caller did.
-///
-/// A watch names the requests it waits on, and an actor may only wait on
-/// requests it made itself. A dogfood run 7 leaf tried to watch its own
-/// settlement through a binding it had inherited from its parent's scope — the
-/// parent's request about that leaf — and got a bare `Unauthorized`, which
-/// says nothing about which rule it met.
+/// Why a watch was refused, said in terms of the resource state.
 fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
     use crate::request::ReplyError;
     let detail = match error {
         ReplyError::Unauthorized | ReplyError::WrongIncarnation => {
-            "a watch may only wait on requests this actor made itself; this one names a \
-             request belonging to another actor, such as a parent's request about this one"
+            "a request this watch names is not available to this actor"
         }
         ReplyError::Stale => {
             "a request this watch names is gone: it has already settled and been forgotten, \
@@ -2852,7 +2845,8 @@ where
                         .requests
                         .forget_terminal_actor_metadata(forget.target)
                     {
-                        Ok(()) => {
+                        Ok(notifications) => {
+                            self.publish_watch_notifications(notifications);
                             self.environment.actors.lock().remove(&forget.target);
                             self.environment.retired.lock().remove(&forget.target);
                             let _ = kernel.forget_terminal_actor(forget.target);
@@ -3057,6 +3051,7 @@ where
                         .cleanup_campaign_metadata(owner, &targets);
                     forgotten_responses.extend(forgotten.forgotten_responses);
                     forgotten_watches.extend(forgotten.forgotten_watches);
+                    self.publish_watch_notifications(forgotten.watch_notifications);
                 }
                 forgotten_responses.sort_unstable();
                 forgotten_watches.sort_unstable();
@@ -3112,7 +3107,8 @@ where
                             .requests
                             .forget_terminal_actor_metadata(actor)
                         {
-                            Ok(()) => {
+                            Ok(notifications) => {
+                                self.publish_watch_notifications(notifications);
                                 self.environment.actors.lock().remove(&actor);
                                 self.environment.retired.lock().remove(&actor);
                                 let _ = kernel.forget_terminal_actor(actor);
@@ -3860,7 +3856,11 @@ where
                 let outcome = self
                     .environment
                     .requests
-                    .forget_response(context.actor, forget.request);
+                    .forget_response(context.actor, forget.request)
+                    .map(|(outcome, notifications)| {
+                        self.publish_watch_notifications(notifications);
+                        outcome
+                    });
                 self.environment
                     .runner
                     .resume_response_forget(context.clone(), forget.continuation, outcome)
@@ -6772,6 +6772,7 @@ where
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "source delivery does not match an installed connection".into(),
                 })?;
+            let delivery = self.environment.requests.accept_source_delivery(delivery);
             if self.checkpoint.is_some() {
                 self.active_input = Some(RetainedActorInput::Source(delivery.clone()));
             }
@@ -7390,7 +7391,9 @@ where
                 }
             };
             if rejected {
-                let aborted = self.environment.requests.abort_unsubmitted(context.actor);
+                let (aborted, notifications) =
+                    self.environment.requests.abort_unsubmitted(context.actor);
+                self.publish_watch_notifications(notifications);
                 if !aborted.is_empty() {
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
                 }
@@ -7582,7 +7585,8 @@ where
                     }
                 }
             }
-            self.environment.requests.abort_unsubmitted(context.actor);
+            let (_, notifications) = self.environment.requests.abort_unsubmitted(context.actor);
+            self.publish_watch_notifications(notifications);
             self.active_route = None;
             self.active_fork_boundary = None;
             let notification = self

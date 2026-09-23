@@ -313,12 +313,11 @@ impl RequestRegistry {
 
     pub(crate) fn observe_update(
         &self,
-        owner: ActorRef,
+        _owner: ActorRef,
         id: RequestUpdateId,
     ) -> Result<RequestUpdateState, ReplyError> {
         let state = self.state.lock();
         let request = state.requests.get(&id.request).ok_or(ReplyError::Stale)?;
-        authorize_owner(request, owner)?;
         let index = id.sequence.checked_sub(1).ok_or(ReplyError::Stale)? as usize;
         let update = request.updates.get(index).ok_or(ReplyError::Stale)?;
         Ok(match &update.phase {
@@ -482,11 +481,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             registry.observe_update(target, update),
-            Err(ReplyError::Unauthorized)
+            Ok(RequestUpdateState::UpdateQueued)
         );
         assert_eq!(
             registry.observe_update(restarted, update),
-            Err(ReplyError::WrongIncarnation)
+            Ok(RequestUpdateState::UpdateQueued)
         );
         assert_eq!(
             registry.observe_update(
