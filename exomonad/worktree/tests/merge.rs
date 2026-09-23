@@ -591,6 +591,174 @@ fn merge_fetches_a_child_only_workspace_commit_before_merging_its_gitlink() {
 }
 
 #[test]
+fn workspace_checkout_failure_reports_the_landed_merge() {
+    for divergent in [false, true] {
+        let workspace_repo = TestRepo::init().expect("init workspace repo");
+        let workspace_base = workspace_repo
+            .writer()
+            .commit_file("README.md", "base\n", "workspace base")
+            .expect("workspace base commit");
+
+        let repo = TestRepo::init().expect("init project repo");
+        repo.writer()
+            .commit_file("README.md", "project base\n", "project base")
+            .expect("project base commit");
+        repo.writer()
+            .write_file(
+                ".gitmodules",
+                &format!(
+                    "[submodule \"exomonad-workspace\"]\n\tpath = .exomonad/workspace\n\turl = {}\n\tignore = dirty\n",
+                    workspace_repo.path().display()
+                ),
+            )
+            .expect("write .gitmodules");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "clone",
+                    "-q",
+                    workspace_repo.path().to_str().unwrap(),
+                    ".exomonad/workspace",
+                ],
+            )
+            .expect("clone base workspace");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("160000,{},.exomonad/workspace", workspace_base.as_str()),
+                ],
+            )
+            .expect("record base gitlink");
+        repo.writer()
+            .stage(".gitmodules")
+            .expect("stage .gitmodules");
+        repo.writer()
+            .commit_file("project.txt", "base\n", "record workspace")
+            .expect("project commit");
+
+        let child_path = add_worktree(&repo, "child", "main");
+        let child_workspace = child_path.join(".exomonad/workspace");
+        std::fs::create_dir_all(child_workspace.parent().unwrap()).expect("child workspace parent");
+        repo.git()
+            .try_run(
+                &child_path,
+                &[
+                    "clone",
+                    "-q",
+                    workspace_repo.path().to_str().unwrap(),
+                    ".exomonad/workspace",
+                ],
+            )
+            .expect("clone child workspace");
+        repo.git()
+            .try_run(
+                &child_workspace,
+                &["checkout", "--detach", workspace_base.as_str()],
+            )
+            .expect("detach child workspace");
+        let child_workspace_commit = repo
+            .writer_at(&child_workspace)
+            .commit_file("README.md", "child version\n", "child workspace work")
+            .expect("child workspace commit");
+        repo.git()
+            .try_run(&child_path, &["add", "--", ".exomonad/workspace"])
+            .expect("stage child gitlink");
+        let child = repo
+            .writer_at(&child_path)
+            .commit_file("child.txt", "child\n", "child project work")
+            .expect("child project commit");
+
+        let node_path = add_worktree(&repo, "node", "main");
+        let node_workspace = node_path.join(".exomonad/workspace");
+        std::fs::create_dir_all(node_workspace.parent().unwrap()).expect("node workspace parent");
+        repo.git()
+            .try_run(
+                &node_path,
+                &[
+                    "clone",
+                    "-q",
+                    workspace_repo.path().to_str().unwrap(),
+                    ".exomonad/workspace",
+                ],
+            )
+            .expect("clone node workspace");
+        if divergent {
+            repo.writer_at(&node_path)
+                .commit_file("node.txt", "node\n", "node project work")
+                .expect("node project commit");
+        }
+        std::fs::write(node_workspace.join("README.md"), "local workspace edit\n")
+            .expect("edit node workspace");
+        assert!(
+            inspect::dirty_summary(repo.git(), &node_path)
+                .expect("node status")
+                .is_clean(),
+            "the project checkout must be eligible for merging"
+        );
+
+        let outcome = try_merge(
+            repo.git(),
+            &node_path,
+            &child_path,
+            &child,
+            None,
+            None,
+            "fold child",
+        )
+        .expect("workspace sync failure is a typed handoff");
+        let landed = repo
+            .git()
+            .try_run(&node_path, &["rev-parse", "HEAD"])
+            .expect("node HEAD")
+            .trimmed()
+            .to_string();
+        match outcome {
+            MergeOutcome::ManualGitRequired {
+                target,
+                reason,
+                paths,
+                ..
+            } => {
+                assert_eq!(target.as_str(), landed, "handoff names the landed commit");
+                assert!(reason.contains(&landed), "reason: {reason}");
+                assert!(reason.contains("workspace checkout"), "reason: {reason}");
+                assert!(reason.contains("local changes"), "reason: {reason}");
+                assert!(paths.is_empty(), "no merge conflicts: {paths:?}");
+            }
+            other => panic!("expected a workspace sync handoff, got {other:?}"),
+        }
+        assert_eq!(
+            repo.git()
+                .try_run(
+                    &node_path,
+                    &["ls-tree", "HEAD", "--", ".exomonad/workspace"]
+                )
+                .expect("merged gitlink")
+                .trimmed()
+                .split_ascii_whitespace()
+                .nth(2),
+            Some(child_workspace_commit.as_str()),
+            "the gitlink bump remains landed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(node_workspace.join("README.md"))
+                .expect("local workspace edit"),
+            "local workspace edit\n",
+            "failed synchronization must not discard local edits"
+        );
+        assert_eq!(
+            inspect::in_progress(repo.git(), &node_path).expect("merge state"),
+            None
+        );
+    }
+}
+
+#[test]
 fn unknown_source_commit_is_a_typed_git_failure() {
     let repo = TestRepo::init().expect("init repo");
     repo.writer()

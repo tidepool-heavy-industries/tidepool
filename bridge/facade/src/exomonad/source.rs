@@ -1981,6 +1981,184 @@ mod tests {
     }
 
     #[test]
+    fn a_checkout_reload_commits_its_captured_workspace_and_rejects_a_broken_dependent() {
+        let (project, run, reload) = cooperating_pair();
+        let child_root = tempfile::tempdir().unwrap();
+        let child = child_root.path().join("child");
+        let git = GitCli::new();
+        git.try_run(
+            project.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "child",
+                child.to_str().unwrap(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        let child_workspace = child.join(".exomonad/workspace");
+        git.try_run(
+            &child,
+            &[
+                "clone",
+                "-q",
+                project.path().join(".exomonad/workspace").to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .unwrap();
+        git.try_run(&child_workspace, &["config", "user.name", "Reload test"])
+            .unwrap();
+        git.try_run(
+            &child_workspace,
+            &["config", "user.email", "reload-test@example.invalid"],
+        )
+        .unwrap();
+        let root_head_before = git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap();
+        let root_status_before = git
+            .try_run(
+                project.path(),
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            )
+            .unwrap();
+        let root_workspace_head_before = git
+            .try_run(
+                &project.path().join(".exomonad/workspace"),
+                &["rev-parse", "HEAD"],
+            )
+            .unwrap();
+        let root_source_before =
+            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
+                .unwrap();
+        let roots = super::super::workspace::checkout_source_roots(
+            &child,
+            &reload.frozen.config().unwrap().haskell,
+        );
+        let layer = SourceLayer::checkout(run.path(), "child");
+        let before = layer
+            .ensure_active_from(reload.frozen.identity(), &roots)
+            .unwrap();
+        let run_before = reload.layer.ensure_active(&reload.frozen).unwrap();
+        let checkout = CheckoutSource {
+            layer: layer.clone(),
+            workspace: child.clone(),
+            roots: roots.into(),
+        };
+
+        write_types(&child, "evidenceAmount");
+        write_work(&child, "evidenceAmount");
+        let outcome = reload.reload_checkout(&checkout, &[], None).unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(
+            previous,
+            published,
+            changed,
+            workspace,
+        ) = outcome
+        else {
+            panic!("a consistent child pair must publish: {outcome:?}");
+        };
+        assert_eq!(previous.identity, before.identity);
+        assert_ne!(published.identity, before.identity);
+        assert_eq!(changed, vec!["Project.Types", "Project.Work"]);
+        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitted(commit, drift) =
+            workspace
+        else {
+            panic!("child workspace must be committed: {workspace:?}");
+        };
+        assert!(drift.is_empty());
+        assert_eq!(
+            git.try_run(&child_workspace, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trimmed(),
+            commit
+        );
+        assert!(
+            git.try_run(
+                &child_workspace,
+                &["show", &format!("{commit}:Project/Types.hs")]
+            )
+            .unwrap()
+            .stdout
+            .contains("evidenceAmount"),
+            "the commit must contain the captured checkout bytes"
+        );
+        assert!(
+            git.try_run(
+                &child,
+                &["ls-files", "--stage", "--", ".exomonad/workspace"]
+            )
+            .unwrap()
+            .stdout
+            .contains(&commit),
+            "the child index must stage the new gitlink"
+        );
+        assert_eq!(reload.layer.read_active().unwrap().unwrap(), run_before);
+
+        write_types(&child, "brokenAccessor");
+        let child_head_before = git
+            .try_run(&child_workspace, &["rev-parse", "HEAD"])
+            .unwrap();
+        let child_index_before = git
+            .try_run(
+                &child,
+                &["ls-files", "--stage", "--", ".exomonad/workspace"],
+            )
+            .unwrap();
+        let active_before = layer.read_active().unwrap().unwrap();
+        let outcome = reload.reload_checkout(&checkout, &[], None).unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, _, diagnostics) =
+            outcome
+        else {
+            panic!("a broken child dependent must reject: {outcome:?}");
+        };
+        assert!(diagnostics.contains("evidenceAmount"), "{diagnostics}");
+        assert_eq!(active.identity, active_before.identity);
+        assert_eq!(layer.read_active().unwrap().unwrap(), active_before);
+        assert_eq!(
+            git.try_run(&child_workspace, &["rev-parse", "HEAD"])
+                .unwrap(),
+            child_head_before
+        );
+        assert_eq!(
+            git.try_run(
+                &child,
+                &["ls-files", "--stage", "--", ".exomonad/workspace"]
+            )
+            .unwrap(),
+            child_index_before
+        );
+        assert_eq!(reload.layer.read_active().unwrap().unwrap(), run_before);
+        assert_eq!(
+            git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap(),
+            root_head_before
+        );
+        assert_eq!(
+            git.try_run(
+                project.path(),
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            .unwrap(),
+            root_status_before
+        );
+        assert_eq!(
+            git.try_run(
+                &project.path().join(".exomonad/workspace"),
+                &["rev-parse", "HEAD"]
+            )
+            .unwrap(),
+            root_workspace_head_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
+                .unwrap(),
+            root_source_before
+        );
+    }
+
+    #[test]
     fn a_reload_can_supply_a_one_line_workspace_commit_intent() {
         let (project, _run, reload) = cooperating_pair();
         write_types(project.path(), "evidenceAmount");

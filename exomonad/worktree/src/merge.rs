@@ -26,8 +26,9 @@
 //!
 //! Every outcome is DATA. A conflict never leaves the target worktree
 //! mid-merge: [`try_merge`] runs `git merge --abort` before returning
-//! [`MergeOutcome::ManualGitRequired`], so the caller always finds a clean
-//! tree either way. A merge failure that is not a real conflict (an unknown
+//! [`MergeOutcome::ManualGitRequired`]. A landed merge whose workspace checkout
+//! cannot be synchronized also returns that outcome, naming the landed commit.
+//! A merge failure that is not a real conflict (an unknown
 //! branch, for instance) surfaces as `Err(WorktreeError::GitFailure(_))`,
 //! the crate's ordinary git-failure shape — never a panic, never a
 //! half-merged tree.
@@ -62,11 +63,10 @@ pub enum MergeOutcome {
         before: GitOid,
         commit: GitOid,
     },
-    /// The conservative operation could not finish automatically. Any merge
-    /// that started has been aborted; `target` is both the starting and final
-    /// target HEAD when this value is returned — except for a refused branch
-    /// advance, where the merge itself succeeded and `target` is the merge
-    /// result the named branch was NOT moved to. `reason` says which.
+    /// The conservative operation could not finish automatically. A conflicted
+    /// merge was aborted, so `target` is both the starting and final HEAD.
+    /// If the merge landed but workspace synchronization or branch advance
+    /// failed, `target` is the landed result. `reason` distinguishes the cases.
     ManualGitRequired {
         source: GitOid,
         target: GitOid,
@@ -98,7 +98,8 @@ pub enum MergeOutcome {
 /// `git update-ref` as the expected old value, so a branch that moved
 /// meanwhile fails the compare-and-swap instead of losing the commit that
 /// moved it; that refusal, and any other `update-ref` failure, is reported as
-/// `ManualGitRequired` over a merge that did happen.
+/// `ManualGitRequired` over a merge that did happen. The same applies when
+/// synchronizing an initialized workspace checkout fails after the merge.
 pub fn try_merge(
     git: &GitCli,
     target_cwd: &Path,
@@ -159,7 +160,9 @@ pub fn try_merge(
     if is_ancestor(git, target_cwd, &target, source)? {
         git.try_run(target_cwd, &["merge", "--ff-only", source.as_str()])?;
         let after = head(git, target_cwd)?;
-        update_initialized_workspace(git, target_cwd, &after)?;
+        if let Err(error) = update_initialized_workspace(git, target_cwd, &after) {
+            return Ok(workspace_sync_handoff(source, after, error));
+        }
         if let Err(reason) = advance_branch(git, target_cwd, advancing, &after) {
             return Ok(MergeOutcome::ManualGitRequired {
                 source: source.clone(),
@@ -181,7 +184,9 @@ pub fn try_merge(
     ) {
         Ok(_) => {
             let commit = head(git, target_cwd)?;
-            update_initialized_workspace(git, target_cwd, &commit)?;
+            if let Err(error) = update_initialized_workspace(git, target_cwd, &commit) {
+                return Ok(workspace_sync_handoff(source, commit, error));
+            }
             if let Err(reason) = advance_branch(git, target_cwd, advancing, &commit) {
                 return Ok(MergeOutcome::ManualGitRequired {
                     source: source.clone(),
@@ -301,6 +306,18 @@ fn update_initialized_workspace(
         git.try_run(&workspace, &["checkout", "--detach", &workspace_commit])?;
     }
     Ok(())
+}
+
+fn workspace_sync_handoff(source: &GitOid, landed: GitOid, error: WorktreeError) -> MergeOutcome {
+    MergeOutcome::ManualGitRequired {
+        source: source.clone(),
+        reason: format!(
+            "the merge landed {} in the target worktree, but its initialized workspace checkout could not be synchronized with the merged gitlink: {error}",
+            landed.as_str()
+        ),
+        target: landed,
+        paths: Vec::new(),
+    }
 }
 
 fn tree_gitlink_oid(
