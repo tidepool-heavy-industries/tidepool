@@ -114,12 +114,23 @@ pub enum Decision {
     Provision,
 }
 
-pub fn decide(stored: Option<String>, fresh: bool, alive: bool) -> Decision {
+/// The stored proxy session, if any, and whether it still answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredSession {
+    Absent,
+    Alive(String),
+    Dead(String),
+}
+
+pub fn decide(stored: StoredSession, fresh: bool) -> Decision {
     match (stored, fresh) {
-        (Some(session), true) => Decision::StopThenProvision(session),
-        (Some(session), false) if alive => Decision::Reuse(session),
-        (Some(_), false) => Decision::Provision,
-        (None, _) => Decision::Provision,
+        (StoredSession::Alive(session) | StoredSession::Dead(session), true) => {
+            Decision::StopThenProvision(session)
+        }
+        (StoredSession::Alive(session), false) => Decision::Reuse(session),
+        (StoredSession::Dead(_) | StoredSession::Absent, false) | (StoredSession::Absent, true) => {
+            Decision::Provision
+        }
     }
 }
 
@@ -253,11 +264,12 @@ async fn resident_operator_session(
     let proxy_json = run_root.join("operator").join("proxy.json");
     let lock = ProxyLock::acquire(run_root)?;
     let stored = read_proxy_record(&proxy_json).map(|r| r.session);
-    let alive = match &stored {
-        Some(session) => session_alive(client, session).await?,
-        None => false,
+    let stored = match stored {
+        Some(session) if session_alive(client, &session).await? => StoredSession::Alive(session),
+        Some(session) => StoredSession::Dead(session),
+        None => StoredSession::Absent,
     };
-    let result = match decide(stored, fresh, alive) {
+    let result = match decide(stored, fresh) {
         Decision::Reuse(session) => Ok(session),
         Decision::StopThenProvision(session) => {
             stop(client, &session).await?;
@@ -486,19 +498,20 @@ mod tests {
 
     #[test]
     fn decide_table() {
-        assert_eq!(decide(None, false, false), Decision::Provision);
-        assert_eq!(decide(None, true, false), Decision::Provision);
+        use StoredSession::{Absent, Alive, Dead};
+        assert_eq!(decide(Absent, false), Decision::Provision);
+        assert_eq!(decide(Absent, true), Decision::Provision);
         assert_eq!(
-            decide(Some("s".into()), false, true),
+            decide(Alive("s".into()), false),
             Decision::Reuse("s".into())
         );
-        assert_eq!(decide(Some("s".into()), false, false), Decision::Provision);
+        assert_eq!(decide(Dead("s".into()), false), Decision::Provision);
         assert_eq!(
-            decide(Some("s".into()), true, true),
+            decide(Alive("s".into()), true),
             Decision::StopThenProvision("s".into())
         );
         assert_eq!(
-            decide(Some("s".into()), true, false),
+            decide(Dead("s".into()), true),
             Decision::StopThenProvision("s".into())
         );
     }
