@@ -68,7 +68,10 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// Worker RSS above which the daemon replaces it after a request. A warm
 /// prepared-route worker holds its module memo at roughly 2.5 GiB; a lower
 /// bound replaces it after nearly every request and discards that memo.
-const DEFAULT_RSS_CEILING_MB: u64 = 6 * 1024;
+/// Logs showed warm workers crossing 6 GiB and rotating long before 1024
+/// requests, discarding the memo; 10 GiB fits beside a 10-job cargo build on
+/// a 31 GiB box.
+const DEFAULT_RSS_CEILING_MB: u64 = 10 * 1024;
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
@@ -1333,7 +1336,7 @@ mod tests {
     #[test]
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
         assert_eq!(DEFAULT_ROTATE_AFTER, 1024);
-        assert_eq!(DEFAULT_RSS_CEILING_MB, 6 * 1024);
+        assert_eq!(DEFAULT_RSS_CEILING_MB, 10 * 1024);
     }
 
     #[derive(Clone, Default)]
