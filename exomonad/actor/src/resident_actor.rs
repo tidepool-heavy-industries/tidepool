@@ -5158,7 +5158,7 @@ where
                                     let output = self
                                         .environment
                                         .commands
-                                        .output(context.actor, &job, 1024 * 1024)
+                                        .output(context.actor, &job, 0)
                                         .await;
                                     let exit = match status {
                                         Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => match result.outcome {
