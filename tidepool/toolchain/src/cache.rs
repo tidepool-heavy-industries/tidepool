@@ -255,6 +255,11 @@ pub struct Invocation<'a> {
     pub argv: &'a [OsString],
     pub input_path: &'a Path,
     pub include: &'a [PathBuf],
+    /// The bound compiler's producer identity (frontend bytes + worker
+    /// selection + worker bytes + GHC libdir) — stable across a daemon
+    /// reboot. A frontend or worker rebuild changes it; a stdlib-only edit
+    /// is caught separately by GHC's per-module interface hash, not by this
+    /// key.
     pub endpoint_identity: &'a [u8],
 }
 

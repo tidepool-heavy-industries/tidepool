@@ -113,12 +113,14 @@ pub fn eval_failure_log_path() -> PathBuf {
 /// override); else content-addressed under [`compile_cache_dir`] — so a test
 /// suite that already shares the compile memo via
 /// `$TIDEPOOL_COMPILE_CACHE_DIR` shares this dir too, with no extra wiring —
-/// keyed by the bound compiler endpoint identity, so a frontend or worker
-/// rebuild and a daemon boot epoch get a FRESH directory: staleness is structurally
-/// impossible, never validate it by mtime. A stdlib-only edit does NOT need
-/// its own fresh directory — GHC's per-module interface hash already detects
-/// that (spike-verified: an edited module is selectively recompiled while
-/// every OTHER module in the same directory stays skipped) — so this key
+/// keyed by the bound compiler's producer identity (frontend bytes + worker
+/// selection + worker bytes + GHC libdir), which is stable across a daemon
+/// reboot, so a fresh daemon reuses interfaces a prior daemon boot already
+/// wrote. A frontend or worker rebuild changes the producer identity and so
+/// gets a fresh directory. A stdlib-only edit does NOT need its own fresh
+/// directory — GHC's per-module interface hash already detects that
+/// (spike-verified: an edited module is selectively recompiled while every
+/// OTHER module in the same directory stays skipped) — so this key
 /// deliberately does not fold in stdlib content; folding it in would cost a
 /// full content walk of the stdlib tree on every compile for a property GHC
 /// already guarantees per-module.
@@ -148,7 +150,7 @@ pub fn apply_build_products_dir(
     cmd: &mut tidepool_extract_cmd::ExtractCmd,
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
 ) {
-    let bp_dir = build_products_dir(&endpoint.identity().to_hex());
+    let bp_dir = build_products_dir(&endpoint.identity().producer_hex());
     if std::fs::create_dir_all(&bp_dir).is_ok() {
         cmd.build_products_dir(&bp_dir);
     }

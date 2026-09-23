@@ -1098,3 +1098,70 @@ fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
     drop(daemon);
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Bind a daemon-routed endpoint through `socket` and return its identity.
+/// Binding a daemon endpoint only preflights the wire handshake (see
+/// `CompilerEndpoint::bind_unscoped`); it does not require a stdlib or an
+/// actual compile.
+fn bound_identity(bin: &Path, socket: &Path) -> tidepool_extract_cmd::CompilerIdentity {
+    let cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    let (k, v) = env_socket(socket);
+    std::env::set_var(k, &v);
+    let endpoint = cmd.bind().expect("daemon bind should succeed");
+    std::env::remove_var(k);
+    endpoint.identity().clone()
+}
+
+/// Two daemons booted independently (each with its own random boot epoch —
+/// `daemon.rs`'s `boot_epoch()`) from the SAME extract binary must still
+/// report the SAME producer identity. This is the actual scenario
+/// `scripts/battery.sh` exercises by starting a fresh daemon per run: the
+/// compile memo (`tidepool-toolchain`'s `cache::invocation_key`) and the
+/// `-fwrite-interface` build-products directory
+/// (`tidepool-toolchain`'s `paths::build_products_dir`) key off
+/// `CompilerIdentity::producer_bytes()`/`producer_hex()`, not
+/// `as_bytes()`/`to_hex()`, so a fresh daemon reuses a prior daemon's warm
+/// cache namespace instead of starting cold every run. The wire endpoint
+/// identity (`as_bytes()`/`to_hex()`) still differs per boot, since it folds
+/// in the epoch to reject a stale connection — see
+/// `daemon_boot_epoch_contributes_to_endpoint_identity` in `daemon.rs` for
+/// that half of the contract.
+#[test]
+fn producer_identity_survives_independent_daemon_boots() {
+    let Some((bin, _lib)) = daemon_toolchain() else {
+        return;
+    };
+
+    let socket_a = unique_socket_path("producer-a");
+    let socket_b = unique_socket_path("producer-b");
+    let Some(daemon_a) = spawn_daemon(&bin, &socket_a, &[]) else {
+        return;
+    };
+    let Some(daemon_b) = spawn_daemon(&bin, &socket_b, &[]) else {
+        return;
+    };
+
+    let identity_a = bound_identity(&bin, &socket_a);
+    let identity_b = bound_identity(&bin, &socket_b);
+
+    assert_eq!(
+        identity_a.producer_bytes(),
+        identity_b.producer_bytes(),
+        "two daemons booted from the same extract binary must share one producer identity"
+    );
+    assert_eq!(
+        identity_a.producer_hex(),
+        identity_b.producer_hex(),
+        "producer_hex must match too — this is what paths::build_products_dir and \
+         cache::invocation_key now key their cache namespace on"
+    );
+    assert_ne!(
+        identity_a.as_bytes(),
+        identity_b.as_bytes(),
+        "each daemon boot still gets a distinct wire endpoint identity from its own boot \
+         epoch, which protects the wire protocol against a stale connection"
+    );
+
+    drop(daemon_a);
+    drop(daemon_b);
+}

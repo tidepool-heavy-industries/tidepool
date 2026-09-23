@@ -28,11 +28,11 @@ dependency-validated module memo that can reuse immutable support across those
 requests. Matched measurement tests are the evidence for costs and savings.
 
 The recipe binds source bytes, the generated module filename, ordered targets
-and absolute import roots, and the already-bound endpoint identity. Unknown
+and absolute import roots, and the bound compiler's producer identity. Unknown
 options are uncacheable. A recipe lookup does not scan entire import trees.
 Instead, the worker emits versioned `dependencies.json` with SHA-256 source
 evidence, selected home modules and absent higher-priority import candidates.
-Package dependencies belong to the endpoint epoch. Incomplete evidence (including
+Package dependencies belong to the producer identity. Incomplete evidence (including
 untracked preprocessing or request-time execution) cannot produce a hit.
 Cache safety and test-selection completeness are separate fields.
 

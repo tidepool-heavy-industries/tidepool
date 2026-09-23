@@ -342,7 +342,7 @@ pub fn compile_invocation(
                     argv: &argv,
                     input_path: &input_path,
                     include: inv.include,
-                    endpoint_identity: endpoint.identity().as_bytes(),
+                    endpoint_identity: endpoint.identity().producer_bytes(),
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
@@ -950,7 +950,7 @@ mod typed_site_tests {
                     argv: &argv,
                     input_path: Path::new("Input.hs"),
                     include: &[],
-                    endpoint_identity: endpoint.identity().as_bytes(),
+                    endpoint_identity: endpoint.identity().producer_bytes(),
                 })
                 .expect("test invocation is cacheable");
                 let products = argv
