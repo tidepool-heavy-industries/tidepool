@@ -62,7 +62,7 @@ import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
-import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
@@ -748,7 +748,8 @@ lowerPreparedEvidence context modules = do
   (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
   (verbNodes, verbRows, verbSites) <-
-    lowerVerbEvidence (length moduleNodes + length auxNodes)
+    lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
+      (length moduleNodes + length auxNodes)
   let sites = moduleSites <> verbRows
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
@@ -855,14 +856,15 @@ auxiliaryRootTypeGraph context modules = do
 -- | One synthetic 'HostAnswer' row per interned constructor with a closed
 -- reply index ('requestReplyIndex'), and the table naming it. Only the index
 -- is interned; the row has no inputs, since the host answer is built from the
--- wire type alone. Membership in an effect row is deliberately not tested:
--- an unused row is inert, a missing one would refuse the request.
-lowerVerbEvidence :: Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerVerbEvidence base = do
+-- wire type alone. These are declared effect types, not membership in a
+-- particular actor row; runtime installations still refuse unhandled effects.
+lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerVerbEvidence effectRequestTypeIds base = do
   known <- gets constructors
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
+        , getKey (nameUnique (GHC.tyConName (dataConTyCon constructor))) `Set.member` effectRequestTypeIds
         , Just index <- [requestReplyIndex constructor]
         , let symbol = nameSymbol "constructor" (dataConName constructor)
               qualified = symbolModule symbol <> "." <> symbolOccurrence symbol
