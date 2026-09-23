@@ -131,6 +131,13 @@ pub(crate) enum ResourceCleanup {
 /// and only fenced against this counter's future output.
 static NEXT_ACTOR_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A recovered forest restores historical IDs without drawing them from
+/// [`NEXT_ACTOR_ID`]; moving the issuer past each one keeps every later
+/// fresh reservation, in any forest, from minting a recovered ID.
+fn advance_actor_ids_past(actor: crate::ActorId) {
+    NEXT_ACTOR_ID.fetch_max(actor.0.saturating_add(1), Ordering::Relaxed);
+}
+
 /// Routing and terminal-observation index for one resident actor forest.
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
@@ -187,11 +194,13 @@ impl LocalActorDirectory {
                 return Err(format!("logical actor {} is already active", actor.0));
             }
             identities.fenced.insert(actor);
+            advance_actor_ids_past(actor);
         }
         Ok(())
     }
 
     fn claim_exact(&self, actor: ActorRef) -> Result<(), String> {
+        advance_actor_ids_past(actor.id);
         let mut identities = self.identities.lock();
         if let Some(previous) = identities.claimed.get(&actor.id).copied() {
             let predecessor_is_terminal = self
