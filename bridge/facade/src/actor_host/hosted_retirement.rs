@@ -15,6 +15,24 @@ pub(crate) enum CompletionBoundary {
 pub(super) type HostedOwner = Arc<tokio::sync::Mutex<HostedRetirement>>;
 pub(super) type HostedSlot = Arc<Mutex<Option<HostedOwner>>>;
 
+/// The real failure modes of standing up and driving hosted retirement, as
+/// distinct variants rather than rendered text. Callers that only propagate
+/// the error keep using `Display`; callers that must branch on which failure
+/// occurred match the variant instead of substring-matching rendered text.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HostedRetirementError {
+    #[error("host service already installed")]
+    ServiceAlreadyInstalled,
+    #[error("cannot start hosted tool service: {0}")]
+    ServiceSetup(String),
+    #[error("service start receiver lost")]
+    ServiceStartReceiverLost,
+    #[error("native input custody is already decided")]
+    InputCustodyAlreadyDecided,
+    #[error("native input producer seal is already retained")]
+    InputSealAlreadyRetained,
+}
+
 enum Operation<T> {
     Pending(BoxFuture<'static, Result<T, String>>),
     Finished(Result<T, String>),
@@ -125,7 +143,7 @@ pub(super) fn start(
     binding_path: PathBuf,
     expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
-) -> Result<HostedOwner, String> {
+) -> Result<HostedOwner, HostedRetirementError> {
     start_endpoint(
         slot,
         actor,
@@ -147,7 +165,7 @@ fn start_untrusted(
     endpoint: Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     binding_path: PathBuf,
     listener: tokio::net::UnixListener,
-) -> Result<HostedOwner, String> {
+) -> Result<HostedOwner, HostedRetirementError> {
     start_endpoint(
         slot,
         actor,
@@ -174,7 +192,7 @@ fn start_endpoint(
         String,
     )>,
     operation_journal: Option<PathBuf>,
-) -> Result<HostedOwner, String> {
+) -> Result<HostedOwner, HostedRetirementError> {
     let endpoint: Arc<dyn exomonad_actor::ResidentToolEndpoint> = match &endpoint_source {
         EndpointSource::Canonical(tools) => {
             Arc::new(exomonad_actor::ResidentInteractivePolicy::local_with_tools(
@@ -186,14 +204,17 @@ fn start_endpoint(
         EndpointSource::Untrusted(endpoint) => endpoint.clone(),
     };
     let require_operation_journal = expected_resume.is_some();
-    let mut server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?
+    let mut server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)
+        .map_err(HostedRetirementError::ServiceSetup)?
         .with_command_resources(resources);
     if let Some(path) = operation_journal {
-        server = server.with_operation_journal(path, require_operation_journal)?;
+        server = server
+            .with_operation_journal(path, require_operation_journal)
+            .map_err(HostedRetirementError::ServiceSetup)?;
     }
     let mut entry = slot.lock();
     if entry.is_some() {
-        return Err("host service already installed".into());
+        return Err(HostedRetirementError::ServiceAlreadyInstalled);
     }
     let control = server.control();
     let (start, ready) = oneshot::channel();
@@ -227,7 +248,7 @@ fn start_endpoint(
     *entry = Some(owner.clone());
     start
         .send(())
-        .map_err(|_| "service start receiver lost".to_string())?;
+        .map_err(|_| HostedRetirementError::ServiceStartReceiverLost)?;
     Ok(owner)
 }
 
@@ -240,7 +261,7 @@ pub(super) async fn begin_input_seal(
     backend: Arc<dyn InteractiveAgentBackend>,
     thread: QueueReadyThread,
     producer: InputProducerId,
-) -> Result<(), String> {
+) -> Result<(), HostedRetirementError> {
     install_input_seal(
         owner,
         Box::pin(async move {
@@ -270,10 +291,12 @@ pub(super) async fn settle_input_seal(owner: &HostedOwner, timeout: Duration) {
 /// Record the mutually exclusive pre-admission path. This is required when a
 /// launch is cancelled before the host creates its durable producer identity;
 /// absence is explicit rather than inferred from a missing operation.
-pub(super) async fn confirm_no_input_producer(owner: &HostedOwner) -> Result<(), String> {
+pub(super) async fn confirm_no_input_producer(
+    owner: &HostedOwner,
+) -> Result<(), HostedRetirementError> {
     let mut state = owner.lock().await;
     if !matches!(state.input_seal, InputSealState::Required) {
-        return Err("native input custody is already decided".into());
+        return Err(HostedRetirementError::InputCustodyAlreadyDecided);
     }
     state.input_seal = InputSealState::NoProducer;
     Ok(())
@@ -282,10 +305,10 @@ pub(super) async fn confirm_no_input_producer(owner: &HostedOwner) -> Result<(),
 async fn install_input_seal(
     owner: &HostedOwner,
     operation: BoxFuture<'static, Result<InputProducerControlOutcome, String>>,
-) -> Result<(), String> {
+) -> Result<(), HostedRetirementError> {
     let mut state = owner.lock().await;
     if !matches!(state.input_seal, InputSealState::Required) {
-        return Err("native input producer seal is already retained".into());
+        return Err(HostedRetirementError::InputSealAlreadyRetained);
     }
     state.input_seal = InputSealState::Pending(Operation::Pending(operation));
     Ok(())
@@ -513,7 +536,7 @@ pub(super) fn start_with_resources(
         String,
     )>,
     operation_journal: PathBuf,
-) -> Result<HostedOwner, String> {
+) -> Result<HostedOwner, HostedRetirementError> {
     start_endpoint(
         slot,
         actor,

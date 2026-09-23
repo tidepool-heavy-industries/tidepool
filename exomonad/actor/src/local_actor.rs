@@ -3,6 +3,7 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -120,14 +121,27 @@ pub(crate) enum ResourceCleanup {
     Retire,
 }
 
-/// Process-local exact-incarnation routing and terminal-observation index.
+/// Process-wide issuer for freshly reserved logical actor identities.
+///
+/// Every [`LocalActorDirectory`] in the process draws new IDs from this one
+/// counter, so two `ResidentForest`s spawned in the same process never mint
+/// colliding `ActorRef`s for unrelated actors. A *recovered* actor's ID is
+/// never drawn from here: it is restored verbatim from that forest's own
+/// recovery journal (`claim_exact`/`spawn_local_actor_in_directory_with_identity`)
+/// and only fenced against this counter's future output.
+static NEXT_ACTOR_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Routing and terminal-observation index for one resident actor forest.
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
 /// owns runnable actors and mailboxes; each actor owns its terminal cell. The
 /// directory only resolves the identity carried by a live Haskell `ActorRef`
 /// to that pair of owners. Entries intentionally live for the routing
 /// domain's lifetime: an exited exact reference must remain resolvable so any
-/// number of late `wait` operations can observe its retained result.
+/// number of late `wait` operations can observe its retained result. Logical
+/// actor IDs are process-unique (see [`NEXT_ACTOR_ID`]); this directory's own
+/// `identities` bookkeeping tracks only which of those process-wide IDs are
+/// fenced, claimed, or live in this particular forest.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
     actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
@@ -137,7 +151,6 @@ pub struct LocalActorDirectory {
 
 #[derive(Default)]
 struct DirectoryIdentities {
-    next_logical_id: u64,
     runtime: HashMap<ractor::ActorId, ActorRef>,
     fenced: std::collections::HashSet<crate::ActorId>,
     claimed: HashMap<crate::ActorId, ActorRef>,
@@ -152,13 +165,10 @@ struct DirectoryEntry {
 
 impl LocalActorDirectory {
     fn reserve(&self, incarnation: crate::Incarnation) -> Result<ActorRef, String> {
-        let mut identities = self.identities.lock();
         loop {
-            identities.next_logical_id = identities
-                .next_logical_id
-                .checked_add(1)
-                .ok_or_else(|| "logical actor identity space exhausted".to_owned())?;
-            let id = crate::ActorId(identities.next_logical_id);
+            let next = NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
+            let id = crate::ActorId(next);
+            let mut identities = self.identities.lock();
             if !identities.fenced.contains(&id) && !identities.claimed.contains_key(&id) {
                 let actor = ActorRef { id, incarnation };
                 identities.claimed.insert(id, actor);
@@ -176,7 +186,6 @@ impl LocalActorDirectory {
             if identities.claimed.contains_key(&actor) {
                 return Err(format!("logical actor {} is already active", actor.0));
             }
-            identities.next_logical_id = identities.next_logical_id.max(actor.0);
             identities.fenced.insert(actor);
         }
         Ok(())
@@ -199,7 +208,6 @@ impl LocalActorDirectory {
         }
         identities.fenced.remove(&actor.id);
         identities.claimed.insert(actor.id, actor);
-        identities.next_logical_id = identities.next_logical_id.max(actor.id.0);
         Ok(())
     }
 
