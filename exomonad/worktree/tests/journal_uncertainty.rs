@@ -136,8 +136,9 @@ fn owning_paths_poison_and_reopen_without_reusing_sequences() {
                 .join(format!("{child}-{kind}-{}", target.replace('/', "-")));
             fs::create_dir(&root).unwrap();
             let log = root.join("hits");
+            let qualified = format!("journal_uncertainty::{child}");
             let result = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", child, "--nocapture"])
+                .args(["--exact", &qualified, "--nocapture"])
                 .env("LD_PRELOAD", &library)
                 .env("JOURNAL_TEST_ROOT", &root)
                 .env("JOURNAL_FAULT_PATH", root.join(target))

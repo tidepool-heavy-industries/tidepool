@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "exomonad-worktree"
 version.workspace = true
 edition.workspace = true
@@ -26,3 +27,7 @@ tempfile.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 rustix = { version = "1", features = ["fs"] }
+
+[[test]]
+name = "worktree"
+path = "tests/suites/worktree.rs"

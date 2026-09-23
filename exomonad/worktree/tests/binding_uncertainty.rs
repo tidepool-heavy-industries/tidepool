@@ -151,7 +151,11 @@ fn binding_public_paths_fence_uncertain_custody_until_reopen() {
                 root.clone()
             };
             let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "binding_fault_child", "--nocapture"])
+                .args([
+                    "--exact",
+                    "binding_uncertainty::binding_fault_child",
+                    "--nocapture",
+                ])
                 .env("LD_PRELOAD", &library)
                 .env("BIND_ROOT", &root)
                 .env("BIND_FAULT_PATH", &target)
