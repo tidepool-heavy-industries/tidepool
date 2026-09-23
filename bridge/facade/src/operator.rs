@@ -103,7 +103,9 @@ impl OperatorService {
             .open
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.state.sessions.lock().await.clear();
-        let _ = std::fs::remove_file(&self.state.socket);
+        // best-effort: cleanup of the listen socket file; a leftover file
+        // does not affect a later run, which binds its own fresh socket.
+        std::fs::remove_file(&self.state.socket).ok();
     }
 }
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -124,12 +126,15 @@ async fn new(State(state): State<AttachmentState>) -> Response {
                 let mut sessions = state.sessions.lock().await;
                 if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
                     drop(sessions);
-                    let _ = actor
+                    if let Err(shutdown_error) = actor
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "host attachment service closed".into(),
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(error = %shutdown_error, "cannot shut down actor provisioned after attachment service closed");
+                    }
                     return error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "unavailable",

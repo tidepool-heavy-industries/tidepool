@@ -81,10 +81,12 @@ const ONE_STATEMENT_CELL: &str = "sum [1 .. 10 :: Int]\n";
 #[tokio::test]
 #[ignore = "reports compile-request counts and timings; wants a live compiler daemon"]
 async fn cell_compile_cost_measurement() {
-    let _ = tracing_subscriber::fmt()
+    // best-effort: a global subscriber may already be installed by another test.
+    tracing_subscriber::fmt()
         .with_env_filter("warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info,tidepool_extract_cmd::endpoint=debug,exomonad_actor::resident_workbench=debug")
         .without_time()
-        .try_init();
+        .try_init()
+        .ok();
     let daemon = std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some();
     assert!(
         daemon,

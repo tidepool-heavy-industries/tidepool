@@ -146,7 +146,8 @@ impl NativeProcess {
 impl Drop for NativeProcess {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
-        let _ = self.0.wait();
+        // best-effort: teardown of a child process this test started.
+        self.0.wait().ok();
     }
 }
 fn shell(workspace: &PreparedWorkspace, script: &str) -> String {
@@ -478,7 +479,8 @@ async fn live_capture_inherits_dirty_source_after_host_git_activity() {
     let holder = std::thread::spawn(move || {
         let _gate = git.try_capture().expect("test Git lane must be free");
         held_sender.send(()).unwrap();
-        let _ = release_git_receiver.recv();
+        // best-effort: the sending side may already be gone once the main thread proceeds.
+        release_git_receiver.recv().ok();
     });
     held_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     // The Git lane is held when the backend admits the fork. The mutex unit

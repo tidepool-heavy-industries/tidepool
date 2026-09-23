@@ -66,36 +66,6 @@ fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::select_checks;
-
-    #[test]
-    fn recipe_selector_matches_one_configured_entry_exactly() {
-        let checks = vec![
-            "Project.Checks.workbench".to_owned(),
-            "Project.JevChecks.reflex".to_owned(),
-        ];
-
-        assert_eq!(
-            select_checks(&checks, Some("Project.JevChecks.reflex")).unwrap(),
-            vec![&checks[1]]
-        );
-        assert_eq!(
-            select_checks(&checks, None).unwrap(),
-            vec![&checks[0], &checks[1]]
-        );
-    }
-
-    #[test]
-    fn recipe_selector_rejects_unconfigured_entries() {
-        let checks = vec!["Project.Checks.workbench".to_owned()];
-        let error = select_checks(&checks, Some("Project.Checks.missing")).unwrap_err();
-        assert!(error.to_string().contains("Project.Checks.missing"));
-        assert!(error.to_string().contains("Project.Checks.workbench"));
-    }
-}
-
 struct Driver {
     // Retain storage until resident shutdown and custody cleanup finish.
     repository: tempfile::TempDir,
@@ -482,5 +452,35 @@ impl DispatchEffect for Driver {
         self.service(request, cx)
             .map(Some)
             .map_err(|error| EffectError::Handler(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_checks;
+
+    #[test]
+    fn recipe_selector_matches_one_configured_entry_exactly() {
+        let checks = vec![
+            "Project.Checks.workbench".to_owned(),
+            "Project.JevChecks.reflex".to_owned(),
+        ];
+
+        assert_eq!(
+            select_checks(&checks, Some("Project.JevChecks.reflex")).unwrap(),
+            vec![&checks[1]]
+        );
+        assert_eq!(
+            select_checks(&checks, None).unwrap(),
+            vec![&checks[0], &checks[1]]
+        );
+    }
+
+    #[test]
+    fn recipe_selector_rejects_unconfigured_entries() {
+        let checks = vec!["Project.Checks.workbench".to_owned()];
+        let error = select_checks(&checks, Some("Project.Checks.missing")).unwrap_err();
+        assert!(error.to_string().contains("Project.Checks.missing"));
+        assert!(error.to_string().contains("Project.Checks.workbench"));
     }
 }

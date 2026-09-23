@@ -159,6 +159,7 @@ impl ProxyLock {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
         rustix::fs::flock(&file, FlockOperation::LockExclusive)
@@ -168,7 +169,9 @@ impl ProxyLock {
 }
 impl Drop for ProxyLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, FlockOperation::Unlock);
+        // best-effort: closing the file descriptor on drop releases the flock
+        // regardless; an explicit unlock failure leaves nothing more to do.
+        rustix::fs::flock(&self.0, FlockOperation::Unlock).ok();
     }
 }
 
@@ -341,6 +344,10 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
     }
 
     // `file` is required (validated above) whenever `--actors` is absent.
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant: line 309 already errored out if !actors && file.is_none(), and the actors branch above returns early"
+    )]
     let source = read_source(options.file.as_deref().expect("validated above"))?;
     let sent = client
         .post(format!("http://localhost/v1/sessions/{session}/submit"))

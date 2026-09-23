@@ -180,6 +180,10 @@ fn start_untrusted(
 
 /// Store control and the gated task before opening the service start gate.
 /// Neither task nor endpoint holds a back-reference to the owner slot.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "heterogeneous endpoint wiring (slot, actor, paths, listener, resources); no natural grouping"
+)]
 fn start_endpoint(
     slot: &HostedSlot,
     actor: LocalActorRef,
@@ -279,13 +283,17 @@ pub(super) async fn begin_input_seal(
 /// can only fail to connect, which leaves every hosted cleanup domain
 /// unconfirmed. A timeout leaves the operation retained for `observe`.
 pub(super) async fn settle_input_seal(owner: &HostedOwner, timeout: Duration) {
-    let _ = tokio::time::timeout(timeout, async {
+    // best-effort: a timeout here is documented above as leaving the
+    // operation retained for `observe`, so there is nothing further to do
+    // with the elapsed error.
+    tokio::time::timeout(timeout, async {
         let mut state = owner.lock().await;
         if let InputSealState::Pending(operation) = &mut state.input_seal {
             operation.finish().await;
         }
     })
-    .await;
+    .await
+    .ok();
 }
 
 /// Record the mutually exclusive pre-admission path. This is required when a
@@ -524,6 +532,10 @@ impl HostedRetirement {
 #[cfg(test)]
 mod tests;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "heterogeneous endpoint wiring (slot, actor, tools, paths, listener, resources); no natural grouping"
+)]
 pub(super) fn start_with_resources(
     slot: &HostedSlot,
     actor: LocalActorRef,

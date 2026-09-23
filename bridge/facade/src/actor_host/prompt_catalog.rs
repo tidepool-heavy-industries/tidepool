@@ -16,6 +16,7 @@ impl PromptId {
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
     /// the correct new value, whenever a prompt body changes without a
     /// matching `CATALOG_VERSION` bump.
+    #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
         "39259882d3cfcde52c7d22910579a43565fd6761a1f16cbb844381785cbbef0d";
 

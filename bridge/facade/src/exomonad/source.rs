@@ -699,6 +699,10 @@ impl ExomonadSourceReload {
     /// unchanged candidate publishes nothing, a candidate that does not
     /// typecheck moves nothing, and a candidate that does becomes the revision
     /// the layer's owner compiles against from its next cell.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "publication transaction takes each layer's independent inputs (revision, candidate, workspace, check scope, intent); no natural grouping"
+    )]
     fn settle(
         &self,
         layer: &SourceLayer,
@@ -1165,7 +1169,7 @@ fn captured_workspace_sources(
             }
             Ok(())
         }
-        walk(&root, &root, &target_prefix, &mut files)?;
+        walk(&root, &root, target_prefix, &mut files)?;
     }
     Ok(files)
 }

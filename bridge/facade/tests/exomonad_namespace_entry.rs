@@ -139,9 +139,11 @@ async fn executable_enters_slice_through_outside_tmux_server() {
     struct Server(String);
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = Command::new("tmux")
+            // best-effort: teardown of a tmux server this test started.
+            Command::new("tmux")
                 .args(["-L", &self.0, "kill-server"])
-                .output();
+                .output()
+                .ok();
         }
     }
     let _server = Server(socket.clone());

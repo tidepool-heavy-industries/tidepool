@@ -288,13 +288,15 @@ struct NativeFixture {
 }
 impl Drop for NativeFixture {
     fn drop(&mut self) {
+        // best-effort: teardown of a process and tmux session this test started.
         if let Some(mut process) = self.process.take() {
-            let _ = process.stop(Duration::from_secs(10));
-            let _ = process.finalize(Duration::from_secs(10));
+            process.stop(Duration::from_secs(10)).ok();
+            process.finalize(Duration::from_secs(10)).ok();
         }
-        let _ = std::process::Command::new("tmux")
+        std::process::Command::new("tmux")
             .args(["kill-session", "-t", &self.session])
-            .status();
+            .status()
+            .ok();
     }
 }
 

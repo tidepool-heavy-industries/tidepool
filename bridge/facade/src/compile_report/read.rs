@@ -194,7 +194,8 @@ mod tests {
     #[test]
     fn missing_file_is_empty_evidence() {
         let path = tmp_path("missing");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: ensure a clean slate; the file may not exist yet.
+        std::fs::remove_file(&path).ok();
         let ev = read_evidence_file(&path).unwrap();
         assert!(ev.answerer_rounds.is_empty());
         assert!(ev.eval_failures.is_empty());
@@ -229,6 +230,7 @@ mod tests {
         assert_eq!(ev.eval_failures.len(), 1);
         assert_eq!(ev.eval_failures[0].detail, "nope");
 
-        let _ = std::fs::remove_file(&path);
+        // best-effort: teardown cleanup of the temp file this test wrote.
+        std::fs::remove_file(&path).ok();
     }
 }

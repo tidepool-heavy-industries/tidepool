@@ -2649,7 +2649,8 @@ pub(crate) mod tests {
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
 
         server.abort();
-        let _ = server.await;
+        // best-effort: task is aborted; the join result is expected to be Cancelled.
+        server.await.ok();
     }
 }
 
@@ -2697,7 +2698,10 @@ async fn command_resources(
                         if *phase.borrow() == HostToolPhase::Serving {
                             result
                         } else {
-                            let _ = owner.cancel(actor, &request.id).await;
+                            // best-effort: cancel is attempted regardless of its
+                            // own outcome; the more specific quiescing error
+                            // below is returned either way.
+                            owner.cancel(actor, &request.id).await.ok();
                             Err(std::io::Error::other("host quiescing; command not started"))
                         }
                     },

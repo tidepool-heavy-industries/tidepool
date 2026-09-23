@@ -721,7 +721,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             &agent,
             error.as_ref(),
         )?;
-        let _ = tmux.kill().await;
+        if let Err(kill_error) = tmux.kill().await {
+            tracing::warn!(%kill_error, "cannot kill tmux session after startup failure");
+        }
         return Err(error);
     }
 
@@ -792,7 +794,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             &agent,
             &error,
         )?;
-        let _ = tmux.kill().await;
+        if let Err(kill_error) = tmux.kill().await {
+            tracing::warn!(%kill_error, "cannot kill tmux session after startup failure");
+        }
         return Err(error.into());
     }
     println!("log:    {}", log_path.display());
@@ -942,7 +946,7 @@ async fn wait_until_compiler_daemon(
     tokio::time::timeout(COMPILER_DAEMON_START_TIMEOUT, async {
         loop {
             let candidate = socket.clone();
-            let ready = tokio::task::spawn_blocking(move || {
+            let ready = tidepool_runtime::spawn_blocking_in_span(move || {
                 tidepool_extract_cmd::preflight_compiler_daemon(&candidate)
             })
             .await
@@ -2147,7 +2151,7 @@ mod tests {
         assert_eq!(
             pinned.trimmed(),
             git_stdout(
-                &example_skills().parent().unwrap().to_path_buf(),
+                example_skills().parent().unwrap(),
                 &["rev-parse", "HEAD"]
             )
             .await
@@ -2161,16 +2165,15 @@ mod tests {
     fn the_scaffolded_haskell_is_the_repositorys_own() {
         let workspace = tempfile::tempdir().unwrap();
         scaffold_workspace(workspace.path()).unwrap();
-        for (relative, expected) in [(
+        let (relative, expected) = (
             ".exomonad/AgentSpec.hs",
             include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs"),
-        )] {
-            assert_eq!(
-                std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
-                expected,
-                "{relative}"
-            );
-        }
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
+            expected,
+            "{relative}"
+        );
         let spec =
             std::fs::read_to_string(workspace.path().join(".exomonad/AgentSpec.hs")).unwrap();
         assert!(spec.contains("specTools = Tools.tools"), "{spec}");

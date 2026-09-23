@@ -285,10 +285,12 @@ fn install_trace_file() {
         )
     });
     // A second campaign in the same process keeps the first subscriber.
-    let _ = tracing_subscriber::fmt()
+    // best-effort: a global subscriber may already be installed.
+    tracing_subscriber::fmt()
         .with_ansi(false)
         .with_thread_names(true)
         .with_env_filter(filter)
         .with_writer(std::sync::Mutex::new(file))
-        .try_init();
+        .try_init()
+        .ok();
 }

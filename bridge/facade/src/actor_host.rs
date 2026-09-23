@@ -399,7 +399,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
         Box::pin(async move {
-            let authorized = tokio::task::spawn_blocking(move || {
+            let authorized = tidepool_runtime::spawn_blocking_in_span(move || {
                 let (spec, dirty_policy) = match seed {
                     ForkWorkspaceSeed::Explicit(spec) => {
                         let dirty_policy = spec.spec_dirty_policy;
@@ -433,7 +433,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                     (prepared.handle, Some(prepared.workspace), prepared.notice)
                 }
                 _ => {
-                    let handle = tokio::task::spawn_blocking(move || authorized.materialize())
+                    let handle = tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
                         .await
                         .map_err(|error| ForkWorkspaceAdmissionError {
                             detail: format!("workspace preparation task failed: {error}"),
@@ -784,6 +784,10 @@ fn latest_recoverable_actor_records(
         .collect()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "heterogeneous recovery inputs (forest, paths, actor identity, durable records, compiled program, policy, admission); no natural grouping"
+)]
 async fn recover_prior_actors(
     forest: &Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     run_root: &Path,
@@ -915,12 +919,16 @@ async fn recover_prior_actors(
             if let Err(error) = copy_interactive_binding(&binding, &thread).await {
                 tracing::warn!(actor = %durable.actor, %error,
                     "recovered actor binding could not be republished");
-                let _ = actor
+                if let Err(shutdown_error) = actor
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: "recovered conversation binding could not be republished".into(),
                     })
-                    .await;
+                    .await
+                {
+                    tracing::warn!(actor = %durable.actor, error = %shutdown_error,
+                        "recovered actor could not be shut down after a republish failure");
+                }
                 continue;
             }
             recovered_ids.insert(actor.identity().id);
@@ -1572,10 +1580,14 @@ impl InteractiveApplicationOwner {
     fn cancel(&mut self) {
         self.creator_workspace = None;
         if let Some(gate) = &self.fork_gate {
-            let _ = gate.mark_failed();
+            // best-effort: the fork group may already be resolved (ready or
+            // failed) by a concurrent path; there is nothing more to do here.
+            gate.mark_failed().ok();
         }
         if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(self.native_retirement);
+            // best-effort: the receiver may already have been dropped if the
+            // cancellation race resolved on the other side first.
+            cancel.send(self.native_retirement).ok();
         }
     }
 
@@ -1908,6 +1920,9 @@ struct InteractiveFleet {
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
+    /// Readiness events are best-effort notifications: a dropped receiver
+    /// means the caller stopped observing startup, not a delivery bug, so
+    /// every `readiness.send(..)` below discards the `SendError` with `.ok()`.
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
     watch_retention: WatchRetentionCheck,
@@ -1958,7 +1973,7 @@ pub(crate) async fn run(
     std::fs::create_dir_all(&run_root)?;
     let workspace = config.workspace.clone();
     let (worktrees, bindings) =
-        tokio::task::spawn_blocking(move || actor_worktree_resources(&workspace)).await??;
+        tidepool_runtime::spawn_blocking_in_span(move || actor_worktree_resources(&workspace)).await??;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
@@ -2102,11 +2117,11 @@ pub(crate) async fn run(
         .map(|record| record.admission.actor)
         .collect::<Vec<_>>();
     for predecessor in &unavailable_records {
-        let _ = readiness.send(ActorHostReadiness::ActorUnavailable {
+        readiness.send(ActorHostReadiness::ActorUnavailable {
             predecessor: *predecessor,
             reason: "durable actor resources or replayable launch state could not be verified"
                 .into(),
-        });
+        }).ok();
     }
     if host_incarnation.incarnation() != exomonad_actor::Incarnation::FIRST {
         let notice_path = run_root.join("host-recovery-notice.txt");
@@ -2229,10 +2244,10 @@ pub(crate) async fn run(
                         let pane = application_owners.lock().get(&root_actor.identity())
                             .and_then(|owner| owner.pane.lock().clone());
                         if let Err(error) = confirm_native_exit(&tmux, pane.as_ref()).await {
-                            let _ = readiness.send(ActorHostReadiness::CoordinationFailed {
+                            readiness.send(ActorHostReadiness::CoordinationFailed {
                                 root: root_actor.identity(),
                                 error: terminal.summary.clone(),
-                            });
+                            }).ok();
                             tracing::error!(%error, failure = %terminal.summary, "root coordination stopped; native execution unconfirmed, retaining session without automatic conversation resume");
                             root_active = false;
                             continue;
@@ -2252,10 +2267,10 @@ pub(crate) async fn run(
                             continue;
                         }
                         Err(error) => {
-                            let _ = readiness.send(ActorHostReadiness::CoordinationFailed {
+                            readiness.send(ActorHostReadiness::CoordinationFailed {
                                 root: root_actor.identity(),
                                 error: error.to_string(),
-                            });
+                            }).ok();
                             tracing::error!(%error, "model root recovery unavailable; operator forest remains attached");
                             root_active = false;
                             continue;
@@ -2551,7 +2566,9 @@ pub(crate) fn typecheck_candidate_revision(
             extra_modules,
         }),
     );
-    let _ = std::fs::remove_dir_all(&scratch);
+    // best-effort: cleanup of a scratch check directory; a leftover directory
+    // does not affect correctness, only disk usage.
+    std::fs::remove_dir_all(&scratch).ok();
     checked?;
     Ok(())
 }
@@ -3043,7 +3060,7 @@ async fn retire_scoped_process(
             detail: "native process intentionally preserved; exact scope remains retained".into(),
         });
     }
-    let stopped = tokio::task::spawn_blocking(move || {
+    let stopped = tidepool_runtime::spawn_blocking_in_span(move || {
         scoped_custody::stop_retained_slot(
             &scope,
             std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
@@ -3506,7 +3523,7 @@ async fn run_interactive_applications(
                         let inbox = Arc::clone(&application.inbox);
                         let key = application.notification_inbox_key.clone();
                         notifications.spawn(async move {
-                            let result = tokio::task::spawn_blocking(move || {
+                            let result = tidepool_runtime::spawn_blocking_in_span(move || {
                                 admit_notification(&command, key, &inbox);
                             }).await.map_err(|error| error.to_string());
                             (target, result)
@@ -3590,10 +3607,16 @@ async fn run_interactive_applications(
                         let reconciler = match delivery.bind_correlation(correlation) {
                             Ok(reconciler) => reconciler,
                             Err(error) => {
-                                let _ = application.inbox.confirm_rejected(
-                                    envelope.sequence,
-                                    &context,
-                                );
+                                if let Err(reject_error) = application
+                                    .inbox
+                                    .confirm_rejected(envelope.sequence, &context)
+                                {
+                                    tracing::warn!(
+                                        sequence = envelope.sequence,
+                                        error = %reject_error,
+                                        "cannot confirm rejection of an unreconcilable update"
+                                    );
+                                }
                                 if let Some(presentation) = delivery.begin() {
                                     presentation.not_presented(format!(
                                         "update correlation failed: {error}"
@@ -3603,9 +3626,16 @@ async fn run_interactive_applications(
                             }
                         };
                         let Some(presentation) = delivery.begin() else {
-                            let _ = application
+                            if let Err(reject_error) = application
                                 .inbox
-                                .confirm_rejected(envelope.sequence, &context);
+                                .confirm_rejected(envelope.sequence, &context)
+                            {
+                                tracing::warn!(
+                                    sequence = envelope.sequence,
+                                    error = %reject_error,
+                                    "cannot confirm rejection of an unpresented update"
+                                );
+                            }
                             continue;
                         };
                         application.update_reconciliations.lock().insert(
@@ -3695,19 +3725,19 @@ async fn run_interactive_applications(
                             continue;
                         }
                         if let Some((predecessor, _)) = recovered_threads.get(&actor) {
-                            let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                            readiness.send(ActorHostReadiness::ActorRecovered {
                                 predecessor: *predecessor,
                                 actor,
-                            });
+                            }).ok();
                         }
                         if actor == root_identity {
                             if let Some(predecessor) = recovered_root_predecessor {
-                                let _ = readiness.send(ActorHostReadiness::ActorRecovered {
+                                readiness.send(ActorHostReadiness::ActorRecovered {
                                     predecessor,
                                     actor,
-                                });
+                                }).ok();
                             }
-                            let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
+                            readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity }).ok();
                         }
                         let pane = deployment.pane.clone();
                         let fork_gate = deployment.fork_gate.clone();
@@ -3856,10 +3886,10 @@ async fn run_interactive_applications(
                             });
                         }
                         if actor == root_identity {
-                            let _ = readiness.send(ActorHostReadiness::Ready {
+                            readiness.send(ActorHostReadiness::Ready {
                                 root: root_identity,
                                 thread,
-                            });
+                            }).ok();
                         }
                     }
                     Some(Ok((actor, Err(error)))) => {
@@ -3867,7 +3897,9 @@ async fn run_interactive_applications(
                             continue;
                         };
                         if let Some(gate) = &deployment.fork_gate {
-                            let _ = gate.mark_failed();
+                            // best-effort: the fork group may already be resolved
+                            // by a concurrent path; nothing more to do here.
+                            gate.mark_failed().ok();
                         }
                         deployment.failure_reported = true;
                         let Some(local_actor) = deployments
@@ -4366,7 +4398,7 @@ async fn launch_prepared_interactive_application(
                 native_tools: installation.effective_role.native_tools(),
                 workspace: installation.effective_role.workspace(),
             };
-            tokio::task::spawn_blocking(move || {
+            tidepool_runtime::spawn_blocking_in_span(move || {
                 layout.prepare(
                     host_path,
                     id,
@@ -4818,12 +4850,16 @@ async fn launch_prepared_interactive_application(
     let release_gate_worker = release_gate.clone();
     let activation_workspace = prepared_workspace.clone();
     let activation_worktrees = worktrees.clone();
-    let mut activation_task = tokio::task::spawn_blocking(move || {
+    let mut activation_task = tidepool_runtime::spawn_blocking_in_span(move || {
         let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
         while !activation_socket.exists() {
             if std::time::Instant::now() >= deadline {
                 return Err(scoped_custody::ScopedProcessError::WrongPhase);
             }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "dedicated blocking-pool thread (spawn_blocking_in_span), not async context"
+            )]
             std::thread::sleep(Duration::from_millis(10));
         }
         let remaining = deadline
@@ -4893,7 +4929,11 @@ async fn launch_prepared_interactive_application(
     if let Some(native_retirement) = activation_retirement {
         let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
         if matches!(process, Some(CleanupComponentOutcome::Completed)) {
-            let _ = retire_pane_artifact(&tmux, &pane, native_retirement).await;
+            if let CleanupComponentOutcome::Failed { detail } =
+                retire_pane_artifact(&tmux, &pane, native_retirement).await
+            {
+                tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
+            }
         }
         return Err(socket_launch_failure(
             actor_identity,
@@ -4925,7 +4965,11 @@ async fn launch_prepared_interactive_application(
     if let Ok(native_retirement) = cancelled.try_recv() {
         let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
         if matches!(process, Some(CleanupComponentOutcome::Completed)) {
-            let _ = retire_pane_artifact(&tmux, &pane, native_retirement).await;
+            if let CleanupComponentOutcome::Failed { detail } =
+                retire_pane_artifact(&tmux, &pane, native_retirement).await
+            {
+                tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
+            }
         }
         return Err(socket_launch_failure(
             actor_identity,
@@ -4988,13 +5032,21 @@ async fn launch_prepared_interactive_application(
     }
     .await;
     if launch_result.is_err() {
-        let _ = hosted_retirement::confirm_no_input_producer(&retirement_service).await;
-        let _ = hosted_retirement::observe(
-            &retirement_service,
-            hosted_retirement::CompletionBoundary::AbortForShutdown,
-            APPLICATION_TASK_GRACE_TIMEOUT,
-        )
-        .await;
+        // best-effort: the launch already failed and `launch_result` below is
+        // what's returned; these settle bookkeeping for the retirement
+        // service so custody isn't left retained, but a failure here has no
+        // separate action to take.
+        hosted_retirement::confirm_no_input_producer(&retirement_service)
+            .await
+            .ok();
+        drop(
+            hosted_retirement::observe(
+                &retirement_service,
+                hosted_retirement::CompletionBoundary::AbortForShutdown,
+                APPLICATION_TASK_GRACE_TIMEOUT,
+            )
+            .await,
+        );
     }
     launch_result
 }
@@ -5274,6 +5326,7 @@ fn observe_notification_receipt(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn deliver_pending(
     actor: ActorRef,
@@ -5313,7 +5366,7 @@ async fn deliver_pending_checked(
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
-    let pending = tokio::task::spawn_blocking(move || pending_inbox.legacy_pending_prefix())
+    let pending = tidepool_runtime::spawn_blocking_in_span(move || pending_inbox.legacy_pending_prefix())
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
@@ -5349,7 +5402,7 @@ async fn deliver_pending_checked(
         .collect::<Vec<_>>();
     if pending.is_empty() {
         let ack_inbox = Arc::clone(inbox);
-        tokio::task::spawn_blocking(move || ack_inbox.acknowledge(inbox_sequence))
+        tidepool_runtime::spawn_blocking_in_span(move || ack_inbox.acknowledge(inbox_sequence))
             .await
             .map_err(|error| format!("actor inbox acknowledgement task: {error}"))?
             .map_err(|error| error.to_string())?;
@@ -5400,7 +5453,7 @@ async fn deliver_pending_checked(
         runtime_observation.publish_event_activation(event_sequences, inbox_watermark);
     }
     let ack_inbox = Arc::clone(inbox);
-    tokio::task::spawn_blocking(move || ack_inbox.acknowledge(inbox_sequence))
+    tidepool_runtime::spawn_blocking_in_span(move || ack_inbox.acknowledge(inbox_sequence))
         .await
         .map_err(|error| format!("inbox acknowledgement task: {error}"))?
         .map_err(|error| error.to_string())?;
@@ -5742,7 +5795,7 @@ async fn poll_source_drift(
     let source_layers = source_layers.cloned();
     let worktrees = worktrees.clone();
     let caller = tidepool_repr::PrincipalId::from(actor);
-    let (layer, frozen, checkout) = tokio::task::spawn_blocking(move || {
+    let (layer, frozen, checkout) = tidepool_runtime::spawn_blocking_in_span(move || {
         let layer = source_layers.as_ref().and_then(|layers| {
             layers
                 .drift(caller)
@@ -5849,7 +5902,7 @@ async fn publish_inbox_event(
     inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
+    tidepool_runtime::spawn_blocking_in_span(move || {
         if let DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
             actor,
             thread,
@@ -5943,7 +5996,9 @@ async fn retire_interactive_application(
             delivery,
             ..
         } => {
-            let _ = delivery_shutdown.send(());
+            // best-effort: the delivery task's receiver may already have
+            // ended if the task exited before shutdown was requested.
+            delivery_shutdown.send(()).ok();
             Some(delivery)
         }
     };
@@ -6153,7 +6208,9 @@ async fn stop_retired_delivery(
         Err(_) => {
             tracing::debug!(actor = ?actor, "forcing retired actor inbox task to stop");
             delivery.abort();
-            let _ = delivery.await;
+            // best-effort: the task was just aborted; the join outcome is
+            // already reported above as `Forced`.
+            delivery.await.ok();
             CleanupComponentOutcome::Forced
         }
     }
@@ -6664,7 +6721,8 @@ mod tests {
         .await
         .unwrap();
         first.abort();
-        let _ = first.await;
+        // best-effort: task is aborted; the join result is expected to be Cancelled.
+        first.await.ok();
         notification.admitted("recovery-test-inbox".into(), 1);
         let retained = tokio::time::timeout(
             Duration::from_secs(60),

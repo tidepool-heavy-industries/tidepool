@@ -1056,8 +1056,10 @@ mod tests {
     impl Drop for Worker {
         fn drop(&mut self) {
             drop(self.child.stdin.take());
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            // best-effort: teardown of a worker process this test started;
+            // kill()/wait() failures here mean it already exited.
+            self.child.kill().ok();
+            self.child.wait().ok();
         }
     }
 

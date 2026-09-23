@@ -111,7 +111,7 @@ impl PreparedWorkspace {
         let worktree = self.worktree.clone();
         let active = active.clone();
         let prepared = self.view.clone();
-        tokio::task::spawn_blocking(move || -> io::Result<()> {
+        tidepool_runtime::spawn_blocking_in_span(move || -> io::Result<()> {
             if let Some(id) = worktree {
                 manager
                     .materialize_retired_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT))
@@ -467,7 +467,7 @@ impl NativeForkAdmission {
         let Some((source_owner, parent)) = parent else {
             let reason = (!explicit_ref)
                 .then(|| SourceFallback::Unavailable("no unique live source owner".into()));
-            return tokio::task::spawn_blocking(move || {
+            return tidepool_runtime::spawn_blocking_in_span(move || {
                 layout.prepare_committed(authorized, policy, build, reason, None)
             })
             .await
@@ -508,7 +508,7 @@ impl NativeForkAdmission {
         });
         if !source_still_owned {
             drop(publication);
-            return tokio::task::spawn_blocking(move || {
+            return tidepool_runtime::spawn_blocking_in_span(move || {
                 layout.prepare_committed(
                     authorized,
                     policy,
@@ -546,7 +546,7 @@ impl NativeForkAdmission {
                     }
                 }
                 Ok(Admission::Busy) => {
-                    return tokio::task::spawn_blocking(move || {
+                    return tidepool_runtime::spawn_blocking_in_span(move || {
                         layout.prepare_committed(
                             authorized,
                             policy,
@@ -559,7 +559,7 @@ impl NativeForkAdmission {
                     .map_err(io::Error::other)?
                 }
                 Ok(Admission::Unavailable(detail)) => {
-                    return tokio::task::spawn_blocking(move || {
+                    return tidepool_runtime::spawn_blocking_in_span(move || {
                         layout.prepare_committed(
                             authorized,
                             policy,
@@ -618,7 +618,7 @@ impl NativeForkAdmission {
                 creator = ?creator,
                 source_owner = ?source_owner,
             );
-            let captured = tokio::task::spawn_blocking(move || {
+            let captured = tidepool_runtime::spawn_blocking_in_span(move || {
                 let _entered = capture_span.enter();
                 // Publication has already begun. Its owner retains this task
                 // through caller cancellation until capture and release settle.
@@ -697,7 +697,7 @@ impl NativeForkAdmission {
             // Keep siblings queued until the worktree created by this
             // publication is finalized. Otherwise the next sibling can race
             // its Git capture against that finalization and fall back cold.
-            let admitted = tokio::task::spawn_blocking(move || {
+            let admitted = tidepool_runtime::spawn_blocking_in_span(move || {
                 layout.prepare_captured(captured, policy, build, Some(donor_view))
             })
             .await
@@ -741,7 +741,7 @@ impl BoundWorkspace {
             .chain(self.workspace.build.iter())
         {
             let mut resource = resource.publication.clone().lock_owned().await;
-            tokio::task::spawn_blocking(move || {
+            tidepool_runtime::spawn_blocking_in_span(move || {
                 resource
                     .as_mut()
                     .ok_or_else(|| io::Error::other("workspace retired"))?

@@ -955,9 +955,11 @@ async fn failed_coordination_preserves_native_pane_and_recovery_requires_observe
     struct ServerCleanup(String);
     impl Drop for ServerCleanup {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("tmux")
+            // best-effort: teardown cleanup of a tmux server this test started.
+            std::process::Command::new("tmux")
                 .args(["-L", &self.0, "kill-server"])
-                .output();
+                .output()
+                .ok();
         }
     }
     let socket = format!("exomonad-containment-{}", uuid::Uuid::new_v4().simple());
@@ -1019,9 +1021,11 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
     struct ServerCleanup(String);
     impl Drop for ServerCleanup {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("tmux")
+            // best-effort: teardown cleanup of a tmux server this test started.
+            std::process::Command::new("tmux")
                 .args(["-L", &self.0, "kill-server"])
-                .output();
+                .output()
+                .ok();
         }
     }
     let socket = format!("custody-proof-{}", std::process::id());

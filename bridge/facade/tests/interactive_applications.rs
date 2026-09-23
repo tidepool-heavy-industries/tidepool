@@ -220,9 +220,11 @@ impl TmuxSession {
 impl Drop for TmuxSession {
     fn drop(&mut self) {
         if let Some(session) = self.0.take() {
-            let _ = std::process::Command::new("tmux")
+            // best-effort: teardown of the tmux session this test started.
+            std::process::Command::new("tmux")
                 .args(["kill-session", "-t", &session])
-                .status();
+                .status()
+                .ok();
         }
     }
 }

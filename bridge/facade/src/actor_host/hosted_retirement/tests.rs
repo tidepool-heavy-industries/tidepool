@@ -557,7 +557,8 @@ async fn lost_input_seal_waiter_reuses_the_retained_operation() {
     });
     entered(&input_seal_entered).await;
     waiter.abort();
-    let _ = waiter.await;
+    // best-effort: task is aborted; the join result is expected to be Cancelled.
+    waiter.await.ok();
     assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(matches!(
         observe(
@@ -676,7 +677,8 @@ async fn hosted_lost_seal_and_http_waiters_reuse_stored_operations() {
     });
     entered(&endpoint.seal_entered).await;
     waiting.abort();
-    let _ = waiting.await;
+    // best-effort: task is aborted; the join result is expected to be Cancelled.
+    waiting.await.ok();
     assert!(matches!(
         observe(
             &fixture.owner,
@@ -714,7 +716,8 @@ async fn hosted_lost_seal_and_http_waiters_reuse_stored_operations() {
         .await
         .unwrap();
     waiting.abort();
-    let _ = waiting.await;
+    // best-effort: task is aborted; the join result is expected to be Cancelled.
+    waiting.await.ok();
     assert!(matches!(
         observe(
             &fixture.owner,
@@ -842,7 +845,8 @@ async fn foreign_seal_terminal_race(terminal_while_pending: bool) {
         });
         entered(&endpoint.seal_entered).await;
         waiting.abort();
-        let _ = waiting.await;
+        // best-effort: task is aborted; the join result is expected to be Cancelled.
+        waiting.await.ok();
         campaign
             .actor
             .shutdown_with_cleanup(cancelled())
