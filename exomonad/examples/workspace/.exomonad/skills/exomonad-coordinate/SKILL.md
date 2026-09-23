@@ -68,21 +68,21 @@ for engineering decisions, actionable failures or integration work.
 
 Start from the accepted `Task` and a checked shared source. Bind the shared plan
 once. An ordinary local selector can make short, disjoint assignments without
-a new workspace lane registry. This cell assumes `baseline :: GitOid` is bound
+a new workspace workstream registry. This cell assumes `baseline :: GitOid` is bound
 to the source being split. Both branches deliberately inherit the current
 reasoning and use the live root source; `solTaskFrom` selects the executor alias
 and Medium effort. The current branch is checkpointed before capture.
 
 ```haskell
-data Lane = InterfaceLane | ConsumerLane deriving (Show, Eq)
+data WorkSlice = InterfaceSlice | ConsumerSlice deriving (Show, Eq)
 
-laneName :: Lane -> Text
-laneName InterfaceLane = "interface"
-laneName ConsumerLane = "consumer"
+sliceName :: WorkSlice -> Text
+sliceName InterfaceSlice = "interface"
+sliceName ConsumerSlice = "consumer"
 
-lanePaths :: Lane -> [Text]
-lanePaths InterfaceLane = ["src/interface.rs", "tests/interface.rs"]
-lanePaths ConsumerLane = ["src/consumer.rs", "tests/consumer.rs"]
+slicePaths :: WorkSlice -> [Text]
+slicePaths InterfaceSlice = ["src/interface.rs", "tests/interface.rs"]
+slicePaths ConsumerSlice = ["src/consumer.rs", "tests/consumer.rs"]
 
 let group = batch "corpus" "fanout"
 let shared = Task
@@ -95,14 +95,14 @@ let shared = Task
       , acceptance = "Integrated behavior and focused checks"
       , acceptedDecisions = []
       }
-let laneTask lane = shared
-      { obligation = laneName lane <> ": implement and check the assigned slice"
-      , ownedPaths = lanePaths lane
+let sliceTask slice = shared
+      { obligation = sliceName slice <> ": implement and check the assigned slice"
+      , ownedPaths = slicePaths slice
       }
-let laneBranch lane = solTaskFrom (case lane of { InterfaceLane -> "interface"; ConsumerLane -> "consumer" }) projectHead (laneTask lane)
+let sliceBranch slice = solTaskFrom (sliceName slice) projectHead (sliceTask slice)
 ((interface, interfaceProgress), (consumer, consumerProgress)) <- unfold group $
-  (,) <$> childWithProgress @WorkProgress @(Outcome Candidate) (laneBranch InterfaceLane)
-      <*> childWithProgress @WorkProgress @(Outcome Candidate) (laneBranch ConsumerLane)
+  (,) <$> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch InterfaceSlice)
+      <*> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch ConsumerSlice)
 ```
 
 Admission creates two pending obligations; it does not join their results. End

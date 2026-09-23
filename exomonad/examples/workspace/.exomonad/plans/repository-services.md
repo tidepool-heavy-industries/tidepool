@@ -27,7 +27,7 @@ R.call (Service.ask (R.client index)) "passing functions between agents"
 ```
 
 Observed: the actor searched captured document values and retained its query
-and answer in a private ledger. Results included the relevant README paragraphs
+and answer in a private record. Results included the relevant README paragraphs
 and some loose matches. `Search.grep` is a semantic shortlist, not exact retrieval.
 
 ## 3. Upgrade the running service
@@ -72,9 +72,9 @@ and a child-source isolation question to commit `b03350e34`.
   per candidate, explicitly marked when partial, with exact Git SHAs retained
   for deeper reads. The bounded continuation ran successfully inside the actor.
 - A failed actor handler could not be drained until replaced. Replacement
-  recovered it with the previously committed ledger intact.
-- The final ledger contained six completed query/answer pairs, spanning policy
-  replacements. The failed handler did not append a ledger entry.
+  recovered it with the previously committed record intact.
+- The final record contained six completed query/answer pairs, spanning policy
+  replacements. The failed handler did not append a record.
 - Jev results can vary. The transcript above is one actual run, not canned output.
 
 `scoutV5` remains live for screenshot capture. The two earlier history-only

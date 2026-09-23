@@ -251,7 +251,7 @@ polling model or competing notification store around that limitation.
 For example, using actual accessible refs in place of these placeholders:
 
 ```text
-ready tp:<commit> plans/lane-checkpoint.md; native:<commit>.
+ready tp:<commit> plans/assignment-checkpoint.md; native:<commit>.
 retained 33@1:<worktree> dirty bridge; owner finishing checkpoint.
 gates lost-ack/native join; no acceptance. Next: rebase task branch onto main:<commit>.
 ```

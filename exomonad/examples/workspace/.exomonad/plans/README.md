@@ -42,11 +42,11 @@ and returns explicit corrections and release scope. Incorporate those decisions
 before dependent implementation. Later local work within the agreement proceeds
 without repeating this initial interview or inventing more approval stages. The
 planner becomes idle without execution subscriptions. Sol owns integration and
-routine cross-lane decisions; fresh Astra specialists handle explicit hard questions.
+routine decisions across workstreams; fresh Astra specialists handle explicit hard questions.
 
 ## Use the workbench
 
-- [composition.md](composition.md): paired source/context forks, dependency frontiers,
+- [composition.md](composition.md): paired source/context unfolds, dependency frontiers,
   checked integration and a continuation at every substantial node.
 - [operating.md](operating.md): readback progress, source-bearing decisions, parallel
   branch expressions and the actual asynchronous control boundaries.
