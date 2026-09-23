@@ -609,13 +609,16 @@ pub(crate) fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
 /// already exited is not an error, and this reports no confirmed reap —
 /// callers that need one re-check liveness themselves afterward.
 pub(crate) fn pidfd_kill_and_wait(fd: &OwnedFd, timeout: Duration) {
-    let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
+    // best-effort: ESRCH from an already-exited process is not an error (see
+    // the doc comment above).
+    rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL).ok();
     let mut pfd = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
     let ts = rustix::event::Timespec {
         tv_sec: timeout.as_secs() as _,
         tv_nsec: timeout.subsec_nanos() as _,
     };
-    let _ = rustix::event::poll(&mut pfd, Some(&ts));
+    // best-effort: this reports no confirmed reap; callers re-check liveness themselves.
+    rustix::event::poll(&mut pfd, Some(&ts)).ok();
 }
 
 /// One observed `item/tool/call`: the correlation triple as the server sent
@@ -1015,6 +1018,7 @@ mod tests {
     }
 
     async fn connect_peer(executable: &Path, cwd: &Path) -> Result<Session, SessionError> {
+        #[allow(clippy::disallowed_methods, reason = "fed into spawn_transport, which spawns with kill_on_drop(true)")]
         let mut command = tokio::process::Command::new(executable);
         command.current_dir(cwd).env_clear().envs(child_env_vars());
         let mut session = Session::over(spawn_transport(command)?);
@@ -1097,6 +1101,10 @@ mod tests {
         // Ignores SIGTERM outright; only SIGKILL (never trappable) ends it.
         // Since the transport's own `shutdown()` above is a no-op, the only
         // thing that can reap this child is `Session::shutdown`'s escalation.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture deliberately without kill_on_drop, to prove Session::shutdown's own SIGKILL escalation reaps it"
+        )]
         let mut child = tokio::process::Command::new("sh")
             .args(["-c", "trap '' TERM; sleep 60"])
             .kill_on_drop(false)
@@ -1119,7 +1127,9 @@ mod tests {
         // now, reap shortly after" shape rather than a hand-reaped process
         // this session never actually had to kill.
         let reap = tokio::spawn(async move {
-            let _ = child.wait().await;
+            // best-effort: this stands in for production's kill-on-drop reaper;
+            // only that it runs matters, not its exit-status value.
+            child.wait().await.ok();
         });
 
         tokio::time::timeout(Duration::from_secs(20), session.shutdown())
@@ -1165,6 +1175,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_owner_overrides_incompatible_caller_stdio() {
+        #[allow(clippy::disallowed_methods, reason = "test fixture process")]
         let mut command = tokio::process::Command::new("cat");
         command
             .stdin(std::process::Stdio::null())
@@ -1725,7 +1736,9 @@ mod tests {
             frames.len(),
             fixture_path.display()
         );
-        let _ = session.shutdown().await;
+        // best-effort: evidence is already persisted above; shutdown failure
+        // here isn't this test's assertion.
+        session.shutdown().await.ok();
 
         let after = ConfigSnapshot::capture(&home).expect("capture post-run config snapshot");
         let report = before.compare(&after);

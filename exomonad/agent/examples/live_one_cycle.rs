@@ -62,7 +62,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     // 1. Config isolation, before anything spawns.
-    let codex_home = isolation::codex_home();
+    let codex_home = isolation::codex_home().map_err(|e| format!("could not resolve codex home: {e}"))?;
     let before = ConfigSnapshot::capture(&codex_home)
         .map_err(|e| format!("could not snapshot {}: {e}", codex_home.display()))?;
     println!("codex home under test: {}", codex_home.display());

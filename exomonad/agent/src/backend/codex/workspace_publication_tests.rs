@@ -191,8 +191,11 @@ fn namespace_publication_server() {
     )
     .unwrap();
     drop(stream);
-    // Keep the exact peer alive until its caller has checked host-visible identity.
-    let _ = std::io::stdin().read(&mut [0]);
+    // Keep the exact peer alive until its caller has checked host-visible identity;
+    // best-effort read, only its blocking (until a byte or EOF) is the point,
+    // not how many bytes came back.
+    #[allow(clippy::unused_io_amount)]
+    std::io::stdin().read(&mut [0]).ok();
 }
 
 #[tokio::test]
@@ -200,6 +203,7 @@ async fn publication_peer_pid_is_host_visible_across_pid_namespace() {
     use std::os::unix::fs::MetadataExt;
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("native.sock");
+    #[allow(clippy::disallowed_methods, reason = "spawned with kill_on_drop(true), dies with its owner")]
     let mut child = tokio::process::Command::new("bwrap")
         .args([
             "--unshare-user",

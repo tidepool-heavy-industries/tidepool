@@ -1326,6 +1326,7 @@ mod tests {
 
     impl Bystander {
         fn spawn() -> Self {
+            #[allow(clippy::disallowed_methods, reason = "test fixture bystander process")]
             Self(
                 std::process::Command::new("sleep")
                     .arg("30")
@@ -1351,6 +1352,7 @@ mod tests {
                 if self.0.try_wait().expect("poll the bystander").is_some() {
                     return false;
                 }
+                #[allow(clippy::disallowed_methods, reason = "sync test poll loop")]
                 std::thread::sleep(Duration::from_millis(10));
             }
             self.0.try_wait().expect("poll the bystander").is_none()
@@ -1359,8 +1361,9 @@ mod tests {
 
     impl Drop for Bystander {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            // best-effort: Drop cannot propagate; the process may already have exited.
+            self.0.kill().ok();
+            self.0.wait().ok();
         }
     }
 

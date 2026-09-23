@@ -53,7 +53,8 @@ impl InputOperationId {
         encoded.push_str("tp1:");
         for byte in producer {
             use std::fmt::Write as _;
-            let _ = write!(encoded, "{byte:02x}");
+            // Writing to a String can't fail.
+            write!(encoded, "{byte:02x}").ok();
         }
         encoded.push(':');
         encoded.push_str(&self.sequence.to_string());
