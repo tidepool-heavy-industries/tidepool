@@ -3,6 +3,12 @@
     clippy::expect_used,
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test tooling: compiles a fault-injection shared library (cc) and re-invokes \
+              this test binary as a short-lived child process, not a long-lived child \
+              needing the launcher"
+)]
 #![cfg(target_os = "linux")]
 use std::{fs, path::Path, process::Command};
 
