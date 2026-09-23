@@ -32,11 +32,14 @@
 //! the crate's ordinary git-failure shape — never a panic, never a
 //! half-merged tree.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{InProgressKind, WorktreeError};
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid};
+
+const WORKSPACE_PATH: &str = ".exomonad/workspace";
 
 /// The result of merging one exact commit into a target worktree. A `git`
 /// invocation failure that is NOT this — an unknown branch, a locked index,
@@ -74,6 +77,10 @@ pub enum MergeOutcome {
 
 /// Merge `source` into the worktree at `target_cwd`. A direct descendant
 /// fast-forwards; divergent histories use one explicit merge commit.
+/// `source_cwd` is the explicitly registered checkout that supplied `source`,
+/// not a path inferred from a branch name. If both checkouts have initialized
+/// `.exomonad/workspace`, a missing source gitlink commit is fetched from that
+/// source workspace repository before Git performs the superproject merge.
 ///
 /// On conflict, `git diff --name-only --diff-filter=U` is read and THEN
 /// `git merge --abort` runs — abort-before-return is the whole of "never a
@@ -95,6 +102,7 @@ pub enum MergeOutcome {
 pub fn try_merge(
     git: &GitCli,
     target_cwd: &Path,
+    source_cwd: &Path,
     source: &GitOid,
     source_branch: Option<&BranchName>,
     advance: Option<&BranchName>,
@@ -147,9 +155,11 @@ pub fn try_merge(
             target,
         });
     }
+    fetch_missing_workspace_gitlink(git, target_cwd, source_cwd, source)?;
     if is_ancestor(git, target_cwd, &target, source)? {
         git.try_run(target_cwd, &["merge", "--ff-only", source.as_str()])?;
         let after = head(git, target_cwd)?;
+        update_initialized_workspace(git, target_cwd, &after)?;
         if let Err(reason) = advance_branch(git, target_cwd, advancing, &after) {
             return Ok(MergeOutcome::ManualGitRequired {
                 source: source.clone(),
@@ -171,6 +181,7 @@ pub fn try_merge(
     ) {
         Ok(_) => {
             let commit = head(git, target_cwd)?;
+            update_initialized_workspace(git, target_cwd, &commit)?;
             if let Err(reason) = advance_branch(git, target_cwd, advancing, &commit) {
                 return Ok(MergeOutcome::ManualGitRequired {
                     source: source.clone(),
@@ -196,13 +207,14 @@ pub fn try_merge(
         return Err(WorktreeError::GitFailure(receipt));
     }
 
-    let paths = git
+    let paths: Vec<String> = git
         .try_run(
             target_cwd,
             &["diff", "--name-only", "--diff-filter=U", "-z"],
         )
         .map(|out| out.nul_fields().into_iter().map(String::from).collect())
         .unwrap_or_default();
+    let gitlink_report = gitlink_conflict_report(git, target_cwd, &paths);
 
     // Abort unconditionally, even though the conflict-path read above could
     // have failed — a caller must never be handed a mid-merge worktree, and
@@ -215,12 +227,152 @@ pub fn try_merge(
         return Err(WorktreeError::GitFailure(receipt));
     }
 
+    let reason = match gitlink_report {
+        Some(report) => format!(
+            "merge conflict contains only gitlinks; merge the workspace commits inside the workspace and bump the gitlink once ({report}); target was restored to its starting state"
+        ),
+        None => "merge conflict; target was restored to its starting state".into(),
+    };
+
     Ok(MergeOutcome::ManualGitRequired {
         source: source.clone(),
         target,
-        reason: "merge conflict; target was restored to its starting state".into(),
+        reason,
         paths,
     })
+}
+
+/// Make a source commit's workspace gitlink object available to the target
+/// workspace repository when both checkouts have initialized
+/// `.exomonad/workspace`. This transfers objects only; it never checks out,
+/// merges, or changes either nested worktree. Missing/uninitialized workspace
+/// checkouts keep ordinary Git's existing behavior.
+fn fetch_missing_workspace_gitlink(
+    git: &GitCli,
+    target_cwd: &Path,
+    source_cwd: &Path,
+    source: &GitOid,
+) -> Result<(), WorktreeError> {
+    let Some(workspace_commit) = tree_gitlink_oid(git, target_cwd, source, WORKSPACE_PATH)? else {
+        return Ok(());
+    };
+    let target_workspace = target_cwd.join(WORKSPACE_PATH);
+    let source_workspace = source_cwd.join(WORKSPACE_PATH);
+    if !git.try_exists(&target_workspace.join(".git"))?
+        || !git.try_exists(&source_workspace.join(".git"))?
+    {
+        return Ok(());
+    }
+
+    let object = format!("{workspace_commit}^{{commit}}");
+    if git
+        .try_run(&target_workspace, &["cat-file", "-e", &object])
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let Some(source_workspace) = source_workspace.to_str() else {
+        return Ok(());
+    };
+    git.try_run(
+        &target_workspace,
+        &["fetch", "--no-tags", source_workspace, &workspace_commit],
+    )?;
+    Ok(())
+}
+
+/// Keep an already initialized checkout aligned with the gitlink that landed.
+/// Git refuses this checkout if it would overwrite local workspace changes.
+fn update_initialized_workspace(
+    git: &GitCli,
+    target_cwd: &Path,
+    merged: &GitOid,
+) -> Result<(), WorktreeError> {
+    let Some(workspace_commit) = tree_gitlink_oid(git, target_cwd, merged, WORKSPACE_PATH)? else {
+        return Ok(());
+    };
+    let workspace = target_cwd.join(WORKSPACE_PATH);
+    if !git.try_exists(&workspace.join(".git"))? {
+        return Ok(());
+    }
+    let current = git.try_run(&workspace, &["rev-parse", "HEAD"])?;
+    if current.trimmed() != workspace_commit {
+        git.try_run(&workspace, &["checkout", "--detach", &workspace_commit])?;
+    }
+    Ok(())
+}
+
+fn tree_gitlink_oid(
+    git: &GitCli,
+    cwd: &Path,
+    commit: &GitOid,
+    path: &str,
+) -> Result<Option<String>, WorktreeError> {
+    let output = git.try_run(cwd, &["ls-tree", "-z", commit.as_str(), "--", path])?;
+    let Some(record) = output.nul_fields().into_iter().next() else {
+        return Ok(None);
+    };
+    let Some((metadata, listed_path)) = record.split_once('\t') else {
+        return Ok(None);
+    };
+    if listed_path != path {
+        return Ok(None);
+    }
+    let mut fields = metadata.split_ascii_whitespace();
+    let mode = fields.next();
+    let kind = fields.next();
+    let oid = fields.next();
+    if mode != Some("160000") || kind != Some("commit") || fields.next().is_some() {
+        return Ok(None);
+    }
+    Ok(oid.map(str::to_string))
+}
+
+/// Return an actionable report only when every conflicted path is a gitlink
+/// and both sides name a commit. This is deliberately report-only: resolving
+/// the nested repository conflict remains authored integration policy.
+fn gitlink_conflict_report(git: &GitCli, cwd: &Path, paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    // `ls-files -u -z` records are `mode oid stage<TAB>path<NUL>`. The index
+    // is the authoritative source for both competing gitlink commits; the
+    // conflicted worktree path itself may not contain a checked-out submodule.
+    let output = git.try_run(cwd, &["ls-files", "-u", "-z"]).ok()?;
+    let mut entries: BTreeMap<String, Vec<(String, String, u8)>> = BTreeMap::new();
+    for record in output.nul_fields() {
+        let (metadata, path) = record.split_once('\t')?;
+        let mut fields = metadata.split_ascii_whitespace();
+        let mode = fields.next()?.to_string();
+        let oid = fields.next()?.to_string();
+        let stage = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        entries
+            .entry(path.to_string())
+            .or_default()
+            .push((mode, oid, stage));
+    }
+
+    if entries.len() != paths.len() || paths.iter().any(|path| !entries.contains_key(path)) {
+        return None;
+    }
+
+    let mut reports = Vec::with_capacity(paths.len());
+    for path in paths {
+        let records = entries.get(path)?;
+        if records.iter().any(|(mode, _, _)| mode != "160000") {
+            return None;
+        }
+        let ours = records.iter().find(|(_, _, stage)| *stage == 2)?.1.as_str();
+        let theirs = records.iter().find(|(_, _, stage)| *stage == 3)?.1.as_str();
+        reports.push(format!("{path} (target {ours}, source {theirs})"));
+    }
+
+    Some(reports.join(", "))
 }
 
 fn branch_ref(branch: &BranchName) -> String {

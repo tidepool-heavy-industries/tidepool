@@ -93,6 +93,9 @@ pub struct ActorWorktreeAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorWorktreeGrant {
     Repository,
+    /// Repository inspection for the operator workbench, which has no
+    /// writable checkout of its own.
+    RepositoryReadOnly,
     Bound {
         enumerate: bool,
         allocate: bool,
@@ -129,7 +132,10 @@ impl ActorWorktreeAuthority {
     }
 
     fn has_repository_access(&self, principal: tidepool_repr::PrincipalId) -> bool {
-        self.grant(principal) == ActorWorktreeGrant::Repository
+        matches!(
+            self.grant(principal),
+            ActorWorktreeGrant::Repository | ActorWorktreeGrant::RepositoryReadOnly
+        )
     }
 
     fn owns(&self, principal: tidepool_repr::PrincipalId, tree: &WorktreeId) -> bool {
@@ -486,6 +492,22 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             integrate,
         } = self.authority.grant(principal)
         else {
+            let grant = self.authority.grant(principal);
+            if grant == ActorWorktreeGrant::RepositoryReadOnly {
+                let denied = WorktreeError::WorktreeAuthorityDenied(
+                    "this actor may inspect repository worktrees but may not modify them".into(),
+                );
+                match &req {
+                    WorktreeReq::WorktreeCreateForActorPath(..)
+                    | WorktreeReq::WorktreeCreateFromBoundForActorPath(..) => {
+                        return cx.respond(Err::<WtWorktreeHandle, _>(denied));
+                    }
+                    WorktreeReq::WorktreeTryMerge(..) => {
+                        return cx.respond(Err::<WtMergeOutcome, _>(denied));
+                    }
+                    _ => {}
+                }
+            }
             if matches!(&req, WorktreeReq::WorktreeBound) {
                 if camino::Utf8Path::from_path(self.inner.manager.source_repository()).is_none() {
                     return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
@@ -502,23 +524,23 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
                 );
             }
             if let WorktreeReq::WorktreeCreate(spec) = &req {
-                // Repository authority is the root's. A worktree it allocates
-                // for ITSELF materializes in the root-owned directory, which is
-                // writable inside the root's own mount namespace — an
-                // integration checkout the root cannot build in is not a
-                // workspace. Children's worktrees (WorktreeCreateForActorPath,
-                // and the fork-admission path) keep landing under the managed
-                // root, which stays read-only to the root.
-                let result = (|| {
-                    let spec = spec_from_wire(spec.clone())?;
-                    self.inner
-                        .manager
-                        .root_allocations()
-                        .create(&spec)
-                        .map(|handle| handle_to_wire(&handle))
-                        .map_err(error_to_wire)
-                })();
-                return cx.respond(result);
+                if grant == ActorWorktreeGrant::Repository {
+                    let result = (|| {
+                        let spec = spec_from_wire(spec.clone())?;
+                        self.inner
+                            .manager
+                            .root_allocations()
+                            .create(&spec)
+                            .map(|handle| handle_to_wire(&handle))
+                            .map_err(error_to_wire)
+                    })();
+                    return cx.respond(result);
+                }
+                return cx.respond(Err::<WtWorktreeHandle, _>(
+                    WorktreeError::WorktreeAuthorityDenied(
+                        "this actor may not allocate a project worktree".into(),
+                    ),
+                ));
             }
             return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
         };
@@ -1060,7 +1082,9 @@ impl WorktreeHandler {
 
     /// The one narrow, deliberate workflow primitive (see
     /// `exomonad/worktree/src/merge.rs`): merge `branch` into the worktree
-    /// `target_worktree` names, through `exomonad_worktree::merge::try_merge`
+    /// `target_worktree` names, using the explicitly named registered source
+    /// checkout for nested kit object transfer, through
+    /// `exomonad_worktree::merge::try_merge`
     /// — the same typed conflict-vs-failure classification and abort-before-
     /// return discipline every caller gets, instead of each authored harness
     /// re-deriving it over raw `Exec`.
@@ -1074,12 +1098,19 @@ impl WorktreeHandler {
             .lookup(&id)
             .map_err(error_to_wire)?
             .ok_or_else(|| never_registered(&request.target_worktree))?;
+        let source_worktree_id = worktree_id_from_wire(&request.source_worktree)?;
+        let source_handle = self
+            .manager
+            .lookup(&source_worktree_id)
+            .map_err(error_to_wire)?
+            .ok_or_else(|| never_registered(&request.source_worktree))?;
         let source = exomonad_worktree::GitOid::from_raw(request.source_head.raw);
         let source_branch = request.source_branch.as_ref().map(branch_name_from_wire);
         let advance = request.merge_advance.as_ref().map(branch_name_from_wire);
         let outcome = try_merge(
             self.manager.git(),
             handle.cwd(),
+            source_handle.cwd(),
             &source,
             source_branch.as_ref(),
             advance.as_ref(),
@@ -1101,6 +1132,7 @@ mod tests {
     use exomonad_worktree::error::InProgressKind;
     use exomonad_worktree::id::{GitOid, GitRef};
     use tidepool_bridge_effects::{WtDirtyPolicy, WtGitRef, WtInProgressKind, WtWorktreeSource};
+    use tidepool_repr::{DataCon, DataConId};
 
     #[test]
     fn actor_worktree_authority_is_exact_to_resource_and_incarnation() {
@@ -1250,7 +1282,27 @@ mod tests {
         );
         use tidepool_bridge::FromHaskell;
         use tidepool_effect::dispatch::{EffectContext, EffectHandler};
-        let table = crate::test_support::full_effect_test_table();
+        let mut table = crate::test_support::full_effect_test_table();
+        for (id, name, arity) in [
+            (10_001, "WorktreeHandle", 1),
+            (10_002, "WorktreeReceipt", 6),
+            (10_003, "WorktreeId", 1),
+            (10_004, "GitOid", 1),
+            (10_005, "BranchName", 1),
+            (10_006, "GitRef", 1),
+        ] {
+            if table.get_by_name(name).is_none() {
+                table.insert(DataCon {
+                    id: DataConId(id),
+                    name: name.to_owned(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: vec![],
+                    qualified_name: None,
+                    type_name: String::new(),
+                });
+            }
+        }
         let captured = tidepool_mcp::CapturedOutput::new();
         let cx = EffectContext::with_principal(&table, worker, &captured);
         let root_source = WtWorktreeSpec {
@@ -1258,6 +1310,75 @@ mod tests {
             spec_label: "forbidden-root-snapshot".into(),
             spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
         };
+        let proxy = tidepool_repr::PrincipalId::new(8, 1);
+        handler
+            .authority
+            .install_grant(proxy, ActorWorktreeGrant::RepositoryReadOnly);
+        let proxy_cx = EffectContext::with_principal(&table, proxy, &captured);
+        let value = crate::test_support::response_value(
+            handler
+                .handle(WorktreeReq::WorktreeCreate(root_source.clone()), &proxy_cx)
+                .unwrap(),
+            &table,
+        );
+        let result = Result::<WtWorktreeHandle, WorktreeError>::from_value(&value, &table).unwrap();
+        assert!(matches!(
+            result,
+            Err(WorktreeError::WorktreeAuthorityDenied(_))
+        ));
+        for request in [
+            WorktreeReq::WorktreeCreateForActorPath(
+                root_source.clone(),
+                "campaign/proxy/denied".into(),
+            ),
+            WorktreeReq::WorktreeCreateFromBoundForActorPath(
+                WtDirtyPolicy::RequireClean,
+                "campaign/proxy/denied-from-bound".into(),
+            ),
+        ] {
+            let value = crate::test_support::response_value(
+                handler.handle(request, &proxy_cx).unwrap(),
+                &table,
+            );
+            let result =
+                Result::<WtWorktreeHandle, WorktreeError>::from_value(&value, &table).unwrap();
+            assert!(matches!(
+                result,
+                Err(WorktreeError::WorktreeAuthorityDenied(_))
+            ));
+        }
+        let proxy_merge = WorktreeReq::WorktreeTryMerge(WtMergeRequest {
+            source_head: tidepool_bridge_effects::WtGitOid {
+                raw: committed.as_str().into(),
+            },
+            source_worktree: reviewed.handle_receipt.tree_id.clone(),
+            source_branch: None,
+            target_worktree: reviewed.handle_receipt.tree_id.clone(),
+            merge_advance: None,
+            merge_message: "operator proxy is read-only".into(),
+        });
+        let value = crate::test_support::response_value(
+            handler.handle(proxy_merge, &proxy_cx).unwrap(),
+            &table,
+        );
+        let result = Result::<WtMergeOutcome, WorktreeError>::from_value(&value, &table).unwrap();
+        assert!(matches!(
+            result,
+            Err(WorktreeError::WorktreeAuthorityDenied(_))
+        ));
+
+        let root_cx = EffectContext::with_principal(&table, root, &captured);
+        let value = crate::test_support::response_value(
+            handler
+                .handle(WorktreeReq::WorktreeCreate(root_source.clone()), &root_cx)
+                .unwrap(),
+            &table,
+        );
+        let result = Result::<WtWorktreeHandle, WorktreeError>::from_value(&value, &table).unwrap();
+        assert!(
+            result.is_ok(),
+            "root repository allocation must remain available: {result:?}"
+        );
         for request in [
             WorktreeReq::WorktreeCreate(root_source.clone()),
             WorktreeReq::WorktreeCreateForActorPath(root_source, "campaign/direct/denied".into()),
@@ -1275,6 +1396,7 @@ mod tests {
             source_head: tidepool_bridge_effects::WtGitOid {
                 raw: committed.as_str().into(),
             },
+            source_worktree: reviewed.handle_receipt.tree_id.clone(),
             source_branch: None,
             target_worktree: reviewed.handle_receipt.tree_id.clone(),
             merge_advance: None,

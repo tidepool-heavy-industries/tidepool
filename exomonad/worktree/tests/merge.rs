@@ -57,6 +57,7 @@ fn divergent_merge_lands_a_merge_commit() {
     let outcome = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &source,
         Some(&BranchName::from_raw("child")),
         None,
@@ -106,12 +107,28 @@ fn direct_descendant_fast_forwards_then_reports_already_contained() {
     );
     let node_path = add_worktree(&repo, "node", "main");
 
-    let first = try_merge(repo.git(), &node_path, &source, None, None, "fold")
-        .expect("fast-forward should work");
+    let first = try_merge(
+        repo.git(),
+        &node_path,
+        &child_path,
+        &source,
+        None,
+        None,
+        "fold",
+    )
+    .expect("fast-forward should work");
     assert!(matches!(first, MergeOutcome::FastForwarded { ref after, .. } if after == &source));
 
-    let second = try_merge(repo.git(), &node_path, &source, None, None, "fold again")
-        .expect("already-contained should work");
+    let second = try_merge(
+        repo.git(),
+        &node_path,
+        &child_path,
+        &source,
+        None,
+        None,
+        "fold again",
+    )
+    .expect("already-contained should work");
     assert!(
         matches!(second, MergeOutcome::AlreadyContained { ref target, .. } if target == &source)
     );
@@ -143,6 +160,7 @@ fn conflicting_merge_reports_paths_and_restores_clean_state() {
     let outcome = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &source,
         Some(&BranchName::from_raw("child")),
         None,
@@ -151,8 +169,12 @@ fn conflicting_merge_reports_paths_and_restores_clean_state() {
     .expect("merge should run (a conflict is a typed outcome, not an Err)");
 
     match outcome {
-        MergeOutcome::ManualGitRequired { paths, .. } => {
+        MergeOutcome::ManualGitRequired { paths, reason, .. } => {
             assert_eq!(paths, vec!["shared.txt".to_string()]);
+            assert_eq!(
+                reason,
+                "merge conflict; target was restored to its starting state"
+            );
         }
         other => panic!("expected a conflict handoff, got {other:?}"),
     }
@@ -177,6 +199,398 @@ fn conflicting_merge_reports_paths_and_restores_clean_state() {
 }
 
 #[test]
+fn gitlink_only_conflict_reports_both_nested_commits_without_resolving_them() {
+    let workspace_repo = TestRepo::init().expect("init workspace repo");
+    let workspace_base = workspace_repo
+        .writer()
+        .commit_file("README.md", "workspace base\n", "workspace base")
+        .expect("workspace base commit");
+    let child_workspace_path = add_worktree(&workspace_repo, "workspace-child", "main");
+    let child_workspace_commit = workspace_repo
+        .writer_at(&child_workspace_path)
+        .commit_file("child.txt", "child\n", "child workspace work")
+        .expect("child workspace commit");
+    let node_workspace_path = add_worktree(&workspace_repo, "workspace-node", "main");
+    let node_workspace_commit = workspace_repo
+        .writer_at(&node_workspace_path)
+        .commit_file("node.txt", "node\n", "node workspace work")
+        .expect("node workspace commit");
+
+    let repo = TestRepo::init().expect("init repo");
+    repo.writer()
+        .commit_file("README.md", "base\n", "base commit")
+        .expect("base commit");
+    repo.writer()
+        .write_file(
+            ".gitmodules",
+            &format!(
+                "[submodule \"exomonad-workspace\"]\n\tpath = .exomonad/workspace\n\turl = {}\n",
+                workspace_repo.path().display()
+            ),
+        )
+        .expect("write .gitmodules");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "clone",
+                "-q",
+                workspace_repo.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone source workspace");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},.exomonad/workspace", workspace_base.as_str()),
+            ],
+        )
+        .expect("record base workspace gitlink");
+    repo.writer()
+        .stage(".gitmodules")
+        .expect("stage .gitmodules");
+    repo.writer()
+        .commit_file("project-base.txt", "base\n", "record workspace submodule")
+        .expect("commit workspace submodule");
+
+    let child_path = add_worktree(&repo, "child", "main");
+    let child_workspace_path = child_path.join(".exomonad/workspace");
+    std::fs::create_dir_all(child_workspace_path.parent().unwrap())
+        .expect("create child workspace parent");
+    repo.git()
+        .try_run(
+            &child_path,
+            &[
+                "clone",
+                "-q",
+                "--no-checkout",
+                workspace_repo.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone nested workspace into child");
+    repo.git()
+        .try_run(
+            &child_workspace_path,
+            &["checkout", "-q", child_workspace_commit.as_str()],
+        )
+        .expect("checkout child workspace commit");
+    repo.git()
+        .try_run(
+            &child_path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!(
+                    "160000,{},.exomonad/workspace",
+                    child_workspace_commit.as_str()
+                ),
+            ],
+        )
+        .expect("record child workspace gitlink");
+    let child = repo
+        .writer_at(&child_path)
+        .commit_file(
+            "child-side.txt",
+            "child side\n",
+            "bump child workspace gitlink",
+        )
+        .expect("child project commit");
+
+    let node_path = add_worktree(&repo, "node", "main");
+    let node_workspace_path = node_path.join(".exomonad/workspace");
+    std::fs::create_dir_all(node_workspace_path.parent().unwrap())
+        .expect("create node workspace parent");
+    repo.git()
+        .try_run(
+            &node_path,
+            &[
+                "clone",
+                "-q",
+                "--no-checkout",
+                workspace_repo.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone nested workspace into node");
+    repo.git()
+        .try_run(
+            &node_workspace_path,
+            &["checkout", "-q", node_workspace_commit.as_str()],
+        )
+        .expect("checkout node workspace commit");
+    repo.git()
+        .try_run(
+            &node_path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!(
+                    "160000,{},.exomonad/workspace",
+                    node_workspace_commit.as_str()
+                ),
+            ],
+        )
+        .expect("record node workspace gitlink");
+    repo.writer_at(&node_path)
+        .commit_file(
+            "node-side.txt",
+            "node side\n",
+            "bump node workspace gitlink",
+        )
+        .expect("node project commit");
+
+    let outcome = try_merge(
+        repo.git(),
+        &node_path,
+        &child_path,
+        &child,
+        None,
+        None,
+        "fold child",
+    )
+    .expect("gitlink conflict is a reportable handoff");
+    match outcome {
+        MergeOutcome::ManualGitRequired { reason, paths, .. } => {
+            assert_eq!(paths, vec![".exomonad/workspace"]);
+            assert!(reason.contains("only gitlinks"), "reason: {reason}");
+            assert!(
+                reason.contains(child_workspace_commit.as_str()),
+                "reason: {reason}"
+            );
+            assert!(
+                reason.contains(node_workspace_commit.as_str()),
+                "reason: {reason}"
+            );
+            assert!(reason.contains("merge the workspace commits inside the workspace"));
+        }
+        other => panic!("expected a gitlink conflict handoff, got {other:?}"),
+    }
+
+    assert_eq!(
+        repo.git()
+            .try_run(&node_path, &["rev-parse", "HEAD"])
+            .expect("node HEAD")
+            .trimmed(),
+        repo.git()
+            .try_run(&node_path, &["rev-parse", "node"])
+            .expect("node branch")
+            .trimmed(),
+        "the report does not resolve or advance the target"
+    );
+    assert_eq!(
+        inspect::in_progress(repo.git(), &node_path).expect("in_progress read"),
+        None,
+        "the merge remains aborted after reporting"
+    );
+    assert_eq!(
+        repo.git()
+            .try_run(&node_workspace_path, &["rev-parse", "HEAD"])
+            .expect("target workspace HEAD after abort")
+            .trimmed(),
+        node_workspace_commit.as_str(),
+        "the conflict must preserve the target workspace checkout"
+    );
+    assert!(!node_workspace_path.join("child.txt").exists());
+}
+
+#[test]
+fn merge_fetches_a_child_only_workspace_commit_before_merging_its_gitlink() {
+    let workspace_upstream = TestRepo::init().expect("init workspace upstream");
+    let workspace_base = workspace_upstream
+        .writer()
+        .commit_file("README.md", "workspace base\n", "workspace base")
+        .expect("workspace base commit");
+
+    let repo = TestRepo::init().expect("init project repo");
+    repo.writer()
+        .commit_file("README.md", "project base\n", "project base")
+        .expect("project base commit");
+    repo.writer()
+        .write_file(
+            ".gitmodules",
+            &format!(
+                "[submodule \"exomonad-workspace\"]\n\tpath = .exomonad/workspace\n\turl = {}\n",
+                workspace_upstream.path().display()
+            ),
+        )
+        .expect("write .gitmodules");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "clone",
+                "-q",
+                workspace_upstream.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone workspace into project source");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},.exomonad/workspace", workspace_base.as_str()),
+            ],
+        )
+        .expect("record source workspace gitlink");
+    repo.writer()
+        .stage(".gitmodules")
+        .expect("stage .gitmodules");
+    repo.writer()
+        .commit_file("project.txt", "base\n", "record workspace submodule")
+        .expect("commit workspace submodule");
+
+    let child_path = add_worktree(&repo, "child", "main");
+    let child_workspace = child_path.join(".exomonad/workspace");
+    std::fs::create_dir_all(child_workspace.parent().unwrap())
+        .expect("create child workspace parent");
+    repo.git()
+        .try_run(
+            &child_path,
+            &[
+                "clone",
+                "-q",
+                workspace_upstream.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone workspace into child");
+    repo.git()
+        .try_run(
+            &child_workspace,
+            &["checkout", "--detach", workspace_base.as_str()],
+        )
+        .expect("match the detached submodule checkout used by a worktree");
+    let child_workspace_commit = repo
+        .writer_at(&child_workspace)
+        .commit_file(
+            "child-only.txt",
+            "unpublished\n",
+            "child-only workspace commit",
+        )
+        .expect("create unpublished child workspace commit");
+    assert!(
+        workspace_upstream
+            .git()
+            .try_run(
+                workspace_upstream.path(),
+                &[
+                    "cat-file",
+                    "-e",
+                    &format!("{}^{{commit}}", child_workspace_commit.as_str()),
+                ],
+            )
+            .is_err(),
+        "the workspace commit must not exist in the upstream repository"
+    );
+    repo.git()
+        .try_run(&child_path, &["add", "--", ".exomonad/workspace"])
+        .expect("stage child gitlink bump");
+    let child = repo
+        .writer_at(&child_path)
+        .commit_file("child-side.txt", "child\n", "child project work")
+        .expect("commit child project work");
+
+    let node_path = add_worktree(&repo, "node", "main");
+    let node_workspace = node_path.join(".exomonad/workspace");
+    std::fs::create_dir_all(node_workspace.parent().unwrap())
+        .expect("create node workspace parent");
+    repo.git()
+        .try_run(
+            &node_path,
+            &[
+                "clone",
+                "-q",
+                workspace_upstream.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("clone workspace into target");
+    assert!(
+        repo.git()
+            .try_run(
+                &node_workspace,
+                &[
+                    "cat-file",
+                    "-e",
+                    &format!("{}^{{commit}}", child_workspace_commit.as_str()),
+                ],
+            )
+            .is_err(),
+        "the target workspace must not have the child-only object before merge"
+    );
+    repo.writer_at(&node_path)
+        .commit_file("node-side.txt", "node\n", "node project work")
+        .expect("commit node work");
+
+    let outcome = try_merge(
+        repo.git(),
+        &node_path,
+        &child_path,
+        &child,
+        None,
+        None,
+        "fold child workspace bump",
+    )
+    .expect("fetch should make the source gitlink mergeable");
+    assert!(
+        matches!(outcome, MergeOutcome::CreatedMergeCommit { .. }),
+        "the project changes are otherwise independent: {outcome:?}"
+    );
+    let merged_link = repo
+        .git()
+        .try_run(
+            &node_path,
+            &["ls-tree", "HEAD", "--", ".exomonad/workspace"],
+        )
+        .expect("read merged workspace gitlink");
+    assert_eq!(
+        merged_link.trimmed().split_ascii_whitespace().nth(2),
+        Some(child_workspace_commit.as_str())
+    );
+    repo.git()
+        .try_run(
+            &node_workspace,
+            &[
+                "cat-file",
+                "-e",
+                &format!("{}^{{commit}}", child_workspace_commit.as_str()),
+            ],
+        )
+        .expect("target workspace now has the child-only object");
+    assert_eq!(
+        repo.git()
+            .try_run(&node_workspace, &["rev-parse", "HEAD"])
+            .expect("target workspace HEAD after merge")
+            .trimmed(),
+        child_workspace_commit.as_str(),
+        "the initialized checkout must advance to the merged gitlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(node_workspace.join("child-only.txt"))
+            .expect("merged workspace file"),
+        "unpublished\n"
+    );
+    assert!(
+        inspect::dirty_summary(repo.git(), &node_path)
+            .expect("merged target status")
+            .is_clean(),
+        "the target should be clean after its submodule is synchronized"
+    );
+}
+
+#[test]
 fn unknown_source_commit_is_a_typed_git_failure() {
     let repo = TestRepo::init().expect("init repo");
     repo.writer()
@@ -187,6 +601,7 @@ fn unknown_source_commit_is_a_typed_git_failure() {
     let err = try_merge(
         repo.git(),
         &node_path,
+        repo.path(),
         &GitOid::from_raw("does-not-exist"),
         None,
         None,
@@ -226,6 +641,7 @@ fn moved_readable_branch_returns_manual_handoff_without_mutation() {
     let outcome = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &expected,
         Some(&BranchName::from_raw("child")),
         None,
@@ -277,6 +693,7 @@ fn an_advance_branch_moves_to_the_merge_result() {
     let outcome = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &source,
         Some(&BranchName::from_raw("child")),
         Some(&BranchName::from_raw("integration")),
@@ -350,6 +767,7 @@ fn a_refused_advance_is_a_manual_handoff_over_a_landed_merge() {
     let outcome = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &source,
         None,
         Some(&BranchName::from_raw("integration")),
@@ -416,6 +834,7 @@ fn an_unknown_advance_branch_fails_before_the_merge() {
     let err = try_merge(
         repo.git(),
         &node_path,
+        &child_path,
         &source,
         None,
         Some(&BranchName::from_raw("no-such-branch")),
@@ -464,7 +883,15 @@ fn dirty_target_is_refused_before_merge_mutates_it() {
     );
 
     assert!(matches!(
-        try_merge(repo.git(), &node_path, &source, None, None, "must refuse"),
+        try_merge(
+            repo.git(),
+            &node_path,
+            &child_path,
+            &source,
+            None,
+            None,
+            "must refuse"
+        ),
         Err(WorktreeError::SourceDirty(_))
     ));
     assert_eq!(

@@ -712,6 +712,11 @@ impl WorktreeManager {
             &receipt.cwd,
             &["reset", "--hard", receipt.source_head.as_str()],
         )?;
+        Self::initialize_submodules(
+            &self.git.on_host(),
+            &receipt.cwd,
+            &receipt.source_repository,
+        )?;
         receipt.status = WorktreeRecordStatus::Finalized;
         self.registry.put(&receipt)?;
         Ok(WorktreeHandle::from_receipt(receipt))
@@ -736,7 +741,39 @@ impl WorktreeManager {
         let finalized = self
             .registry
             .install_view(&receipt, namespace, visible_root)?;
+        Self::initialize_submodules(&self.git, &finalized.cwd, &finalized.source_repository)?;
         Ok(WorktreeHandle::from_receipt(finalized))
+    }
+
+    /// Populate every submodule from the gitlinks in this checkout's recorded
+    /// commit. Linked worktrees share the superproject's Git metadata, but not
+    /// their submodule working directories; without this each child sees empty
+    /// workspace paths even though the source commit records the right gitlink.
+    fn initialize_submodules(
+        git: &GitCli,
+        cwd: &Path,
+        source_repository: &Path,
+    ) -> Result<(), WorktreeError> {
+        let local_workspace = source_repository.join(".exomonad/workspace");
+        let mut args: Vec<OsString> = Vec::new();
+        if git.try_exists(&local_workspace.join(".git"))? {
+            let mut override_url = OsString::from("submodule.exomonad-workspace.url=");
+            override_url.push(local_workspace.as_os_str());
+            args.extend([
+                "-c".into(),
+                override_url,
+                "-c".into(),
+                "protocol.file.allow=always".into(),
+            ]);
+        }
+        args.extend([
+            "submodule".into(),
+            "update".into(),
+            "--init".into(),
+            "--recursive".into(),
+        ]);
+        git.try_run(cwd, &args)?;
+        Ok(())
     }
 
     /// Bind a completed checkout to its retained launch view, or reattach that
@@ -858,6 +895,8 @@ impl WorktreeManager {
             // provisional until the source-view owner completes that step.
             return Ok(WorktreeHandle::from_receipt(provisional));
         }
+
+        Self::initialize_submodules(&host_git, &cwd, &resolved.source_repository)?;
 
         let finalized = WorktreeReceipt {
             status: WorktreeRecordStatus::Finalized,

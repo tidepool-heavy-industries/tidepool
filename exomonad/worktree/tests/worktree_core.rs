@@ -99,6 +99,193 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
 }
 
 #[test]
+fn created_worktree_initializes_submodules_at_the_recorded_gitlink() {
+    let workspace = TestRepo::init().expect("init workspace repository");
+    workspace
+        .writer()
+        .commit_file("Project/Generic.hs", "module Generic where\n", "workspace")
+        .expect("commit workspace module");
+
+    let repo = TestRepo::init().expect("init project repository");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--name",
+                "exomonad-workspace",
+                workspace.path().to_str().expect("workspace path is utf8"),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("add workspace submodule");
+    repo.git()
+        .try_run(repo.path(), &["commit", "-q", "-m", "add workspace"])
+        .expect("commit workspace gitlink");
+    let recorded = repo
+        .git()
+        .try_run(repo.path(), &["rev-parse", "HEAD:.exomonad/workspace"])
+        .expect("read recorded workspace gitlink");
+
+    let base = tempfile::TempDir::new().expect("tempdir");
+    // Test-only transport permission for the local fixture URL. Production
+    // worktree creation does not broaden Git's protocol policy.
+    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let git = GitCli::new().with_env("GIT_ALLOW_PROTOCOL", "file:https:ssh:git");
+    let child = WorktreeManager::new(git, registry, base.path().join("worktrees"), repo.path())
+        .create(&WorktreeSpec::from_current_repository("workspace-child"))
+        .expect("create child worktree");
+
+    assert_eq!(
+        GitCli::new()
+            .try_run(
+                &child.cwd().join(".exomonad/workspace"),
+                &["rev-parse", "HEAD"]
+            )
+            .expect("read child workspace HEAD")
+            .trimmed(),
+        recorded.trimmed(),
+        "the child must check out the exact gitlink recorded by its source commit"
+    );
+    assert!(child
+        .cwd()
+        .join(".exomonad/workspace/Project/Generic.hs")
+        .is_file());
+}
+
+#[test]
+fn created_worktree_fetches_an_unpublished_workspace_commit_from_its_parent() {
+    let upstream_workspace = TestRepo::init().expect("init upstream workspace");
+    upstream_workspace
+        .writer()
+        .commit_file(
+            "Project/Generic.hs",
+            "module Generic where\n",
+            "published workspace",
+        )
+        .expect("commit published workspace module");
+
+    let repo = TestRepo::init().expect("init project repository");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--name",
+                "exomonad-workspace",
+                upstream_workspace
+                    .path()
+                    .to_str()
+                    .expect("workspace path is utf8"),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("add workspace submodule");
+    let parent_workspace = repo.path().join(".exomonad/workspace");
+    repo.git()
+        .try_run(&parent_workspace, &["checkout", "-q", "-b", "local-only"])
+        .expect("create unpublished workspace branch");
+    let unpublished = repo
+        .writer_at(&parent_workspace)
+        .commit_file(
+            "Project/Private.hs",
+            "module Private where\n",
+            "unpublished workspace change",
+        )
+        .expect("commit unpublished workspace change");
+    repo.git()
+        .try_run(repo.path(), &["add", "--", ".exomonad/workspace"])
+        .expect("stage unpublished gitlink");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &["commit", "-q", "-m", "record local workspace commit"],
+        )
+        .expect("commit project gitlink");
+    let upstream_url = repo
+        .git()
+        .try_run(
+            repo.path(),
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "--get",
+                "submodule.exomonad-workspace.url",
+            ],
+        )
+        .expect("read upstream URL");
+
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    // Parent-local transport must work with ordinary production Git policy;
+    // the child cannot fetch this commit from the upstream URL.
+    let git = GitCli::new();
+    let manager = WorktreeManager::new(git, registry, base.path().join("worktrees"), repo.path());
+    let parent = manager
+        .create(&WorktreeSpec::from_current_repository(
+            "local-workspace-parent",
+        ))
+        .expect("create parent from local workspace commit");
+    let child = manager
+        .create(&WorktreeSpec::from_worktree(
+            parent.id().clone(),
+            "local-workspace-child",
+        ))
+        .expect("create child from parent's local workspace repository");
+
+    let child_workspace = child.cwd().join(".exomonad/workspace");
+    assert_eq!(
+        GitCli::new()
+            .try_run(&child_workspace, &["rev-parse", "HEAD"])
+            .expect("read child workspace HEAD")
+            .trimmed(),
+        unpublished.as_str(),
+        "child should receive the parent-local commit absent from the upstream repo"
+    );
+    assert!(child_workspace.join("Project/Private.hs").is_file());
+    assert_eq!(
+        GitCli::new()
+            .try_run(
+                child.cwd(),
+                &[
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "--get",
+                    "submodule.exomonad-workspace.url",
+                ],
+            )
+            .expect("read child's recorded upstream URL")
+            .trimmed(),
+        upstream_url.trimmed(),
+        "the command-scoped URL override must not rewrite .gitmodules"
+    );
+    assert_eq!(
+        GitCli::new()
+            .try_run(
+                child.cwd(),
+                &[
+                    "config",
+                    "--local",
+                    "--get",
+                    "submodule.exomonad-workspace.url",
+                ],
+            )
+            .expect("read child's initialized upstream URL")
+            .trimmed(),
+        upstream_url.trimmed(),
+        "initialization must persist the upstream URL, not the command override"
+    );
+}
+
+#[test]
 fn source_checkout_registration_is_clean_idempotent_and_non_mutating() {
     let repo = TestRepo::init().expect("init");
     repo.writer()
