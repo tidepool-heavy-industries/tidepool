@@ -572,10 +572,13 @@ impl NativeForkAdmission {
             let host_path = parent.workspace.host_path.clone();
             let preserved = parent.workspace.source_preserved_mounts.clone();
             let captured = tokio::task::spawn_blocking(move || {
+                // Sibling admissions can briefly hold the repository Git lane.
+                // Wait for that ordinary overlap, but never fall back to HEAD
+                // when a live source checkpoint remains unavailable.
                 let _admission = capture_layout
                     .worktrees
                     .git()
-                    .try_capture()
+                    .capture_within(std::time::Duration::from_secs(3))
                     .ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::WouldBlock,
