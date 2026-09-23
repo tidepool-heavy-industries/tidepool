@@ -224,7 +224,11 @@ await :: (Member Commands effects) => Job -> Eff effects RunResult
 await retained@(Job key) = do
   observation <- checked <$> send (CommandForegroundWith key)
   let result = Finished retained (observedCommandResult observation) (observedCommandOutput observation)
-  send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> resultHeading (commandResult result)) 65536))
+  -- The status/next block belongs to the returned 'RunResult's own Display
+  -- instance, which renders it once when the result is the cell's value (or
+  -- the shortened "output retained" form when this job was already shown).
+  -- Presenting it again here would print the same block twice.
+  send (CommandPresentWith key (CommandVisible ("session_id: " <> key) 65536))
   pure result
 
 -- | Wait briefly and display newly available output, retaining the same job.

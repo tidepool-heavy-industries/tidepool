@@ -289,13 +289,14 @@ async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
 pub(super) async fn backend_request(
     campaign: &mut TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
-    loop {
-        if let LocalResidentDeployment::CommandBackend(request) =
-            campaign.deployments.recv().await.unwrap()
-        {
-            return request;
-        }
-    }
+    campaign
+        .next_deployment("backend request", Duration::from_secs(30), |event| {
+            match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            }
+        })
+        .await
 }
 
 #[tokio::test]
@@ -1373,12 +1374,25 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
     assert!(!text(0).contains("stdout ·"), "{result}");
     assert!(!text(1).contains("stdout ·"), "{result}");
     assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
+    // The finished-command status/next block renders exactly once, not once
+    // from `await`'s own presentation and again from the returned RunResult's
+    // automatic display.
+    assert_eq!(
+        text(2).matches("next: inspect outcome and output").count(),
+        1,
+        "status block renders once: {result}"
+    );
     assert!(text(3).contains("Right \"result\""), "{result}");
     // The summarized bound command's output is first presented here, once.
     assert_eq!(
         text(4).matches("stdout ·").count(),
         1,
         "await presents output exactly once: {result}"
+    );
+    assert_eq!(
+        text(4).matches("next: inspect outcome and output").count(),
+        1,
+        "status block renders once: {result}"
     );
     assert!(
         text(5).contains("result"),
