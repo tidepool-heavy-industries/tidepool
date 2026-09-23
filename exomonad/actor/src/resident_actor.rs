@@ -1460,7 +1460,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             // Delivering a transition for it would send its owner to
             // `pollWatch`, which can only answer `WatchUnavailable
             // (WatchRejected ReplyStale)` — a notice about nothing.
-            if !self.environment.requests.retains_watch(notification.watch) {
+            if !self
+                .environment
+                .requests
+                .retains_watch(notification.owner, notification.watch)
+            {
                 continue;
             }
             let _ = self
@@ -7958,6 +7962,16 @@ where
             },
             receiver,
         )
+    }
+
+    /// Read whether an exact actor still owns a retained watch.
+    ///
+    /// The facade uses this nonblocking registry observation immediately
+    /// before presenting a queued watch-transition notice. It does not grant
+    /// authority to poll or transfer the watch.
+    #[must_use]
+    pub fn retains_watch(&self, owner: ActorRef, watch: crate::WatchId) -> bool {
+        self.environment.requests.retains_watch(owner, watch)
     }
 
     /// Install the host's reader for an actor's own conversation. Without one,

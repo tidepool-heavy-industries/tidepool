@@ -657,8 +657,12 @@ impl RequestRegistry {
     /// poll an id the registry no longer knows, and be answered
     /// `WatchUnavailable (WatchRejected ReplyStale)`. Publishers ask here
     /// rather than each keeping their own forgotten-id set.
-    pub(crate) fn retains_watch(&self, watch: WatchId) -> bool {
-        self.state.lock().watches.contains_key(&watch)
+    pub(crate) fn retains_watch(&self, owner: ActorRef, watch: WatchId) -> bool {
+        self.state
+            .lock()
+            .watches
+            .get(&watch)
+            .is_some_and(|record| record.owner == owner)
     }
 
     pub(crate) fn active_for_target(&self, target: ActorRef) -> Vec<(RequestId, String)> {
@@ -2864,14 +2868,36 @@ mod tests {
             notifications.iter().any(|notice| notice.watch == watch),
             "the settled request must produce the watch transition under test"
         );
-        assert!(registry.retains_watch(watch));
+        assert!(registry.retains_watch(owner, watch));
 
         let targets = [target].into_iter().collect();
         let outcome = registry.cleanup_campaign_metadata(owner, &targets);
         assert_eq!(outcome.forgotten_watches, vec![watch]);
         assert!(
-            !registry.retains_watch(watch),
+            !registry.retains_watch(owner, watch),
             "a notice for a forgotten watch must not be delivered"
         );
+    }
+
+    #[test]
+    fn watch_retention_is_scoped_to_its_exact_owner() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let intruder = actor(3);
+        let target = actor(2);
+
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        assert!(registry.retains_watch(owner, watch));
+        assert!(!registry.retains_watch(intruder, watch));
+        assert!(!registry.retains_watch(
+            ActorRef {
+                id: owner.id,
+                incarnation: crate::Incarnation(2),
+            },
+            watch
+        ));
     }
 }

@@ -1202,6 +1202,7 @@ struct OwnerNotification {
 }
 
 type ActorInbox = DurableInbox<DurableActorEvent, DeliveryProvenance>;
+type WatchRetentionCheck = Arc<dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -1307,7 +1308,7 @@ impl DurableActorEvent {
                 elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
-                "watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
+                "watch {} {:?}: {:?} → {:?} ({}). This records the transition when it was observed; cleanup may since have forgotten the watch.",
                 notification.watch.0,
                 notification.label,
                 notification.previous,
@@ -1909,6 +1910,7 @@ struct InteractiveFleet {
     bindings: Arc<Mutex<BindingTable>>,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
+    watch_retention: WatchRetentionCheck,
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
@@ -2023,7 +2025,9 @@ pub(crate) async fn run(
         Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
-        .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(&config.workspace)?)
+        .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
+            &config.workspace,
+        )?)
         .with_recovery_journal(actor_recovery.clone())
         .with_conversation_reader(conversation_reader(
             application_owners.clone(),
@@ -2182,6 +2186,9 @@ pub(crate) async fn run(
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
+    let watch_forest = Arc::clone(&forest);
+    let watch_retention: WatchRetentionCheck =
+        Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2195,6 +2202,7 @@ pub(crate) async fn run(
             bindings,
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
+            watch_retention,
             source_layers,
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
@@ -3082,6 +3090,7 @@ async fn run_interactive_applications(
         bindings,
         readiness,
         worktree_authority,
+        watch_retention,
         source_layers,
         actor_recovery,
         recovered_threads,
@@ -3814,6 +3823,7 @@ async fn run_interactive_applications(
                             Arc::clone(&deployment.update_reconciliations),
                             deployment.workspace.clone(),
                             deployment.runtime_observation.clone(),
+                            Arc::clone(&watch_retention),
                             source_layers.clone(),
                             worktrees.clone(),
                             stop_delivery,
@@ -5263,6 +5273,32 @@ async fn deliver_pending(
     workspace: &Path,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
 ) -> Result<(), String> {
+    deliver_pending_checked(
+        actor,
+        inbox,
+        thread,
+        backend,
+        producer,
+        reconciliations,
+        workspace,
+        runtime_observation,
+        &|_, _| true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_pending_checked(
+    actor: ActorRef,
+    inbox: &Arc<ActorInbox>,
+    thread: &QueueReadyThread,
+    backend: &dyn InteractiveAgentBackend,
+    producer: &InputProducerId,
+    reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
+    workspace: &Path,
+    runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
+    watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
+) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
     let pending = tokio::task::spawn_blocking(move || pending_inbox.legacy_pending_prefix())
@@ -5281,8 +5317,39 @@ async fn deliver_pending(
         )
         .await;
     };
-    let inbox_watermark = inbox.watermark();
     let inbox_sequence = last.sequence;
+    let mut suppressed_watches = Vec::new();
+    let pending = pending
+        .into_iter()
+        .filter(|message| {
+            let DurableActorEvent::Typed(TypedActorEvent::WatchChanged { notification }) =
+                &message.payload
+            else {
+                return true;
+            };
+            if watch_retained(notification.owner, notification.watch) {
+                true
+            } else {
+                suppressed_watches.push((message.sequence, notification.owner, notification.watch));
+                false
+            }
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        let ack_inbox = Arc::clone(inbox);
+        tokio::task::spawn_blocking(move || ack_inbox.acknowledge(inbox_sequence))
+            .await
+            .map_err(|error| format!("actor inbox acknowledgement task: {error}"))?
+            .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            actor = ?actor,
+            inbox_sequence,
+            suppressed_watches = ?suppressed_watches,
+            "suppressed queued watch notices whose handles were forgotten"
+        );
+        return Ok(());
+    }
+    let inbox_watermark = inbox.watermark();
     let activation = pending
         .iter()
         .rev()
@@ -5332,6 +5399,14 @@ async fn deliver_pending(
         event_count = pending.len(),
         "actor activation batch delivered"
     );
+    if !suppressed_watches.is_empty() {
+        tracing::debug!(
+            actor = ?actor,
+            inbox_sequence,
+            suppressed_watches = ?suppressed_watches,
+            "suppressed queued watch notices whose handles were forgotten"
+        );
+    }
     Ok(())
 }
 
@@ -5382,7 +5457,7 @@ async fn deliver_tracked_message(
             ),
         )?;
         return Err(format!(
-            "message {sequence} retains terminal compacted evidence; later delivery is fenced"
+            "message {sequence} native operation {native_key} retains terminal compacted evidence; later delivery is fenced"
         ));
     }
     if matches!(evidence.context, DeliveryProvenance::RequestUpdate { .. })
@@ -5514,8 +5589,9 @@ async fn deliver_tracked_message(
             inbox
                 .confirm_compacted_exact(sequence, &evidence.context)
                 .map_err(|e| e.to_string())?;
-            let detail =
-                "native input evidence was compacted; resubmission remains fenced".to_owned();
+            let detail = format!(
+                "message {sequence} native operation {native_key} has compacted input evidence; resubmission remains fenced"
+            );
             finish_update_reconciliation(
                 reconciliations,
                 &native_key,
@@ -5526,9 +5602,16 @@ async fn deliver_tracked_message(
         exomonad_agent::InputAdmission::NotSubmitted
         | exomonad_agent::InputAdmission::Admitted
         | exomonad_agent::InputAdmission::Dispatching
-        | exomonad_agent::InputAdmission::Unknown => Err(format!(
-            "message {sequence} awaits terminal native input evidence"
-        )),
+        | exomonad_agent::InputAdmission::Unknown => {
+            let phase = match inbox.observe_receipt(sequence) {
+                Ok(ReceiptLookup::Retained(receipt)) => format!("{:?}", receipt.phase),
+                Ok(ReceiptLookup::Unavailable) => "unavailable".to_owned(),
+                Err(error) => format!("unreadable ({error})"),
+            };
+            Err(format!(
+                "message {sequence} native operation {native_key} remains pending in durable phase {phase}; latest provider input state: {outcome:?}"
+            ))
+        }
     }
 }
 
@@ -5569,6 +5652,7 @@ async fn run_delivery_pump(
     reconciliations: Arc<Mutex<BTreeMap<String, PendingUpdateReconciliation>>>,
     workspace: PathBuf,
     runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
+    watch_retained: WatchRetentionCheck,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: WorktreeManager,
     mut shutdown: oneshot::Receiver<()>,
@@ -5580,7 +5664,7 @@ async fn run_delivery_pump(
         tokio::select! {
             _ = &mut shutdown => return,
             _ = health.tick() => {
-                let result = deliver_pending(
+                let result = deliver_pending_checked(
                     actor,
                     &inbox,
                     &thread,
@@ -5589,6 +5673,7 @@ async fn run_delivery_pump(
                     &reconciliations,
                     &workspace,
                     &runtime_observation,
+                    watch_retained.as_ref(),
                 ).await;
                 match result {
                     Ok(()) => {
@@ -8142,6 +8227,10 @@ mod tests {
         assert!(watch
             .render(Some(800_000))
             .contains("elapsed time unavailable"));
+        assert!(watch
+            .render(None)
+            .contains("cleanup may since have forgotten"));
+        assert!(!watch.render(None).contains("pollWatch"));
         let encoded = serde_json::to_value(&watch).expect("serialize typed watch event");
         assert_eq!(encoded["type"], "watchChanged");
         assert_eq!(encoded["watch"], 9);
@@ -8173,6 +8262,73 @@ mod tests {
                 .expect("decode legacy actor event"),
             DurableActorEvent::Text("old notice".into())
         );
+    }
+
+    #[tokio::test]
+    async fn queued_watch_forgotten_before_delivery_is_acknowledged_without_prompting() {
+        use exomonad_agent::BackendThreadId;
+
+        let root = tempfile::tempdir().unwrap();
+        let rows = root.path().join("rows");
+        let cursor = root.path().join("cursor");
+        let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor).unwrap());
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let notification = exomonad_actor::WatchNotification {
+            owner: actor,
+            watch: exomonad_actor::WatchId(19),
+            label: "join".into(),
+            previous: exomonad_actor::WatchStateProjection::Pending,
+            current: exomonad_actor::WatchStateProjection::Ready,
+            transition: exomonad_actor::WatchTransition::Ready,
+            occurred_at_unix_ms: 0,
+            sequence: exomonad_actor::ActorEventSequence(1),
+            watermark: exomonad_actor::ActorEventSequence(1),
+        };
+        inbox
+            .publish(DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
+                notification: notification.clone(),
+            }))
+            .unwrap();
+        let backend = ScriptedPush {
+            fail: std::sync::atomic::AtomicBool::new(false),
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let binding = root.path().join("binding.json");
+        exomonad_agent::accept_interactive_session_binding(
+            &binding,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = exomonad_agent::read_interactive_binding(&binding)
+            .await
+            .unwrap();
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+        let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+
+        deliver_pending_checked(
+            actor,
+            &inbox,
+            &thread,
+            &backend,
+            &producer,
+            &reconciliations,
+            root.path(),
+            &observation,
+            &|owner, watch| owner != actor || watch != notification.watch,
+        )
+        .await
+        .unwrap();
+
+        assert!(backend.messages.lock().unwrap().is_empty());
+        assert_eq!(inbox.cursor(), 1);
+        assert_eq!(inbox.watermark(), 1);
+        assert!(inbox.pending().unwrap().is_empty());
+        assert!(std::fs::read_to_string(rows)
+            .unwrap()
+            .contains("watchChanged"));
     }
 
     impl InteractiveAgentBackend for ScriptedPush {
@@ -10429,7 +10585,7 @@ mod tests {
         let nested_submitted = tokio::spawn(async move {
             dispatch_haskell_script(
                 scaffold_policy.as_ref(),
-                "nested <- unfold (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport boundHead (assignment \"implementation\" (7 :: Int))) <*> child (coding @EchoReport boundHead (assignment \"verification\" (\"nested\" :: Text))))",
+                "nested <- unfold (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport boundHead (assignment [label|implementation|] (7 :: Int))) <*> child (coding @EchoReport boundHead (assignment [label|verification|] (\"nested\" :: Text))))",
             )
             .await
         });
