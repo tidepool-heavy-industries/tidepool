@@ -801,10 +801,15 @@ impl RequestRegistry {
         notify_owner: bool,
     ) -> RequestId {
         let mut state = self.state.lock();
-        state.next_request = state
-            .next_request
-            .checked_add(1)
-            .expect("request identity exhausted");
+        // `next_request` is a per-process u64 counter; wraparound needs
+        // 2^64 reservations in one process lifetime and is not reachable.
+        #[allow(clippy::expect_used)]
+        {
+            state.next_request = state
+                .next_request
+                .checked_add(1)
+                .expect("request identity exhausted");
+        }
         let id = RequestId(state.next_request);
         state.requests.insert(
             id,
@@ -1376,10 +1381,15 @@ impl RequestRegistry {
         for actor in touched {
             *state.cleanup_revision.entry(actor).or_default() += 1;
         }
-        state.next_watch = state
-            .next_watch
-            .checked_add(1)
-            .expect("watch identity exhausted");
+        // `next_watch` is a per-process u64 counter; wraparound needs
+        // 2^64 registrations in one process lifetime and is not reachable.
+        #[allow(clippy::expect_used)]
+        {
+            state.next_watch = state
+                .next_watch
+                .checked_add(1)
+                .expect("watch identity exhausted");
+        }
         let id = WatchId(state.next_watch);
         state.watches.insert(
             id,

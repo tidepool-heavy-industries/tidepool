@@ -930,7 +930,7 @@ impl MailboxTable {
     ) -> Result<(), EventError> {
         let owner = self
             .live
-            .get(&id)
+            .get(id)
             .ok_or_else(|| EventError::EventUnknownMailbox(id.raw.clone()))?;
         if *owner != caller {
             return Err(EventError::EventMailboxDenied(
