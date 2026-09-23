@@ -97,23 +97,22 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// first time any request's rotation bound is reached, which only makes
 /// sense for the single short-lived worker that mode was designed around
 /// (see `tidepool/extract-cmd/CLAUDE.md`).
-const DEFAULT_WORKER_COUNT: usize = 2;
+const DEFAULT_WORKER_COUNT: usize = 3;
 /// Total resident-worker RSS budget a `--persistent` daemon divides evenly
 /// across its worker slots for each slot's default rotation ceiling
 /// (`worker_rss_ceiling_mb = DEFAULT_MEMORY_BUDGET_MB / worker_count`).
 /// `--rss-ceiling-mb` keeps its old meaning — a per-worker ceiling — and, when
 /// given explicitly, overrides that derived figure instead of the total.
 ///
-/// Sized for a 31 GiB box: at the default `DEFAULT_WORKER_COUNT` (2) this is
-/// 10 GiB per worker — unchanged from the single-worker daemon's old fixed
-/// ceiling. That figure came from measurement, not headroom arithmetic: a
-/// real warm GHC worker's RSS runs 6.1-6.5 GiB, so a lower ceiling (e.g. the
-/// 6 GiB two extra slots at a fixed 18 GiB budget would have given each
-/// worker) rotates on almost every request and discards the module memo the
-/// ceiling exists to protect. Two 10 GiB workers (20 GiB) leaves roughly
-/// 11 GiB for the concurrent cargo/nextest build issuing those `ghc-heavy`
-/// requests alongside the pool.
-const DEFAULT_MEMORY_BUDGET_MB: u64 = 20 * 1024;
+/// Sized for a 31 GiB box that runs nothing else: at the default
+/// `DEFAULT_WORKER_COUNT` (3) this is 7 GiB per worker. The ceiling comes
+/// from measurement, not headroom arithmetic: a real warm GHC worker's RSS
+/// runs 6.1-6.5 GiB, so a lower ceiling (e.g. the 6 GiB a fourth slot would
+/// leave) rotates on almost every request and discards the module memo the
+/// ceiling exists to protect. Three 7 GiB workers (21 GiB) leaves roughly
+/// 10 GiB for the concurrent cargo/nextest build issuing those `ghc-heavy`
+/// requests alongside the pool. A shared box should pass `--workers 2`.
+const DEFAULT_MEMORY_BUDGET_MB: u64 = 21 * 1024;
 /// Absolute wall-clock bound on a single compiler request served by the
 /// pinned GHC worker (begin_transaction/request/end_transaction are cheap;
 /// this bounds the request itself). The daemon's accept loop is
@@ -2053,11 +2052,11 @@ mod tests {
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
         assert_eq!(DEFAULT_ROTATE_AFTER, 1024);
         assert_eq!(DEFAULT_REQUEST_DEADLINE, Duration::from_secs(15 * 60));
-        assert_eq!(DEFAULT_WORKER_COUNT, 2);
-        assert_eq!(DEFAULT_MEMORY_BUDGET_MB, 20 * 1024);
+        assert_eq!(DEFAULT_WORKER_COUNT, 3);
+        assert_eq!(DEFAULT_MEMORY_BUDGET_MB, 21 * 1024);
         assert_eq!(
             DEFAULT_MEMORY_BUDGET_MB / DEFAULT_WORKER_COUNT as u64,
-            10 * 1024,
+            7 * 1024,
             "the default per-worker RSS ceiling is the total budget split across the default worker count"
         );
     }

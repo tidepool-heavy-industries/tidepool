@@ -74,7 +74,7 @@ instead, so a restart only restores warmth. Other agents and test runs share
 the persistent daemon: restart it once, at a quiet point, never per parcel.
 `just daemon-stop` lets an in-flight compile finish before the daemon exits.
 Leave the host cargo config's incremental compilation on (no
-`CARGO_INCREMENTAL=0`) and cap jobs to fit beside a 10 GiB GHC worker.
+`CARGO_INCREMENTAL=0`) and cap jobs to fit beside three 7 GiB GHC workers.
 
 Large integration suites use small entry points in `tests/suites/` that import
 separate test files as modules. Cargo's `autotests = false` prevents linking a
