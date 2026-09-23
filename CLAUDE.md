@@ -72,9 +72,8 @@ suite, and check runs reuse it automatically while its producer matches the
 current extractor and worker; after a rebuild they start their own daemon
 instead, so a restart only restores warmth. Other agents and test runs share
 the persistent daemon: restart it once, at a quiet point, never per parcel.
-Leave the host cargo config's
-incremental compilation on (no `CARGO_INCREMENTAL=0`) and cap jobs to fit
-beside a 10 GiB GHC worker.
+Leave the host cargo config's incremental compilation on (no
+`CARGO_INCREMENTAL=0`) and cap jobs to fit beside a 10 GiB GHC worker.
 
 Large integration suites use small entry points in `tests/suites/` that import
 separate test files as modules. Cargo's `autotests = false` prevents linking a
@@ -83,8 +82,8 @@ coverage of every top-level test file. Add new tests to the appropriate
 suite entry point. Nextest still runs each test in its own process.
 
 `just test-find NAME` prints the exact command for a test function without
-building. Use `just test-target CRATE SUITE 'test(module::name)'` to restrict compilation
-as well as execution. `just test CRATE FILTER` selects tests across all targets
+building. Use `just test-target CRATE SUITE 'test(module::name)'` to restrict
+compilation as well as execution. `just test CRATE FILTER` selects tests across all targets
 and may compile more than needed. `just suite CRATE` builds each declared suite
 as it reaches it. Routine dev/test builds omit debug information while retaining
 symbols and GC-required frame pointers. To opt into debugger information, set
