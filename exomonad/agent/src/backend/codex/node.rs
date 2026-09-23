@@ -536,6 +536,7 @@ fn command_for(
         }
     }
     command
+        .arg("--no-daemon")
         .arg("--ask-for-approval")
         .arg("never")
         .arg("--sandbox");
@@ -1119,6 +1120,7 @@ mod tests {
         ] {
             let requested = spec(mode);
             let command = command_for(&installation(), &requested).unwrap();
+            assert!(command.args.iter().any(|arg| arg == "--no-daemon"));
             let overrides = command
                 .args
                 .windows(2)
