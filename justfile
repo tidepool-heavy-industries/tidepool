@@ -133,6 +133,13 @@ exomonad-repl *args:
     test -e "$HOME/dev/exomonad-repl/.git" || { echo "missing $HOME/dev/exomonad-repl; run exomonad new ~/dev/exomonad-repl first" >&2; exit 1; }
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-repl" --model gpt-6-astra --effort medium
 
+# Build this Exomonad checkout and run it against the model-harness repository
+# (a build wave outside this repository). Extra arguments go to `exomonad init`.
+[positional-arguments]
+exomonad-harness *args:
+    test -e "$HOME/dev/exomonad-harness/.exomonad/config.toml" || { echo "missing $HOME/dev/exomonad-harness/.exomonad; run exomonad new ~/dev/exomonad-harness first" >&2; exit 1; }
+    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-harness"
+
 # Pre-review gate: check, suite registration, fixtures; all run, all failures reported.
 verify:
     {{ nix }} scripts/verify.sh

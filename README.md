@@ -289,6 +289,12 @@ Then, from the repository you want to work on:
 Detach with `Ctrl-b d`, or use `--no-attach` and the printed connection
 information. Model and Jev calls use your accounts.
 
+From a development checkout of this repository, without a Nix build,
+`just exomonad-init -- --workspace /path/to/repo` builds the matched tools
+incrementally and starts the same run against that repository after its
+`exomonad new`; `just exomonad-harness` is that recipe aimed at
+`~/dev/exomonad-harness`.
+
 For a first task, ask the agent to investigate a real repository issue,
 retain its evidence, and save a useful investigation function. Then ask it
 to reuse that function. This exercises the central loop, not just the chat

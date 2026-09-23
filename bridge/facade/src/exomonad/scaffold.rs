@@ -435,3 +435,29 @@ pub(super) fn project_flake_hint(workspace: &Path) -> String {
         workspace.display()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_WORKSPACE_REV;
+    use exomonad_worktree::GitCli;
+    use std::path::Path;
+
+    /// `exomonad new` installs the workspace commit this checkout compiled and
+    /// checked: the pin above must be the `.exomonad/workspace` gitlink of the
+    /// repository HEAD, or a project gets modules nobody here ran.
+    #[test]
+    fn default_workspace_rev_is_this_checkouts_workspace_gitlink() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(listing) = GitCli::new().run(&repository, &["ls-tree", "HEAD", ".exomonad/workspace"])
+        else {
+            eprintln!("skipped: not a git checkout");
+            return;
+        };
+        // `ls-tree` prints mode, type, object, path.
+        let gitlink = listing.stdout.split_whitespace().nth(2).unwrap_or_default();
+        assert_eq!(
+            gitlink, DEFAULT_WORKSPACE_REV,
+            "DEFAULT_WORKSPACE_REV must match the .exomonad/workspace gitlink at HEAD"
+        );
+    }
+}
