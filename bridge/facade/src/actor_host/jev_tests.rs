@@ -456,12 +456,12 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
     );
 }
 
-async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
+async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign {
     TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.jev = Some(backend);
+            config.jev = Some(backend as exomonad_actor::JevBackendHandle);
             pinned_jev_workspace(config);
         },
     )
