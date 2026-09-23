@@ -91,12 +91,16 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                 match owner.admit_actor().await {
                     Ok(_reservation) => {
                         if send(&mut stream, &Response::ActorAdmitted).await.is_ok() {
-                            // The connection itself is the startup reservation lease.
-                            let _ = stream.read_u8().await;
+                            // The connection itself is the startup reservation lease;
+                            // best-effort: only its close (any read outcome) matters.
+                            stream.read_u8().await.ok();
                         }
                     }
                     Err(error) => {
-                        let _ = send(&mut stream, &Response::Error(error.to_string())).await;
+                        // best-effort: the client may already have disconnected.
+                        send(&mut stream, &Response::Error(error.to_string()))
+                            .await
+                            .ok();
                     }
                 }
                 return;
@@ -131,7 +135,10 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                 Request::ActorAdmission => unreachable!("startup lease handled above"),
             };
             let response = result.unwrap_or_else(|error| Response::Error(error.to_string()));
-            let _ = tokio::time::timeout(IO_TIMEOUT, send(&mut stream, &response)).await;
+            // best-effort: the client may already have disconnected or timed out.
+            tokio::time::timeout(IO_TIMEOUT, send(&mut stream, &response))
+                .await
+                .ok();
         });
     }
 }

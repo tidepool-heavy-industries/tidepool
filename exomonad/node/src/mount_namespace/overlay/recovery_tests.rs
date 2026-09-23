@@ -21,8 +21,9 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         drop(self.child.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // best-effort: Drop cannot propagate; the worker may already have exited.
+        self.child.kill().ok();
+        self.child.wait().ok();
     }
 }
 
@@ -58,6 +59,7 @@ fn fixture(root: &Path) -> (Worker, MountNamespace, OverlayRotation) {
             ],
         },
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture worker process")]
     let mut child = Command::new(invocation.program)
         .args(invocation.args)
         .stdin(Stdio::piped())

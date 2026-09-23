@@ -392,6 +392,10 @@ impl MountNamespace {
             .preparation
             .clone()
             .unwrap_or_else(|| descriptors.clone());
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "backs process_scope::spawn_with_stdio/host_command::spawn, the process launcher"
+        )]
         let mut command = Command::new(program);
         // The helper re-exec names this executable by descriptor: the entered
         // view's `/proc` may belong to another PID namespace, where

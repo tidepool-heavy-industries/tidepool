@@ -670,10 +670,12 @@ fn panicked_mutation_owner_requires_reopen_not_mutex_poison_recovery() {
     inbox
         .publish_tracked("pending".into(), "owner".into())
         .unwrap();
-    let _ = std::panic::catch_unwind(|| {
+    // The panic payload isn't inspected; only the mutex-poisoning side effect matters.
+    std::panic::catch_unwind(|| {
         let _state = inbox.state.lock().unwrap();
         panic!("interrupted mutation");
-    });
+    })
+    .ok();
     assert!(matches!(
         inbox.publish("new".into()),
         Err(InboxError::Poisoned)

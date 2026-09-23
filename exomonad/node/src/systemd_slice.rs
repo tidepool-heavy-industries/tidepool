@@ -67,6 +67,10 @@ impl SystemdSlice {
 
     /// Require explicit machine configuration rather than an unlimited implicit slice.
     pub async fn inspect(&self) -> std::io::Result<SliceLimits> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "short synchronous probe of systemd slice properties, not a long-lived child"
+        )]
         let output = tokio::process::Command::new("systemctl")
             .args([
                 "--user",

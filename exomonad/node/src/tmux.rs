@@ -447,6 +447,7 @@ impl TmuxSession {
     }
 
     fn command(&self) -> Command {
+        #[allow(clippy::disallowed_methods, reason = "the process launcher")]
         let mut command = Command::new("tmux");
         command.kill_on_drop(true);
         if let Some(socket) = &self.socket {
@@ -802,7 +803,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "diagnostic pane did not exit"
             );
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         };
         assert_eq!(status.exit_status, Some(17));
         assert!(session

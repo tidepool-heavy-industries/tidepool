@@ -224,6 +224,7 @@ impl HostCommand {
                 args: arguments.to_vec(),
             },
         };
+        #[allow(clippy::disallowed_methods, reason = "the process launcher")]
         let mut command = Command::new(&invocation.program);
         command
             .args(&invocation.args)
@@ -278,7 +279,9 @@ impl HostCommand {
     pub async fn wait(&self) -> std::io::Result<HostExit> {
         let status = self.child.lock().await.wait().await?;
         for reader in self.readers.lock().await.drain(..) {
-            let _ = reader.await;
+            // best-effort: the drain task's own join error carries nothing we
+            // act on; the captured buffers are what callers read.
+            reader.await.ok();
         }
         use std::os::unix::process::ExitStatusExt;
         Ok(match (status.code(), status.signal()) {

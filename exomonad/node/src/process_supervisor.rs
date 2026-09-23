@@ -301,6 +301,10 @@ impl ProcessSupervisorClient {
             let remaining = deadline
                 .checked_sub(started.elapsed())
                 .ok_or(ProcessSupervisorError::Deadline)?;
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "synchronous supervisor client poll loop, not async"
+            )]
             std::thread::sleep(Duration::from_millis(10).min(remaining));
             response = self.request(ProcessSupervisorCommand::Inspect, remaining)?;
             if !response.operation_pending
@@ -421,6 +425,10 @@ impl ProcessSupervisorRecovery {
             let remaining = deadline
                 .checked_sub(started.elapsed())
                 .ok_or(ProcessSupervisorError::Deadline)?;
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "synchronous supervisor client poll loop, not async"
+            )]
             std::thread::sleep(Duration::from_millis(10).min(remaining));
             response = self.request(ProcessSupervisorCommand::Inspect, remaining)?;
         }
@@ -612,7 +620,9 @@ pub fn run_process_supervisor(path: &Path) -> Result<(), ProcessSupervisorError>
     publish_checkpoint(&manifest, &scope.observed()?)?;
     let result = serve(&listener, &manifest, &scope);
     drop(scope);
-    let _ = worker.join();
+    // best-effort: worker's panic payload isn't actionable here; `result`
+    // from serve() is what's reported.
+    worker.join().ok();
     result
 }
 
@@ -628,6 +638,7 @@ fn serve(
             Ok(connection) => connection,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 submit_expired_primary_loss(scope, &mut last_primary);
+                #[allow(clippy::disallowed_methods, reason = "synchronous accept-loop poll, not async")]
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -640,14 +651,16 @@ fn serve(
             Ok(request) => request,
             Err(error) => {
                 let response = unauthorized_response(Some(error.to_string()));
-                let _ = write_response(&mut stream, &response);
+                // best-effort: the client may already have disconnected.
+                write_response(&mut stream, &response).ok();
                 continue;
             }
         };
         if request.version != PROCESS_SUPERVISOR_VERSION || request.launch_id != manifest.launch_id
         {
             let response = unauthorized_response(None);
-            let _ = write_response(&mut stream, &response);
+            // best-effort: the client may already have disconnected.
+            write_response(&mut stream, &response).ok();
             continue;
         }
         enum Authority {
@@ -663,7 +676,8 @@ fn serve(
                 Authority::Primary
             }
             ProcessSupervisorCommand::Pair => {
-                let _ = write_response(&mut stream, &unauthorized_response(None));
+                // best-effort: the client may already have disconnected.
+                write_response(&mut stream, &unauthorized_response(None)).ok();
                 continue;
             }
             ProcessSupervisorCommand::Recover
@@ -679,7 +693,8 @@ fn serve(
                 Authority::Recovery
             }
             _ => {
-                let _ = write_response(&mut stream, &unauthorized_response(None));
+                // best-effort: the client may already have disconnected.
+                write_response(&mut stream, &unauthorized_response(None)).ok();
                 continue;
             }
         };
@@ -1040,11 +1055,13 @@ fn cleanup_after_primary_loss(
         }
         OwnedLaunch::Scope(scope) => match scope.observation() {
             Ok(ScopeObservation::Blocked) => {
-                let _ = scope.pin_init(deadline);
-                let _ = stop(launch, stopped, deadline);
+                // best-effort: this is a primary-loss cleanup path with no
+                // caller to report to; `stopped` carries what succeeded.
+                scope.pin_init(deadline).ok();
+                stop(launch, stopped, deadline).ok();
             }
             Ok(ScopeObservation::Pinned) => {
-                let _ = stop(launch, stopped, deadline);
+                stop(launch, stopped, deadline).ok();
             }
             Ok(
                 ScopeObservation::Released
@@ -1201,6 +1218,7 @@ mod tests {
             client.prepare(Duration::from_secs(10)).unwrap();
             client.pin(Duration::from_secs(10)).unwrap();
             drop(client);
+            #[allow(clippy::disallowed_methods, reason = "sync test waits out the primary lease")]
             std::thread::sleep(PRIMARY_LEASE + Duration::from_millis(200));
             let (recovery, observed) = ProcessSupervisorRecovery::recover(
                 socket,
@@ -1236,6 +1254,7 @@ mod tests {
             client.pin(Duration::from_secs(10)).unwrap();
             client.release(Duration::from_secs(10)).unwrap();
             drop(client);
+            #[allow(clippy::disallowed_methods, reason = "sync test waits out the primary lease")]
             std::thread::sleep(PRIMARY_LEASE + Duration::from_millis(200));
             let (mut recovery, observed) = ProcessSupervisorRecovery::recover(
                 socket,
@@ -1279,6 +1298,7 @@ mod tests {
                     break;
                 }
                 assert!(Instant::now() < limit, "natural exit remained unobserved");
+                #[allow(clippy::disallowed_methods, reason = "sync test poll loop")]
                 std::thread::sleep(Duration::from_millis(20));
             }
             client.finalize(Duration::from_secs(10)).unwrap();

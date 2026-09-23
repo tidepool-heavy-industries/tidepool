@@ -566,12 +566,15 @@ impl MountNamespace {
                 },
             )?
         };
-        let _ = command
+        // best-effort: the helper's exit status isn't the source of truth;
+        // `observe_overlay` below confirms whether remount actually happened.
+        command
             .arg(MOUNT_HELPER_COMMAND)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .ok();
         let restored = self.observe_overlay(&rotation.target)?;
         if restored.id == before.id && !restored.readonly {
             Ok(OverlayRotationOutcome::RecoveredOriginal)

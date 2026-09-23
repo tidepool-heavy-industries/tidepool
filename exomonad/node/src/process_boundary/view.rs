@@ -16,8 +16,9 @@ impl Drop for Bootstrap {
         // Only this directly owned, fixed bootstrap command is affected. An
         // error is not a resource-cleanup receipt for its backing directories.
         drop(self.0.stdin.take());
-        let _ = self.0.kill();
-        let _ = self.0.try_wait();
+        // best-effort: Drop cannot propagate; the bootstrap may already have exited.
+        self.0.kill().ok();
+        self.0.try_wait().ok();
     }
 }
 
@@ -67,6 +68,10 @@ impl ProcessMountBoundary {
             &[],
             OverlayMountMode::Prepared,
         );
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "fixed, short-lived readiness-probe bootstrap owned and killed by Bootstrap's Drop, not a supervised long-lived child"
+        )]
         let mut bootstrap = Bootstrap(
             Command::new(invocation.program)
                 .args(invocation.args)

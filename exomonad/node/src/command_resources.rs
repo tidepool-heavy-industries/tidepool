@@ -932,7 +932,9 @@ impl CommandResources {
             std::fs::write(dir.join("memory.oom.group"), "1")
         })();
         if let Err(error) = result {
-            let _ = std::fs::remove_dir(&dir);
+            // best-effort: cleanup of a partially-configured directory; the
+            // original `error` is what's reported either way.
+            std::fs::remove_dir(&dir).ok();
             return Err(error);
         }
         Ok(dir)

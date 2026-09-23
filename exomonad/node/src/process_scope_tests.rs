@@ -144,6 +144,7 @@ fn scope_rejects_stale_and_sibling_info_retains_exact_cleanup() {
     fixture.pin();
     let witness = fixture.scope.init.as_ref().unwrap().pidfd.as_raw_fd();
     let actual = fixture.scope.info_record.clone().unwrap();
+    #[allow(clippy::disallowed_methods, reason = "test fixture sibling process")]
     let mut sibling = Command::new("sleep").arg("30").spawn().unwrap();
     let result = fixture.scope.pin_record(&InitInfo {
         pid: sibling.id(),
@@ -217,6 +218,7 @@ fn released_descendants(kill_monitor: bool) {
     use std::os::unix::net::UnixListener;
     // Python is resolved by the Nix shell. It announces readiness only after
     // setsid grandchild startup and output larger than pipe capacity.
+    #[allow(clippy::disallowed_methods, reason = "short synchronous test probe")]
     let python = Command::new("which").arg("python3").output().unwrap();
     assert!(python.status.success());
     let python = String::from_utf8(python.stdout).unwrap();
@@ -322,6 +324,7 @@ fn scope_invalid_executable_is_pre_spawn_failure() {
 #[test]
 fn scope_stale_proc_directory_cannot_validate_replacement() {
     let proc = checked_proc().unwrap();
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let mut child = Command::new("sleep").arg("30").spawn().unwrap();
     let directory = rustix::fs::openat(
         &proc,
@@ -405,6 +408,7 @@ fn scope_inherited_terminal_job_control_survives_interrupt_and_restores_terminal
         executable.display().to_string().replace('\'', "'\\''"),
         test
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture pty wrapper")]
     let status = Command::new("script")
         .args(["-qefc", &command, "/dev/null"])
         .status()
@@ -545,7 +549,10 @@ fn retained_workspace_is_entered_before_pid_scope() {
             "{}",
             std::fs::read_to_string(fixture.directory.path().join("output")).unwrap()
         );
-        std::thread::sleep(Duration::from_millis(10));
+        #[allow(clippy::disallowed_methods, reason = "sync test poll loop")]
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     assert_eq!(

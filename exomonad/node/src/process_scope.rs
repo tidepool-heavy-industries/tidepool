@@ -190,6 +190,7 @@ impl LaunchReservation {
                     &options,
                     super::OverlayMountMode::Direct,
                 );
+                #[allow(clippy::disallowed_methods, reason = "the process launcher")]
                 let mut command = Command::new(invocation.program);
                 command.args(invocation.args);
                 command
@@ -629,7 +630,13 @@ impl ScopeCapability {
                                 "monitor wait deadline elapsed".into(),
                             )
                         })?;
-                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "synchronous cleanup wait outside the async runtime"
+                )]
+                {
+                    std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                }
             }
         }
     }
@@ -641,14 +648,16 @@ impl Drop for ScopeCapability {
             return;
         }
         if let Some(init) = &self.init {
-            let _ = rustix::process::pidfd_send_signal(&init.pidfd, rustix::process::Signal::KILL);
+            // best-effort: Drop cannot propagate; init may already be gone (ESRCH).
+            rustix::process::pidfd_send_signal(&init.pidfd, rustix::process::Signal::KILL).ok();
         }
         // Child::kill targets the still-owned direct child, never a rediscovered
         // PID. This is emergency best effort, not a cleanup receipt.
-        let _ = self.monitor.kill();
-        let _ = self.monitor.try_wait();
+        self.monitor.kill().ok();
+        self.monitor.try_wait().ok();
         if let Some(terminal) = &mut self.terminal {
-            let _ = terminal.restore();
+            // best-effort: Drop cannot propagate terminal restore failures.
+            terminal.restore().ok();
         }
     }
 }

@@ -69,6 +69,7 @@ fn linked_actor_worktree_commits_into_shared_git_namespace() {
             args: vec!["-c".into(), script],
         },
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let output = Command::new(&invocation.program)
         .args(&invocation.args)
         .output()
@@ -80,15 +81,15 @@ fn linked_actor_worktree_commits_into_shared_git_namespace() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(actor.join("candidate.txt").exists());
-    assert_eq!(
-        Command::new("git")
-            .args(["-C", actor.to_str().unwrap(), "log", "-1", "--format=%s"])
-            .output()
-            .unwrap()
-            .stdout,
-        b"candidate\n"
-    );
-    assert!(Command::new("git")
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
+    let candidate_log = Command::new("git")
+        .args(["-C", actor.to_str().unwrap(), "log", "-1", "--format=%s"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(candidate_log, b"candidate\n");
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
+    let commit_exists = Command::new("git")
         .args([
             "-C",
             source.to_str().unwrap(),
@@ -98,7 +99,8 @@ fn linked_actor_worktree_commits_into_shared_git_namespace() {
         ])
         .status()
         .unwrap()
-        .success());
+        .success();
+    assert!(commit_exists);
     assert!(!source.join("candidate.txt").exists());
     assert!(!sibling.join("escaped").exists());
 }
@@ -134,6 +136,7 @@ fn writable_overlay_keeps_build_artifacts_outside_the_checkout() {
             ],
         },
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let output = Command::new(&invocation.program)
         .args(&invocation.args)
         .output()
@@ -152,6 +155,7 @@ fn writable_overlay_keeps_build_artifacts_outside_the_checkout() {
 }
 
 fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
@@ -204,6 +208,7 @@ fn build_overlay_shares_layers_and_isolates_writes() {
                 "test \"$(cat target/artifact)\" = warm && printf '%s' \"$1\" > target/artifact && ! touch \"$2/escape\" && ! touch \"$3/escape\"".into(),
                 "probe".into(), suffix.into(), newer.to_string_lossy().into_owned(), upper.to_string_lossy().into_owned()],
         });
+        #[allow(clippy::disallowed_methods, reason = "test fixture process")]
         let output = Command::new(invocation.program)
             .args(invocation.args)
             .output()

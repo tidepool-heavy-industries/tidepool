@@ -16,6 +16,7 @@ fn spawn_in(path: &Path, script: &str) -> Child {
         .write(true)
         .open(path.join("cgroup.procs"))
         .unwrap();
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let mut command = Command::new("python3");
     command.args(["-c", script]);
     // SAFETY: only a retained fd and async-signal-safe write are used before exec.
@@ -229,7 +230,8 @@ async fn shared_clients_retain_queued_work_after_observer_disconnect() {
     let abandoned = tokio::spawn(async move { observer.wait("0-1", "same-id").await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     abandoned.abort();
-    let _ = abandoned.await;
+    // best-effort: aborted tasks resolve to a cancellation error, not a value we act on.
+    abandoned.await.ok();
     assert_eq!(
         second.status("0-1", "same-id").await.unwrap(),
         CommandResourceStatus::Queued
@@ -259,5 +261,6 @@ async fn shared_clients_retain_queued_work_after_observer_disconnect() {
         CommandResourceStatus::Completed
     );
     server.abort();
-    let _ = server.await;
+    // best-effort: aborted tasks resolve to a cancellation error, not a value we act on.
+    server.await.ok();
 }

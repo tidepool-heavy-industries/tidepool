@@ -31,8 +31,9 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         drop(self.child.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // best-effort: Drop cannot propagate; the worker may already have exited.
+        self.child.kill().ok();
+        self.child.wait().ok();
     }
 }
 
@@ -66,6 +67,7 @@ fn setup(root: &Path) -> (Worker, MountNamespace) {
 }
 
 fn spawn_worker(invocation: ProcessInvocation) -> (Worker, MountNamespace) {
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let mut child = Command::new(invocation.program)
         .args(invocation.args)
         .stdin(Stdio::piped())
@@ -123,6 +125,7 @@ async fn command_oom_releases_writers_for_cow_publication() {
         namespace.rotate_overlay(rotation),
         OverlayRotationOutcome::Rotated
     ));
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let child = Command::new("bwrap")
         .args(["--bind", "/", "/", "--dev", "/dev", "--overlay-src"])
         .arg(root.join("base"))
@@ -206,6 +209,7 @@ fn busy_freeze_preserves_worker_then_publication_allows_independent_continuation
         std::fs::read_to_string(root.join("u0/value")).unwrap(),
         "1\n"
     );
+    #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let output = Command::new("bwrap")
         .args(["--bind", "/", "/", "--dev", "/dev", "--overlay-src"])
         .arg(root.join("base"))
