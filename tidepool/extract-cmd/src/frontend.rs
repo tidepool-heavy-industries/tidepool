@@ -161,6 +161,24 @@ impl PreparedWorker {
     pub(crate) fn selection(&self) -> &std::path::Path {
         &self.selection
     }
+
+    /// Build a `PreparedWorker` around an arbitrary executable, for tests
+    /// outside this module that need to fake the resident GHC worker (this
+    /// struct's fields are private, matching production's strict binary
+    /// resolution — `daemon.rs`'s own daemon-loop tests use this instead).
+    #[cfg(test)]
+    pub(crate) fn for_test(selection: PathBuf) -> Result<Self, FrontendError> {
+        let mut file = File::open(&selection).map_err(FrontendError::Io)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
+        file.rewind().map_err(FrontendError::Io)?;
+        Ok(Self {
+            file,
+            selection,
+            bytes,
+            ghc_libdir: "unused".into(),
+        })
+    }
 }
 
 fn prepare_worker() -> Result<PreparedWorker, FrontendError> {
@@ -250,6 +268,7 @@ pub(crate) struct DaemonConfig {
     pub socket: PathBuf,
     pub rotate_after: Option<u64>,
     pub rss_ceiling_mb: Option<u64>,
+    pub request_deadline_secs: Option<u64>,
     pub watch_stamp: Option<PathBuf>,
     pub persistent: bool,
     pub run_id: Option<String>,
@@ -260,6 +279,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
     let mut socket = None;
     let mut rotate_after = None;
     let mut rss_ceiling_mb = None;
+    let mut request_deadline_secs = None;
     let mut watch_stamp = None;
     let mut persistent = false;
     let mut run_id = None;
@@ -273,6 +293,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
             "--socket" => socket = Some(PathBuf::from(next(&mut args, option)?)),
             "--rotate-after" => rotate_after = Some(number(&mut args, option)?),
             "--rss-ceiling-mb" => rss_ceiling_mb = Some(number(&mut args, option)?),
+            "--request-deadline-secs" => request_deadline_secs = Some(number(&mut args, option)?),
             "--watch-stamp" => watch_stamp = Some(PathBuf::from(next(&mut args, option)?)),
             "--persistent" => persistent = true,
             "--run-id" => {
@@ -295,6 +316,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
         socket: socket.ok_or_else(|| FrontendError::Usage("--socket is required".to_owned()))?,
         rotate_after,
         rss_ceiling_mb,
+        request_deadline_secs,
         watch_stamp,
         persistent,
         run_id,
@@ -385,6 +407,7 @@ mod tests {
             socket: socket.clone(),
             rotate_after: None,
             rss_ceiling_mb: None,
+            request_deadline_secs: None,
             watch_stamp: Some(stamp.clone()),
             persistent: false,
             run_id: None,
@@ -446,6 +469,7 @@ mod tests {
             socket: socket.clone(),
             rotate_after: None,
             rss_ceiling_mb: None,
+            request_deadline_secs: None,
             watch_stamp: Some(stamp.clone()),
             persistent: true,
             run_id: None,

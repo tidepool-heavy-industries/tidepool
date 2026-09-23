@@ -72,6 +72,19 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// requests, discarding the memo; 10 GiB fits beside a 10-job cargo build on
 /// a 31 GiB box.
 const DEFAULT_RSS_CEILING_MB: u64 = 10 * 1024;
+/// Absolute wall-clock bound on a single compiler request served by the
+/// pinned GHC worker (begin_transaction/request/end_transaction are cheap;
+/// this bounds the request itself). The daemon's accept loop is
+/// single-threaded: a worker that stops replying — wedged GHC, an infinite
+/// loop in the compiled program's desugaring, a stuck external tool — would
+/// otherwise block every other client forever. `kill_process` reclaims the
+/// worker at expiry and the request fails with a named deadline error; the
+/// existing crash-recovery path (`persistent` mode) replaces the worker for
+/// the next request the same way it recovers from any other worker failure.
+/// Generous: a cold compile of the full stdlib can legitimately take
+/// minutes, so this is sized well above any ordinary compile, not tuned to
+/// the warm case.
+const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
@@ -495,6 +508,10 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         .map_err(FrontendError::Io)?;
     let rotate_after = config.rotate_after.unwrap_or(DEFAULT_ROTATE_AFTER);
     let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(DEFAULT_RSS_CEILING_MB);
+    let request_deadline = config
+        .request_deadline_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_REQUEST_DEADLINE);
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
     let socket = OwnedSocket::bind(&config.socket)?;
     let listener = &socket.listener;
@@ -598,7 +615,12 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                             };
                             let compile_request = compile_request_correlation(&cwd, &worker_argv);
                             let started = Instant::now();
-                            match worker.request_while_connected(&connection, &cwd, &worker_argv) {
+                            match worker.request_while_connected(
+                                &connection,
+                                &cwd,
+                                &worker_argv,
+                                request_deadline,
+                            ) {
                                 Ok((code, stdout, stderr)) => {
                                     served += 1;
                                     log_compile_timing(run_id, &compile_request, &stderr);
@@ -650,7 +672,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     let _ = connection.write_all(&[ACCEPTED]);
                     let _ = connection.flush();
                 }
-                let worker_rss = worker_rss_mb(worker.child.id()).unwrap_or(0);
+                let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
                 if served >= rotate_after || worker_rss > rss_ceiling_mb {
                     tracing::info!(
                         run_id,
@@ -737,7 +759,14 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
             let response = worker
                 .begin_transaction()
-                .and_then(|()| worker.request(&cwd, &worker_argv))
+                .and_then(|()| {
+                    worker.request_while_connected(
+                        &connection,
+                        &cwd,
+                        &worker_argv,
+                        request_deadline,
+                    )
+                })
                 .and_then(|response| worker.end_transaction().map(|()| response));
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let (code, stdout, stderr) = match response {
@@ -778,7 +807,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             served += 1;
             let _ = write_response(&mut connection, code, &stdout, &stderr);
 
-            let worker_rss = worker_rss_mb(worker.child.id()).unwrap_or(0);
+            let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
             if served >= rotate_after || worker_rss > rss_ceiling_mb {
                 // Replacing the worker discards its module memo; the next
                 // request recompiles every library module.
@@ -1164,6 +1193,25 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+/// Worker RSS for rotation, with an operator-visible warning when `/proc` is
+/// unreadable. Reading `0` here must be distinguishable in the log from a
+/// worker that is simply small: an unlogged `unwrap_or(0)` would silently
+/// disable the RSS ceiling instead of reporting "unknown".
+fn worker_rss_mb_logged(run_id: &str, pid: u32) -> u64 {
+    match worker_rss_mb(pid) {
+        Ok(rss) => rss,
+        Err(error) => {
+            tracing::warn!(
+                run_id,
+                pid,
+                %error,
+                "could not read compiler worker RSS from /proc; rotation ceiling check treated it as 0 for this request"
+            );
+            0
+        }
+    }
+}
+
 fn worker_rss_mb(pid: u32) -> io::Result<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
     Ok(status
@@ -1285,13 +1333,21 @@ impl Worker {
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
     }
 
+    /// Serve one request against the pinned worker, bounded on two axes: the
+    /// caller's own connection (dropping the client interrupts an in-flight
+    /// compile promptly) and an absolute `deadline` from when this request
+    /// started (a wedged worker — hung GHC, a stuck external tool — must not
+    /// block every other client on this single-threaded accept loop forever,
+    /// even while the caller stays connected).
     fn request_while_connected(
         &mut self,
         connection: &UnixStream,
         cwd: &Path,
         argv: &[OsString],
+        deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
         let pid = self.child.id();
+        let started = Instant::now();
         let result = std::thread::scope(|scope| {
             let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
             scope.spawn(move || {
@@ -1306,6 +1362,26 @@ impl Worker {
                         ));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let elapsed = started.elapsed();
+                if elapsed >= deadline {
+                    let _ = crate::process::kill_process(pid);
+                    tracing::warn!(
+                        cwd = %cwd.display(),
+                        elapsed_secs = elapsed.as_secs(),
+                        deadline_secs = deadline.as_secs(),
+                        "compiler worker exceeded its request deadline; killing it"
+                    );
+                    // The kill unblocks whatever the worker was doing (a read
+                    // or a write) so the monitor thread settles quickly; its
+                    // own result is discarded in favor of a deadline error
+                    // that names the bound, matching the disconnect branch's
+                    // own definite report below.
+                    let _ = completed_rx.recv();
+                    return Err(FrontendError::Daemon(format!(
+                        "compiler worker exceeded its {}s request deadline and was killed",
+                        deadline.as_secs()
+                    )));
                 }
                 if peer_disconnected(connection) {
                     let _ = crate::process::kill_process(pid);
@@ -1373,6 +1449,7 @@ mod tests {
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
         assert_eq!(DEFAULT_ROTATE_AFTER, 1024);
         assert_eq!(DEFAULT_RSS_CEILING_MB, 10 * 1024);
+        assert_eq!(DEFAULT_REQUEST_DEADLINE, Duration::from_secs(15 * 60));
     }
 
     #[derive(Clone, Default)]
@@ -2001,6 +2078,7 @@ tidepool-target phase=desugar module=Execute\n",
             &connection,
             Path::new("/tmp"),
             &[OsString::from("request")],
+            DEFAULT_REQUEST_DEADLINE,
         );
         assert!(result.is_err());
         assert!(
@@ -2053,6 +2131,138 @@ tidepool-target phase=desugar module=Execute\n",
             DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::Crashed)
         ));
         std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn hung_worker_request_is_killed_at_the_deadline_and_the_next_request_uses_a_fresh_worker() {
+        // A fake worker, playing the resident GHC worker's stdin/stdout
+        // protocol directly (no real GHC): it acks `begin_transaction`
+        // (a single `\x01` byte in, a single `\x01` byte back) and then,
+        // on its first invocation only, never answers the request that
+        // follows — exactly the "GHC worker that never replies" case the
+        // request deadline exists for. A sentinel file makes its second
+        // invocation (the daemon's replacement worker, spawned after the
+        // deadline kills the first) answer immediately instead, so the
+        // test can observe the daemon serving a subsequent request from a
+        // fresh worker rather than staying wedged. `PreparedWorker::command`
+        // execs the selected binary via `/proc/self/fd/N`, which only
+        // resolves for a real ELF (a shebang script's interpreter re-opens
+        // the path in its own, unrelated fd table) — so the fake worker is
+        // a tiny Rust program, compiled once here with `rustc`.
+        let dir = std::env::temp_dir().join(format!("tp-request-deadline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let sentinel = dir.join("spawned-once");
+        let argv = vec![OsString::from("Expr.hs")];
+        // The daemon normalizes the client's raw argv into the worker's own
+        // typed wire form before it ever reaches the worker's stdin; the
+        // fake worker's second invocation must drain exactly that many
+        // bytes (never reading the frames' contents) so it neither blocks
+        // on a partial read nor races its own exit against the daemon's
+        // write.
+        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let payload_len = encode_request(&dir, &worker_argv).len();
+        let source = dir.join("fake_worker.rs");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+use std::io::{{Read, Write}};
+
+fn main() {{
+    let sentinel = std::path::Path::new(r"{sentinel}");
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut one = [0u8; 1];
+
+    if !sentinel.exists() {{
+        std::fs::write(sentinel, b"").unwrap();
+        stdin.read_exact(&mut one).unwrap(); // begin_transaction
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+        return;
+    }}
+
+    stdin.read_exact(&mut one).unwrap(); // begin_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // request prefix
+    let mut payload = vec![0u8; {payload_len}];
+    stdin.read_exact(&mut payload).unwrap();
+    stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+    stdout.flush().unwrap();
+
+    stdin.read_exact(&mut one).unwrap(); // end_transaction
+    stdout.write_all(&[1]).unwrap();
+    stdout.flush().unwrap();
+}}
+"#,
+                sentinel = sentinel.display(),
+                payload_len = payload_len,
+            ),
+        )
+        .unwrap();
+        let worker_bin = dir.join("fake-worker");
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&worker_bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: Some(1),
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let started = Instant::now();
+        let error = execute(&socket, &binding.epoch, &dir, &argv).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the deadline did not bound the hung request: {:?}",
+            started.elapsed()
+        );
+        assert!(error.was_accepted(), "{error}");
+
+        // The daemon is still alive under the same boot epoch: the deadline
+        // replaced the dead worker in place instead of the daemon exiting.
+        let next = preflight(&socket).unwrap();
+        assert_eq!(next.epoch, binding.epoch);
+
+        // The replacement worker (second script invocation) serves the next
+        // request normally.
+        let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        std::fs::write(&stamp, b"changed").unwrap();
+        assert!(preflight(&socket).is_err());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

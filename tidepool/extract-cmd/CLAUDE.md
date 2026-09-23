@@ -32,6 +32,11 @@ Ordinary daemon mode exits when its request or RSS rotation bound is reached.
 worker, for a long-lived owner such as one Exomonad tmux session.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
+Every request against the pinned worker (plain and transaction-pinned alike)
+is bounded by an absolute request deadline (`--request-deadline-secs`,
+default 15 minutes); a worker that never replies is killed at expiry and the
+daemon recovers it through the same worker-replacement path a crash uses,
+which only `--persistent` survives.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork

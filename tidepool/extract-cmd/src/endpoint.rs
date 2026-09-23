@@ -183,17 +183,27 @@ impl Transport {
 struct DirectEndpoint {
     child: Arc<Mutex<Child>>,
     stdin: Option<ChildStdin>,
-    stdout: ChildStdout,
+    stdout: Option<ChildStdout>,
     program: OsString,
 }
 
 impl DirectEndpoint {
     fn abort(&mut self) {
         drop(self.stdin.take());
+        drop(self.stdout.take());
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn stdout_mut(&mut self) -> Result<&mut ChildStdout, SpawnError> {
+        self.stdout.as_mut().ok_or_else(|| {
+            SpawnError::indeterminate(
+                self.program.clone(),
+                io::Error::new(io::ErrorKind::BrokenPipe, "bound endpoint is closed"),
+            )
+        })
     }
 }
 
@@ -267,8 +277,14 @@ fn cancel_target(target: Option<CancellationTarget>) {
     }
 }
 
+/// Bound a direct-mode worker's exit the same way `OwnedSocket::retire`
+/// bounds the daemon's own shutdown: an orderly exit is given a fixed
+/// window, past which the child is killed outright rather than left to
+/// wedge whoever is dropping this endpoint (this function is reachable from
+/// `Drop`, where blocking forever is not an option).
 fn wait_for_owned_child(child: &Arc<Mutex<Child>>) {
-    loop {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
         let finished = child
             .lock()
             .ok()
@@ -279,6 +295,10 @@ fn wait_for_owned_child(child: &Arc<Mutex<Child>>) {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+        let _ = child.try_wait();
     }
 }
 
@@ -350,13 +370,13 @@ impl CompilerEndpoint {
         let mut direct = DirectEndpoint {
             child: Arc::new(Mutex::new(child)),
             stdin: Some(stdin),
-            stdout,
+            stdout: Some(stdout),
             program: spec.program.clone(),
         };
         let mut magic = [0u8; 8];
         let mut producer = [0u8; 32];
         direct
-            .stdout
+            .stdout_mut()?
             .read_exact(&mut magic)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         if &magic != IDENTITY_MAGIC {
@@ -369,7 +389,7 @@ impl CompilerEndpoint {
             ));
         }
         direct
-            .stdout
+            .stdout_mut()?
             .read_exact(&mut producer)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         Ok(Self {
@@ -402,7 +422,7 @@ impl CompilerEndpoint {
                 })?;
                 let mut accepted = [0u8; 1];
                 endpoint
-                    .stdout
+                    .stdout_mut()?
                     .read_exact(&mut accepted)
                     .map_err(|source| {
                         SpawnError::indeterminate(endpoint.program.clone(), source)
@@ -479,7 +499,7 @@ impl CompilerEndpoint {
                 })?;
                 drop(stdin);
                 crate::EXTRACT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                daemon::decode_output(&mut endpoint.stdout).map_err(|error| {
+                daemon::decode_output(endpoint.stdout_mut()?).map_err(|error| {
                     SpawnError::indeterminate(
                         endpoint.program.clone(),
                         io::Error::other(error.to_string()),
@@ -703,7 +723,7 @@ impl CompilerTransaction {
                     .map_err(|source| {
                         SpawnError::indeterminate(endpoint.program.clone(), source)
                     })?;
-                daemon::decode_output(&mut endpoint.stdout).map_err(|error| {
+                daemon::decode_output(endpoint.stdout_mut()?).map_err(|error| {
                     SpawnError::indeterminate(
                         endpoint.program.clone(),
                         io::Error::other(error.to_string()),
@@ -750,6 +770,13 @@ impl CompilerTransaction {
                             Ok(())
                         };
                         drop(endpoint.stdin.take());
+                        // Nothing more is read from this endpoint once
+                        // `TRANSACTION_END` is sent (the worker owes it no
+                        // reply). Closing the read end too, before waiting,
+                        // lets a worker still blocked writing to a full
+                        // stdout pipe get EPIPE and exit instead of wedging
+                        // this wait.
+                        drop(endpoint.stdout.take());
                         wait_for_owned_child(&endpoint.child);
                         result
                     }
@@ -838,5 +865,34 @@ mod tests {
         cancellation.cancel();
         let mut byte = [0u8; 1];
         assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn wait_for_owned_child_does_not_wait_forever_for_an_unresponsive_child() {
+        // A child that never exits on its own (nothing closes its stdio,
+        // nothing sends it a signal) must not wedge whoever is waiting on
+        // it — `wait_for_owned_child` is reachable from `Drop`.
+        let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
+        let started = Instant::now();
+        wait_for_owned_child(&child);
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "wait_for_owned_child did not bound its wait: {:?}",
+            started.elapsed()
+        );
+        // `kill()` is asynchronous: give the kernel a moment to make the
+        // process waitable before asserting it was reaped.
+        let reap_deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.lock().unwrap().try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < reap_deadline,
+                "the deadline branch did not kill and reap the child"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!status.success());
     }
 }
