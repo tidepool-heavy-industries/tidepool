@@ -450,9 +450,13 @@ mod tests {
             .unwrap()
             .with_read_only_overlay(&source, workspace.join(".exomonad/build/cargo"))
             .unwrap();
+        // `preserved_mounts_under` sorts outermost-first by depth then
+        // lexicographically (see its `sort_by` above), not by builder call
+        // order or filesystem listing order — ".exomonad" precedes ".git"
+        // because both sit at the same depth and 'e' < 'g'.
         assert_eq!(
             boundary.preserved_mounts_under(&workspace),
-            vec![workspace.join(".git"), workspace.join(".exomonad")]
+            vec![workspace.join(".exomonad"), workspace.join(".git")]
         );
     }
 
