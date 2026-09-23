@@ -43,3 +43,19 @@ invariant is dead or covered elsewhere.
 - **Launcher TODOs.** `bridge/handlers/src/handlers/exec.rs` and
   `bridge/facade/src/exomonad.rs` spawn processes outside the launcher; each
   site carries a `TODO(launcher)` allow reason (`grep -rn "TODO(launcher)"`).
+- **Failed launches leave state a retry trips over.** Seen on 2026-09-23
+  starting the exomonad-harness wave: (1) `exomonad init --recreate` on a
+  session whose first host failed before the root ever bound reads the stale
+  `.exomonad/sessions/<name>/root-binding.json` and fails with "cannot resume
+  the requested root conversation" instead of starting fresh; (2) a host
+  launched through `systemd-run` outlives `tmux kill-session` and keeps the
+  workspace's `actor-worktrees/<hash>/bindings/.owner.lock`, so the next run
+  fails with "another process already owns this binding". Class: a failed or
+  killed run must release everything a fresh run of the same workspace needs,
+  and a retry must not resume state a failed run never completed.
+- **Memory admission versus compiler workers.** The persistent test daemon's
+  three warm GHC workers (about 5.5 GiB each) plus a run's own daemon left
+  3.4 GiB on a 31 GiB box and the root actor failed admission (7 GiB
+  needed). A run's daemon and the test daemon size themselves independently;
+  one budget should cover both, or a run should refuse to start next to a
+  warm test daemon and say so.
