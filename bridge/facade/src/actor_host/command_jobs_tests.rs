@@ -1368,13 +1368,17 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
     let result = running.await.unwrap();
     assert_eq!(result["status"], "committed", "{result}");
     let text = |index: usize| result["items"][index]["output"].as_str().unwrap();
-    assert_eq!(text(0).matches("stdout ·").count(), 1, "{result}");
+    // A bound command statement summarizes instead of presenting output.
+    assert!(text(0).contains("exit 0 · stdout 6 bytes"), "{result}");
+    assert!(!text(0).contains("stdout ·"), "{result}");
     assert!(!text(1).contains("stdout ·"), "{result}");
     assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
     assert!(text(3).contains("Right \"result\""), "{result}");
-    assert!(
-        !text(4).contains("stdout ·"),
-        "repeated await repeated output: {result}"
+    // The summarized bound command's output is first presented here, once.
+    assert_eq!(
+        text(4).matches("stdout ·").count(),
+        1,
+        "await presents output exactly once: {result}"
     );
     assert!(
         text(5).contains("result"),
