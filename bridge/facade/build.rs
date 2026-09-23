@@ -3,21 +3,13 @@
 //! interactive actor surface without hand-maintained file lists. Only `.hs`
 //! sources are included; build artifacts and test-only probes are excluded.
 //!
-//! The same mechanism carries the package `exomonad new` scaffolds: the workspace
-//! skills, the Jev facade, and the starter agent spec are embedded from the
-//! files this repository already keeps them in, so scaffolding cannot drift
-//! from the source it is copied out of.
+//! The same mechanism carries project-owned defaults for `exomonad new`.
+//! Reusable workspace sources are cloned when the command runs.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
-#[path = "../../exomonad/actor/src/lookup_tool/qualified_name.rs"]
-mod qualified_name;
-use qualified_name::qualifier_and_identifier;
-
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    println!("cargo:rerun-if-changed=../../exomonad/actor/src/lookup_tool/qualified_name.rs");
     // Shared target directories must not reuse another checkout's source paths.
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
@@ -64,27 +56,19 @@ fn main() {
     emit_scaffold_package(Path::new(&manifest).join("../.."));
 }
 
-/// The Exomonad package `exomonad new` writes into a project, as
-/// `&[(workspace_relative_path, contents)]`, plus the jev-dsl revision the
-/// shipped example workspace pins. The template tree is the source of truth;
-/// local plans and prompts describe this repository's current run and do not
-/// belong in a fresh project.
+/// The project-owned files `exomonad new` writes, alongside the URL for the
+/// generic workspace repository it clones.
 fn emit_scaffold_package(repository: PathBuf) {
     let template = repository.join("exomonad/examples/workspace/.exomonad");
     println!("cargo:rerun-if-changed={}", template.display());
     let mut entries = Vec::new();
     collect_all(&template, &template, &mut entries);
     entries.retain(|(relative, _)| {
-        let path = Path::new(relative);
-        !matches!(path.components().next(), Some(std::path::Component::Normal(name)) if name == "plans" || name == "prompts")
-            && relative != "config.toml"
+        relative == "AgentSpec.hs"
+            || relative.starts_with("prompts/")
+            || relative.starts_with("plans/")
     });
     entries.sort();
-    let skill_files: Vec<(String, PathBuf)> = entries
-        .iter()
-        .filter(|(relative, _)| relative.starts_with("skills/"))
-        .cloned()
-        .collect();
     let entries: Vec<(String, PathBuf)> = entries
         .into_iter()
         .map(|(relative, path)| (format!(".exomonad/{relative}"), path))
@@ -109,6 +93,10 @@ fn emit_scaffold_package(repository: PathBuf) {
          pub(crate) static JEV_DSL_URL: &str = {:?};\n",
         jev_dsl_url(&example_flake)
     ));
+    out.push_str(&format!(
+        "#[cfg_attr(test, allow(dead_code))]\npub(crate) static DEFAULT_WORKSPACE_URL: &str = {:?};\n",
+        "https://github.com/tidepool-heavy-industries/exomonad-default-workspace.git"
+    ));
 
     #[allow(
         clippy::unwrap_used,
@@ -117,91 +105,6 @@ fn emit_scaffold_package(repository: PathBuf) {
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("scaffold_package.rs");
     #[allow(clippy::expect_used, reason = "write generated scaffold package")]
     std::fs::write(dest, out).expect("write generated scaffold package");
-
-    emit_usage_pointer_index(&repository, &skill_files);
-}
-
-/// Generate the compact lookup table consumed by `exomonad-actor`. The
-/// facade already owns the shipped source inventory; only identifier/locator
-/// pairs cross the crate boundary, so actor builds never embed skill text.
-fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]) {
-    let checks = repository.join("exomonad/examples/workspace/.exomonad/checks");
-    println!("cargo:rerun-if-changed={}", checks.display());
-    let mut sources: Vec<(String, PathBuf)> = std::fs::read_dir(&checks)
-        .unwrap_or_else(|error| panic!("read {}: {error}", checks.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read entry in {}: {error}", checks.display()))
-                .path()
-        })
-        .filter(|path| path.extension().is_some_and(|extension| extension == "hs"))
-        .map(|path| {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            (format!(".exomonad/checks/{name}"), path)
-        })
-        .collect();
-    sources.sort_by(|left, right| left.0.cmp(&right.0));
-    for (relative, path) in skill_files.iter().filter(|(relative, _)| {
-        Path::new(relative)
-            .file_name()
-            .is_some_and(|name| name == "SKILL.md")
-    }) {
-        sources.push((format!(".exomonad/{relative}"), path.clone()));
-    }
-
-    let mut index = BTreeMap::<String, String>::new();
-    for (locator, path) in sources {
-        println!("cargo:rerun-if-changed={}", path.display());
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        for token in raw_tokens(&source) {
-            let token = token.trim_matches('.');
-            let Some((_qualifier, identifier)) = qualifier_and_identifier(token) else {
-                continue;
-            };
-            index
-                .entry(identifier.to_owned())
-                .or_insert(locator.clone());
-        }
-    }
-
-    let mut out = String::from(
-        "// @generated by build.rs — compact shipped usage pointers.\n\
-         pub(crate) static EXOMONAD_USAGE_POINTERS: &[(&str, &str)] = &[\n",
-    );
-    for (identifier, locator) in index {
-        out.push_str(&format!("    ({identifier:?}, {locator:?}),\n"));
-    }
-    out.push_str("];\n");
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Cargo supplies OUT_DIR to build scripts"
-    )]
-    let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("usage_pointers.rs");
-    #[allow(clippy::expect_used, reason = "generation failure must fail the build")]
-    std::fs::write(dest, out).expect("write generated usage pointers");
-}
-
-fn raw_tokens(source: &str) -> impl Iterator<Item = &str> {
-    let is_word = |character: char| {
-        character.is_ascii_alphanumeric()
-            || character == '_'
-            || character == '\''
-            || character == '.'
-    };
-    let mut start = None;
-    let mut tokens = Vec::new();
-    for (index, character) in source.char_indices() {
-        if is_word(character) {
-            start.get_or_insert(index);
-        } else if let Some(begin) = start.take() {
-            tokens.push(&source[begin..index]);
-        }
-    }
-    if let Some(begin) = start {
-        tokens.push(&source[begin..]);
-    }
-    tokens.into_iter()
 }
 
 /// The pinned jev-dsl flake URL, read out of the example workspace's own

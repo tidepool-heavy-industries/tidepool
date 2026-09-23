@@ -1,30 +1,34 @@
 //! The Exomonad package `exomonad new` writes into a project.
 //!
-//! Every file in it is embedded from one this repository already maintains for
-//! its own use — `bridge/facade/build.rs` generates the table — so a scaffolded
-//! workspace and the shipped example cannot drift apart. This module is the
-//! only writer of a `.exomonad/config.toml`; every other command reads one.
+//! Project configuration, the starter agent spec, prompts, and plans are
+//! generated from the project template. Generic modules, checks
+//! and skills arrive through the workspace submodule. This module is
+//! the only writer of `.exomonad/config.toml`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use exomonad_worktree::GitCli;
 
 include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 
-/// The configuration `exomonad new` writes. Its module and recipe list matches
-/// the shipped workspace; plans, prompts and the repository's custom settings
-/// stay in that workspace rather than being copied into a new project.
+/// The configuration `exomonad new` writes. Its modules, recipes, model aliases
+/// and prompt files match the shipped workspace; only repository-specific
+/// settings stay out of a new project.
 const CONFIG: &str = r#"[defaults]
 model = "gpt-6-sol"
 effort = "medium"
+
+[models]
+planner = "gpt-6-astra"
+executor = "gpt-6-sol"
+luna = "gpt-6-luna"
 
 [research]
 default_depth = 1
 maximum_depth = 8
 
 [haskell]
-source_roots = ["."]
+source_roots = [".", "workspace"]
 modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
@@ -51,7 +55,7 @@ checks = [
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
 # this project. Only `core` is named: it is the JSON-polymorphic library, and
-# `.exomonad/Jev/Operators.hs` in this package fixes its value type to Tidepool's
+# `.exomonad/workspace/Jev/Operators.hs` fixes its value type to Tidepool's
 # own. The input's `src` holds the same front over aeson, which Tidepool does
 # not have; naming it here would put a second `Jev.Operators` on the search
 # path that cannot compile.
@@ -62,6 +66,17 @@ checks = [
 # module.
 [haskell.flake_sources]
 jev-dsl = ["core"]
+
+[prompts.files]
+coordinator = "prompts/coordinator.md"
+planner = "prompts/planner.md"
+lead = "prompts/lead.md"
+specialist = "prompts/specialist.md"
+task = "prompts/task.md"
+review = "prompts/review.md"
+repair = "prompts/repair.md"
+incorporate = "prompts/incorporate.md"
+rsi = "prompts/rsi.md"
 "#;
 
 /// Why `exomonad new` will not scaffold a path. Each variant leaves the path
@@ -185,11 +200,13 @@ pub(super) fn scaffold(
     let git = GitCli::new();
     let target = classify(&git, workspace)?;
     let package = package_files();
-    let links = skill_links();
     let taken = package
         .iter()
         .map(|(path, _)| path.clone())
-        .chain(links.iter().map(|(link, _)| link.clone()))
+        .chain([
+            PathBuf::from(".agents/skills"),
+            PathBuf::from(".exomonad/workspace"),
+        ])
         .filter(|path| workspace.join(path).symlink_metadata().is_ok())
         .collect::<Vec<_>>();
     if !taken.is_empty() {
@@ -216,13 +233,17 @@ pub(super) fn scaffold(
         tidepool_atomic_write::write_durable(&absolute, contents.as_bytes())?;
         written.push(path.clone());
     }
-    for (link, destination) in &links {
-        let absolute = workspace.join(link);
+    add_default_workspace(&git, workspace)?;
+    written.push(PathBuf::from(".gitmodules"));
+    written.push(PathBuf::from(".exomonad/workspace"));
+
+    for (link, destination) in skill_links(workspace)? {
+        let absolute = workspace.join(&link);
         if let Some(parent) = absolute.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::os::unix::fs::symlink(destination, &absolute)?;
-        written.push(link.clone());
+        written.push(link);
     }
 
     let flake = PathBuf::from("flake.nix");
@@ -317,28 +338,47 @@ fn package_files() -> Vec<(PathBuf, &'static str)> {
         .collect()
 }
 
-/// The links a client loads the workspace skills through, one per skill
-/// directory the package carries. Relative, so they survive a copied or
-/// renamed checkout.
-fn skill_links() -> Vec<(PathBuf, PathBuf)> {
-    skill_names()
-        .into_iter()
-        .map(|name| {
-            (
-                Path::new(".agents/skills").join(name),
-                Path::new("../../.exomonad/skills").join(name),
-            )
-        })
-        .collect()
+/// Client skill links into the default workspace submodule. Relative links
+/// survive a copied or renamed checkout.
+fn skill_links(workspace: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn std::error::Error>> {
+    let skills = workspace.join(".exomonad/workspace/skills");
+    let mut links = Vec::new();
+    for entry in std::fs::read_dir(skills)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let name = entry.file_name();
+            links.push((
+                Path::new(".agents/skills").join(&name),
+                Path::new("../../.exomonad/workspace/skills").join(name),
+            ));
+        }
+    }
+    links.sort();
+    Ok(links)
 }
 
-/// The skill directories in the embedded package, derived from it rather than
-/// listed beside it.
-fn skill_names() -> BTreeSet<&'static str> {
-    SCAFFOLD_PACKAGE
-        .iter()
-        .filter_map(|(path, _)| path.strip_prefix(".exomonad/skills/")?.split('/').next())
-        .collect()
+fn add_default_workspace(git: &GitCli, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(test)]
+    let source_url = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.exomonad/workspace")
+        .canonicalize()?;
+    #[cfg(not(test))]
+    let source_url = std::path::PathBuf::from(DEFAULT_WORKSPACE_URL);
+    let source_url = source_url.to_string_lossy();
+    git.try_run(
+        workspace,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--name",
+            "exomonad-workspace",
+            &source_url,
+            ".exomonad/workspace",
+        ],
+    )?;
+    Ok(())
 }
 
 fn flake_nix() -> String {

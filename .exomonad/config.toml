@@ -5,12 +5,13 @@ effort = "low"
 [models]
 planner = "gpt-6-astra"
 executor = "gpt-6-sol"
+luna = "gpt-6-luna"
 
 [launch]
 systemd_slice = "swarm.slice"
 
 [haskell]
-source_roots = ["../exomonad/examples/workspace/.exomonad"]
+source_roots = [".", "workspace"]
 modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
@@ -43,10 +44,10 @@ jev-dsl = ["core"]
 # These files describe this repository's current prompts. Other projects
 # start from shipped prompt defaults and can add their own through this table.
 [prompts.files]
-lead = "prompts/lead.md"
-specialist = "prompts/specialist.md"
-task = "prompts/task.md"
-review = "prompts/review.md"
-repair = "prompts/repair.md"
-incorporate = "prompts/incorporate.md"
-rsi = "prompts/rsi.md"
+lead = "workspace/prompts/lead.md"
+specialist = "workspace/prompts/specialist.md"
+task = "workspace/prompts/task.md"
+review = "workspace/prompts/review.md"
+repair = "workspace/prompts/repair.md"
+incorporate = "workspace/prompts/incorporate.md"
+rsi = "workspace/prompts/rsi.md"
