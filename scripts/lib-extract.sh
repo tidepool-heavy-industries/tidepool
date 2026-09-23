@@ -375,10 +375,12 @@ start_battery_daemon() {
   # it also carries each phase and every memo miss.
   local compiler_log="$BATTERY_DAEMON_SOCKET_DIR/compiler.log"
   echo "==> starting per-run resident compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
+  # Rotation, RSS, and worker-count defaults stay in the frontend; set
+  # TIDEPOOL_DAEMON_ARGS (e.g. "--workers 3 --rss-ceiling-mb 7168") to override.
   # Rotation, RSS, and worker-count flags are omitted so the frontend owns
   # their defaults (a persistent daemon defaults to several concurrent GHC
   # workers; see tidepool/extract-cmd/CLAUDE.md).
-  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" >"$log" 2>&1 &
+  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   BATTERY_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still
@@ -591,7 +593,7 @@ daemon_start_persistent() {
   rm -f "$pidfile"
   PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
     persistent-daemon-keeper \
-    "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" \
+    "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} \
     </dev/null >"$log" 2>&1 &
   local pid=""
   local pid_wait=0
