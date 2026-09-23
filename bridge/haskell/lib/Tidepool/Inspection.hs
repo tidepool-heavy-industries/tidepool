@@ -102,13 +102,13 @@ instance {-# OVERLAPPABLE #-} (Show a) => Display a where
         prefix = take (limit + 1) (show value)
      in (Text.pack (take limit prefix), length prefix > limit)
 
--- | Text renders as a quoted, escaped string literal.
+-- | One text rule: nested (`displayTree`) text is a quoted, escaped literal;
+-- a standalone (`displayWith`) text renders raw, as 'WorkbenchDisplay' and a
+-- raw tool's output do.
 instance Display Text where
   displayTree = literalText
   displayTreePrec _ = literalText
-  displayWith budget value =
-    let (rendered, remaining, unavailable) = renderTree budget (literalText value)
-    in (rendered, maybe False (const True) remaining || unavailable)
+  displayWith = rawText
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =
