@@ -511,7 +511,7 @@ analyzeCellWithFlags dflags template source = do
         genericAlias = freshAlias "TidepoolCompilerGeneric" source
         displayAlias = freshAlias "TidepoolCompilerDisplay" source
         generated = automaticGenericDeclarations effective genericAlias classified
-        grouped = groupDeclarations headerItems classified ""
+        grouped = groupDeclarations (not (null (prologueImports prologue))) headerItems classified ""
         targets = automaticDisplayTargets effective classified
         generatedImports =
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias)
@@ -549,9 +549,9 @@ analyzeCellWithFlags dflags template source = do
               }
           ]
       }
-    groupDeclarations headerItems classified generated =
+    groupDeclarations hasImports headerItems classified generated =
       case partition isDeclaration classified of
-        ([], executable) -> executable
+        ([], executable) | not hasImports -> executable
         (declarations, executable) -> declarationGroup headerItems declarations generated : executable
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict

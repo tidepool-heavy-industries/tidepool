@@ -3345,11 +3345,7 @@ where
                 binders,
             } => {
                 return Ok(ResidentWorkbenchStep::Committed {
-                    output: format!(
-                        "defined {} at generation {}",
-                        binders.join(", "),
-                        generation.0
-                    ),
+                    output: declaration_receipt(&binders, generation.0),
                     warnings: Vec::new(),
                     installed_bindings: binders,
                 });
@@ -3564,6 +3560,14 @@ where
     begin_ready_block(session, context, &source, scope, block, *compiled, 8192)
 }
 
+fn declaration_receipt(binders: &[String], generation: u64) -> String {
+    if binders.is_empty() {
+        String::new()
+    } else {
+        format!("defined {} at generation {generation}", binders.join(", "))
+    }
+}
+
 fn begin_ready_block<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -3592,15 +3596,7 @@ where
                 &declaration_imports,
             ) {
                 Ok(generation) => ResidentWorkbenchStep::Committed {
-                    output: format!(
-                        "defined {} at generation {}",
-                        if receipt.binders.is_empty() {
-                            "declaration".to_string()
-                        } else {
-                            receipt.binders.join(", ")
-                        },
-                        generation.0
-                    ),
+                    output: declaration_receipt(&receipt.binders, generation.0),
                     warnings: Vec::new(),
                     installed_bindings: receipt.binders.clone(),
                 },

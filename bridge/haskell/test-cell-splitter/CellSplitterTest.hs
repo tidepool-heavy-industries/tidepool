@@ -758,7 +758,11 @@ prologuePlans flags = do
       assertContains "rendered cell import" "import qualified Data.Map.Strict as Map" checked
   importOnly <- analyzeCellWithFlags flags checkTemplate "import Data.List\n"
   case importOnly of
-    Right (CellSourcePlan { cellPlanItems = [] }) -> pure ()
+    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
+      assertEqual "import-only kind" KDecl (sbKind (cellAnalysisVerdict item))
+      assertEqual "import-only declaration body" "" (cellAnalysisSource item)
+      assertEqual "import-only source ordinal" [0]
+        (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems item))
     other -> fail ("import-only plan: " ++ show other)
   cpp <- analyzeCellWithFlags flags checkTemplate "{-# LANGUAGE CPP #-}\nvalue = 1\n"
   case cpp of
