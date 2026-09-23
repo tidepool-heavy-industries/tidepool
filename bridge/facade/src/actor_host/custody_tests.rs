@@ -33,6 +33,26 @@ pub(super) fn custody_fixture() -> (
     (repository, runtime, tree, bindings, admission)
 }
 
+/// The root actor writes its own runtime state (journal, logs) straight into
+/// the source repository it was handed — it is never admitted through
+/// `prepare()` the way a fork's checkout is, so nothing on that path installs
+/// the exclusion. A bootstrapped campaign must still leave the source clean:
+/// `actor_worktree_resources_at` installs the exclusion once, for every
+/// caller that builds a `WorktreeManager` over a source repository, rather
+/// than depending on each caller (a launcher, a scaffold, a test harness) to
+/// remember it separately.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrapping_a_campaign_leaves_the_source_repository_clean() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let git = exomonad_worktree::GitCli::new();
+    let dirty = exomonad_worktree::git::inspect::dirty_summary(&git, campaign._repository.path())
+        .unwrap();
+    assert!(
+        dirty.is_clean(),
+        "source repository dirty after bootstrap: {dirty}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
     let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();

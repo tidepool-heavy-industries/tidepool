@@ -189,6 +189,22 @@ impl DirtySummary {
     }
 }
 
+impl DirtySummary {
+    /// Up to the first 5 offending paths, staged first, then unstaged, then
+    /// untracked, in that priority order. Models and operators read the
+    /// [`Display`](std::fmt::Display) output to find what to commit or
+    /// exclude; a bare count leaves them guessing.
+    fn sample_paths(&self) -> Vec<&str> {
+        self.staged
+            .iter()
+            .chain(self.unstaged.iter())
+            .chain(self.untracked.iter())
+            .take(5)
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 impl std::fmt::Display for DirtySummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -197,7 +213,12 @@ impl std::fmt::Display for DirtySummary {
             self.staged.len(),
             self.unstaged.len(),
             self.untracked.len()
-        )
+        )?;
+        let sample = self.sample_paths();
+        if !sample.is_empty() {
+            write!(f, " ({})", sample.join(", "))?;
+        }
+        Ok(())
     }
 }
 
