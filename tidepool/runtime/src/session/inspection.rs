@@ -1215,6 +1215,11 @@ mod tests {
     #[test]
     fn qualified_info_and_browse_share_one_checked_target() {
         eval_harness::require_extract();
+        // The assertion reads the worker's `tidepool-checked` accounting
+        // lines, which a compile daemon filters from the stderr it returns.
+        // Bind a direct worker so the evidence is visible on every route.
+        // Nextest runs each test in its own process, so this is not shared.
+        std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("Expr.hs");
         std::fs::write(
