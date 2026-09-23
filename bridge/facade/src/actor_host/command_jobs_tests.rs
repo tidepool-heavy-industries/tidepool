@@ -23,6 +23,7 @@ pub(super) struct TestCommands {
     output_budgets: Mutex<Vec<usize>>,
     slice_reads: std::sync::atomic::AtomicUsize,
     short_slice_read: std::sync::atomic::AtomicUsize,
+    hang_cancel: std::sync::atomic::AtomicBool,
 }
 impl TestCommands {
     pub(super) fn completed(stdout: &str) -> Arc<Self> {
@@ -74,7 +75,16 @@ impl TestCommands {
             output_budgets: Mutex::new(Vec::new()),
             slice_reads: 0.into(),
             short_slice_read: 0.into(),
+            hang_cancel: false.into(),
         })
+    }
+
+    /// A `control(.., Cancel)` call on this backend never resolves. Exercises
+    /// the actor-turn bound wrapping that call, which must not let a stuck
+    /// backend freeze the actor.
+    pub(super) fn hang_cancel(&self) {
+        self.hang_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub(super) fn shorten_slice_read(&self, read: usize) {
@@ -129,6 +139,9 @@ impl CommandBackend for TestCommands {
                 ));
             }
             if matches!(operation, CommandControl::Cancel) {
+                if self.hang_cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    std::future::pending::<()>().await;
+                }
                 self.cancelled
                     .store(true, std::sync::atomic::Ordering::Release);
                 self.finish.send_replace(true);
@@ -1027,6 +1040,62 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
         .unwrap();
     assert!(result.to_string().contains("CommandCancelled"), "{result}");
     assert!(backend.specs.lock().is_empty());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// The actor kernel admits one active turn at a time, and the `Control`
+/// `Cancel` branch of `JobActor::handle` runs inside that turn. A backend
+/// whose `control(.., Cancel)` never resolves must not freeze the actor
+/// forever: the call is bounded, and cancel comes back with an error rather
+/// than hanging.
+#[tokio::test]
+async fn command_cancel_is_bounded_when_the_backend_never_confirms() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.clone().dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(
+            serde_json::json!({"cmd":"long-lived", "yield_time_ms":0}),
+        ),
+    }));
+    let backend = TestCommands::new();
+    backend.hang_cancel();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let response = running.await.unwrap().unwrap();
+    let output = response["items"][0]["output"].as_str().unwrap();
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let cancelled = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "cancel_command".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+            ),
+        })
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "cancel with a stuck backend must return within the actor-turn bound, took {elapsed:?}"
+    );
+    assert!(
+        cancelled.to_string().contains("not confirmed within"),
+        "{cancelled}"
+    );
+    backend.finish.send_replace(true);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

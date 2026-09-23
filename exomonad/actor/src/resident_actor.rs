@@ -5173,7 +5173,7 @@ where
                                         Ok(tidepool_bridge_effects::CommandStatus::CommandStarting) => "starting".into(),
                                         Ok(tidepool_bridge_effects::CommandStatus::CommandRunning) => "running".into(),
                                         Ok(tidepool_bridge_effects::CommandStatus::CommandStopping) => "stopping".into(),
-                                        Err(_) => "status unavailable".into(),
+                                        Err(error) => format!("status unavailable: {error:?}"),
                                     };
                                     let counts = match output {
                                         Ok(output) => format!(
@@ -5181,7 +5181,9 @@ where
                                             output.stdout.available_end,
                                             output.stderr.available_end
                                         ),
-                                        Err(_) => "stdout/stderr byte counts unavailable".into(),
+                                        Err(error) => {
+                                            format!("stdout/stderr byte counts unavailable: {error:?}")
+                                        }
                                     };
                                     presentation = CommandPresentation::CommandVisible(
                                         format!("command {job}: {exit} · {counts}"),

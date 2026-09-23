@@ -12,6 +12,11 @@ use tidepool_bridge_effects::{
 };
 use tokio::sync::{oneshot, watch};
 
+/// Bound on a single native-backend call reached from inside an actor's one
+/// active turn: cancellation acknowledgement and cleanup confirmation both use
+/// this so an unresponsive backend cannot freeze the actor indefinitely.
+const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
 type CompletionSink = dyn Fn(CommandResult) -> bool + Send + Sync;
 
 /// Native execution remains in the owning TUI; these operations carry no shell launcher.
@@ -22,6 +27,17 @@ pub trait CommandBackend: Send + Sync + 'static {
         spec: CommandSpec,
         phase: watch::Sender<CommandStatus>,
     ) -> BoxFuture<'a, CommandResult>;
+    /// `CommandControl::Cancel` is issued outside the per-job control queue
+    /// (`JobState::next_control`) so it can bypass stdin backpressure, and can
+    /// therefore run concurrently with an in-flight `Input`/`Resize`/etc. call
+    /// for the same `id`. Implementations must accept that: a `Cancel` must
+    /// not race a concurrent non-cancel call in a way that corrupts state, and
+    /// each call resolves to its own outcome (an in-flight write may simply
+    /// fail once cancellation has torn the command down). The two facade
+    /// implementations satisfy this because `Cancel` only touches process
+    /// teardown and resource-registry bookkeeping, both internally
+    /// synchronized, while other operations only touch the stdin/output path;
+    /// they do not share mutable state.
     fn control<'a>(
         &'a self,
         id: &'a str,
@@ -143,7 +159,15 @@ impl Shared {
         let Some(backend) = backend else {
             return result.cleanup;
         };
-        let cleanup = backend.cleanup(id).await;
+        let Ok(cleanup) = tokio::time::timeout(BACKEND_CALL_TIMEOUT, backend.cleanup(id)).await
+        else {
+            // Unconfirmed within the bound: leave phase untouched so the next
+            // poll retries the backend instead of latching an unconfirmed
+            // cleanup into settled state.
+            return CommandCleanup::CommandCleanupUnknown(format!(
+                "cleanup was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+            ));
+        };
         self.phase.send_modify(|phase| {
             if let CommandStatus::CommandFinished(result) = phase {
                 result.cleanup = cleanup.clone();
@@ -816,7 +840,17 @@ impl Actor for JobActor {
                     if let Some(backend) = backend {
                         // Cancellation must bypass stdin backpressure. The backend
                         // accepts intent here; execution observes and settles it.
-                        let result = backend.control(&state.id, CommandControl::Cancel).await;
+                        let result = match tokio::time::timeout(
+                            BACKEND_CALL_TIMEOUT,
+                            backend.control(&state.id, CommandControl::Cancel),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(CommandError::CommandUnavailable(format!(
+                                "cancel was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                            ))),
+                        };
                         let _ = reply.send(result);
                     } else {
                         state.execution.abort();
@@ -852,7 +886,7 @@ impl Actor for JobActor {
         }
         let backend = state.shared.backend.lock().clone();
         if let Some(backend) = backend {
-            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = tokio::time::timeout(BACKEND_CALL_TIMEOUT, async {
                 backend.control(&state.id, CommandControl::Cancel).await?;
                 (&mut state.execution)
                     .await
