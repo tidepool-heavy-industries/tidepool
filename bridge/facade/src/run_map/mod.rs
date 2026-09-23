@@ -1,9 +1,13 @@
 //! Read-only, bounded derivation of Exomonad run artifacts.
 //! Missing evidence is not a negative observation or an acceptance verdict.
 mod metadata;
+mod trace;
 use metadata::{binding_thread, read_root, recorded_link};
 pub use metadata::{RecordedLink, RootBinding, TimeWindow, WatchState};
 use serde::Serialize;
+pub use trace::{
+    ActorLifecycle, CorrelationCounts, DurationSummary, RunProvenance, TimingLink, TraceSummary,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "certainty", rename_all = "snake_case")]
@@ -81,6 +85,8 @@ pub struct RunMap {
     pub diagnostics: Vec<String>,
     pub usage: Evidence<u64>,
     pub acceptance: Evidence<String>,
+    pub provenance: RunProvenance,
+    pub trace: TraceSummary,
 }
 
 /// Partial artifact inventory. It deliberately does not parse assignment prose
@@ -102,6 +108,7 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
                 "record byte limit must leave room for overflow detection",
             )
         })?;
+    let (provenance, trace_path) = trace::provenance(run, read_bound);
     let mut report = RunMap {
         source: run.display().to_string(),
         root: read_root(run, read_bound),
@@ -114,6 +121,8 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
         acceptance: Evidence::Unknown {
             reason: "No structured acceptance evidence consumed".into(),
         },
+        provenance,
+        trace: TraceSummary::default(),
     };
     // Inspect the listing, retaining only the smallest keys. Selection is
     // independent of filesystem enumeration order and uses O(actor limit) memory.
@@ -288,11 +297,29 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
             ));
         }
     }
+    if let Some(path) = trace_path {
+        report.trace = trace::read_trace(&path, limits, window, &mut report.diagnostics);
+        if report.trace.unclassified_dispatch_failures > 0 {
+            report.diagnostics.push(format!(
+                "{} dispatch failures have no structured class; error prose was not classified",
+                report.trace.unclassified_dispatch_failures
+            ));
+        }
+    } else {
+        report
+            .diagnostics
+            .push("Host trace location unknown because run status is unavailable".into());
+    }
     Ok(report)
 }
 impl RunMap {
     pub fn concise(&self) -> String {
         let mut output = format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len());
+        if let (Evidence::Observed { value: run_id, .. }, Evidence::Observed { value: model, .. }) =
+            (&self.provenance.run_id, &self.provenance.model)
+        {
+            output.push_str(&format!("\n  run={run_id} configured model={model}"));
+        }
         for actor in &self.actors {
             let thread = match &actor.provider_thread {
                 Evidence::Observed { value, .. } => value.as_str(),
@@ -311,6 +338,31 @@ impl RunMap {
                 "\n  UTC window {:?}..{:?} ms; untimed events remain unclassified",
                 self.window.from_unix_ms, self.window.until_unix_ms
             ));
+        }
+        let tools: u64 = self
+            .trace
+            .host_tools
+            .values()
+            .map(|value| value.count)
+            .sum();
+        let rejected = self.trace.input_units.get("Rejected").copied().unwrap_or(0);
+        output.push_str(&format!("\n  host tools={tools} compile requests={} prepared compiles={} Jev calls={} rejected units={rejected} dispatch failures classified={} unclassified={}", self.trace.compile_requests.count, self.trace.prepared_compiles.count, self.trace.jev_calls.count, self.trace.dispatch_failures.values().sum::<u64>(), self.trace.unclassified_dispatch_failures));
+        for (tool, duration) in &self.trace.host_tools {
+            output.push_str(&format!(
+                "\n    {tool}: {} calls, recorded elapsed {} ms (overlapping)",
+                duration.count, duration.total_ms
+            ));
+        }
+        for (class, count) in &self.trace.dispatch_failures {
+            output.push_str(&format!("\n    dispatch failure {class}: {count}"));
+        }
+        if matches!(self.trace.typed_refusal_coverage, Evidence::Unknown { .. }) {
+            output.push_str(
+                "\n    typed refusal total unknown; no complete structured source consumed",
+            );
+        }
+        for diagnostic in &self.diagnostics {
+            output.push_str(&format!("\n    diagnostic: {diagnostic}"));
         }
         output
     }
