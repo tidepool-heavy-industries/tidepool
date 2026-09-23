@@ -448,7 +448,8 @@ mod tests {
     #[test]
     fn default_workspace_rev_is_this_checkouts_workspace_gitlink() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let Ok(listing) = GitCli::new().run(&repository, &["ls-tree", "HEAD", ".exomonad/workspace"])
+        let Ok(listing) =
+            GitCli::new().run(&repository, &["ls-tree", "HEAD", ".exomonad/workspace"])
         else {
             eprintln!("skipped: not a git checkout");
             return;

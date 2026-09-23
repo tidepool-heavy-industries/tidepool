@@ -245,7 +245,9 @@ mod tests {
             assert!(workbench_doc("topics", &[]).unwrap().contains(skill));
         }
         assert!(workbench_doc("jev", &[]).unwrap().contains("exomonad-jev"));
-        assert!(workbench_doc("topics", &[]).unwrap().contains("exomonad-jev"));
+        assert!(workbench_doc("topics", &[])
+            .unwrap()
+            .contains("exomonad-jev"));
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing", &[]).is_err());
     }
