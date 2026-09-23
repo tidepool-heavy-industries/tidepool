@@ -2,7 +2,6 @@
 //! representative struct and enum, exercising the type map, snake→camel field
 //! naming, `#[haskell(hs = ...)]` / `#[haskell(hs_type = ...)]` overrides, and the
 //! `inventory` registration.
-#![allow(dead_code)]
 
 use tidepool_bridge::{all_record_decls, HaskellRecord};
 use tidepool_bridge_derive::HaskellRecord;

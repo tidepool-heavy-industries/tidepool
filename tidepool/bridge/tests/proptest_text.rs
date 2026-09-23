@@ -1,8 +1,7 @@
-mod support;
-
 use proptest::prelude::*;
 use std::sync::OnceLock;
-use support::roundtrip;
+
+use super::support::roundtrip;
 use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
 
 static TABLE: OnceLock<DataConTable> = OnceLock::new();

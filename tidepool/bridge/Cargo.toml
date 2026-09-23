@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-bridge"
 version.workspace = true
 edition.workspace = true
@@ -20,3 +21,7 @@ inventory.workspace = true
 proptest.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-test-data.workspace = true
+
+[[test]]
+name = "bridge"
+path = "tests/suites/bridge.rs"
