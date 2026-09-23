@@ -99,8 +99,7 @@ class Selection(unittest.TestCase):
         self.package("tidepool", path="bridge/facade")
         retired = (
             "exomonad/harness/Cargo.toml", "exomonad/harness/src/engine.rs",
-            "exomonad/web/src/lib.rs", "bridge/facade/src/bin/tidepool-selfharness.rs",
-            "bridge/facade/src/bin/tidepool-selfharness/prompt_catalog.rs",
+            "exomonad/web/src/lib.rs",
         )
         self.assertEqual(self.select(*retired), ({}, {}, set(), set()))
         selection, checks, _, reasons = self.select(

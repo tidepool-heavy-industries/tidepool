@@ -56,7 +56,10 @@ pub fn decode_extract_result(
                 diagnostics.push(ExtractDiag {
                     span: None,
                     severity: DiagnosticSeverity::Error,
-                    message: format!("compiler worker stderr:\n{}", truncate_tail(stderr, 4_000)),
+                    message: format!(
+                        "compiler worker stderr:\n{}",
+                        truncate_head(&without_machine_lines(stderr), 4_000)
+                    ),
                 });
             }
             Err(CompileError::WorkerFailure(diagnostics))
@@ -79,6 +82,47 @@ fn truncate_tail(s: &str, max: usize) -> &str {
         start += 1;
     }
     &s[start..]
+}
+
+/// Machine-readable measurements belong in the daemon's structured log, not
+/// in a source diagnostic. Filter before applying the bounded diagnostic
+/// budget so a long measurement run cannot push the GHC error out of view.
+fn without_machine_lines(stderr: &str) -> String {
+    const PREFIXES: [&str; 13] = [
+        "tidepool-timing ",
+        "tidepool-timing-detail ",
+        "tidepool-timing-module ",
+        "tidepool-timing-module-detail ",
+        "tidepool-count ",
+        "tidepool-compile-summary ",
+        "tidepool-memo-miss ",
+        "tidepool-checked ",
+        "tidepool-checked-dependency-executable ",
+        "tidepool-checked-interface-retained ",
+        "tidepool-checked-interface-elided ",
+        "tidepool-dependency-witness ",
+        "tidepool-target ",
+    ];
+    stderr
+        .lines()
+        .filter(|line| {
+            !PREFIXES
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_head(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Options controlling how [`render_diagnostics`] partitions/remaps/labels a
@@ -933,6 +977,27 @@ mod tests {
         assert!(diagnostics[0]
             .message
             .contains("typecheckIface\nmodule X is not loaded"));
+    }
+
+    #[test]
+    fn worker_failure_filters_machine_lines_before_bounding_stderr() {
+        let worker = br#"{"version":2,"outcome":"worker-failure","diagnostics":[]}"#;
+        let mut stderr = String::from("ghc: panic! (the 'impossible' happened)\n");
+        for _ in 0..200 {
+            stderr.push_str("tidepool-timing phase=cycle_modules_wall ms=14700\n");
+            stderr.push_str("tidepool-checked module=Long.Dependency target=False\n");
+        }
+        stderr.push_str(&"tail noise\n".repeat(500));
+        let Err(CompileError::WorkerFailure(diagnostics)) =
+            decode_extract_result(false, worker, stderr.as_bytes())
+        else {
+            panic!("worker failure must stay typed");
+        };
+        let message = &diagnostics[0].message;
+        assert!(message.contains("ghc: panic!"), "{message}");
+        assert!(!message.contains("tidepool-timing"), "{message}");
+        assert!(!message.contains("tidepool-checked"), "{message}");
+        assert!(message.len() <= "compiler worker stderr:\n".len() + 4_000);
     }
 
     // ---- render_diagnostics ----

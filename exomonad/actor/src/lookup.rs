@@ -394,7 +394,7 @@ pub(crate) fn execute(
         inspected.clone(),
         live_modules,
         workspace_modules,
-        usage,
+        usage.clone(),
     );
     let reference_results = if request.references.is_empty() {
         Ok(vec![])
@@ -462,7 +462,7 @@ pub(crate) fn execute(
                             vec![inspected],
                             live_modules,
                             workspace_modules,
-                            usage,
+                            usage.clone(),
                         )
                         .results
                         .remove(0)
@@ -787,9 +787,15 @@ mod tests {
     fn changed_view_performs_no_inspection() {
         let mut req = request(&["x"], true);
         req.expected_view = Some("old".into());
-        let result = execute(req, "new".into(), "", &[], &[], &[], |_| {
-            panic!("changed view must not inspect")
-        });
+        let result = execute(
+            req,
+            "new".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| panic!("changed view must not inspect"),
+        );
         assert!(result.issue.is_some());
         assert!(result.results.is_empty());
     }
@@ -802,7 +808,7 @@ mod tests {
             "",
             &[],
             &["Project.Test".into()],
-            &[],
+            crate::UsagePointerTable::default(),
             |queries| {
                 calls.set(calls.get() + 1);
                 assert_eq!(queries.len(), 1);
@@ -823,33 +829,41 @@ mod tests {
     fn references_are_one_degree_deduplicated_and_fair() {
         let mut req = request(&["a", "b"], true);
         req.candidate_limit = 2;
-        let result = execute(req, "view".into(), "", &[], &[], &[], |queries| {
-            Ok(queries
-                .iter()
-                .map(|q| {
-                    let InspectionQuery::Info(name) = q else {
-                        panic!()
-                    };
-                    let mut e = entry(name);
-                    e.references = vec![
-                        IdentifierRef {
-                            module: "Project.Test".into(),
-                            name: format!("{name}First"),
-                            namespace: IdentifierNamespace::Type,
-                        },
-                        IdentifierRef {
-                            module: "Project.Test".into(),
-                            name: format!("{name}Second"),
-                            namespace: IdentifierNamespace::Type,
-                        },
-                    ];
-                    InspectionResult::Info {
-                        query: name.clone(),
-                        entries: vec![e],
-                    }
-                })
-                .collect())
-        });
+        let result = execute(
+            req,
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |queries| {
+                Ok(queries
+                    .iter()
+                    .map(|q| {
+                        let InspectionQuery::Info(name) = q else {
+                            panic!()
+                        };
+                        let mut e = entry(name);
+                        e.references = vec![
+                            IdentifierRef {
+                                module: "Project.Test".into(),
+                                name: format!("{name}First"),
+                                namespace: IdentifierNamespace::Type,
+                            },
+                            IdentifierRef {
+                                module: "Project.Test".into(),
+                                name: format!("{name}Second"),
+                                namespace: IdentifierNamespace::Type,
+                            },
+                        ];
+                        InspectionResult::Info {
+                            query: name.clone(),
+                            entries: vec![e],
+                        }
+                    })
+                    .collect())
+            },
+        );
         assert_eq!(
             result
                 .candidates
@@ -863,26 +877,34 @@ mod tests {
     fn full_candidate_budget_retains_origins_from_later_queries() {
         let mut req = request(&["a", "b"], true);
         req.candidate_limit = 1;
-        let result = execute(req, "view".into(), "", &[], &[], &[], |queries| {
-            Ok(queries
-                .iter()
-                .map(|query| {
-                    let InspectionQuery::Info(name) = query else {
-                        panic!()
-                    };
-                    let mut entry = entry(name);
-                    entry.references = vec![IdentifierRef {
-                        module: "Project.Test".into(),
-                        name: "Shared".into(),
-                        namespace: IdentifierNamespace::Type,
-                    }];
-                    InspectionResult::Info {
-                        query: name.clone(),
-                        entries: vec![entry],
-                    }
-                })
-                .collect())
-        });
+        let result = execute(
+            req,
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |queries| {
+                Ok(queries
+                    .iter()
+                    .map(|query| {
+                        let InspectionQuery::Info(name) = query else {
+                            panic!()
+                        };
+                        let mut entry = entry(name);
+                        entry.references = vec![IdentifierRef {
+                            module: "Project.Test".into(),
+                            name: "Shared".into(),
+                            namespace: IdentifierNamespace::Type,
+                        }];
+                        InspectionResult::Info {
+                            query: name.clone(),
+                            entries: vec![entry],
+                        }
+                    })
+                    .collect())
+            },
+        );
         assert_eq!(result.candidates.len(), 1);
         assert_eq!(result.candidates[0].origins, vec!["a", "b"]);
     }
@@ -894,7 +916,7 @@ mod tests {
             "qualified Project.Test as T",
             &[],
             &[],
-            &[],
+            crate::UsagePointerTable::default(),
             |queries| {
                 Ok(queries
                     .iter()
@@ -928,7 +950,7 @@ mod tests {
             "Project.Test",
             &[],
             &[],
-            &[],
+            crate::UsagePointerTable::default(),
             |queries| {
                 calls.set(calls.get() + 1);
                 assert!(queries
@@ -967,7 +989,7 @@ mod reference_tests {
             "",
             &[],
             &[],
-            &[],
+            crate::UsagePointerTable::default(),
             |queries| {
                 Ok(queries
                     .iter()

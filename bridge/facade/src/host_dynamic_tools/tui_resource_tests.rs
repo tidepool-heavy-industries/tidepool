@@ -341,18 +341,16 @@ async fn run_shell_fixture(shell: exomonad_agent::InteractiveShellTools) {
         .status()
         .unwrap()
         .success());
-    let skill = work.join(".exomonad/skills/exomonad-command");
+    let skill = work.join(".exomonad/workspace/skills/exomonad-command");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
         skill.join("SKILL.md"),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-command/SKILL.md"
-        ),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md"),
     )
     .unwrap();
     std::fs::create_dir_all(work.join(".agents/skills")).unwrap();
     std::os::unix::fs::symlink(
-        "../../.exomonad/skills/exomonad-command",
+        "../../.exomonad/workspace/skills/exomonad-command",
         work.join(".agents/skills/exomonad-command"),
     )
     .unwrap();

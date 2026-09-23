@@ -41,6 +41,7 @@ pub trait SourceReloadService: Send + Sync {
         &self,
         caller: tidepool_repr::PrincipalId,
         also_check: &[String],
+        intent: Option<&str>,
     ) -> Result<SrReloadOutcome, SourceError>;
 
     /// The revision `caller`'s later cells compile against, and the revision
@@ -83,10 +84,11 @@ impl SourceHandler {
         &mut self,
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
         also_check: Vec<String>,
+        intent: Option<String>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         cx.respond(
             self.service()
-                .and_then(|service| service.reload(cx.principal(), &also_check)),
+                .and_then(|service| service.reload(cx.principal(), &also_check, intent.as_deref())),
         )
     }
 

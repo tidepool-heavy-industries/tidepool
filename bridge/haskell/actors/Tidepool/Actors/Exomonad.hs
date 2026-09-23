@@ -47,6 +47,9 @@ module Tidepool.Actors.Exomonad
   , WorktreeRegistry
   , WorktreeAllocation
   , WorktreeIntegration
+  , Journal
+  , record
+  , trace
   , Forks
   , Reflect
   , reflect
@@ -115,6 +118,7 @@ module Tidepool.Actors.Exomonad
   , child
   , childWithProgress
   , AdmissionReceipt (..)
+  , admittedAgent
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
@@ -378,3 +382,4 @@ import Tidepool.Worktree hiding
   , worktreeHead
   , GitOid
   )
+import Tidepool.Journal (record, trace)

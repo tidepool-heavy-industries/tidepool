@@ -190,6 +190,8 @@ pub struct WtWorktreeSummary {
 pub struct WtMergeRequest {
     /// The exact observed source commit; this, not the branch label, is merged.
     pub source_head: WtGitOid,
+    /// The registered source checkout that supplied this commit and its initialized kit objects.
+    pub source_worktree: WtWorktreeId,
     /// Optional readable provenance. If present, it must still resolve to sourceHead.
     pub source_branch: Option<WtBranchName>,
     /// The managed worktree whose checked-out branch receives the merge.

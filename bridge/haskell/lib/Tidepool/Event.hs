@@ -134,6 +134,8 @@ module Tidepool.Event
     -- * Registration
   , withHandler
   , withHandlerTry
+  , subscribe
+  , unsubscribe
   , pumpEff
   , drainSubscription
 
@@ -155,6 +157,7 @@ module Tidepool.Event
   ) where
 
 import Control.Monad.Freer hiding (run)
+import Control.Monad.Freer (Member)
 -- `Eff`'s own constructors, for `pumpEff`'s interposition — the SAME type
 -- re-exported by `Control.Monad.Freer` above, so this import adds
 -- constructors and the queue operations and shadows nothing. Exactly the
@@ -250,7 +253,18 @@ pumpEff tick (E u q) = tick >> E u (tsingleton (\x -> pumpEff tick (qApp q x)))
 -- | Drain everything this subscription has observed since the last
 -- drain, applying the handler to each match in OBSERVATION ORDER.
 -- A queue overflow aborts here rather than dropping a commit.
-drainSubscription :: Event a -> (a -> M ()) -> SubscriptionId -> M ()
+subscribe :: Member RepoEvent effects => Event a -> Eff effects SubscriptionId
+subscribe ev = send (RepoEventSubscribe ev.eventWatches) >>= liftEither
+
+unsubscribe :: Member RepoEvent effects => SubscriptionId -> Eff effects ()
+unsubscribe sub = send (RepoEventUnsubscribe sub) >>= liftEither
+
+drainSubscription
+  :: Member RepoEvent effects
+  => Event a
+  -> (a -> Eff effects ())
+  -> SubscriptionId
+  -> Eff effects ()
 drainSubscription ev handler sub = do
   batch <- send (RepoEventDrain sub) >>= liftEither
   mapM_ (\o -> case ev.eventProject o of { Just a -> handler a; Nothing -> pure () }) batch
@@ -265,10 +279,10 @@ drainSubscription ev handler sub = do
 -- and it may itself suspend. Its failure fails this scope.
 withHandler :: Event a -> (a -> M ()) -> M b -> M b
 withHandler ev handler body = do
-  sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither
+  sub <- subscribe ev
   r <- pumpEff (drainSubscription ev handler sub) body
   drainSubscription ev handler sub
-  send (RepoEventUnsubscribe sub) >>= liftEither
+  unsubscribe sub
   pure r
 
 -- | Like 'withHandler', but returns a subscription failure and delivers later

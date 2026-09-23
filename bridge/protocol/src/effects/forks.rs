@@ -137,7 +137,9 @@ pub fn forks() -> Effect {
                         "EffectActor",
                         "EffectReflect",
                         "EffectLookup",
+                        "EffectRepoEvent",
                         "EffectSource",
+                        "EffectJournal",
                     ]
                     .into_iter()
                     .map(|ctor| SumVariant {

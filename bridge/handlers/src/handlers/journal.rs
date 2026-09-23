@@ -373,14 +373,13 @@ pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), J
 // SegmentPath — a segment path mintable only by exclusively claiming it
 // ============================================================================
 
-/// A journal segment path, mintable ONLY by [`SegmentPath::create_exclusive`]
-/// — never by wrapping an arbitrary `PathBuf`. The invariant this buys:
-/// holding a `SegmentPath` is proof the underlying file was exclusively
-/// claimed (`OpenOptions::create_new`), not merely a promise that some
-/// caller meant to claim it first. [`JournalHandler::new`]/[`JournalHandler::resuming`]
-/// take this instead of a bare `PathBuf` so "a handler pointed at a segment
-/// nobody allocated" is a type error to construct, not a runtime hazard to
-/// remember to avoid.
+/// A journal segment path, mintable by [`SegmentPath::create_exclusive`] for
+/// a fresh segment or [`SegmentPath::open_existing`] for a serialized resume —
+/// never by wrapping an arbitrary `PathBuf`. A fresh path proves an exclusive
+/// claim; a resumed path proves the existing file was opened for append.
+/// [`JournalHandler::new`]/[`JournalHandler::resuming`] take this instead of a
+/// bare `PathBuf` so callers cannot accidentally point a handler at a path
+/// without establishing the corresponding file condition first.
 ///
 /// The resume layer is the legitimate non-test caller: it owns the segment
 /// NAMING scheme (ordinal
@@ -411,6 +410,14 @@ impl SegmentPath {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        Ok(SegmentPath(path))
+    }
+
+    /// Open a previously created segment without truncating it. The caller
+    /// must serialize resumes for the journal; Exomonad's host-incarnation
+    /// lease provides that process-level exclusion.
+    pub fn open_existing(path: PathBuf) -> std::io::Result<Self> {
+        OpenOptions::new().append(true).open(&path)?;
         Ok(SegmentPath(path))
     }
 
@@ -1139,7 +1146,7 @@ mod tests {
         let path = tmp_file("resuming");
         let _ = std::fs::remove_file(&path);
 
-        let first = JournalHandler::new(SegmentPath::for_test(path.clone()))
+        let first = JournalHandler::new(SegmentPath::create_exclusive(path.clone()).unwrap())
             .expect("fresh segment header stamp succeeds");
         for i in 0..3 {
             first
@@ -1147,8 +1154,8 @@ mod tests {
                 .unwrap();
         }
 
-        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), 1)
-            .expect("fresh segment header stamp succeeds");
+        let second = JournalHandler::resuming(SegmentPath::open_existing(path.clone()).unwrap(), 1)
+            .expect("existing segment resumes without rewriting its header");
         for i in 3..6 {
             second
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))

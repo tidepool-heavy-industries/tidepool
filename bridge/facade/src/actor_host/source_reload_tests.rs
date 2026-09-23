@@ -164,7 +164,7 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     std::fs::write(&module, work_module(41)).unwrap();
     let reloaded = committed(
         child.policy.as_ref(),
-        "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ changed -> changed; _ -> [\"not published\"] })",
+        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ changed _ -> changed; _ -> [\"not published\"] })",
     )
     .await;
     assert_eq!(
@@ -267,7 +267,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     .unwrap();
     let refused = committed(
         child.policy.as_ref(),
-        "outcome <- reloadSource []\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
@@ -322,7 +322,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     std::fs::write(workspace.join(".exomonad/Project/Work.hs"), work_module(41)).unwrap();
     let reloaded = committed(
         policy,
-        "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ changed -> changed; _ -> [\"not published\"] })",
+        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ changed _ -> changed; _ -> [\"not published\"] })",
     )
     .await;
     assert_eq!(
@@ -348,6 +348,50 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     .await;
     assert_eq!(after["items"][1]["output"], "2", "{after}");
     assert_eq!(after["items"][2]["output"], "True", "{after}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
+    let campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            write_workspace(&config.workspace, 1);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let policy = campaign.root_installation.policy.clone();
+    let published_before = run_layer_target(&campaign);
+    let new_module = workspace.join(".exomonad/Project/Vibe.hs");
+    std::fs::write(
+        &new_module,
+        "module Project.Vibe (vibeAnswer) where\n\nvibeAnswer :: Int\nvibeAnswer = 42\n",
+    )
+    .unwrap();
+
+    let result = committed(
+        policy.as_ref(),
+        "Right before <- sourceStatus\nRight outcome <- reloadSource [] Nothing\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"Project.Vibe\" `T.isInfixOf` detail && \"restart\" `T.isInfixOf` detail; _ -> False })\ninspectFull (revisionGeneration (statusActive before) == revisionGeneration (statusActive after))",
+    )
+    .await;
+    assert_eq!(result["items"][3]["output"], "True", "{result}");
+    assert_eq!(result["items"][4]["output"], "True", "{result}");
+    assert!(
+        new_module.is_file(),
+        "a refused reload leaves the edit in place"
+    );
+    assert_eq!(run_layer_target(&campaign), published_before);
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -386,7 +430,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
     std::fs::write(workspace.join(".exomonad/Project/Work.hs"), broken).unwrap();
     let rejected = committed(
         policy,
-        "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False })\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False })",
+        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False })\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False })",
     )
     .await;
     assert_eq!(

@@ -612,11 +612,13 @@ data ToolCall = ToolCall
   , toolCallArguments :: Value
   }
 
--- | What the tool answered, and the handle the whole answer stays addressable
--- under.
+-- | What the tool answered, the runtime-issued one-based result ordinal, and
+-- the handle the whole answer stays addressable under. The ordinal and the
+-- decimal suffix of the handle identify the same result.
 data ToolResult = ToolResult
   { toolResultName :: Text
   , toolResultHandle :: ResultHandle
+  , toolResultOrdinal :: Int
   , toolResultOutput :: Text
   }
 
@@ -629,6 +631,7 @@ instance FromJSON ToolResult where
     ToolResult
       <$> (o .: T.pack "name")
       <*> ((o .:? T.pack "handle") .!= T.empty)
+      <*> (o .: T.pack "ordinal")
       <*> ((o .:? T.pack "output") .!= T.empty)
 
 -- | What the runtime shows the after-tool slot: one finished call, and what it

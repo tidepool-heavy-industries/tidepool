@@ -839,17 +839,17 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let command_examples = [
         "judgeChanges \"inspect changed documentation\"",
         examples(include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
+            "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(2)
         .unwrap(),
         examples(include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
+            "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(4)
         .unwrap(),
         example(include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-jev/SKILL.md"
+            "../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"
         )),
     ];
     for (index, source) in command_examples.into_iter().enumerate() {
@@ -873,7 +873,9 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
 
     committed(
         root.as_ref(),
-        example(include_str!("../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-jev/references/recent-changes.md")),
+        example(include_str!(
+            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
+        )),
     )
     .await;
     let layout =
@@ -1831,22 +1833,18 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/progress-route-producer.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/progress-route-producer.hs"),
     )
     .await;
     let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/progress-route.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/progress-route.hs"),
     )
     .await;
     committed(
         producer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/progress-route-questions.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/progress-route-questions.hs"),
     )
     .await;
     for (questions, expected, effects) in [
@@ -2245,9 +2243,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_delivery_setup.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_delivery_setup.hs"),
     )
     .await;
     let (implementer, _implementer_binding) = next_project_worker(&mut campaign).await;
@@ -2280,9 +2276,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(replied["status"], "replied", "{replied}");
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_start.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_review_start.hs"),
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
@@ -2326,9 +2320,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     committed(
         reviewer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_repair.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_review_repair.hs"),
     )
     .await;
     let pending = committed(
@@ -2391,9 +2383,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
     committed(
         reviewer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_design_question.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_design_question.hs"),
     )
     .await;
     let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
@@ -2445,9 +2435,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
     committed(
         reviewer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_plan_incorporation.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_plan_incorporation.hs"),
     )
     .await;
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -2500,9 +2488,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
     let questions = committed(
         reviewer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_review_questions.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs"),
     )
     .await;
     assert_eq!(
@@ -2520,9 +2506,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     let pending = committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_decision_return.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs"),
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
@@ -2569,9 +2553,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     let propagated = committed(
         reviewer.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/project_decision_consumer.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs"),
     )
     .await;
     assert!(
@@ -2692,17 +2674,13 @@ async fn route_reply_case(cancel: bool) {
     .await;
     committed(
         root.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/route-reply-setup.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/route-reply-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
     committed(
         lead.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/route-reply-worker.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/route-reply-worker.hs"),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
@@ -2785,7 +2763,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/component-setup.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/component-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
@@ -2808,9 +2786,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )).await;
     committed(
         lead.policy.as_ref(),
-        include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/checks/component-review.hs"
-        ),
+        include_str!("../../../../.exomonad/workspace/checks/component-review.hs"),
     )
     .await;
     let (reviewer, _review_binding) = next_project_worker(&mut campaign).await;
@@ -2831,7 +2807,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let verdict = dispatch_haskell_script(
         reviewer.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/owner-repair.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/owner-repair.hs"),
     )
     .await;
     assert_eq!(verdict["status"], "replied", "{verdict}");
@@ -2857,7 +2833,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     let again = committed(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/review-again.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/review-again.hs"),
     )
     .await;
     assert!(again.to_string().contains("Repair"), "{again}");
@@ -2910,7 +2886,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let delivered = dispatch_haskell_script(
         lead.policy.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/deliver.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/deliver.hs"),
     )
     .await;
     assert_eq!(delivered["status"], "replied", "{delivered}");
@@ -2937,7 +2913,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     committed(
         root.as_ref(),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/rsi.hs"),
+        include_str!("../../../../.exomonad/workspace/checks/rsi.hs"),
     )
     .await;
     let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;

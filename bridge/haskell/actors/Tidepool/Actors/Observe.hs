@@ -5,6 +5,7 @@
 module Tidepool.Actors.Observe
   ( SwarmSnapshot (..)
   , UsageTotal (..)
+  , UsageUnavailability (..)
   , UsageDelta (..)
   , snapshot
   , subtree
@@ -36,9 +37,20 @@ data UsageTotal = UsageTotal
   , totalTokens :: Int
   , observedProviderThreads :: [Text]
   , unknownActors :: [(Int, Int)]
+  , unobservedProviderActors :: [((Int, Int), UsageUnavailability)]
   , partialProviderThreads :: [Text]
   , inconsistentProviderThreads :: [Text]
   } deriving (Show, Eq)
+
+-- | Why an actor contributes no thread total. In particular, an empty
+-- 'observedProviderThreads' list is not a measured zero when these entries
+-- are present.
+data UsageUnavailability
+  = NoProviderThread
+  | ThreadUsageNotObserved
+  | TurnUsageOnly
+  | InconsistentThreadAggregate
+  deriving (Show, Eq)
 
 data UsageDelta = UsageDelta
   { comparableUsage :: UsageTotal
@@ -97,12 +109,16 @@ usageByRequestedModel (SwarmSnapshot actors) =
 -- observations and changed origins never become zero spend or negative spend.
 usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
 usageDelta (SwarmSnapshot before) (SwarmSnapshot after) = UsageDelta
-  { comparableUsage = foldl addChange (emptyUsage { unknownActors = unknownActors (summarize after) }) pairs
+  { comparableUsage = foldl addChange (emptyUsage
+      { unknownActors = unknownActors afterUsage
+      , unobservedProviderActors = unobservedProviderActors afterUsage
+      }) pairs
   , newlyObservedUsage = summarize (concat [rows | (key, rows) <- newGroups, isNothing (lookup key oldGroups)])
   , lostProviderThreads = [key | (key, _) <- oldGroups, isNothing (lookup key newGroups)]
   , discontinuousProviderThreads = [key | (key, old, new) <- pairs, isNothing (comparable old new)]
   }
   where
+    afterUsage = summarize after
     oldGroups = threadGroups before
     newGroups = threadGroups after
     pairs = [(key, old, new) | (key, new) <- newGroups, Just old <- [lookup key oldGroups]]
@@ -124,7 +140,7 @@ usageDelta (SwarmSnapshot before) (SwarmSnapshot after) = UsageDelta
     addChange total (key, old, new) = maybe total (addUsage key total) (comparable old new)
 
 emptyUsage :: UsageTotal
-emptyUsage = UsageTotal 0 0 0 0 0 [] [] [] []
+emptyUsage = UsageTotal 0 0 0 0 0 [] [] [] [] []
 
 identity :: AgentRosterEntry -> (Int, Int)
 identity actor = (rosterActorId actor, rosterActorIncarnation actor)
@@ -175,13 +191,26 @@ newest rows = case filter coversAll rows of
 summarize :: [AgentRosterEntry] -> UsageTotal
 summarize actors = foldl addGroup initial (threadGroups actors)
   where
-    initial = emptyUsage { unknownActors = map identity (filter ((== Nothing) . threadKey) actors) }
+    unthreaded = filter ((== Nothing) . threadKey) actors
+    initial = emptyUsage
+      { unknownActors = map identity unthreaded
+      , unobservedProviderActors = map (\actor -> (identity actor, reason actor)) unthreaded
+      }
     addGroup total (key, rows) = case newest rows >>= rosterUsageSummary of
       Just usage -> addUsage key total usage
       Nothing -> total
         { unknownActors = map identity rows ++ unknownActors total
+        , unobservedProviderActors = map (\actor -> (identity actor, InconsistentThreadAggregate)) rows
+            ++ unobservedProviderActors total
         , inconsistentProviderThreads = key : inconsistentProviderThreads total
         }
+    reason actor = case rosterUsageSummary actor of
+      Just usage -> case usageSummaryScope usage of
+        UsageTurn _ _ -> TurnUsageOnly
+        UsageThread _ -> InconsistentThreadAggregate
+      Nothing -> case rosterProviderThread actor of
+        Nothing -> NoProviderThread
+        Just _ -> ThreadUsageNotObserved
 
 addUsage :: Text -> UsageTotal -> ProviderUsageSummary -> UsageTotal
 addUsage key total usage = total

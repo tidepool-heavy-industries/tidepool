@@ -78,6 +78,8 @@ pub enum ActorEffectKey {
     Actor,
     Reflect,
     Lookup,
+    RepoEvent,
+    Journal,
     /// Reloading the source layer the holder's own cells compile against. The
     /// root's layer is the run's; an actor launched with a checkout has its
     /// own, captured from that checkout. The key names the verb, never the
@@ -108,6 +110,8 @@ impl ActorEffectKey {
             Self::Actor => "Actor",
             Self::Reflect => "Reflect",
             Self::Lookup => "Lookup",
+            Self::RepoEvent => "RepoEvent",
+            Self::Journal => "Journal",
             Self::Source => "Source",
         }
     }
@@ -156,6 +160,8 @@ impl EffectiveRole {
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
                 ActorEffectKey::Lookup,
+                ActorEffectKey::RepoEvent,
+                ActorEffectKey::Journal,
                 ActorEffectKey::Source,
             ],
         )
@@ -600,6 +606,7 @@ mod tests {
             ("ResearchEffects", EffectiveRole::research()),
             ("CodingEffects", EffectiveRole::coding()),
             ("IntegrationEffects", EffectiveRole::integration()),
+            ("ActorEffects", EffectiveRole::root()),
         ] {
             let ceiling: Vec<&str> = role
                 .effect_keys()
@@ -614,6 +621,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn journal_is_available_to_the_root_only() {
+        assert!(EffectiveRole::root()
+            .effect_keys()
+            .contains(&ActorEffectKey::Journal));
+        assert!(!EffectiveRole::research()
+            .effect_keys()
+            .contains(&ActorEffectKey::Journal));
+        assert!(!EffectiveRole::coding()
+            .effect_keys()
+            .contains(&ActorEffectKey::Journal));
+        assert!(!EffectiveRole::integration()
+            .effect_keys()
+            .contains(&ActorEffectKey::Journal));
+    }
+
+    #[test]
+    fn repository_events_are_available_to_the_root_only() {
+        assert!(EffectiveRole::root()
+            .effect_keys()
+            .contains(&ActorEffectKey::RepoEvent));
+        assert!(!EffectiveRole::research()
+            .effect_keys()
+            .contains(&ActorEffectKey::RepoEvent));
+        assert!(!EffectiveRole::coding()
+            .effect_keys()
+            .contains(&ActorEffectKey::RepoEvent));
+        assert!(!EffectiveRole::integration()
+            .effect_keys()
+            .contains(&ActorEffectKey::RepoEvent));
     }
 
     #[test]
@@ -636,6 +675,18 @@ mod tests {
             ActorEffectKey::WorktreeIntegration,
             ActorEffectKey::Commands,
             ActorEffectKey::Actor,
+        ];
+        let router = vec![
+            ActorEffectKey::Replies,
+            ActorEffectKey::BoundWorktree,
+            ActorEffectKey::WorktreeRegistry,
+            ActorEffectKey::RepoEvent,
+            ActorEffectKey::Commands,
+            ActorEffectKey::Actor,
+            ActorEffectKey::Notifications,
+            ActorEffectKey::Jev,
+            ActorEffectKey::Journal,
+            ActorEffectKey::Sleep,
         ];
         let root = EffectiveRole::root();
         for (role, generations) in [
@@ -670,6 +721,16 @@ mod tests {
             );
             root.preview_child(actor, None)
                 .expect("the root admits its own integrator");
+        }
+        for role in [EffectiveRole::root()] {
+            let actor = role.clone().with_effect_keys(router.clone());
+            assert!(
+                actor.respects_role_ceiling(),
+                "the router row exceeds the {:?} ceiling",
+                role.role()
+            );
+            root.preview_child(actor, None)
+                .expect("the root admits the journaled event router");
         }
         assert!(
             !EffectiveRole::research()

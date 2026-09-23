@@ -734,6 +734,12 @@ fn type_defs() -> Vec<TypeDef> {
                         doc: &["The exact observed source commit; this, not the branch label, is merged."],
                     },
                     RecordField {
+                        hs_name: "mergeSourceWorktree",
+                        rust_name: "source_worktree",
+                        ty: HsType::Named("WorktreeId"),
+                        doc: &["The registered source checkout that supplied this commit and its initialized kit objects."],
+                    },
+                    RecordField {
                         hs_name: "mergeSourceBranch",
                         rust_name: "source_branch",
                         ty: HsType::maybe(HsType::Named("BranchName")),

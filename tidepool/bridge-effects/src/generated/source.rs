@@ -35,6 +35,20 @@ pub struct SrStatus {
     pub disk: SrRevision,
 }
 
+/// The best-effort Git outcome for a successfully published source revision.
+#[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum SrWorkspaceCommitOutcome {
+    /// No changed captured workspace files needed a commit.
+    WorkspaceUnchanged,
+    /// The workspace commit's object id and source paths that changed on
+    /// disk after capture. The commit contains the captured bytes.
+    WorkspaceCommitted(String, Vec<String>),
+    /// The reason publication to Git failed, an optional workspace commit
+    /// that was already created, and source paths changed on disk after
+    /// capture. Source publication still succeeded.
+    WorkspaceCommitFailed(String, Option<String>, Vec<String>),
+}
+
 /// What one reload did. Every case is an ordinary value to match on.
 #[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum SrReloadOutcome {
@@ -44,7 +58,7 @@ pub enum SrReloadOutcome {
     /// The revision that was active, the revision now active, and the
     /// modules whose source differs between them. Later cells compile
     /// against the new one.
-    ReloadPublished(SrRevision, SrRevision, Vec<String>),
+    ReloadPublished(SrRevision, SrRevision, Vec<String>, SrWorkspaceCommitOutcome),
     /// The affected module graph did not typecheck. The first revision
     /// is the one still active — unchanged — the second names the
     /// snapshot that failed, and the text carries its diagnostics. The

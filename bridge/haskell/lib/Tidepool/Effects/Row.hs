@@ -16,6 +16,7 @@ import Data.Kind (Type)
 
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
+import Tidepool.Effects (Journal, RepoEvent)
 import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
@@ -88,3 +89,5 @@ instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
 instance KnownEffect Reflect where effectWitness = EffectWitness EffectReflect
 instance KnownEffect Lookup where effectWitness = EffectWitness EffectLookup
 instance KnownEffect Source where effectWitness = EffectWitness EffectSource
+instance KnownEffect RepoEvent where effectWitness = EffectWitness EffectRepoEvent
+instance KnownEffect Journal where effectWitness = EffectWitness EffectJournal

@@ -248,7 +248,7 @@ pub(crate) struct LookupEntry {
     pub(crate) quality: MatchQuality,
     pub(crate) availability: InspectionAvailability,
     /// A locator for one worked use of this callable — a shipped Exomonad
-    /// example (`.exomonad/checks/<file>.hs`) or skill (`skill: <name>`) that
+    /// example (`.exomonad/workspace/checks/<file>.hs`) or skill (`skill: <name>`) that
     /// actually uses the qualified name. `None` when no shipped example uses
     /// it. Derived from the shipped examples/skills at build time; see
     /// `crate::usage_pointer`. Not populated for non-callable kinds (types,
@@ -569,7 +569,7 @@ pub(crate) fn resolve(
                         prepared.query,
                         entries
                             .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
+                            .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
                             .collect(),
                         MATCH_LIMIT,
                     ),
@@ -577,7 +577,7 @@ pub(crate) fn resolve(
                         prepared.query,
                         entries
                             .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
+                            .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
                             .collect(),
                         MATCH_LIMIT,
                     ),
@@ -617,7 +617,7 @@ pub(crate) fn resolve(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
+                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -625,7 +625,7 @@ pub(crate) fn resolve(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
+                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -633,7 +633,7 @@ pub(crate) fn resolve(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
+                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -668,7 +668,7 @@ pub(crate) fn resolve(
                             },
                             availability: entry.availability,
                             usage_pointer: crate::usage_pointer::pointer_for(
-                                usage_pointers,
+                                &usage_pointers,
                                 &entry.name,
                             ),
                         })
@@ -697,7 +697,7 @@ pub(crate) fn resolve(
     fn info_lookup_entry(
         entry: tidepool_runtime::session::InfoEntry,
         live_modules: &[String],
-        usage_pointers: crate::UsagePointerTable,
+        usage_pointers: &crate::UsagePointerTable,
     ) -> LookupEntry {
         let kind = match entry.kind.as_str() {
             "class-method" => LookupEntryKind::ClassMethod,
@@ -1180,7 +1180,7 @@ mod tests {
                 LookupResult::found(
                     "Cmd.readOutput".into(),
                     vec![LookupEntry {
-                        usage_pointer: Some(".exomonad/checks/handler-call.hs".into()),
+                        usage_pointer: Some(".exomonad/workspace/checks/handler-call.hs".into()),
                         ..entry("readOutput", MatchQuality::Exact)
                     }],
                     8,
@@ -1195,7 +1195,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("(see: .exomonad/checks/handler-call.hs)"),
+            rendered.contains("(see: .exomonad/workspace/checks/handler-call.hs)"),
             "{rendered}"
         );
     }

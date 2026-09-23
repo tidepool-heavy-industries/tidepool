@@ -19,7 +19,7 @@ pub enum SourceError {
 #[allow(clippy::enum_variant_names)]
 #[derive(FromHaskell)]
 pub enum SourceReq {
-    SourceReloadWith(Vec<String>),
+    SourceReloadWith(Vec<String>, Option<String>),
     SourceStatusWith,
 }
 
@@ -38,7 +38,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
-            SourceReq::SourceReloadWith(also_check) => self.source_reload(cx, also_check),
+            SourceReq::SourceReloadWith(also_check, intent) => {
+                self.source_reload(cx, also_check, intent)
+            }
             SourceReq::SourceStatusWith => self.source_status(cx),
         }
     }

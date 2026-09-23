@@ -18,6 +18,41 @@ if [[ $mode != 160000 || $type != commit || $path != vendor/codex ]]; then
   exit 2
 fi
 
+# Codex vendors git-sourced Cargo.lock entries through cargoLock.outputHashes.
+# Nix otherwise reports a missing entry only while evaluating the Codex
+# derivation, often underneath a long Tidepool build trace. Catch that drift
+# before entering Nix and name the file that owns the hash table.
+codex_lock="$codex_repo/codex-rs/Cargo.lock"
+codex_nix="$codex_repo/codex-rs/default.nix"
+if [[ -f $codex_lock && -f $codex_nix ]]; then
+  missing_hashes=$(awk '
+    BEGIN { RS = ""; FS = "\n" }
+    {
+      name = version = source = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^name = "/) { name = $i; sub(/^name = "/, "", name); sub(/"$/, "", name) }
+        if ($i ~ /^version = "/) { version = $i; sub(/^version = "/, "", version); sub(/"$/, "", version) }
+        if ($i ~ /^source = "/) { source = $i; sub(/^source = "/, "", source); sub(/"$/, "", source) }
+      }
+      if (name != "" && version != "" && source ~ /^git\+/) print name "-" version
+    }
+  ' "$codex_lock" | while IFS= read -r package; do
+    if ! grep -Fq "\"$package\" =" "$codex_nix"; then
+      printf '%s\n' "$package"
+    fi
+  done)
+  if [[ -n $missing_hashes ]]; then
+    echo 'error: Codex Cargo.lock has git dependencies without Nix vendor hashes:' >&2
+    while IFS= read -r package; do
+      [[ -z $package ]] || printf '       %s\n' "$package" >&2
+    done <<<"$missing_hashes"
+    echo "       Add each hash to $codex_nix in cargoLock.outputHashes." >&2
+    echo '       Nix reports the expected SRI hash when that entry is set to an empty string.' >&2
+    echo '       Update and push the Codex submodule commit before rebuilding Tidepool.' >&2
+    exit 2
+  fi
+fi
+
 if ! codex_root=$(git -C "$codex_repo" rev-parse --show-toplevel 2>/dev/null) ||
    [[ $codex_root == "$repo" ]]; then
   echo 'error: vendor/codex is not checked out, so its origin cannot be checked' >&2

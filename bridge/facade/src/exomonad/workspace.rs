@@ -495,7 +495,8 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
     }
     #[derive(Deserialize)]
     struct ArchivedInput {
-        path: PathBuf,
+        #[serde(default)]
+        path: Option<PathBuf>,
     }
     let archive: Archive = serde_json::from_slice(&report.stdout)?;
     let mut roots = Vec::new();
@@ -504,6 +505,10 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
             .inputs
             .get(input)
             .ok_or_else(|| format!("the project's flake.nix declares no input named {input:?}"))?;
+        let fetched_path = fetched
+            .path
+            .as_ref()
+            .ok_or_else(|| format!("flake input {input:?} has no archived source path"))?;
         if directories.is_empty() {
             return Err(
                 format!("[haskell.flake_sources] {input:?} names no source directory").into(),
@@ -524,7 +529,7 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
                 )
                 .into());
             }
-            let root = fetched.path.join(directory);
+            let root = fetched_path.join(directory);
             if !root.is_dir() {
                 return Err(format!(
                     "flake input {input:?} has no directory {}",

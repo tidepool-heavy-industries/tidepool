@@ -51,6 +51,7 @@ impl ModelFreeSession {
             worktrees.clone(),
             authority.clone(),
             source_layers.as_ref(),
+            exomonad_actor::Incarnation::FIRST,
         )?;
         let (descriptor, machine, outcome) = root.into_parts();
         let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
@@ -67,7 +68,9 @@ impl ModelFreeSession {
             exomonad_actor::Incarnation::FIRST,
             Some(worker_launch_resolver(config)),
         );
-        let mut forest = forest.with_usage_pointers(super::EXOMONAD_USAGE_POINTERS);
+        let mut forest = forest.with_usage_pointers(
+            exomonad_actor::UsagePointerTable::discover(&config.workspace)?,
+        );
         forest.set_jev_backend(super::jev_backend(config));
         if let Some(layers) = &source_layers {
             forest.set_source_layers(layers.clone());

@@ -206,13 +206,21 @@ fn body(e: &Effect) -> String {
         }
     }
 
-    let mut imports = String::new();
+    let mut import_sections = Vec::new();
     if !wire_imports.is_empty() {
-        imports.push_str(&render_use("tidepool_bridge_effects", &wire_imports));
+        import_sections.push((
+            "tidepool_bridge_effects",
+            render_use("tidepool_bridge_effects", &wire_imports),
+        ));
     }
     for (module, idents) in &domain_imports {
-        imports.push_str(&render_use(module, idents));
+        import_sections.push((module, render_use(module, idents)));
     }
+    import_sections.sort_by_key(|(module, _)| *module);
+    let imports = import_sections
+        .into_iter()
+        .map(|(_, section)| section)
+        .collect::<String>();
     if !imports.is_empty() {
         sections.insert(0, imports.trim_end().to_string());
     }

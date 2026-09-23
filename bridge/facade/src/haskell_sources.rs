@@ -72,7 +72,10 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// cwd or development overrides used by the general Tidepool tools.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = content_hash(EMBEDDED_STDLIB);
-    materialize(EMBEDDED_STDLIB, tidepool_toolchain::paths::stdlib_dir(&hash))
+    materialize(
+        EMBEDDED_STDLIB,
+        tidepool_toolchain::paths::stdlib_dir(&hash),
+    )
 }
 
 /// Resolve the Haskell modules used by Exomonad's interactive workbench.

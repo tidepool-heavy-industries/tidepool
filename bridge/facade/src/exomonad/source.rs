@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use exomonad_worktree::{WorktreeId, WorktreeManager};
+use exomonad_worktree::{GitCli, WorktreeId, WorktreeManager};
 use parking_lot::{Mutex, RwLock};
 use tidepool_repr::PrincipalId;
 
@@ -102,6 +102,7 @@ impl SourceRevision {
 /// A captured revision that exists on disk but is not yet the active one.
 pub(crate) struct PendingRevision {
     directory: PathBuf,
+    source_roots: Vec<PathBuf>,
     revision: SourceRevision,
 }
 
@@ -370,6 +371,7 @@ impl SourceLayer {
         }
         Ok(PendingRevision {
             directory,
+            source_roots: roots.to_vec(),
             revision: SourceRevision {
                 identity,
                 generation: 0,
@@ -465,6 +467,7 @@ fn revision_root_count(directory: &Path) -> Result<usize> {
 #[derive(Clone)]
 struct CheckoutSource {
     layer: SourceLayer,
+    workspace: PathBuf,
     /// The authored roots this checkout provides, resolved once, when the
     /// actor holding the checkout was constructed. Fixing them there is what
     /// makes the actor's search path and its reload target the same thing.
@@ -620,6 +623,7 @@ impl ExomonadSourceReload {
         layer.ensure_active_from(self.frozen.identity(), &roots)?;
         Ok(Some(CheckoutSource {
             layer,
+            workspace: handle.cwd().to_path_buf(),
             roots: roots.into(),
         }))
     }
@@ -637,6 +641,7 @@ impl ExomonadSourceReload {
     fn reload_run(
         &self,
         also_check: &[String],
+        intent: Option<&str>,
     ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
     {
         let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
@@ -647,7 +652,16 @@ impl ExomonadSourceReload {
         let candidate = |pending: &PendingRevision| {
             pending.include_paths(self.frozen.captured_source_roots().len())
         };
-        self.settle(&self.layer, active, pending, &candidate, true, also_check)
+        self.settle(
+            &self.layer,
+            active,
+            pending,
+            &candidate,
+            &self.workspace,
+            true,
+            also_check,
+            intent,
+        )
     }
 
     /// Reload one checkout's own layer. Same transaction, one checkout's
@@ -657,6 +671,7 @@ impl ExomonadSourceReload {
         &self,
         checkout: &CheckoutSource,
         also_check: &[String],
+        intent: Option<&str>,
     ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
     {
         let active = checkout
@@ -673,8 +688,10 @@ impl ExomonadSourceReload {
             active,
             pending,
             &candidate,
+            &checkout.workspace,
             false,
             also_check,
+            intent,
         )
     }
 
@@ -688,13 +705,41 @@ impl ExomonadSourceReload {
         active: SourceRevision,
         pending: PendingRevision,
         candidate: &dyn Fn(&PendingRevision) -> Vec<PathBuf>,
+        workspace: &Path,
         replaces_run_layer: bool,
         also_check: &[String],
+        intent: Option<&str>,
     ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
     {
         use tidepool_bridge_effects::SrReloadOutcome;
         if pending.revision().identity == active.identity {
             return Ok(SrReloadOutcome::ReloadUnchanged(Self::wire(&active)));
+        }
+        let active_modules: std::collections::BTreeSet<&str> = active
+            .modules
+            .iter()
+            .map(|(module, _)| module.as_str())
+            .collect();
+        let configured_modules: std::collections::BTreeSet<&str> =
+            self.frozen.import_modules().collect();
+        let new_modules: Vec<&str> = pending
+            .revision()
+            .modules
+            .iter()
+            .map(|(module, _)| module.as_str())
+            .filter(|module| {
+                !active_modules.contains(module) && !configured_modules.contains(module)
+            })
+            .collect();
+        if !new_modules.is_empty() {
+            return Ok(SrReloadOutcome::ReloadRejected(
+                Self::wire(&active),
+                Self::wire(pending.revision()),
+                format!(
+                    "new module(s) {} cannot be imported in this running session; add them to [haskell].modules and restart",
+                    new_modules.join(", ")
+                ),
+            ));
         }
         if let Err(error) = crate::actor_host::typecheck_candidate_revision(
             &self.frozen,
@@ -713,11 +758,21 @@ impl ExomonadSourceReload {
             ));
         }
         let changed = layer.changed_modules(&active, pending.revision());
+        let capture_directory = pending.directory.clone();
+        let source_roots = pending.source_roots.clone();
         let published = layer.publish(pending).map_err(unreadable)?;
+        let workspace = commit_captured_workspace(
+            workspace,
+            &source_roots,
+            &capture_directory,
+            intent,
+            &changed,
+        );
         Ok(SrReloadOutcome::ReloadPublished(
             Self::wire(&active),
             Self::wire(&published),
             changed,
+            workspace,
         ))
     }
 
@@ -853,6 +908,355 @@ impl ExomonadSourceReload {
     }
 }
 
+enum WorkspaceCommitResult {
+    Unchanged,
+    Committed { oid: String, drift: Vec<String> },
+}
+
+struct WorkspaceCommitFailure {
+    reason: String,
+    committed: Option<String>,
+    drift: Vec<String>,
+}
+
+/// Publish the checked snapshot to Git without reading candidate bytes from
+/// the mutable workspace working tree. The alternate index starts at HEAD and gets
+/// only files present in this source capture.
+fn commit_captured_workspace(
+    workspace: &Path,
+    source_roots: &[PathBuf],
+    capture_directory: &Path,
+    intent: Option<&str>,
+    changed_modules: &[String],
+) -> tidepool_bridge_effects::SrWorkspaceCommitOutcome {
+    use tidepool_bridge_effects::SrWorkspaceCommitOutcome as WorkspaceOutcome;
+
+    match commit_captured_workspace_inner(
+        workspace,
+        source_roots,
+        capture_directory,
+        intent,
+        changed_modules,
+    ) {
+        Ok(WorkspaceCommitResult::Unchanged) => WorkspaceOutcome::WorkspaceUnchanged,
+        Ok(WorkspaceCommitResult::Committed { oid, drift }) => {
+            WorkspaceOutcome::WorkspaceCommitted(oid, drift)
+        }
+        Err(failure) => WorkspaceOutcome::WorkspaceCommitFailed(
+            failure.reason,
+            failure.committed,
+            failure.drift,
+        ),
+    }
+}
+
+fn commit_captured_workspace_inner(
+    project: &Path,
+    source_roots: &[PathBuf],
+    capture_directory: &Path,
+    intent: Option<&str>,
+    changed_modules: &[String],
+) -> std::result::Result<WorkspaceCommitResult, WorkspaceCommitFailure> {
+    const WORKSPACE_PATH: &str = ".exomonad/workspace";
+    let workspace = project.join(WORKSPACE_PATH);
+    if !workspace.is_dir() {
+        return Ok(WorkspaceCommitResult::Unchanged);
+    }
+
+    let mut committed = None;
+    let mut drift = Vec::new();
+    let result = (|| -> Result<Option<String>> {
+        let git = GitCli::new();
+        let workspace_root = git.try_run(&workspace, &["rev-parse", "--show-toplevel"])?;
+        let workspace_root = PathBuf::from(workspace_root.stdout.trim()).canonicalize()?;
+        let workspace = workspace.canonicalize()?;
+        if workspace_root != workspace {
+            return Err("workspace mount does not resolve to its own Git repository".into());
+        }
+        let unmerged = git.try_run(project, &["ls-files", "--unmerged", "--", WORKSPACE_PATH])?;
+        if !unmerged.stdout.is_empty() {
+            return Err("workspace gitlink has an unresolved index conflict".into());
+        }
+        let parent_index = git.try_run(project, &["ls-files", "--stage", "--", WORKSPACE_PATH])?;
+        let staged = parent_index.stdout.lines().next().and_then(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?, fields.next()?, fields.next()?))
+        });
+        if !matches!(staged, Some(("160000", _, "0"))) || parent_index.stdout.lines().count() != 1 {
+            return Err("workspace mount is not recorded as a Git submodule".into());
+        }
+        let prior_head = git.try_run(&workspace, &["rev-parse", "HEAD"])?;
+        if staged.is_some_and(|(_, oid, _)| oid != prior_head.stdout.trim()) {
+            return Err(
+                "workspace gitlink has a staged revision different from its checkout".into(),
+            );
+        }
+        let scopes = workspace_source_scopes(&workspace, source_roots)?;
+        if scopes.is_empty() {
+            return Ok(None);
+        }
+        let source = captured_workspace_sources(&scopes, capture_directory)?;
+        drift = workspace_source_drift(&workspace, &scopes, &source)?;
+
+        let message = match intent {
+            Some(message) => {
+                let message = message.trim();
+                if message.is_empty() || message.contains('\n') || message.contains('\r') {
+                    return Err("workspace commit intent must be a non-empty single line".into());
+                }
+                message.to_owned()
+            }
+            None if changed_modules.is_empty() => "Update workspace".to_owned(),
+            None => format!("Update workspace: {}", changed_modules.join(", ")),
+        };
+
+        let temporary_index = tempfile::tempdir()?;
+        let index_path = temporary_index.path().join("index");
+        let staged_git = git.with_env("GIT_INDEX_FILE", index_path.to_string_lossy());
+        staged_git.try_run(&workspace, &["read-tree", "HEAD"])?;
+        let existing = staged_git.try_run(&workspace, &["ls-files", "--stage"])?;
+        let mut indexed_modes = BTreeMap::new();
+        for line in existing.stdout.lines() {
+            let Some((metadata, path)) = line.split_once('\t') else {
+                continue;
+            };
+            let mut fields = metadata.split_whitespace();
+            let (Some(mode), Some(_oid), Some("0")) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            indexed_modes.insert(path.to_owned(), mode.to_owned());
+        }
+
+        let source_paths: BTreeMap<String, PathBuf> = source;
+        let mut affected: std::collections::BTreeSet<String> =
+            source_paths.keys().cloned().collect();
+        for path in indexed_modes.keys() {
+            if source_scopes_contain(&scopes, path) && is_haskell_source(path) {
+                affected.insert(path.clone());
+                if !source_paths.contains_key(path) {
+                    staged_git.try_run(&workspace, &["update-index", "--remove", "--", path])?;
+                }
+            }
+        }
+
+        for (path, captured) in &source_paths {
+            let blob = staged_git.try_run(
+                &workspace,
+                &[
+                    std::ffi::OsStr::new("hash-object"),
+                    std::ffi::OsStr::new("-w"),
+                    captured.as_os_str(),
+                ],
+            )?;
+            let mode = indexed_modes
+                .get(path)
+                .map(String::as_str)
+                .filter(|mode| matches!(*mode, "100644" | "100755"))
+                .unwrap_or("100644");
+            let cacheinfo = format!("{mode},{},{}", blob.stdout.trim(), path);
+            staged_git.try_run(
+                &workspace,
+                &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            )?;
+        }
+
+        let tree = staged_git.try_run(&workspace, &["write-tree"])?;
+        let head_tree = git.try_run(&workspace, &["rev-parse", "HEAD^{tree}"])?;
+        if tree.stdout.trim() == head_tree.stdout.trim() {
+            return Ok(None);
+        }
+        let prior_head = git.try_run(&workspace, &["rev-parse", "HEAD"])?;
+        if let Err(error) = staged_git.try_run(&workspace, &["commit", "-m", &message]) {
+            if let (Ok(head), Ok(committed_tree)) = (
+                git.try_run(&workspace, &["rev-parse", "HEAD"]),
+                git.try_run(&workspace, &["rev-parse", "HEAD^{tree}"]),
+            ) {
+                if head.stdout.trim() != prior_head.stdout.trim()
+                    && committed_tree.stdout.trim() == tree.stdout.trim()
+                {
+                    committed = Some(head.stdout.trim().to_owned());
+                }
+            }
+            return Err(Box::new(error));
+        }
+        let oid = git
+            .try_run(&workspace, &["rev-parse", "HEAD"])?
+            .stdout
+            .trim()
+            .to_owned();
+        committed = Some(oid.clone());
+
+        // Bring only captured source paths in the real index forward. A file
+        // edited after capture remains visible as an unstaged drift.
+        let mut args: Vec<String> =
+            vec!["reset".into(), "--quiet".into(), "HEAD".into(), "--".into()];
+        args.extend(affected.iter().cloned());
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        git.try_run(&workspace, &refs)?;
+
+        git.try_run(
+            project,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{oid},{WORKSPACE_PATH}"),
+            ],
+        )?;
+        Ok(Some(oid))
+    })();
+
+    match result {
+        Ok(Some(oid)) => Ok(WorkspaceCommitResult::Committed { oid, drift }),
+        Ok(None) => Ok(WorkspaceCommitResult::Unchanged),
+        Err(error) => Err(WorkspaceCommitFailure {
+            reason: error.to_string(),
+            committed,
+            drift,
+        }),
+    }
+}
+
+fn captured_workspace_sources(
+    scopes: &[(usize, PathBuf, PathBuf, PathBuf)],
+    capture_directory: &Path,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let mut files = BTreeMap::new();
+    for (index, _root, captured_suffix, target_prefix) in scopes {
+        let root = capture_directory
+            .join(index.to_string())
+            .join(captured_suffix);
+        if !root.is_dir() {
+            continue;
+        }
+        fn walk(
+            root: &Path,
+            current: &Path,
+            prefix: &Path,
+            files: &mut BTreeMap<String, PathBuf>,
+        ) -> Result<()> {
+            for entry in current.read_dir()? {
+                let entry = entry?;
+                let path = entry.path();
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    walk(root, &path, prefix, files)?;
+                } else if kind.is_file() {
+                    let relative = path.strip_prefix(root)?;
+                    let relative = prefix.join(relative);
+                    let name = relative
+                        .to_str()
+                        .ok_or("workspace source path is not valid UTF-8")?
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    match files.get(&name) {
+                        Some(previous) if std::fs::read(previous)? != std::fs::read(&path)? => {
+                            return Err(format!(
+                                "overlapping source roots captured different bytes for {name}"
+                            )
+                            .into());
+                        }
+                        Some(_) => {}
+                        None => {
+                            files.insert(name, path);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        walk(&root, &root, &target_prefix, &mut files)?;
+    }
+    Ok(files)
+}
+
+/// Each tuple is `(source-root index, original root, captured suffix under
+/// that root, project-relative prefix within the workspace)`.
+fn workspace_source_scopes(
+    workspace: &Path,
+    source_roots: &[PathBuf],
+) -> Result<Vec<(usize, PathBuf, PathBuf, PathBuf)>> {
+    let mut scopes = Vec::new();
+    for (index, root) in source_roots.iter().enumerate() {
+        if let Ok(prefix) = root.strip_prefix(workspace) {
+            scopes.push((index, root.clone(), PathBuf::new(), prefix.to_path_buf()));
+        } else if let Ok(suffix) = workspace.strip_prefix(root) {
+            scopes.push((index, root.clone(), suffix.to_path_buf(), PathBuf::new()));
+        }
+    }
+    Ok(scopes)
+}
+
+fn source_scopes_contain(scopes: &[(usize, PathBuf, PathBuf, PathBuf)], path: &str) -> bool {
+    let path = Path::new(path);
+    scopes
+        .iter()
+        .any(|(_, _, _, prefix)| path.starts_with(prefix))
+}
+
+fn is_haskell_source(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("hs" | "lhs" | "hs-boot" | "h")
+    )
+}
+
+fn workspace_source_drift(
+    workspace: &Path,
+    scopes: &[(usize, PathBuf, PathBuf, PathBuf)],
+    captured: &BTreeMap<String, PathBuf>,
+) -> Result<Vec<String>> {
+    let mut live = BTreeMap::new();
+    fn walk(
+        root: &Path,
+        current: &Path,
+        prefix: &Path,
+        live: &mut BTreeMap<String, PathBuf>,
+    ) -> Result<()> {
+        for entry in current.read_dir()? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                if entry.file_name() != ".git" {
+                    walk(root, &path, prefix, live)?;
+                }
+            } else if kind.is_file() {
+                let relative = prefix.join(path.strip_prefix(root)?);
+                let name = relative
+                    .to_str()
+                    .ok_or("workspace source path is not valid UTF-8")?
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                if is_haskell_source(&name) {
+                    live.insert(name, path);
+                }
+            }
+        }
+        Ok(())
+    }
+    for (_, _, _, prefix) in scopes {
+        let root = workspace.join(prefix);
+        if root.is_dir() {
+            walk(&root, &root, prefix, &mut live)?;
+        }
+    }
+    let paths: std::collections::BTreeSet<_> =
+        captured.keys().chain(live.keys()).cloned().collect();
+    let mut drift = Vec::new();
+    for path in paths {
+        let same = match (captured.get(&path), live.get(&path)) {
+            (Some(snapshot), Some(current)) => std::fs::read(snapshot)? == std::fs::read(current)?,
+            _ => false,
+        };
+        if !same {
+            drift.push(path);
+        }
+    }
+    Ok(drift)
+}
+
 fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceError {
     tidepool_handlers::SourceError::SourceUnreadable(error.to_string())
 }
@@ -862,12 +1266,15 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
         &self,
         caller: PrincipalId,
         also_check: &[String],
+        intent: Option<&str>,
     ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
     {
         let _one_at_a_time = self.gate.lock();
         match self.scope(caller) {
-            ActorSourceScope::Run => self.reload_run(also_check),
-            ActorSourceScope::Checkout(checkout) => self.reload_checkout(&checkout, also_check),
+            ActorSourceScope::Run => self.reload_run(also_check, intent),
+            ActorSourceScope::Checkout(checkout) => {
+                self.reload_checkout(&checkout, also_check, intent)
+            }
             ActorSourceScope::RunReadOnly => {
                 Err(tidepool_handlers::SourceError::SourceUnavailable(
                     "this actor has no source layer of its own: it compiles against the run's, \
@@ -946,11 +1353,11 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
     ) -> exomonad_actor::SourceLayerReload {
         use exomonad_actor::SourceLayerReload;
         use tidepool_bridge_effects::SrReloadOutcome;
-        match tidepool_handlers::SourceReloadService::reload(self, actor, also_check) {
+        match tidepool_handlers::SourceReloadService::reload(self, actor, also_check, None) {
             Ok(SrReloadOutcome::ReloadUnchanged(revision)) => SourceLayerReload::Unchanged {
                 revision: revision.identity,
             },
-            Ok(SrReloadOutcome::ReloadPublished(previous, published, changed)) => {
+            Ok(SrReloadOutcome::ReloadPublished(previous, published, changed, _workspace)) => {
                 SourceLayerReload::Published {
                     previous: previous.identity,
                     revision: published.identity,
@@ -1253,11 +1660,19 @@ mod tests {
         std::fs::create_dir_all(authored.join("Project")).unwrap();
         std::fs::write(
             authored.join("config.toml"),
-            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['workspace']\nmodules = ['Project.Work']\n",
         )
         .unwrap();
+        std::fs::write(
+            project.path().join(".gitmodules"),
+            "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = ../exomonad-default-workspace.git\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(authored.join("workspace/Project")).unwrap();
         write_types(project.path(), "evidenceValue");
         write_work(project.path(), "evidenceValue");
+        init_git_repo(authored.join("workspace").as_path());
+        init_git_repo(project.path());
         let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
         let reload = ExomonadSourceReload::new(
             frozen,
@@ -1270,7 +1685,7 @@ mod tests {
 
     fn write_types(project: &Path, accessor: &str) {
         std::fs::write(
-            project.join(".exomonad/Project/Types.hs"),
+            project.join(".exomonad/workspace/Project/Types.hs"),
             format!(
                 "module Project.Types (Evidence(..), {accessor}) where\n\
                  \n\
@@ -1285,7 +1700,7 @@ mod tests {
 
     fn write_work(project: &Path, accessor: &str) {
         std::fs::write(
-            project.join(".exomonad/Project/Work.hs"),
+            project.join(".exomonad/workspace/Project/Work.hs"),
             format!(
                 "module Project.Work (describe) where\n\
                  \n\
@@ -1296,6 +1711,200 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    fn init_git_repo(path: &Path) {
+        let git = GitCli::new();
+        git.try_run(path, &["init", "-q"]).unwrap();
+        git.try_run(path, &["config", "user.name", "Reload test"])
+            .unwrap();
+        git.try_run(
+            path,
+            &["config", "user.email", "reload-test@example.invalid"],
+        )
+        .unwrap();
+        git.try_run(path, &["add", "--all"]).unwrap();
+        git.try_run(path, &["commit", "-q", "-m", "initial"])
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_gitlink_commit_uses_captured_bytes_and_reports_later_drift() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = project.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            project.path().join(".gitmodules"),
+            "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = ../exomonad-default-workspace.git\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("FieldNotes.hs"), "module FieldNotes where\n").unwrap();
+        init_git_repo(&workspace);
+        init_git_repo(project.path());
+
+        let capture = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(capture.path().join("0")).unwrap();
+        let captured = "module FieldNotes where\n-- checked snapshot\n";
+        std::fs::write(capture.path().join("0/FieldNotes.hs"), captured).unwrap();
+        std::fs::write(
+            workspace.join("FieldNotes.hs"),
+            "module FieldNotes where\n-- changed after capture\n",
+        )
+        .unwrap();
+
+        let outcome = commit_captured_workspace(
+            project.path(),
+            &[workspace.canonicalize().unwrap()],
+            capture.path(),
+            None,
+            &["FieldNotes".to_owned()],
+        );
+        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitted(oid, drift) =
+            outcome
+        else {
+            panic!("expected captured workspace commit, got {outcome:?}");
+        };
+        assert_eq!(drift, vec!["FieldNotes.hs"]);
+
+        let git = GitCli::new();
+        assert_eq!(
+            git.try_run(&workspace, &["show", &format!("{oid}:FieldNotes.hs")])
+                .unwrap()
+                .stdout,
+            captured
+        );
+        assert_eq!(
+            git.try_run(&workspace, &["log", "-1", "--format=%s"])
+                .unwrap()
+                .stdout
+                .trim(),
+            "Update workspace: FieldNotes"
+        );
+        let parent_index = git
+            .try_run(
+                project.path(),
+                &["ls-files", "--stage", "--", ".exomonad/workspace"],
+            )
+            .unwrap();
+        assert!(parent_index.stdout.contains(&oid));
+        assert!(parent_index.stdout.starts_with("160000 "));
+    }
+
+    #[test]
+    fn workspace_commit_failure_is_typed_and_retains_a_commit_if_index_reconcile_fails() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = project.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            project.path().join(".gitmodules"),
+            "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = ../exomonad-default-workspace.git\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("FieldNotes.hs"), "module FieldNotes where\n").unwrap();
+        init_git_repo(&workspace);
+        init_git_repo(project.path());
+        let capture = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(capture.path().join("0")).unwrap();
+        std::fs::write(
+            capture.path().join("0/FieldNotes.hs"),
+            "module FieldNotes where\n-- captured\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("FieldNotes.hs"),
+            "module FieldNotes where\n-- captured\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join(".git/index.lock"), "occupied").unwrap();
+
+        let outcome = commit_captured_workspace(
+            project.path(),
+            &[workspace.canonicalize().unwrap()],
+            capture.path(),
+            None,
+            &["FieldNotes".to_owned()],
+        );
+        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitFailed(
+            reason,
+            Some(oid),
+            _,
+        ) = outcome
+        else {
+            panic!("expected post-commit index failure with its commit id: {outcome:?}");
+        };
+        assert!(reason.contains("index.lock"), "{reason}");
+        assert_eq!(
+            GitCli::new()
+                .try_run(&workspace, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout
+                .trim(),
+            oid
+        );
+        std::fs::remove_file(workspace.join(".git/index.lock")).unwrap();
+    }
+
+    #[test]
+    fn staged_parent_gitlink_mismatch_is_not_overwritten() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = project.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            project.path().join(".gitmodules"),
+            "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = ../exomonad-default-workspace.git\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("FieldNotes.hs"), "module FieldNotes where\n").unwrap();
+        init_git_repo(&workspace);
+        init_git_repo(project.path());
+        let git = GitCli::new();
+        git.try_run(
+            &workspace,
+            &["commit", "--allow-empty", "-m", "checkout moved"],
+        )
+        .unwrap();
+        let prior_head = git.try_run(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let parent_index = git
+            .try_run(
+                project.path(),
+                &["ls-files", "--stage", "--", ".exomonad/workspace"],
+            )
+            .unwrap();
+        let capture = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(capture.path().join("0")).unwrap();
+        std::fs::write(
+            capture.path().join("0/FieldNotes.hs"),
+            "module FieldNotes where\n-- captured\n",
+        )
+        .unwrap();
+
+        let outcome = commit_captured_workspace(
+            project.path(),
+            &[workspace.canonicalize().unwrap()],
+            capture.path(),
+            None,
+            &["FieldNotes".to_owned()],
+        );
+        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitFailed(_, None, _) =
+            outcome
+        else {
+            panic!("staged gitlink mismatch should fail before a workspace commit: {outcome:?}");
+        };
+        assert_eq!(
+            git.try_run(&workspace, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+            prior_head.stdout
+        );
+        assert_eq!(
+            git.try_run(
+                project.path(),
+                &["ls-files", "--stage", "--", ".exomonad/workspace"]
+            )
+            .unwrap()
+            .stdout,
+            parent_index.stdout
+        );
     }
 
     /// Source-revision identity; artifact reuse additionally validates the
@@ -1320,10 +1929,14 @@ mod tests {
         write_types(project.path(), "evidenceAmount");
         write_work(project.path(), "evidenceAmount");
         let outcome =
-            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
                 .unwrap();
-        let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(previous, published, changed) =
-            outcome
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(
+            previous,
+            published,
+            changed,
+            workspace,
+        ) = outcome
         else {
             panic!("a consistent pair must publish: {outcome:?}");
         };
@@ -1331,6 +1944,32 @@ mod tests {
         assert_ne!(published.identity, before.identity);
         assert_eq!(published.generation, 2);
         assert_eq!(changed, vec!["Project.Types", "Project.Work"]);
+        assert!(matches!(
+            workspace,
+            tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitted(_, ref drift)
+                if drift.is_empty()
+        ));
+        let git = GitCli::new();
+        let workspace = project.path().join(".exomonad/workspace");
+        let commit = git
+            .try_run(&workspace, &["log", "-1", "--format=%s"])
+            .unwrap();
+        assert_eq!(
+            commit.stdout.trim(),
+            "Update workspace: Project.Types, Project.Work"
+        );
+        let workspace_head = git.try_run(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let staged_gitlink = git
+            .try_run(
+                project.path(),
+                &["ls-files", "--stage", "--", ".exomonad/workspace"],
+            )
+            .unwrap();
+        assert!(
+            staged_gitlink.stdout.contains(workspace_head.stdout.trim()),
+            "the project index must stage the newly committed workspace gitlink: {}",
+            staged_gitlink.stdout
+        );
 
         // Same include vector, different compiled-artifact key: a later
         // compile cannot be served the previous revision's artifact.
@@ -1339,6 +1978,101 @@ mod tests {
 
         // And GHC agrees: this only compiles if BOTH new files were read.
         crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
+    }
+
+    #[test]
+    fn a_reload_can_supply_a_one_line_workspace_commit_intent() {
+        let (project, _run, reload) = cooperating_pair();
+        write_types(project.path(), "evidenceAmount");
+        write_work(project.path(), "evidenceAmount");
+
+        let outcome = tidepool_handlers::SourceReloadService::reload(
+            &reload,
+            PrincipalId::SYSTEM,
+            &[],
+            Some("Add evidence amount accessor"),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(..)
+            ),
+            "reload with a one-line workspace intent should publish: {outcome:?}"
+        );
+        let message = GitCli::new()
+            .try_run(
+                &project.path().join(".exomonad/workspace"),
+                &["log", "-1", "--format=%s"],
+            )
+            .unwrap();
+        assert_eq!(message.stdout.trim(), "Add evidence amount accessor");
+    }
+
+    #[test]
+    fn a_multiline_workspace_commit_intent_is_reported_after_source_publication() {
+        let (project, _run, reload) = cooperating_pair();
+        write_types(project.path(), "evidenceAmount");
+        write_work(project.path(), "evidenceAmount");
+        let git = GitCli::new();
+        let workspace = project.path().join(".exomonad/workspace");
+        let head = git.try_run(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let workspace_status = git
+            .try_run(
+                &workspace,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            )
+            .unwrap();
+        let parent_index = git
+            .try_run(
+                project.path(),
+                &["diff", "--cached", "--", ".exomonad/workspace"],
+            )
+            .unwrap();
+
+        let Ok(tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(
+            _,
+            _,
+            _,
+            tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitFailed(
+                error,
+                None,
+                _,
+            ),
+        )) = tidepool_handlers::SourceReloadService::reload(
+            &reload,
+            PrincipalId::SYSTEM,
+            &[],
+            Some("first line\nsecond line"),
+        )
+        else {
+            panic!("bad intent must be a typed workspace failure after publication");
+        };
+        assert!(error.contains("single line"));
+        assert_eq!(
+            git.try_run(&workspace, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+            head.stdout
+        );
+        assert_eq!(
+            git.try_run(
+                &workspace,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            .unwrap()
+            .stdout,
+            workspace_status.stdout
+        );
+        assert_eq!(
+            git.try_run(
+                project.path(),
+                &["diff", "--cached", "--", ".exomonad/workspace"]
+            )
+            .unwrap()
+            .stdout,
+            parent_index.stdout
+        );
     }
 
     /// Changing one module rebuilds everything that imports it, and a break
@@ -1354,6 +2088,18 @@ mod tests {
 
         // Only Project.Types is edited. Project.Work still calls the old name.
         write_types(project.path(), "evidenceAmount");
+        let git = GitCli::new();
+        let workspace = project.path().join(".exomonad/workspace");
+        let head_before = git.try_run(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let workspace_status_before = git
+            .try_run(
+                &workspace,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            )
+            .unwrap();
+        let project_status_before = git
+            .try_run(project.path(), &["status", "--porcelain"])
+            .unwrap();
         let expected = reload
             .layer
             .capture_from_workspace(&reload.frozen, project.path())
@@ -1362,7 +2108,7 @@ mod tests {
             .identity
             .clone();
         let outcome =
-            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
                 .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, rejected, diagnostics) =
             outcome
@@ -1380,10 +2126,34 @@ mod tests {
 
         // The edited source is untouched, and the previous graph still
         // compiles, which is what "still active" means.
-        assert!(
-            std::fs::read_to_string(project.path().join(".exomonad/Project/Types.hs"))
+        assert!(std::fs::read_to_string(
+            project.path().join(".exomonad/workspace/Project/Types.hs")
+        )
+        .unwrap()
+        .contains("evidenceAmount"));
+        assert_eq!(
+            git.try_run(&workspace, &["rev-parse", "HEAD"])
                 .unwrap()
-                .contains("evidenceAmount")
+                .stdout,
+            head_before.stdout,
+            "a refused reload must not create a workspace commit"
+        );
+        assert_eq!(
+            git.try_run(
+                &workspace,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            .unwrap()
+            .stdout,
+            workspace_status_before.stdout,
+            "a refused reload must not stage workspace edits"
+        );
+        assert_eq!(
+            git.try_run(project.path(), &["status", "--porcelain"])
+                .unwrap()
+                .stdout,
+            project_status_before.stdout,
+            "a refused reload must not stage the project gitlink"
         );
         crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
     }
@@ -1395,7 +2165,7 @@ mod tests {
         let (project, run, reload) = cooperating_pair();
         let active = reload.layer.ensure_active(&reload.frozen).unwrap();
         let outcome =
-            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
                 .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadUnchanged(revision) = outcome else {
             panic!("an unedited workspace must not republish: {outcome:?}");

@@ -1782,6 +1782,13 @@ pub fn exomonad_trace_path(workspace: &Path, run_id: &str) -> PathBuf {
         .join(format!("{run_id}.jsonl"))
 }
 
+/// The write-only actor journal for one run.
+pub fn exomonad_journal_path(workspace: &Path, run_id: &str) -> PathBuf {
+    exomonad_state_root(workspace)
+        .join("logs")
+        .join(format!("{run_id}-journal.jsonl"))
+}
+
 /// Target for the text a cell actually carried. It is written to the run-local
 /// JSONL file and to nothing else: the human log and the tmux pane switch it
 /// off explicitly, and no request-update payload is ever routed here.
@@ -2082,8 +2089,7 @@ mod tests {
     }
 
     fn example_skills() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../exomonad/examples/workspace/.exomonad/skills")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.exomonad/workspace/skills")
     }
 
     #[tokio::test]
@@ -2107,7 +2113,10 @@ mod tests {
             config.haskell.flake_sources.get("jev-dsl").unwrap(),
             &[PathBuf::from("core")]
         );
-        assert_eq!(config.haskell.source_roots, [PathBuf::from(".")]);
+        assert_eq!(
+            config.haskell.source_roots,
+            [PathBuf::from("."), PathBuf::from("workspace")]
+        );
         let installed = std::fs::read_to_string(workspace.join(".git/info/exclude")).unwrap();
         for exclusion in exomonad_worktree::git::EXOMONAD_LOCAL_EXCLUDES {
             assert!(installed.lines().any(|line| line == *exclusion));
@@ -2122,35 +2131,40 @@ mod tests {
         );
         assert_eq!(
             git_stdout(&workspace, &["ls-tree", "--name-only", "HEAD"]).await,
-            ".agents\n.exomonad\nflake.lock\nflake.nix\n"
+            ".agents\n.exomonad\n.gitmodules\nflake.lock\nflake.nix\n"
+        );
+        let gitmodules = std::fs::read_to_string(workspace.join(".gitmodules")).unwrap();
+        assert!(
+            gitmodules.contains("path = .exomonad/workspace"),
+            "unexpected default-workspace submodule config: {gitmodules}"
+        );
+        let pinned = exomonad_worktree::GitCli::new()
+            .try_run(
+                &workspace.join(".exomonad/workspace"),
+                &["rev-parse", "HEAD"],
+            )
+            .unwrap();
+        assert_eq!(
+            pinned.trimmed(),
+            git_stdout(
+                &example_skills().parent().unwrap().to_path_buf(),
+                &["rev-parse", "HEAD"]
+            )
+            .await
+            .trim()
         );
     }
 
-    /// The scaffolded Haskell is the repository's own, byte for byte. A copy
-    /// that drifted would compile against a different pinned revision than the
-    /// one the example workspace is checked with.
+    /// The project layer is copied from the default workspace source, while
+    /// generic Haskell remains in the pinned submodule.
     #[test]
     fn the_scaffolded_haskell_is_the_repositorys_own() {
         let workspace = tempfile::tempdir().unwrap();
         scaffold_workspace(workspace.path()).unwrap();
-        for (relative, expected) in [
-            (
-                ".exomonad/Jev/Operators.hs",
-                include_str!("../../../exomonad/examples/workspace/.exomonad/Jev/Operators.hs"),
-            ),
-            (
-                ".exomonad/AgentSpec.hs",
-                include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs"),
-            ),
-            (
-                ".exomonad/Project/Tools.hs",
-                include_str!("../../../exomonad/examples/workspace/.exomonad/Project/Tools.hs"),
-            ),
-            (
-                ".exomonad/Project/Watchdog.hs",
-                include_str!("../../../exomonad/examples/workspace/.exomonad/Project/Watchdog.hs"),
-            ),
-        ] {
+        for (relative, expected) in [(
+            ".exomonad/AgentSpec.hs",
+            include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs"),
+        )] {
             assert_eq!(
                 std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
                 expected,
@@ -2160,13 +2174,46 @@ mod tests {
         let spec =
             std::fs::read_to_string(workspace.path().join(".exomonad/AgentSpec.hs")).unwrap();
         assert!(spec.contains("specTools = Tools.tools"), "{spec}");
-        let tools =
-            std::fs::read_to_string(workspace.path().join(".exomonad/Project/Tools.hs")).unwrap();
+        let tools = std::fs::read_to_string(
+            workspace
+                .path()
+                .join(".exomonad/workspace/Project/Tools.hs"),
+        )
+        .unwrap();
         assert!(
             tools.contains("shell :: Command.ShellTools mode"),
             "{tools}"
         );
         assert!(tools.contains("inspection = Lookup.tools"), "{tools}");
+        assert_eq!(
+            std::fs::read_to_string(
+                workspace
+                    .path()
+                    .join(".exomonad/workspace/Jev/Operators.hs")
+            )
+            .unwrap(),
+            include_str!("../../../.exomonad/workspace/Jev/Operators.hs")
+        );
+        let config =
+            std::fs::read_to_string(workspace.path().join(".exomonad/config.toml")).unwrap();
+        for expected in [
+            "luna = \"gpt-6-luna\"",
+            "executor = \"gpt-6-sol\"",
+            "planner = \"gpt-6-astra\"",
+            "task = \"prompts/task.md\"",
+            "review = \"prompts/review.md\"",
+        ] {
+            assert!(config.contains(expected), "missing {expected} in {config}");
+        }
+        for prompt in ["task", "review", "repair", "incorporate"] {
+            assert!(
+                workspace
+                    .path()
+                    .join(format!(".exomonad/prompts/{prompt}.md"))
+                    .is_file(),
+                "missing scaffold prompt {prompt}"
+            );
+        }
     }
 
     /// Every workspace skill lands, and the links a client discovers them
@@ -2176,6 +2223,13 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         scaffold_workspace(workspace.path()).unwrap();
         let source = example_skills();
+        let installed_workspace = workspace.path().join(".exomonad/workspace");
+        let git = exomonad_worktree::GitCli::new();
+        let installed_revision = git
+            .try_run(&installed_workspace, &["rev-parse", "HEAD"])
+            .unwrap();
+        let source_revision = git.try_run(&source, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(installed_revision.trimmed(), source_revision.trimmed());
         let mut checked = 0;
         for skill in std::fs::read_dir(&source).unwrap() {
             let skill = skill.unwrap().path();
@@ -2183,24 +2237,29 @@ mod tests {
             let link = workspace.path().join(".agents/skills").join(name);
             assert_eq!(
                 std::fs::read_link(&link).unwrap(),
-                Path::new("../../.exomonad/skills").join(name),
+                Path::new("../../.exomonad/workspace/skills").join(name),
                 "{}",
                 link.display()
             );
             assert_eq!(
                 std::fs::canonicalize(&link).unwrap(),
-                std::fs::canonicalize(workspace.path().join(".exomonad/skills").join(name))
-                    .unwrap()
+                std::fs::canonicalize(
+                    workspace
+                        .path()
+                        .join(".exomonad/workspace/skills")
+                        .join(name),
+                )
+                .unwrap()
             );
             for file in walk_files(&skill) {
                 let relative = file.strip_prefix(&source).unwrap();
-                assert_eq!(
-                    std::fs::read_to_string(
-                        workspace.path().join(".exomonad/skills").join(relative)
-                    )
-                    .unwrap(),
-                    std::fs::read_to_string(&file).unwrap(),
-                    "{}",
+                assert!(
+                    workspace
+                        .path()
+                        .join(".exomonad/workspace/skills")
+                        .join(relative)
+                        .is_file(),
+                    "missing pinned skill file {}",
                     relative.display()
                 );
                 checked += 1;
@@ -2252,9 +2311,8 @@ mod tests {
         for path in [
             ".exomonad/config.toml",
             ".exomonad/AgentSpec.hs",
-            ".exomonad/Project/Tools.hs",
-            ".exomonad/Project/Watchdog.hs",
-            ".exomonad/Jev/Operators.hs",
+            ".exomonad/workspace",
+            ".gitmodules",
             ".agents/skills/exomonad-jev",
             "flake.nix",
             "flake.lock",

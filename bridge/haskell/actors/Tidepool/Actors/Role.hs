@@ -21,6 +21,8 @@ module Tidepool.Actors.Role
   , Lookup
   , Reflect
   , Source
+  , Journal
+  , RepoEvent
   , EffectWitness
   , Effects
   , KnownEffect (effectWitness)
@@ -37,6 +39,7 @@ module Tidepool.Actors.Role
 
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
+import Tidepool.Effects (Journal, RepoEvent)
 import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
@@ -99,4 +102,6 @@ type ActorEffects =
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
    , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup
    , Source
+   , Journal
+   , RepoEvent
    ]

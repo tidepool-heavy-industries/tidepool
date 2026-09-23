@@ -5,12 +5,14 @@ module Tidepool.Agent.Launch
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , AdmissionReceipt (..)
+  , admittedAgent
   ) where
 
 import Data.Text (Text)
 import Prelude
 
 import Tidepool.Effects.Core (WorktreeReceipt)
+import Tidepool.Agent.Ref (AgentRef, internalAgentRef)
 
 newtype ActorPath = ActorPath Text
   deriving (Show, Eq, Ord)
@@ -46,3 +48,7 @@ data AdmissionReceipt = AdmissionReceipt
   , launchedHaskellScope :: Maybe Int
   }
   deriving (Show, Eq)
+
+admittedAgent :: AdmissionReceipt -> AgentRef
+admittedAgent receipt =
+  internalAgentRef (launchedActorId receipt) (launchedActorIncarnation receipt)

@@ -2166,10 +2166,10 @@ pub(crate) mod tests {
     /// the rendered `output` still present and unchanged beside them.
     #[test]
     fn workbench_reply_json_carries_structured_diagnostics_beside_the_rendered_output() {
-        use tidepool_toolchain::diag::{DiagnosticLevel, DiagnosticLocation, StructuredDiagnostic};
         use tidepool_runtime::session::{
             WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchResponse, WorkbenchRunStatus,
         };
+        use tidepool_toolchain::diag::{DiagnosticLevel, DiagnosticLocation, StructuredDiagnostic};
         let rendered = "<cell>:1:1-8: error:\n    Variable not in scope: missing";
         let reply = Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Rejected,

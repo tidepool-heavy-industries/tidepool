@@ -45,7 +45,7 @@ pub fn source() -> Effect {
             "your reload is invisible to every other actor; if you own the run, it is the ",
             "run's own package, which every actor without a checkout of its own compiles ",
             "against. Write a module under a configured source root with ordinary file ",
-            "tools, then `reloadSource []` re-reads every configured root, compiles the ",
+            "tools, then `reloadSource [] Nothing` re-reads every configured root, compiles the ",
             "whole affected module graph, and — only if all of it typechecks — makes that ",
             "snapshot the revision YOUR LATER cells compile against. It is a compilation ",
             "boundary, not dynamic scope: the cell that asked for the reload was already ",
@@ -130,6 +130,45 @@ pub fn source() -> Effect {
                 ],
             },
             TypeDef {
+                name: "WorkspaceCommitOutcome",
+                wire_rust: Some("SrWorkspaceCommitOutcome"),
+                haskell_module: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "WorkspaceUnchanged",
+                            fields: positional_fields![],
+                            doc: &["No changed captured workspace files needed a commit."],
+                        },
+                        SumVariant {
+                            ctor: "WorkspaceCommitted",
+                            fields: positional_fields![HsType::Text, HsType::list(HsType::Text)],
+                            doc: &[
+                                "The workspace commit's object id and source paths that changed on",
+                                "disk after capture. The commit contains the captured bytes.",
+                            ],
+                        },
+                        SumVariant {
+                            ctor: "WorkspaceCommitFailed",
+                            fields: positional_fields![
+                                HsType::Text,
+                                HsType::maybe(HsType::Text),
+                                HsType::list(HsType::Text),
+                            ],
+                            doc: &[
+                                "The reason publication to Git failed, an optional workspace commit",
+                                "that was already created, and source paths changed on disk after",
+                                "capture. Source publication still succeeded.",
+                            ],
+                        },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WIRE,
+                domain: None,
+                doc: &["The best-effort Git outcome for a successfully published source revision."],
+            },
+            TypeDef {
                 name: "ReloadOutcome",
                 wire_rust: Some("SrReloadOutcome"),
                 haskell_module: None,
@@ -149,6 +188,7 @@ pub fn source() -> Effect {
                                 HsType::Named("SourceRevision"),
                                 HsType::Named("SourceRevision"),
                                 HsType::list(HsType::Text),
+                                HsType::Named("WorkspaceCommitOutcome"),
                             ],
                             doc: &[
                                 "The revision that was active, the revision now active, and the",
@@ -206,11 +246,18 @@ pub fn source() -> Effect {
             Verb {
                 ctor: "SourceReloadWith",
                 method: "source_reload",
-                args: vec![Arg {
-                    name: "alsoCheck",
-                    ty: HsType::list(HsType::Text),
-                    rust: RustBinding::Derived,
-                }],
+                args: vec![
+                    Arg {
+                        name: "alsoCheck",
+                        ty: HsType::list(HsType::Text),
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "intent",
+                        ty: HsType::maybe(HsType::Text),
+                        rust: RustBinding::Derived,
+                    },
+                ],
                 ret: HsType::Named("ReloadOutcome"),
                 errors: Some("SourceError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Source),
@@ -234,15 +281,17 @@ pub fn source() -> Effect {
                 doc: &[
                     "Re-read every configured source root of the package YOU work in, check",
                     "the affected module graph, and publish it as one transaction.",
-                    "`reloadSource []` is that whole package; the list names ADDITIONAL",
+                    "`reloadSource [] Nothing` is that whole package; the list names ADDITIONAL",
                     "modules to pull into the checked",
                     "graph when a module you rely on is not reachable from the workspace's",
-                    "configured module list. Natural spelling: `Right outcome <- reloadSource",
-                    "[]`. The definitions become available to LATER cells — the cell that",
-                    "called this keeps the environment it was compiled in, so do not expect",
-                    "to call a newly loaded API from here.",
+                    "configured module list. Pass an optional one-line workspace commit intent; `Nothing`",
+                    "uses the changed module names. A rejected reload leaves Git untouched.",
+                    "Natural spelling: `Right outcome <- reloadSource [] Nothing`. The definitions",
+                    "become available to LATER cells — the cell that called this keeps the",
+                    "environment it was compiled in, so do not expect to call a newly loaded API",
+                    "from here.",
                 ],
-                body: HelperBody::Pointfree,
+                body: HelperBody::Applied(&["alsoCheck", "intent"]),
             },
             Helper {
                 name: "sourceStatus",

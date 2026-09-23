@@ -61,8 +61,10 @@ const REQUEST: &[u8; 8] = b"TPDRQ001";
 pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR001";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
-/// Requests one worker serves before the daemon replaces it.
-const DEFAULT_ROTATE_AFTER: u64 = 256;
+/// Requests one worker serves before the daemon replaces it. Keep ordinary
+/// request-count rotation out of the common session length; the RSS ceiling
+/// remains the tighter bound when a worker grows quickly.
+const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// Worker RSS above which the daemon replaces it after a request. A warm
 /// prepared-route worker holds its module memo at roughly 2.5 GiB; a lower
 /// bound replaces it after nearly every request and discards that memo.
@@ -564,6 +566,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                                 Ok((code, stdout, stderr)) => {
                                     served += 1;
                                     log_compile_timing(run_id, &compile_request, &stderr);
+                                    let stderr = diagnostic_stderr(&stderr);
                                     tracing::info!(
                                         run_id,
                                         %compile_request,
@@ -710,7 +713,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                         "compiler request finished"
                     );
                     log_compile_timing(run_id, &compile_request, &response.2);
-                    response
+                    (response.0, response.1, diagnostic_stderr(&response.2))
                 }
                 Err(error) => {
                     tracing::error!(
@@ -796,21 +799,42 @@ fn hex(bytes: &[u8]) -> String {
 /// checks from executable target desugaring. The
 /// prefixes mirror `tidepool_toolchain::timing` (this crate is a dependency
 /// leaf and cannot name it).
+const MACHINE_STDERR_PREFIXES: [&str; 13] = [
+    "tidepool-timing ",
+    "tidepool-timing-detail ",
+    "tidepool-timing-module ",
+    "tidepool-timing-module-detail ",
+    "tidepool-count ",
+    "tidepool-compile-summary ",
+    "tidepool-memo-miss ",
+    "tidepool-checked ",
+    "tidepool-checked-dependency-executable ",
+    "tidepool-checked-interface-retained ",
+    "tidepool-checked-interface-elided ",
+    "tidepool-dependency-witness ",
+    "tidepool-target ",
+];
+
+fn diagnostic_stderr(stderr: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| {
+            !MACHINE_STDERR_PREFIXES
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes()
+}
+
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
-    const PREFIXES: [&str; 9] = [
-        "tidepool-timing ",
-        "tidepool-timing-detail ",
-        "tidepool-timing-module ",
-        "tidepool-timing-module-detail ",
-        "tidepool-count ",
-        "tidepool-compile-summary ",
-        "tidepool-memo-miss ",
-        "tidepool-checked ",
-        "tidepool-target ",
-    ];
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
-        if PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
+        if MACHINE_STDERR_PREFIXES
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
             tracing::debug!(run_id, %compile_request, line, "compiler timing");
         }
     }
@@ -1306,6 +1330,12 @@ mod tests {
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
 
+    #[test]
+    fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
+        assert_eq!(DEFAULT_ROTATE_AFTER, 1024);
+        assert_eq!(DEFAULT_RSS_CEILING_MB, 6 * 1024);
+    }
+
     #[derive(Clone, Default)]
     struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -1641,6 +1671,16 @@ tidepool-target phase=desugar module=Execute\n",
                 "tidepool-target phase=desugar module=Execute",
             ]
         );
+    }
+
+    #[test]
+    fn machine_stderr_is_kept_in_daemon_log_but_removed_from_diagnostics() {
+        let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\nuseful detail\n";
+        let diagnostic = String::from_utf8(diagnostic_stderr(stderr)).unwrap();
+        assert_eq!(diagnostic, "ghc: panic!\nuseful detail");
+        let filtered = String::from_utf8_lossy(stderr);
+        assert!(filtered.contains("tidepool-timing"));
+        assert!(filtered.contains("tidepool-checked"));
     }
 
     #[test]

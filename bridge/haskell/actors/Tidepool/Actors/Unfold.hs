@@ -63,6 +63,7 @@ module Tidepool.Actors.Unfold
   , childWithProgress
   , childWithProgressSited
   , AdmissionReceipt (..)
+  , admittedAgent
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
@@ -100,7 +101,7 @@ import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), assign
 import Tidepool.Agent.Watch.Internal (WatchLabel (..))
 import Tidepool.Agent.Launch
   ( ActorPath (..), GitBranchPrefix (..), ForkRole (..)
-  , ForkWorkspaceAccess (..), AdmissionReceipt (..)
+  , ForkWorkspaceAccess (..), AdmissionReceipt (..), admittedAgent
   )
 import Tidepool.Actors.Internal.Agent
   ( AgentRef

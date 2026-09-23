@@ -79,36 +79,20 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
-
-#[cfg(test)]
-mod usage_pointer_tests {
-    #[test]
-    fn shipped_usage_table_resolves_known_callable_and_uses_path_locators() {
-        let call = super::EXOMONAD_USAGE_POINTERS
-            .iter()
-            .find(|(identifier, _)| *identifier == "call")
-            .map(|(_, locator)| *locator);
-        assert!(call.is_some());
-        assert!(call.is_some_and(|locator| {
-            locator.starts_with(".exomonad/checks/") || locator.starts_with(".exomonad/skills/")
-        }));
-    }
-}
 use exomonad_node::{
     DurableInbox, ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient,
     ProcessSupervisorManifest, ServiceEnvironment, TmuxLaunch, TmuxPaneId, TmuxSession,
     BUBBLEWRAP_PROGRAM,
 };
 use exomonad_worktree::{
-    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, GitCli, WorktreeHandle, WorktreeId,
-    WorktreeManager, WorktreeRegistry,
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli,
+    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeMonitor, WorktreeRegistry,
 };
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
     ActorWorktreeGrant, ActorWorktreeHandler, ActorWorktreeIntegrationHandler,
-    ActorWorktreeRegistryHandler, WorktreeHandler,
+    ActorWorktreeRegistryHandler, EventConfig, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::SessionId;
@@ -155,12 +139,18 @@ const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 type ExomonadHandlerStack = HCons<
     tidepool_handlers::SourceHandler,
     HCons<
-        ActorBoundWorktreeHandler,
+        tidepool_handlers::JournalHandler,
         HCons<
-            ActorWorktreeRegistryHandler,
+            RepoEventHandler,
             HCons<
-                ActorWorktreeAllocationHandler,
-                HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+                ActorBoundWorktreeHandler,
+                HCons<
+                    ActorWorktreeRegistryHandler,
+                    HCons<
+                        ActorWorktreeAllocationHandler,
+                        HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+                    >,
+                >,
             >,
         >,
     >,
@@ -696,6 +686,12 @@ fn recovery_role(
         _ => return None,
     };
     Some(role.with_research_policy(research_policy))
+}
+
+fn operator_effective_role(
+    research_policy: exomonad_actor::ResearchPolicy,
+) -> exomonad_actor::EffectiveRole {
+    exomonad_actor::EffectiveRole::root().with_research_policy(research_policy)
 }
 
 fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
@@ -1987,6 +1983,7 @@ pub(crate) async fn run(
         worktrees.clone(),
         worktree_authority.clone(),
         source_layers.as_ref(),
+        host_incarnation.incarnation(),
     )?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
@@ -2026,7 +2023,7 @@ pub(crate) async fn run(
         Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
-        .with_usage_pointers(EXOMONAD_USAGE_POINTERS)
+        .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(&config.workspace)?)
         .with_recovery_journal(actor_recovery.clone())
         .with_conversation_reader(conversation_reader(
             application_owners.clone(),
@@ -2142,8 +2139,7 @@ pub(crate) async fn run(
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
-    let operator_role =
-        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy);
+    let operator_role = operator_effective_role(config.research_policy);
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -2157,12 +2153,14 @@ pub(crate) async fn run(
             let authority = provision_authority.clone();
             let source = provision_source.clone();
             Box::pin(async move {
-                let grant = worktree_grant(role.role());
                 let actor = forest
                     .new_workbench("operator".into(), role)
                     .await
                     .map_err(|e| e.to_string())?;
-                authority.install_grant(actor.identity().into(), grant);
+                authority.install_grant(
+                    actor.identity().into(),
+                    ActorWorktreeGrant::RepositoryReadOnly,
+                );
                 // The operator workbench holds the run itself, not a checkout:
                 // it reads and republishes the run's own layer.
                 if let Some(layers) = &source {
@@ -2374,14 +2372,18 @@ async fn await_applications(
 fn actor_worktree_resources(
     workspace: &Path,
 ) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
+    let root = actor_worktree_storage_root(workspace);
+    actor_worktree_resources_at(&root, workspace)
+}
+
+fn actor_worktree_storage_root(workspace: &Path) -> PathBuf {
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
-    let root = tidepool_toolchain::paths::cache_dir()
+    tidepool_toolchain::paths::cache_dir()
         .join("exomonad")
         .join("actor-worktrees")
-        .join(project);
-    actor_worktree_resources_at(&root, workspace)
+        .join(project)
 }
 
 fn actor_worktree_resources_at(
@@ -2466,6 +2468,8 @@ pub(crate) fn exomonad_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::worktree_registry_decl(),
         tidepool_mcp::worktree_allocation_decl(),
         tidepool_mcp::worktree_integration_decl(),
+        tidepool_mcp::event_decl(),
+        tidepool_mcp::journal_decl(),
     ]
 }
 
@@ -2695,6 +2699,7 @@ fn compile_root(
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
+    host_incarnation: exomonad_actor::Incarnation,
 ) -> Result<
     (
         ActorWorkbenchSource,
@@ -2736,11 +2741,39 @@ fn compile_root(
         lost = recovery_report.lost.len(),
         "attached Exomonad root declaration recovery manifest"
     );
+    let event_registry =
+        WorktreeRegistry::open(actor_worktree_storage_root(&config.workspace).join("registry"))?;
+    let event_journal = EventJournal::open(run_root.join("repo-events.jsonl"))?;
+    let event_handler = RepoEventHandler::with_registry(
+        WorktreeMonitor::new(GitCli::new(), event_journal),
+        event_registry,
+        EventConfig::default(),
+    );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
+    let run_id = run_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| runtime_error("run root has no UTF-8 run identifier"))?;
+    let journal_path = crate::exomonad::exomonad_journal_path(&config.workspace, run_id);
+    if let Some(parent) = journal_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let journal = if host_incarnation == exomonad_actor::Incarnation::FIRST {
+        tidepool_handlers::JournalHandler::new(tidepool_handlers::SegmentPath::create_exclusive(
+            journal_path,
+        )?)?
+    } else {
+        tidepool_handlers::JournalHandler::resuming(
+            tidepool_handlers::SegmentPath::open_existing(journal_path)?,
+            host_incarnation.0,
+        )?
+    };
     let mut machine = ResidentSession::unbootstrapped(
         hlist![
             source_handler(source),
+            journal,
+            event_handler,
             ActorBoundWorktreeHandler::new(worktree_handler.clone()),
             ActorWorktreeRegistryHandler::new(worktree_handler.clone()),
             ActorWorktreeAllocationHandler::new(worktree_handler.clone()),
@@ -6367,6 +6400,25 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn operator_role_has_journal_without_widening_child_roles() {
+        let operator = operator_effective_role(exomonad_actor::ResearchPolicy::default());
+        assert!(operator
+            .effect_keys()
+            .contains(&exomonad_actor::ActorEffectKey::Journal));
+        assert!(operator.haskell_effects_type().contains("Journal"));
+
+        for child in [
+            exomonad_actor::EffectiveRole::research(),
+            exomonad_actor::EffectiveRole::coding(),
+            exomonad_actor::EffectiveRole::integration(),
+        ] {
+            assert!(!child
+                .effect_keys()
+                .contains(&exomonad_actor::ActorEffectKey::Journal));
+        }
+    }
+
+    #[test]
     fn typed_site_surface_callers_have_returning_contracts() {
         use tidepool_repr::execution_schema::{Group, HeapRhs, ResultContract, RuntimeRep};
 
@@ -9135,6 +9187,41 @@ mod tests {
             assert_eq!(item["status"], "committed", "{result:?}");
         }
         assert!(result.to_string().contains("True"), "{result:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_journal_effect_appends_a_typed_record() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let result = dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            include_str!("actor_host/journal_record.hs"),
+        )
+        .await;
+        assert_eq!(result["status"], "committed", "{result:?}");
+        let run_id = campaign
+            .session_root
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("model-free run root has a UTF-8 test id");
+        let journal_path =
+            crate::exomonad::exomonad_journal_path(campaign._repository.path(), run_id);
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&journal_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", journal_path.display()))
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("journal line is JSON"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "one version header and one record: {lines:?}"
+        );
+        assert!(lines[0].get("version").is_some(), "header: {lines:?}");
+        assert_eq!(lines[1]["kind"], "test-kind");
+        assert_eq!(lines[1]["key"], "test-key");
+        assert_eq!(lines[1]["payload"], "payload");
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }

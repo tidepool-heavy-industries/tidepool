@@ -23,8 +23,6 @@ EXTRACTOR_FREE = (
 # Retained reference source has no supported build or test obligation.
 RETIRED_SOURCES = (
     Path("exomonad/harness"), Path("exomonad/web"),
-    Path("bridge/facade/src/bin/tidepool-selfharness.rs"),
-    Path("bridge/facade/src/bin/tidepool-selfharness"),
 )
 
 
