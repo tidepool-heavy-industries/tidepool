@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 
-use crate::request::WORKER_REQUEST_FLAG;
+use crate::request::{PRINT_WORKER_REQUEST_FLAG, WORKER_REQUEST_FLAG};
 use crate::{daemon, ExtractRequest};
 
 const WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
@@ -130,11 +130,42 @@ impl PreparedWorker {
         file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
         file.rewind().map_err(FrontendError::Io)?;
         let ghc_libdir = resolve_ghc_libdir()?;
-        Ok(Self {
+        let prepared = Self {
             file,
             selection,
             bytes,
             ghc_libdir,
+        };
+        prepared.check_request_protocol()?;
+        Ok(prepared)
+    }
+
+    /// Ask the resolved worker binary, once, what request protocol it speaks
+    /// (`--print-worker-request-flag`, outside the versioned request grammar)
+    /// and compare it against this frontend's own. A stale built worker after
+    /// a protocol bump otherwise fails every real request with an obscure
+    /// argv-parse rejection instead of naming the mismatch; an old worker
+    /// that predates the probe flag (unknown flag, or any nonzero exit)
+    /// is reported the same way, as speaking an older protocol.
+    fn check_request_protocol(&self) -> Result<(), FrontendError> {
+        let mut command = self.command();
+        command
+            .arg(PRINT_WORKER_REQUEST_FLAG)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let worker_flag = match command.output() {
+            Ok(output) if output.status.success() => std::str::from_utf8(&output.stdout)
+                .ok()
+                .map(|text| text.trim().to_owned()),
+            _ => None,
+        };
+        if worker_flag.as_deref() == Some(WORKER_REQUEST_FLAG) {
+            return Ok(());
+        }
+        Err(FrontendError::WorkerVersionMismatch {
+            path: self.selection.clone(),
+            worker_flag,
         })
     }
 
@@ -351,6 +382,14 @@ fn exit_code(status: ExitStatus) -> u8 {
 pub enum FrontendError {
     Usage(String),
     WorkerProtocol(crate::request::ProtocolError),
+    /// The resolved worker binary's `--print-worker-request-flag` output
+    /// (`None` if it doesn't understand the probe or exited nonzero) doesn't
+    /// match [`WORKER_REQUEST_FLAG`]. Checked once per resolved worker binary
+    /// in [`PreparedWorker::prepare`], before any real request is sent.
+    WorkerVersionMismatch {
+        path: PathBuf,
+        worker_flag: Option<String>,
+    },
     Io(io::Error),
     Daemon(String),
 }
@@ -372,6 +411,16 @@ impl std::fmt::Display for FrontendError {
         match self {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
             Self::WorkerProtocol(error) => error.fmt(f),
+            Self::WorkerVersionMismatch { path, worker_flag } => {
+                let worker_version = worker_flag.as_deref().unwrap_or("an older protocol");
+                write!(
+                    f,
+                    "compiler worker {} speaks {}, this frontend speaks {}: rebuild the worker (see bridge/haskell/CLAUDE.md)",
+                    path.display(),
+                    worker_version,
+                    WORKER_REQUEST_FLAG,
+                )
+            }
             Self::Io(error) => error.fmt(f),
         }
     }
@@ -562,26 +611,59 @@ mod tests {
         assert!(!rotating.persistent);
     }
 
+    /// Compile a tiny ELF fake worker (rustc, matching the style of
+    /// `daemon.rs`'s hung-worker fixture) that answers this frontend's own
+    /// `--print-worker-request-flag` probe correctly and otherwise prints
+    /// `label` when `TIDEPOOL_PREPARED_WORKER_CHILD` is set. Compiled rather
+    /// than a shebang script: `PreparedWorker::command` execs the selected
+    /// binary via `/proc/self/fd/N`, which only resolves for a real ELF.
+    fn compile_fake_worker(source_path: &std::path::Path, bin_path: &std::path::Path, label: &str) {
+        std::fs::write(
+            source_path,
+            format!(
+                r#"
+fn main() {{
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["{probe}"] {{
+        print!("{flag}");
+        return;
+    }}
+    if std::env::var_os("TIDEPOOL_PREPARED_WORKER_CHILD").is_some() {{
+        print!("{label}");
+    }}
+}}
+"#,
+                probe = PRINT_WORKER_REQUEST_FLAG,
+                flag = WORKER_REQUEST_FLAG,
+                label = label,
+            ),
+        )
+        .unwrap();
+        let rustc = std::process::Command::new("rustc")
+            .arg(source_path)
+            .arg("-o")
+            .arg(bin_path)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+    }
+
     #[test]
     fn prepared_worker_identity_and_execution_survive_path_replacement() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _env = ENV.lock().unwrap();
         let dir =
             std::env::temp_dir().join(format!("tidepool-prepared-worker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let worker = dir.join("worker");
         let replacement = dir.join("replacement");
-        std::fs::copy(std::env::current_exe().unwrap(), &worker).unwrap();
-        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        compile_fake_worker(&dir.join("worker.rs"), &worker, "old-worker");
         std::env::set_var(WORKER_ENV, &worker);
         std::env::set_var("TIDEPOOL_GHC_LIBDIR", "/ghc/lib-a");
 
         let prepared = PreparedWorker::prepare().unwrap();
         let old_identity = prepared.producer_identity().unwrap();
 
-        std::fs::write(&replacement, b"#!/bin/sh\nprintf new-worker").unwrap();
-        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        compile_fake_worker(&dir.join("replacement.rs"), &replacement, "new-worker");
         std::fs::rename(&replacement, &worker).unwrap();
         assert_eq!(
             prepared.producer_identity().unwrap(),
@@ -591,11 +673,6 @@ mod tests {
 
         let output = prepared
             .command()
-            .args([
-                "--exact",
-                "frontend::tests::prepared_worker_child",
-                "--nocapture",
-            ])
             .env("TIDEPOOL_PREPARED_WORKER_CHILD", "1")
             .output()
             .unwrap();
@@ -621,9 +698,89 @@ mod tests {
     }
 
     #[test]
-    fn prepared_worker_child() {
-        if std::env::var_os("TIDEPOOL_PREPARED_WORKER_CHILD").is_some() {
-            print!("old-worker");
-        }
+    fn a_worker_speaking_a_different_protocol_is_reported_by_name_and_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-worker-protocol-mismatch-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("worker.rs");
+        let bin = dir.join("worker");
+        std::fs::write(
+            &source,
+            r#"
+fn main() {
+    print!("--worker-request-v11");
+}
+"#,
+        )
+        .unwrap();
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        let prepared = PreparedWorker::for_test(bin.clone()).unwrap();
+        let error = prepared.check_request_protocol().unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("compiler worker {}", bin.display())),
+            "{message}"
+        );
+        assert!(message.contains("speaks --worker-request-v11"), "{message}");
+        assert!(
+            message.contains(&format!("this frontend speaks {WORKER_REQUEST_FLAG}")),
+            "{message}"
+        );
+        assert!(
+            message.contains("rebuild the worker (see bridge/haskell/CLAUDE.md)"),
+            "{message}"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_worker_that_predates_the_probe_flag_is_reported_as_speaking_an_older_protocol() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-worker-protocol-unknown-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("worker.rs");
+        let bin = dir.join("worker");
+        // An old worker that has never heard of the probe flag: it doesn't
+        // recognize `--print-worker-request-flag` and exits nonzero, the way
+        // an argv-parse rejection from before the probe existed would.
+        std::fs::write(
+            &source,
+            r#"
+fn main() {
+    std::process::exit(2);
+}
+"#,
+        )
+        .unwrap();
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        let prepared = PreparedWorker::for_test(bin.clone()).unwrap();
+        let error = prepared.check_request_protocol().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("speaks an older protocol"), "{message}");
+        assert!(
+            message.contains(&format!("this frontend speaks {WORKER_REQUEST_FLAG}")),
+            "{message}"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }

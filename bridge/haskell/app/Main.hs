@@ -66,7 +66,7 @@ import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
-import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv)
+import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
@@ -155,7 +155,9 @@ throwCellSplitError errorValue = case errorValue of
 main :: IO ()
 main = do
   rawWorkerRequest <- getArgs
-  if rawWorkerRequest == ["--worker-loop-v2"]
+  if rawWorkerRequest == ["--print-worker-request-flag"]
+    then putStrLn workerRequestFlag >> exitWith ExitSuccess
+  else if rawWorkerRequest == ["--worker-loop-v2"]
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True

@@ -5,6 +5,13 @@ use std::path::{Path, PathBuf};
 pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v12";
 const MAGIC: &[u8; 8] = b"TPREQ012";
 
+/// A probe flag deliberately outside the versioned request grammar above: it
+/// asks a worker binary to print the request flag it was built against and
+/// exit, so the launcher can compare its own [`WORKER_REQUEST_FLAG`] against
+/// a resolved worker's before ever sending it a real request. Mirrored in
+/// `bridge/haskell/app/Main.hs`'s argument handling.
+pub(crate) const PRINT_WORKER_REQUEST_FLAG: &str = "--print-worker-request-flag";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
     Current,

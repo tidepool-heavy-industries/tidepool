@@ -11,6 +11,7 @@ module Tidepool.ExtractRequest
   , WorkerRequest(..)
   , workerRequestFromArgv
   , workerArgv
+  , workerRequestFlag
   ) where
 
 import qualified Data.ByteString as BS
