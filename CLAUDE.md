@@ -72,6 +72,7 @@ suite, and check runs reuse it automatically while its producer matches the
 current extractor and worker; after a rebuild they start their own daemon
 instead, so a restart only restores warmth. Other agents and test runs share
 the persistent daemon: restart it once, at a quiet point, never per parcel.
+`just daemon-stop` lets an in-flight compile finish before the daemon exits.
 Leave the host cargo config's incremental compilation on (no
 `CARGO_INCREMENTAL=0`) and cap jobs to fit beside a 10 GiB GHC worker.
 
