@@ -32,7 +32,8 @@ fn strict_jsonl_append_syncs_new_and_existing_directory_entries() {
     struct Remove(std::path::PathBuf);
     impl Drop for Remove {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            // best-effort: test cleanup of a temp path.
+            fs::remove_dir_all(&self.0).ok();
         }
     }
     let _remove = Remove(root.clone());
@@ -43,15 +44,19 @@ fn strict_jsonl_append_syncs_new_and_existing_directory_entries() {
     )
     .unwrap();
     let library = root.join("fault.so");
-    assert!(Command::new("cc")
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe: compiles a throwaway fault-injection shared object and exits, not a long-lived child"
+    )]
+    let cc_status = Command::new("cc")
         .args(["-shared", "-fPIC", "-Wall", "-Werror"])
         .arg(source)
         .arg("-o")
         .arg(&library)
         .arg("-ldl")
         .status()
-        .unwrap()
-        .success());
+        .unwrap();
+    assert!(cc_status.success());
     for policy in ["all", "data", "none"] {
         for existing in [false, true] {
             let dir = root.join(format!("{policy}-{existing}"));
@@ -60,6 +65,10 @@ fn strict_jsonl_append_syncs_new_and_existing_directory_entries() {
                 fs::write(dir.join("rows"), "0\n").unwrap();
             }
             let log = root.join(format!("hit-{policy}-{existing}"));
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test fixture: re-execs this test binary under LD_PRELOAD fault injection, not a production launch site"
+            )]
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "strict_jsonl_directory::jsonl_fault_child", "--nocapture"])
                 .env("LD_PRELOAD", &library)

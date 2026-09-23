@@ -299,7 +299,8 @@ mod tests {
     #[test]
     fn append_then_read_roundtrips() {
         let path = tmp_file("roundtrip");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         append_new_line(&path, "1", SyncPolicy::All).unwrap();
         append_new_line(&path, "2", SyncPolicy::Data).unwrap();
         append_new_line(&path, "3", SyncPolicy::None).unwrap();
@@ -307,13 +308,15 @@ mod tests {
         let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, vec![1, 2, 3]);
         assert!(torn.is_none());
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn missing_file_reads_as_empty() {
         let path = tmp_file("missing");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         let (entries, torn) = read_tail::<u64>(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, Vec::<u64>::new());
         assert!(torn.is_none());
@@ -322,7 +325,8 @@ mod tests {
     #[test]
     fn torn_final_line_under_repair_is_truncated_on_disk() {
         let path = tmp_file("torn_final_repair");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         append_new_line(&path, "1", SyncPolicy::All).unwrap();
         append_new_line(&path, "2", SyncPolicy::All).unwrap();
         // Simulate a crash mid-write: append a truncated (non-numeric,
@@ -348,7 +352,8 @@ mod tests {
         let (entries_final, _) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries_final, vec![1, 2, 4]);
 
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
     }
 
     /// `TailPolicy::Observe` reports the same torn row but never mutates the
@@ -358,7 +363,8 @@ mod tests {
     #[test]
     fn torn_final_line_under_observe_is_reported_but_left_in_place() {
         let path = tmp_file("torn_final_observe");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         append_new_line(&path, "1", SyncPolicy::All).unwrap();
         {
             use std::io::Write as _;
@@ -381,13 +387,15 @@ mod tests {
         assert_eq!(entries2, vec![1]);
         assert!(torn2.is_some());
 
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn torn_mid_file_line_is_loud_not_absorbed() {
         let path = tmp_file("torn_mid");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         std::fs::write(&path, b"not-a-number\n2\n").unwrap();
 
         let err = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap_err();
@@ -395,7 +403,8 @@ mod tests {
             matches!(err, JsonlReadError::MalformedRow { line_no: 1, .. }),
             "expected MalformedRow at line 1, got {err:?}"
         );
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -417,7 +426,8 @@ mod tests {
     #[test]
     fn write_line_to_open_file_appends() {
         let path = tmp_file("write_line");
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -429,6 +439,7 @@ mod tests {
 
         let (entries, _) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, vec![1, 2]);
-        let _ = std::fs::remove_file(&path);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_file(&path).ok();
     }
 }

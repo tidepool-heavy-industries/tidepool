@@ -719,7 +719,7 @@ fn valid_artifact_truncations_and_single_bit_mutations_never_panic() {
             mutant[offset] ^= 1 << bit;
             // Some mutations remain valid programs. Both a checked program and
             // a typed refusal are acceptable; panic is not.
-            let _ = parse_program(&mutant, &requirements(), limits);
+            parse_program(&mutant, &requirements(), limits).ok();
         }
     }
 }

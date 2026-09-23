@@ -1054,6 +1054,10 @@ mod tests {
     fn deep_flat_program_is_stack_safe_through_decode_validation_and_drop() {
         const CHILD: &str = "TIDEPOOL_DEEP_FLAT_SCHEMA_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test fixture: re-execs this test binary itself to exercise a bounded stack, not a production launch site"
+            )]
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "execution_schema::codec::tests::deep_flat_program_is_stack_safe_through_decode_validation_and_drop", "--nocapture"])
                 .env(CHILD, "1").output().unwrap();
