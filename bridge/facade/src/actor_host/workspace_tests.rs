@@ -410,10 +410,65 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .commit_file("file", "committed", "seed")
         .unwrap();
     repo.writer()
-        .commit_file(".gitignore", "ignored\n.exomonad/\n", "ignore")
+        .commit_file(".gitignore", "ignored\n", "ignore")
         .unwrap();
-    std::fs::create_dir(repo.path().join(".exomonad")).unwrap();
-    std::fs::write(repo.path().join(".exomonad/config"), "canonical").unwrap();
+    repo.writer()
+        .commit_file(".exomonad/config", "canonical", "workspace configuration")
+        .unwrap();
+    let workspace_repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    workspace_repo
+        .writer()
+        .commit_file("module.txt", "base", "workspace base")
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--name",
+                "exomonad-workspace",
+                workspace_repo.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .unwrap();
+    repo.git()
+        .try_run(repo.path(), &["commit", "-qm", "record workspace"])
+        .unwrap();
+    let root_workspace = repo.path().join(".exomonad/workspace");
+    repo.git()
+        .try_run(&root_workspace, &["config", "user.name", "Workspace Test"])
+        .unwrap();
+    repo.git()
+        .try_run(
+            &root_workspace,
+            &["config", "user.email", "workspace@example.invalid"],
+        )
+        .unwrap();
+    std::fs::write(root_workspace.join("module.txt"), "unpushed-root").unwrap();
+    repo.git()
+        .try_run(
+            &root_workspace,
+            &["commit", "-qam", "local workspace revision"],
+        )
+        .unwrap();
+    let root_workspace_head = repo
+        .git()
+        .try_run(&root_workspace, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trimmed()
+        .to_owned();
+    for name in ["logs", "sessions", "runtime"] {
+        std::fs::create_dir_all(repo.path().join(".exomonad").join(name)).unwrap();
+        std::fs::write(
+            repo.path().join(".exomonad").join(name).join("root-only"),
+            "runtime",
+        )
+        .unwrap();
+    }
     std::fs::write(repo.path().join("file"), "staged").unwrap();
     repo.git().try_run(repo.path(), &["add", "file"]).unwrap();
     std::fs::write(repo.path().join("file"), "working").unwrap();
@@ -501,6 +556,17 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         child.inheritance_notice
     );
     let child = child.workspace.as_ref().unwrap();
+    assert_eq!(
+        shell(child, "git -C .exomonad/workspace rev-parse HEAD").trim(),
+        root_workspace_head
+    );
+    shell(child, "git -C .exomonad/workspace status --porcelain; test ! -e .exomonad/logs/root-only; test ! -e .exomonad/sessions/root-only; test ! -e .exomonad/runtime/root-only");
+    assert!(shell(child, "cat .exomonad/workspace/.git").starts_with("gitdir: /"));
+    shell(child, "printf child-config > .exomonad/config");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(".exomonad/config")).unwrap(),
+        "canonical"
+    );
     {
         let source = child.source.as_ref().unwrap().publication.lock().await;
         let source = source.as_ref().unwrap();
@@ -580,7 +646,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             child,
             "cat file; git show :file; cat untracked ignored .exomonad/config"
         ),
-        "workingworkinguntrackedignoredcanonical"
+        "workingworkinguntrackedignoredchild-config"
     );
     assert_eq!(
         shell(child, "stat -c '%y' file"),
@@ -833,7 +899,28 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         child_actor,
         owner(child.clone(), child_binding, &_child_native),
     );
+    shell(
+        child,
+        "printf dirty-module > .exomonad/workspace/module.txt",
+    );
+    let before_dirty_fork = shell(child, "git rev-parse HEAD");
+    let dirty_fork = admission
+        .admit(
+            child_actor,
+            "root/child/dirty-workspace".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            CODING,
+        )
+        .await;
+    assert!(
+        dirty_fork.is_err(),
+        "uncommitted submodule edits must not be silently omitted"
+    );
+    assert_eq!(shell(child, "git rev-parse HEAD"), before_dirty_fork);
+    assert!(!child.publication.lock().await.is_pending());
     shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .exomonad/build/cargo/artifact");
+    shell(child, "git -C .exomonad/workspace config user.name 'Workspace Test'; git -C .exomonad/workspace config user.email workspace@example.invalid; printf child-module > .exomonad/workspace/module.txt; git -C .exomonad/workspace commit -qam child-module");
+    let child_workspace_head = shell(child, "git -C .exomonad/workspace rev-parse HEAD");
     let grandchild = admission
         .admit(
             child_actor,
@@ -859,8 +946,18 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             grandchild,
             "cat file; git show :file; cat .exomonad/build/cargo/artifact .exomonad/config"
         ),
-        "dirty-childdirty-childwarmcanonical"
+        "dirty-childdirty-childwarmchild-config"
     );
+    assert_eq!(
+        shell(grandchild, "git -C .exomonad/workspace rev-parse HEAD"),
+        child_workspace_head
+    );
+    assert_eq!(
+        shell(grandchild, "cat .exomonad/workspace/module.txt"),
+        "child-module"
+    );
+    shell(grandchild, "printf private-grandchild > .exomonad/config");
+    assert_eq!(shell(child, "cat .exomonad/config"), "child-config");
     shell(
         child,
         "printf later-child > file; printf later-build > .exomonad/build/cargo/artifact",
@@ -897,7 +994,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             inspection,
-            "cat file; if touch forbidden 2>/dev/null; then exit 1; fi"
+            "cat file; if touch forbidden 2>/dev/null; then exit 1; fi; if touch .exomonad/forbidden 2>/dev/null; then exit 1; fi; if touch .exomonad/workspace/forbidden 2>/dev/null; then exit 1; fi"
         ),
         "later-child"
     );
@@ -1069,7 +1166,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(shell(child, "cat file"), "later-child");
     // Exercise retirement through the same composed admission fixture: dirty
     // source and the index survive, while descendants keep their warm layers.
-    shell(child, "printf preserved > retirement-untracked; printf '*.ignored\\n' > .gitignore; printf ignored > retirement.ignored; rm -f input.txt");
+    shell(child, "printf preserved > retirement-untracked; printf '*.ignored\\n' > .gitignore; printf ignored > retirement.ignored; rm -f input.txt; printf retained-config > .exomonad/config; printf retained-module > .exomonad/workspace/module.txt");
     let status = shell(child, "git status --porcelain=v1 -- . ':!.exomonad'");
     let index = shell(child, "git show :file");
     let child_head = shell(child, "git rev-parse HEAD");
@@ -1095,6 +1192,26 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         "ignored"
     );
     assert!(!receipt.cwd.join("input.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(receipt.cwd.join(".exomonad/config")).unwrap(),
+        "retained-config"
+    );
+    assert_eq!(
+        std::fs::read_to_string(receipt.cwd.join(".exomonad/workspace/module.txt")).unwrap(),
+        "retained-module"
+    );
+    assert_eq!(
+        admission
+            .manager
+            .git()
+            .try_run(
+                &receipt.cwd.join(".exomonad/workspace"),
+                &["rev-parse", "HEAD"]
+            )
+            .unwrap()
+            .trimmed(),
+        child_workspace_head.trim()
+    );
     for (arguments, expected) in [
         (
             vec!["status", "--porcelain=v1", "--", ".", ":!.exomonad"],

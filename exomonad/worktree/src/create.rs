@@ -668,7 +668,7 @@ impl WorktreeManager {
         }
         let seed = GitOid::from_raw(self.git.try_run(source, &["rev-parse", "HEAD"])?.trimmed());
         let resolved = ResolvedSeed {
-            seed,
+            seed: seed.clone(),
             snapshot_ref: None,
             origin,
             git_repository: source.clone(),
@@ -681,9 +681,41 @@ impl WorktreeManager {
             Some(BranchName::from_raw(actor_path.git_branch())),
             Some(&index),
         )?;
+        // The inherited overlay deliberately omits .exomonad. Materialize
+        // authored files from the exact checkpoint into this child's durable
+        // host checkout before its private .exomonad mount is prepared.
+        Self::restore_private_exomonad(&self.git.on_host(), handle.cwd(), &seed)?;
+        Self::initialize_submodules(&self.git.on_host(), handle.cwd(), source)?;
         Ok(PreparedSourceWorktree {
             receipt: handle.receipt,
         })
+    }
+
+    fn restore_private_exomonad(
+        git: &GitCli,
+        cwd: &Path,
+        seed: &GitOid,
+    ) -> Result<(), WorktreeError> {
+        for path in [".gitmodules", ".exomonad"] {
+            if !git
+                .try_run(cwd, &["ls-tree", "--name-only", seed.as_str(), "--", path])?
+                .stdout
+                .is_empty()
+            {
+                git.try_run(
+                    cwd,
+                    &[
+                        "restore",
+                        "--source",
+                        seed.as_str(),
+                        "--worktree",
+                        "--",
+                        path,
+                    ],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Settle an unexposed source preparation as an ordinary committed checkout.
@@ -722,9 +754,8 @@ impl WorktreeManager {
         Ok(WorktreeHandle::from_receipt(receipt))
     }
 
-    /// Complete Git preparation only after the child's actual mounted view is
-    /// accessible. All manager clones and their Git clients then resolve the
-    /// registered checkout path through that same retained filesystem view.
+    /// Register the child's mounted view after host-side Git preparation. The
+    /// mounted view may be read-only, so no Git setup belongs after this point.
     #[cfg(target_os = "linux")]
     pub fn finish_inherited_source(
         &self,
@@ -741,7 +772,6 @@ impl WorktreeManager {
         let finalized = self
             .registry
             .install_view(&receipt, namespace, visible_root)?;
-        Self::initialize_submodules(&self.git, &finalized.cwd, &finalized.source_repository)?;
         Ok(WorktreeHandle::from_receipt(finalized))
     }
 
@@ -754,17 +784,32 @@ impl WorktreeManager {
         cwd: &Path,
         source_repository: &Path,
     ) -> Result<(), WorktreeError> {
+        let workspace_name = if git.try_exists(&cwd.join(".gitmodules"))? {
+            let modules = git.try_run(cwd, &["config", "--file", ".gitmodules", "-z", "--list"])?;
+            modules.nul_fields().into_iter().find_map(|entry| {
+                let (key, path) = entry.split_once('\n')?;
+                (path == ".exomonad/workspace")
+                    .then_some(key)
+                    .and_then(|key| key.strip_prefix("submodule."))
+                    .and_then(|key| key.strip_suffix(".path"))
+                    .map(str::to_owned)
+            })
+        } else {
+            None
+        };
         let local_workspace = source_repository.join(".exomonad/workspace");
         let mut args: Vec<OsString> = Vec::new();
-        if git.try_exists(&local_workspace.join(".git"))? {
-            let mut override_url = OsString::from("submodule.exomonad-workspace.url=");
-            override_url.push(local_workspace.as_os_str());
-            args.extend([
-                "-c".into(),
-                override_url,
-                "-c".into(),
-                "protocol.file.allow=always".into(),
-            ]);
+        if let Some(name) = &workspace_name {
+            if git.try_exists(&local_workspace.join(".git"))? {
+                let mut override_url = OsString::from(format!("submodule.{name}.url="));
+                override_url.push(local_workspace.as_os_str());
+                args.extend([
+                    "-c".into(),
+                    override_url,
+                    "-c".into(),
+                    "protocol.file.allow=always".into(),
+                ]);
+            }
         }
         args.extend([
             "submodule".into(),
@@ -773,6 +818,53 @@ impl WorktreeManager {
             "--recursive".into(),
         ]);
         git.try_run(cwd, &args)?;
+        let workspace = cwd.join(".exomonad/workspace");
+        Self::normalize_submodule_gitfiles(git, &workspace)?;
+        if let Some(name) = workspace_name.filter(|_| workspace.join(".git").is_file()) {
+            // The command-scoped local URL gets an unpublished parent commit
+            // into this clone, but Git also records it as origin. Restore the
+            // initialized upstream in the child's clone alone.
+            let url_key = format!("submodule.{name}.url");
+            let upstream = git.try_run(cwd, &["config", "--local", "--get", &url_key])?;
+            git.try_run(
+                &workspace,
+                &["remote", "set-url", "origin", upstream.trimmed()],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn normalize_submodule_gitfiles(git: &GitCli, workspace: &Path) -> Result<(), WorktreeError> {
+        if !workspace.is_dir() {
+            return Ok(());
+        }
+        // This host-backed subtree is mounted at a stable actor path. Relative
+        // gitdir pointers written by Git at the host path would resolve from a
+        // different parent in that view. Embedded .git directories stay intact.
+        let mut pending = vec![workspace.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .map_err(|error| crate::storage::storage_failure(&directory, error))?
+            {
+                let entry =
+                    entry.map_err(|error| crate::storage::storage_failure(&directory, error))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| crate::storage::storage_failure(&entry.path(), error))?;
+                if entry.file_name() == ".git" {
+                    if kind.is_file() {
+                        let admin = inspect::git_dir(git, &directory)?;
+                        let pointer = format!("gitdir: {}\n", admin.display());
+                        tidepool_atomic_write::write_best_effort(&entry.path(), pointer.as_bytes())
+                            .map_err(|error| {
+                                crate::storage::storage_failure(&error.path, error.source)
+                            })?;
+                    }
+                } else if kind.is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
         Ok(())
     }
 

@@ -13,7 +13,7 @@ use exomonad_worktree::testing::{fingerprint, TestRepo};
 use exomonad_worktree::{
     AgentRef, BindingTable, BranchName, DirtySummary, GitCli, GitOid, GitRef, InProgressKind,
     WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
-    WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
+    WorktreeRecordStatus, WorktreeRegistry, WorktreeSource, WorktreeSpec,
 };
 use tidepool_repr::ActorPath;
 
@@ -115,8 +115,6 @@ fn created_worktree_initializes_submodules_at_the_recorded_gitlink() {
                 "protocol.file.allow=always",
                 "submodule",
                 "add",
-                "--name",
-                "exomonad-workspace",
                 workspace.path().to_str().expect("workspace path is utf8"),
                 ".exomonad/workspace",
             ],
@@ -154,6 +152,116 @@ fn created_worktree_initializes_submodules_at_the_recorded_gitlink() {
         .cwd()
         .join(".exomonad/workspace/Project/Generic.hs")
         .is_file());
+    let pointer = std::fs::read_to_string(child.cwd().join(".exomonad/workspace/.git"))
+        .expect("read child submodule pointer");
+    assert!(
+        pointer.starts_with("gitdir: /"),
+        "mounted child views need an absolute submodule Git pointer: {pointer}"
+    );
+}
+
+#[test]
+fn inherited_source_prepares_private_authored_workspace_before_mount() {
+    let nested = TestRepo::init().expect("init nested repository");
+    nested
+        .writer()
+        .commit_file("Nested.hs", "module Nested where\n", "nested module")
+        .expect("commit nested module");
+    let workspace = TestRepo::init().expect("init workspace repository");
+    workspace
+        .writer()
+        .commit_file("Project/Generic.hs", "module Generic where\n", "workspace")
+        .expect("commit workspace module");
+    workspace
+        .git()
+        .try_run(
+            workspace.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                nested.path().to_str().expect("nested path is utf8"),
+                "Modules/nested",
+            ],
+        )
+        .expect("add nested submodule");
+    workspace
+        .git()
+        .try_run(
+            workspace.path(),
+            &["commit", "-q", "-m", "record nested module"],
+        )
+        .expect("commit nested gitlink");
+    let repo = TestRepo::init().expect("init project repository");
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--name",
+                "exomonad-workspace",
+                workspace.path().to_str().expect("workspace path is utf8"),
+                ".exomonad/workspace",
+            ],
+        )
+        .expect("add workspace submodule");
+    repo.writer()
+        .commit_file(".exomonad/config.toml", "[defaults]\n", "authored config")
+        .expect("commit authored config and gitlink");
+    repo.writer()
+        .write_file(".exomonad/config.toml", "[defaults]\nmodel = \"local\"\n")
+        .expect("edit authored config");
+    let committed = repo
+        .git()
+        .checkpoint_source(repo.path(), &[])
+        .expect("checkpoint authored config");
+
+    let storage = tempfile::TempDir::new().expect("tempdir");
+    let manager = WorktreeManager::new(
+        GitCli::new(),
+        WorktreeRegistry::open(storage.path().join("registry")).expect("open registry"),
+        storage.path().join("worktrees"),
+        repo.path(),
+    );
+    let prepared = manager
+        .prepare_inherited_source(
+            &WorktreeSource::CurrentRepository,
+            &tidepool_repr::ActorPath::parse("root/child").expect("actor path"),
+        )
+        .expect("prepare inherited child");
+    let child = prepared.receipt().cwd.as_path();
+    assert_eq!(prepared.receipt().source_head, committed);
+    assert_eq!(
+        std::fs::read_to_string(child.join(".exomonad/config.toml"))
+            .expect("read child authored config"),
+        "[defaults]\nmodel = \"local\"\n"
+    );
+    assert!(child
+        .join(".exomonad/workspace/Project/Generic.hs")
+        .is_file());
+    assert!(
+        std::fs::read_to_string(child.join(".exomonad/workspace/.git"))
+            .expect("read child submodule pointer")
+            .starts_with("gitdir: /")
+    );
+    assert!(
+        std::fs::read_to_string(child.join(".exomonad/workspace/Modules/nested/.git"))
+            .expect("read nested submodule pointer")
+            .starts_with("gitdir: /")
+    );
+    assert!(
+        !child.join("README.md").exists(),
+        "ordinary files await the mounted view"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(".exomonad/config.toml"))
+            .expect("read parent config"),
+        "[defaults]\nmodel = \"local\"\n"
+    );
 }
 
 #[test]
@@ -282,6 +390,14 @@ fn created_worktree_fetches_an_unpublished_workspace_commit_from_its_parent() {
             .trimmed(),
         upstream_url.trimmed(),
         "initialization must persist the upstream URL, not the command override"
+    );
+    assert_eq!(
+        GitCli::new()
+            .try_run(&child_workspace, &["remote", "get-url", "origin"])
+            .expect("read child's workspace clone origin")
+            .trimmed(),
+        upstream_url.trimmed(),
+        "the local bootstrap transport must not persist as the clone origin"
     );
 }
 

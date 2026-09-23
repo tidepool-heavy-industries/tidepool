@@ -379,6 +379,9 @@ impl GitCli {
         if let Some(kind) = inspect::in_progress(self, repo)? {
             return Err(WorktreeError::SourceOperationInProgress(kind));
         }
+        // A superproject commit can record only a submodule's HEAD. Refuse
+        // uncommitted nested working files before any checkpoint mutation.
+        crate::snapshot::refuse_dirty_submodules(self, repo)?;
         self.try_run(repo, &["symbolic-ref", "HEAD"])?;
         let head = GitOid::from_raw(
             self.try_run(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?
@@ -386,8 +389,8 @@ impl GitCli {
                 .to_owned(),
         );
 
-        // These are root entry names from the source-import policy, not path
-        // fragments. Literal pathspecs prevent Git metacharacters in a name
+        // Paths are repository-relative; callers may exclude a root entry or
+        // nested runtime directory. Literal pathspecs prevent Git metacharacters
         // from changing the exclusion's meaning.
         let mut paths = vec![OsString::from(":(top)")];
         for name in excluded {

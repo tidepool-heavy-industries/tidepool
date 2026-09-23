@@ -346,14 +346,19 @@ impl WorkspaceLayout {
                 .with_read_only_overlay(host_path.join(".git"), visible.join(".git"))
                 .map_err(io::Error::other)?;
         }
-        let canonical = self.source_root.join(".exomonad");
+        let canonical = if root {
+            self.source_root.join(".exomonad")
+        } else {
+            host_path.join(".exomonad")
+        };
         if canonical.is_dir() {
-            boundary = if root {
-                boundary.with_writable_overlay(&canonical, visible.join(".exomonad"))
-            } else {
-                boundary.with_read_only_overlay(&canonical, visible.join(".exomonad"))
-            }
-            .map_err(io::Error::other)?;
+            boundary =
+                if root || policy.workspace == exomonad_actor::WorkspaceAccess::WritableBound {
+                    boundary.with_writable_overlay(&canonical, visible.join(".exomonad"))
+                } else {
+                    boundary.with_read_only_overlay(&canonical, visible.join(".exomonad"))
+                }
+                .map_err(io::Error::other)?;
         }
         for InteractivePolicyMount { source, target } in mounts {
             boundary = boundary
@@ -678,9 +683,22 @@ impl WorkspaceLayout {
         let excluded = self.source_exclusions(source_path, files.as_path())?;
         // Native writers and host Git operations are excluded by the caller.
         // Resolve the child's Git baseline only after this source checkpoint.
+        // Children mount their own durable .exomonad, so the working-file
+        // snapshot omits it. The Git checkpoint still needs its authored files
+        // and workspace gitlink; only runtime state is excluded there.
+        let mut checkpoint_excluded = excluded
+            .iter()
+            .filter(|path| path.as_os_str() != std::ffi::OsStr::new(".exomonad"))
+            .cloned()
+            .collect::<Vec<_>>();
+        checkpoint_excluded.extend(
+            exomonad_worktree::git::EXOMONAD_LOCAL_EXCLUDES
+                .iter()
+                .map(|path| std::ffi::OsString::from(path.trim_matches('/'))),
+        );
         self.worktrees
             .git()
-            .checkpoint_source(source_path, &excluded)
+            .checkpoint_source(source_path, &checkpoint_excluded)
             .map_err(io::Error::other)?;
         let git = authorized
             .prepare_source()
