@@ -23,6 +23,9 @@ wrongMemchr array = W# (wrongMemchr# array 0## 4## (wordToWord8# 0##))
 measureTwo :: Text -> Int
 measureTwo = T.measureOff 2
 
+breakPath :: Text -> (Text, Text)
+breakPath = T.breakOnEnd "/"
+
 foreign import ccall unsafe "_hs_text_measure_off"
   wrongMeasureOff# :: ByteArray# -> Word# -> Word# -> Word# -> Word#
 

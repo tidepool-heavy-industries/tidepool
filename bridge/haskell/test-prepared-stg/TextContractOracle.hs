@@ -12,3 +12,5 @@ main = do
   print Contract.packedShow
   print Contract.charFold
   print Contract.textKeyedLookup
+  print Contract.reversedGreek
+  print Contract.splitGreekPath

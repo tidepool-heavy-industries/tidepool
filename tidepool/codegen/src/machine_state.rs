@@ -2497,6 +2497,64 @@ impl MachineState {
         })
     }
 
+    /// text's `_hs_text_reverse` over ledger-authenticated byte arrays. The
+    /// source and destination ranges are both checked before mutation begins.
+    pub(crate) fn reverse_external_utf8(
+        &self,
+        source: *mut u8,
+        source_offset: usize,
+        length: usize,
+        destination: *mut u8,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let source_span =
+            Self::checked_external_byte_range(&storage, source, source_offset, length)?;
+        let destination_span = Self::checked_external_byte_range(&storage, destination, 0, length)?;
+        if source == destination {
+            return Err(ExternalStorageValidationError::AliasedByteCopy);
+        }
+        let source_span = unsafe { std::slice::from_raw_parts(source_span, length) };
+        let character_len_at = |position: usize| match source_span[position] {
+            byte if byte < 0xC0 => 1,
+            byte if byte < 0xE0 => 2,
+            byte if byte < 0xF0 => 3,
+            _ => 4,
+        };
+        let mut validated = 0_usize;
+        while validated < length {
+            let character_len = character_len_at(validated);
+            validated = validated.checked_add(character_len).ok_or(
+                ExternalStorageValidationError::IndexOutOfBounds {
+                    index: validated,
+                    len: length,
+                },
+            )?;
+            if validated > length {
+                return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                    index: validated - 1,
+                    len: length,
+                });
+            }
+        }
+        let (mut read_position, mut write_position) = (0_usize, length);
+        while read_position < length {
+            let character_len = character_len_at(read_position);
+            write_position -= character_len;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source_span.as_ptr().add(read_position),
+                    destination_span.add(write_position),
+                    character_len,
+                );
+            }
+            read_position += character_len;
+        }
+        if length != 0 {
+            self.external_changed();
+        }
+        Ok(())
+    }
+
     /// Snapshot an active byte payload while its ledger owner is borrowed.
     /// This call is noncollecting and returns owned storage; no payload borrow
     /// survives into later observation or forcing steps.
@@ -4179,6 +4237,45 @@ mod tests {
             Err(ExternalStorageValidationError::AliasedByteCopy)
         );
         assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcd");
+    }
+
+    #[test]
+    fn text_reverse_writes_codepoints_in_reverse_order() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 6)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(source, 0, b"x\x61\xce\xbb\x62y")
+            .unwrap();
+
+        ms.reverse_external_utf8(source, 1, 4, destination).unwrap();
+
+        assert_eq!(
+            ms.copy_external_bytes(destination).unwrap(),
+            b"\x62\xce\xbb\x61"
+        );
+    }
+
+    #[test]
+    fn text_reverse_rejects_truncated_codepoint_before_writing() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        ms.store_external_bytes(source, 0, &[b'a', 0xe2]).unwrap();
+        ms.store_external_bytes(destination, 0, b"zz").unwrap();
+
+        assert!(matches!(
+            ms.reverse_external_utf8(source, 0, 2, destination),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.copy_external_bytes(destination).unwrap(), b"zz");
     }
 
     #[test]

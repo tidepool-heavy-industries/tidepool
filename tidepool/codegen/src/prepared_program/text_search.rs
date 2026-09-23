@@ -1,4 +1,4 @@
-//! text's byte C kernels (`_hs_text_memchr`, `_hs_text_measure_off`) over
+//! text's byte C kernels over
 //! descriptor-backed byte arrays. Each host authenticates the managed span
 //! through the external-storage ledger before reading a single byte; it never
 //! dereferences an unauthenticated address.
@@ -16,24 +16,27 @@ use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 
 pub(super) const MEMCHR_HOST: &str = "prepared_text_memchr";
 pub(super) const MEASURE_OFF_HOST: &str = "prepared_text_measure_off";
+pub(super) const REVERSE_HOST: &str = "prepared_text_reverse";
 
-pub(super) fn host_functions() -> [(&'static str, *const u8); 2] {
+pub(super) fn host_functions() -> [(&'static str, *const u8); 3] {
     [
         (MEMCHR_HOST, prepared_text_memchr as *const u8),
         (MEASURE_OFF_HOST, prepared_text_measure_off as *const u8),
+        (REVERSE_HOST, prepared_text_reverse as *const u8),
     ]
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum TextSearchOperation {
+pub(super) enum TextKernelOperation {
     Memchr,
     MeasureOff,
+    Reverse,
 }
 
 pub(super) fn recognize(
     identity: &OperationIdentity,
     signature: &Signature,
-) -> Option<TextSearchOperation> {
+) -> Option<TextKernelOperation> {
     use RuntimeRep::*;
     let OperationIdentity::Intrinsic {
         symbol,
@@ -42,14 +45,27 @@ pub(super) fn recognize(
     else {
         return None;
     };
-    let (operation, last) = match symbol.as_str() {
-        "_hs_text_memchr" => (TextSearchOperation::Memchr, Word(8)),
-        "_hs_text_measure_off" => (TextSearchOperation::MeasureOff, Word(64)),
-        _ => return None,
-    };
-    (signature.arguments == [UnliftedRef, Word(64), Word(64), last, Void]
-        && signature.results == ResultContract::Returns(vec![Int(64)]))
-    .then_some(operation)
+    match symbol.as_str() {
+        "_hs_text_memchr"
+            if signature.arguments == [UnliftedRef, Word(64), Word(64), Word(8), Void]
+                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+        {
+            Some(TextKernelOperation::Memchr)
+        }
+        "_hs_text_measure_off"
+            if signature.arguments == [UnliftedRef, Word(64), Word(64), Word(64), Void]
+                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+        {
+            Some(TextKernelOperation::MeasureOff)
+        }
+        "_hs_text_reverse"
+            if signature.arguments == [UnliftedRef, UnliftedRef, Word(64), Word(64), Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(TextKernelOperation::Reverse)
+        }
+        _ => None,
+    }
 }
 
 /// The wire span arguments are unsigned; a value the ledger span cannot hold
@@ -151,21 +167,90 @@ pub(super) unsafe extern "C" fn prepared_text_measure_off(
     }
 }
 
-/// One emitter for both kernels: `(byte array, offset, length, last)` in,
-/// one `Int64` out through a checked host call.
+/// Reverse UTF-8 codepoint byte sequences from an authenticated source span
+/// into an authenticated destination array. Both complete spans validate
+/// before the first write.
+pub(super) unsafe extern "C" fn prepared_text_reverse(
+    vmctx: *mut crate::context::VMContext,
+    destination: *mut u8,
+    destination_descriptor: *const ObjectDescriptor,
+    source: *mut u8,
+    source_descriptor: *const ObjectDescriptor,
+    offset: u64,
+    length: u64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (destination, _) = unsafe {
+            super::arrays::active_payload(
+                machine,
+                vmctx,
+                destination,
+                destination_descriptor,
+                ExternalStorageKind::Bytes,
+            )
+        }?;
+        let (source, source_len) = unsafe {
+            super::arrays::active_payload(
+                machine,
+                vmctx,
+                source,
+                source_descriptor,
+                ExternalStorageKind::Bytes,
+            )
+        }?;
+        let offset = checked_word_span_arg(offset, source_len)?;
+        let length = checked_word_span_arg(length, source_len)?;
+        machine
+            .reverse_external_utf8(source, offset, length, destination)
+            .map_err(|error| super::arrays::storage_error(error, 0))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+/// Emit a checked host call for one admitted text byte kernel.
 pub(super) fn emit_text_kernel(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
-    operation: TextSearchOperation,
+    operation: TextKernelOperation,
 ) -> Result<Vec<Value>, super::CompileError> {
+    if operation == TextKernelOperation::Reverse {
+        let host = super::arrays::declare_host(builder, pipeline, REVERSE_HOST, 7)?;
+        let owner = builder
+            .ins()
+            .iconst(types::I64, descriptor.initial_header_word() as i64);
+        let call = builder.ins().call(
+            host,
+            &[
+                vmctx,
+                arguments[0],
+                owner,
+                arguments[1],
+                owner,
+                arguments[2],
+                arguments[3],
+            ],
+        );
+        let status = builder.inst_results(call)[0];
+        super::arrays::finish_checked_call(builder, status);
+        return Ok(Vec::new());
+    }
     let (symbol, last) = match operation {
-        TextSearchOperation::Memchr => {
+        TextKernelOperation::Memchr => {
             (MEMCHR_HOST, builder.ins().uextend(types::I64, arguments[3]))
         }
-        TextSearchOperation::MeasureOff => (MEASURE_OFF_HOST, arguments[3]),
+        TextKernelOperation::MeasureOff => (MEASURE_OFF_HOST, arguments[3]),
+        TextKernelOperation::Reverse => unreachable!(),
     };
     let host = super::arrays::declare_host(builder, pipeline, symbol, 7)?;
     let owner = builder
@@ -222,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             recognize(&identity, &exact),
-            Some(TextSearchOperation::Memchr)
+            Some(TextKernelOperation::Memchr)
         );
         for wrong in [
             sig(
@@ -256,6 +341,32 @@ mod tests {
             recognize(&OperationIdentity::PrimOp("_hs_text_memchr".into()), &exact),
             None
         );
+    }
+
+    #[test]
+    fn reverse_requires_the_exact_intrinsic_signature() {
+        use RuntimeRep::*;
+        let identity = OperationIdentity::Intrinsic {
+            symbol: "_hs_text_reverse".into(),
+            convention: ForeignConvention::CCall,
+        };
+        let exact = sig(
+            vec![UnliftedRef, UnliftedRef, Word(64), Word(64), Void],
+            vec![],
+        );
+        assert_eq!(
+            recognize(&identity, &exact),
+            Some(TextKernelOperation::Reverse)
+        );
+        for wrong in [
+            sig(vec![UnliftedRef, UnliftedRef, Word(64), Word(64)], vec![]),
+            sig(
+                vec![UnliftedRef, UnliftedRef, Word(64), Word(64), Void],
+                vec![Int(64)],
+            ),
+        ] {
+            assert_eq!(recognize(&identity, &wrong), None);
+        }
     }
 
     /// The last argument of a text kernel: memchr's needle byte or
@@ -467,7 +578,7 @@ mod tests {
         );
         assert_eq!(
             recognize(&identity, &exact),
-            Some(TextSearchOperation::MeasureOff)
+            Some(TextKernelOperation::MeasureOff)
         );
         for wrong in [
             sig(

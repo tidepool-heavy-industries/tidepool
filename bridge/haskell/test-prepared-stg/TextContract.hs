@@ -30,3 +30,14 @@ textKeyedLookup :: Maybe Int
 textKeyedLookup = lookup "beta" table
   where
     table = [("alpha", 1), ("beta", 2), ("gamma", 3)] :: [(Text, Int)]
+
+-- Multi-byte UTF-8 regression for the `_hs_text_reverse` native kernel:
+-- "λαβ" holds three two-byte codepoints, so a byte-wise reverse would
+-- corrupt the encoding.
+reversedGreek :: Text
+reversedGreek = T.reverse "λαβ"
+
+-- `T.breakOnEnd` recovers through the same kernel; exercised here on a
+-- multi-byte needle-adjacent haystack.
+splitGreekPath :: (Text, Text)
+splitGreekPath = T.breakOnEnd "/" "λ/αβ"

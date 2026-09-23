@@ -16,6 +16,11 @@
     "nonAsciiLength": { "kind": "int", "value": 12 },
     "packedShow": { "kind": "text", "value": "(12345,True)" },
     "charFold": { "kind": "int", "value": 294 },
-    "textKeyedLookup": { "kind": "maybe", "value": { "kind": "int", "value": 2 } }
+    "textKeyedLookup": { "kind": "maybe", "value": { "kind": "int", "value": 2 } },
+    "reversedGreek": { "kind": "text", "value": "βαλ" },
+    "splitGreekPath": {
+      "kind": "tuple",
+      "value": [ { "kind": "text", "value": "λ/" }, { "kind": "text", "value": "αβ" } ]
+    }
   }
 }

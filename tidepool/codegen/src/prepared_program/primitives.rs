@@ -726,7 +726,7 @@ pub(super) fn recognize_operation(
         return Some(PrimitiveOperation::Fingerprint(operation));
     }
     if let Some(operation) = super::text_search::recognize(&declaration.identity, signature) {
-        return Some(PrimitiveOperation::TextSearch(operation));
+        return Some(PrimitiveOperation::TextKernel(operation));
     }
     if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Formatting(operation));
@@ -867,7 +867,7 @@ pub(super) enum PrimitiveOperation {
     Capability(super::capabilities::Capability),
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
-    TextSearch(super::text_search::TextSearchOperation),
+    TextKernel(super::text_search::TextKernelOperation),
     Formatting(super::formatting::FormattingOperation),
     ParseIso8601,
     ParseJson(
@@ -1099,7 +1099,7 @@ pub(super) fn emit_operation(
             super::byte_arrays::emit_compare_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
         }
-        PrimitiveOperation::TextSearch(operation) => super::text_search::emit_text_kernel(
+        PrimitiveOperation::TextKernel(operation) => super::text_search::emit_text_kernel(
             builder,
             pipeline,
             vmctx,
