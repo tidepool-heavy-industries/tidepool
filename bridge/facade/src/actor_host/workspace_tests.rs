@@ -392,6 +392,127 @@ fn root_workspace_resources_are_isolated_between_runs() {
 }
 
 #[tokio::test]
+async fn live_capture_inherits_dirty_source_after_host_git_activity() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repo.writer()
+        .commit_file("file", "committed", "seed")
+        .unwrap();
+    repo.writer()
+        .commit_file(".exomonad/config", "test", "workspace configuration")
+        .unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, bindings) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let bindings = Arc::new(Mutex::new(bindings));
+    let authority = ActorWorktreeAuthority::new("workspace-test", bindings.clone());
+    let root = ActorRef::first(exomonad_actor::ActorId(1));
+    authority.install_grant(
+        root.into(),
+        tidepool_handlers::handlers::worktree::ActorWorktreeGrant::Repository,
+    );
+    let backend = Arc::new(Backend::default());
+    let layout = WorkspaceLayout {
+        run_namespace: "queued-capture-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager.clone(),
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: backend.clone(),
+    };
+    let workspace = layout
+        .prepare(repo.path().into(), None, "root", true, CODING, None, None)
+        .unwrap();
+    let native = NativeProcess::start(&workspace, &backend);
+    let binding = runtime.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId(uuid::Uuid::new_v4().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
+        root,
+        owner(workspace.clone(), thread, &native),
+    )])));
+    let admission = fork_workspace_admission(
+        manager,
+        authority,
+        bindings,
+        "workspace-test".into(),
+        Some(NativeForkAdmission {
+            owners,
+            backend: backend.clone(),
+            layout: Some(layout),
+        }),
+    );
+    let previous_head = shell(&workspace, "git rev-parse HEAD");
+    std::fs::write(repo.path().join("file"), "live-dirty").unwrap();
+
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release_begin, resumed) = tokio::sync::oneshot::channel();
+    *backend.begin_pause.lock() = Some((entered, resumed));
+    let queued_admission = admission.clone();
+    let queued = tokio::spawn(async move {
+        queued_admission
+            .admit(
+                root,
+                "root/git-queued".into(),
+                ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
+                    spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceCurrentRepository,
+                    spec_label: "queued".into(),
+                    spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+                }),
+                CODING,
+            )
+            .await
+    });
+    ready.await.unwrap();
+    let git = admission.manager.git().clone();
+    let (held_sender, held_receiver) = std::sync::mpsc::channel();
+    let (release_git_sender, release_git_receiver) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _gate = git.try_capture().expect("test Git lane must be free");
+        held_sender.send(()).unwrap();
+        let _ = release_git_receiver.recv();
+    });
+    held_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The Git lane is held when the backend admits the fork. The mutex unit
+    // test checks waiting itself; this test checks the resulting live source.
+    release_begin.send(()).unwrap();
+    release_git_sender.send(()).unwrap();
+    holder.join().unwrap();
+    let queued = tokio::time::timeout(Duration::from_secs(20), queued)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .install(ActorRef::first(exomonad_actor::ActorId(2)))
+        .unwrap();
+    let queued = (queued.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(
+        queued.inheritance_notice.is_none(),
+        "queued capture unexpectedly fell back: {:?}",
+        queued.inheritance_notice
+    );
+    assert_eq!(
+        shell(queued.workspace.as_ref().unwrap(), "cat file"),
+        "live-dirty"
+    );
+    assert_ne!(shell(&workspace, "git rev-parse HEAD"), previous_head);
+    assert_eq!(
+        shell(queued.workspace.as_ref().unwrap(), "git rev-parse HEAD"),
+        shell(&workspace, "git rev-parse HEAD")
+    );
+}
+
+#[tokio::test]
 async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("Cargo.toml", "[package]\nname = \"workspace-fork-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "crate").unwrap();
@@ -846,7 +967,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     });
     held_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     release_begin.send(()).unwrap();
-    let failed = tokio::time::timeout(Duration::from_secs(30), blocked).await;
+    let failed = tokio::time::timeout(Duration::from_secs(40), blocked).await;
     release_git_sender.send(()).unwrap();
     holder.join().unwrap();
     let failed = failed.unwrap().unwrap();

@@ -11,6 +11,8 @@ use tidepool_bridge_effects::WtWorktreeHandle;
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
 use workspace_publication::Admission;
 
+const SOURCE_CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(super) struct AdmittedWorkspace {
     pub(super) handle: WtWorktreeHandle,
     pub(super) workspace: Arc<PreparedWorkspace>,
@@ -571,28 +573,68 @@ impl NativeForkAdmission {
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
             let preserved = parent.workspace.source_preserved_mounts.clone();
+            let capture_span = tracing::info_span!(
+                "source_capture",
+                creator = ?creator,
+                source_owner = ?source_owner,
+            );
             let captured = tokio::task::spawn_blocking(move || {
-                // Sibling admissions can briefly hold the repository Git lane.
-                // Wait for that ordinary overlap, but never fall back to HEAD
-                // when a live source checkpoint remains unavailable.
+                let _entered = capture_span.enter();
+                // Publication has already begun. Its owner retains this task
+                // through caller cancellation until capture and release settle.
+                // Never substitute old HEAD for an unavailable live checkpoint.
+                let wait_started = std::time::Instant::now();
                 let _admission = capture_layout
                     .worktrees
                     .git()
-                    .capture_within(std::time::Duration::from_secs(3))
+                    .capture_within(SOURCE_CAPTURE_WAIT)
                     .ok_or_else(|| {
+                        tracing::warn!(
+                            phase = "git_capture_wait",
+                            elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                            outcome = "timeout",
+                            "source capture phase finished"
+                        );
                         io::Error::new(
                             io::ErrorKind::WouldBlock,
-                            "source Git operation is busy; live fork was not checkpointed",
+                            "source Git operation remained busy for 30 seconds; live fork was not checkpointed",
                         )
                     })?;
-                capture_layout.capture(
+                tracing::info!(
+                    phase = "git_capture_wait",
+                    elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                    outcome = "acquired",
+                    "source capture phase finished"
+                );
+                let capture_started = std::time::Instant::now();
+                let captured = capture_layout.capture(
                     &authorized,
                     &namespace,
                     &host_path,
                     &preserved,
                     source,
-                    cache,
-                )
+                );
+                tracing::info!(
+                    phase = "git_capture",
+                    elapsed_ms = capture_started.elapsed().as_millis() as u64,
+                    success = captured.is_ok(),
+                    "source capture phase finished"
+                );
+                // Source bytes and private Git state are now frozen. Build
+                // publication consumes another resource and cannot alter that
+                // baseline, so it must not exclude unrelated repository work.
+                drop(_admission);
+                let captured = captured?;
+                let build_started = std::time::Instant::now();
+                let published = WorkspaceLayout::publish_build(&namespace, cache);
+                tracing::info!(
+                    phase = "build_snapshot",
+                    elapsed_ms = build_started.elapsed().as_millis() as u64,
+                    success = published.is_ok(),
+                    "source capture phase finished"
+                );
+                published?;
+                Ok::<_, io::Error>(captured)
             })
             .await
             .map_err(io::Error::other);
@@ -680,7 +722,6 @@ impl WorkspaceLayout {
         source_path: &Path,
         preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
-        mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
     ) -> io::Result<CapturedSource> {
         let files = namespace.retained_view_path(Path::new(ACTOR_PROJECT_ROOT))?;
         let excluded = self.source_exclusions(source_path, files.as_path())?;
@@ -779,6 +820,17 @@ impl WorkspaceLayout {
                 }
             }
         };
+        Ok(CapturedSource {
+            git,
+            source,
+            fallback,
+        })
+    }
+
+    fn publish_build(
+        namespace: &MountNamespace,
+        mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
+    ) -> io::Result<()> {
         if let Some(build) = &mut parent_build {
             let build = build
                 .as_mut()
@@ -795,11 +847,7 @@ impl WorkspaceLayout {
                 }
             }
         }
-        Ok(CapturedSource {
-            git,
-            source,
-            fallback,
-        })
+        Ok(())
     }
 
     fn prepare_captured(

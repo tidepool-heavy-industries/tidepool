@@ -11,6 +11,7 @@
 //! libgit2 models incompletely. Reconciled inspection through the same tool the
 //! writers use is the honest observer.
 
+use parking_lot::{RawFairMutex, RawThreadId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -67,9 +68,15 @@ impl GitOutput {
 }
 
 /// Runs git commands with a scrubbed environment.
+type AdmissionMutex = parking_lot::lock_api::ReentrantMutex<RawFairMutex, RawThreadId, ()>;
+pub type GitCaptureGuard<'a> =
+    parking_lot::lock_api::ReentrantMutexGuard<'a, RawFairMutex, RawThreadId, ()>;
+
 #[derive(Clone, Debug, Default)]
 pub struct GitCli {
-    admission: std::sync::Arc<parking_lot::ReentrantMutex<()>>,
+    // Fair handoff keeps frequent short Git reads from starving a queued
+    // source checkpoint. Recursive calls on the capture thread remain valid.
+    admission: std::sync::Arc<AdmissionMutex>,
     /// Extra environment applied to every invocation (the snapshot lane sets
     /// `GIT_INDEX_FILE` here; the monitor sets nothing).
     env: BTreeMap<String, String>,
@@ -88,16 +95,13 @@ impl GitCli {
     /// and private Git state. The capture thread can issue nested Git commands;
     /// other threads wait at the normal invocation entry point. Native writers
     /// require their separate admission boundary.
-    pub fn try_capture(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+    pub fn try_capture(&self) -> Option<GitCaptureGuard<'_>> {
         self.admission.try_lock()
     }
 
     /// [`Self::try_capture`], waiting up to `timeout` for running host Git
     /// commands to finish.
-    pub fn capture_within(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+    pub fn capture_within(&self, timeout: std::time::Duration) -> Option<GitCaptureGuard<'_>> {
         self.admission.try_lock_for(timeout)
     }
 
