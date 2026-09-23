@@ -82,7 +82,8 @@ runtime copy for every file; `just suite-check` checks suite registration and
 coverage of every top-level test file. Add new tests to the appropriate
 suite entry point. Nextest still runs each test in its own process.
 
-Use `just test-target CRATE SUITE 'test(module::name)'` to restrict compilation
+`just test-find NAME` prints the exact command for a test function without
+building. Use `just test-target CRATE SUITE 'test(module::name)'` to restrict compilation
 as well as execution. `just test CRATE FILTER` selects tests across all targets
 and may compile more than needed. `just suite CRATE` builds each declared suite
 as it reaches it. Routine dev/test builds omit debug information while retaining

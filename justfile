@@ -61,6 +61,11 @@ daemon-stop:
 suite crate:
     {{ nix }} scripts/test-suite.sh "$1"
 
+# Print the exact just command that runs a test function (NAME substring), without building.
+[positional-arguments]
+test-find name:
+    {{ nix }} python3 scripts/test-find.py "$1"
+
 # Show a crate's registered integration targets without running tests.
 [positional-arguments]
 suite-plan crate:
