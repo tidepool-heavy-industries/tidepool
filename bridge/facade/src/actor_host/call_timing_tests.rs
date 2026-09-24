@@ -65,7 +65,11 @@ async fn bash_call_logs_one_call_timing_summary_line() {
         }),
     };
     let dispatch = tokio::spawn(policy.dispatch_boxed(invocation));
-    let backend = TestCommands::completed("hi\n");
+    // The command settles only after a real ~50ms delay, so the effect
+    // boundary that awaits it (`Cmd.observe`'s `CommandAwaitWith`) spends
+    // measurable wall time — proving `exec_ms` reports the command's own
+    // execution, not just the near-instant `Cmd.start` dispatch.
+    let backend = TestCommands::completed_after(std::time::Duration::from_millis(50), "hi\n");
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
@@ -124,7 +128,10 @@ async fn bash_call_logs_one_call_timing_summary_line() {
         .as_u64()
         .or_else(|| fields["exec_ms"].as_str()?.parse().ok())
         .expect("exec_ms is a number");
-    let _ = exec_ms; // present with a real (possibly zero) command-effect total
+    // The backend settled only after a real ~50ms delay while this call's
+    // Cmd.observe awaited it, so the command-effect total must reflect that
+    // wait, not the near-instant Cmd.start dispatch alone.
+    assert!(exec_ms > 0, "exec_ms did not capture the command's own execution: {fields}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

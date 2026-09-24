@@ -4984,9 +4984,13 @@ where
                                     continuation,
                                     request,
                                 } => {
+                                    let exec_started = std::time::Instant::now();
                                     let resolved = self
                                         .resolve_command(kernel, context, continuation, request)
                                         .await;
+                                    crate::call_timing::add_exec_ms(
+                                        exec_started.elapsed().as_millis(),
+                                    );
                                     if let Some(job) = resolved.started_job {
                                         // Record the job id against this
                                         // item's fragment: on commit, a sole

@@ -38,6 +38,21 @@ impl TestCommands {
         backend
     }
 
+    /// Like [`Self::completed`], but `execute` only settles after `delay`
+    /// elapses: for a test that needs a command whose actual execution
+    /// occupies measurable wall time, rather than one that is already
+    /// finished before anything observes it.
+    pub(super) fn completed_after(delay: std::time::Duration, stdout: &str) -> Arc<Self> {
+        let backend = Self::new();
+        *backend.stdout.lock() = stdout.into();
+        let finish = backend.finish.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            finish.send_replace(true);
+        });
+        backend
+    }
+
     /// How many commands this backend actually executed. A regression that
     /// asserts committed effects were not replayed reads this.
     pub(super) fn executions(&self) -> usize {
