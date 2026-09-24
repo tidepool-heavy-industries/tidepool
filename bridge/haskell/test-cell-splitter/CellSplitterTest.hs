@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
@@ -6,8 +7,9 @@ import Control.Monad (forM_, unless, when)
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf, tails)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
 import Data.Char (isDigit)
+import qualified Data.Text as Text
 import GHC
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc)
@@ -16,7 +18,9 @@ import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Types.SourceError (SourceError)
+import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
+import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest (InspectionRequest(..))
@@ -54,6 +58,8 @@ main = do
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
   interfaceMeasurementDiagnostics
+  renderNameErrorTeachesGroupPaths
+  ambiguousOccurrenceHintCompilation
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
@@ -761,6 +767,83 @@ interfaceMeasurementDiagnostics = bracket temporary removeDirectoryRecursive $ \
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-interface-measurements"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- | Precedent: 379da60e6 ("labels: one validator, and a rejection that
+-- teaches the label/path distinction") extended 'renderNameError' so a
+-- fork-group path pasted where 'batch'\/'subgroup' expect one kebab label
+-- names the mistake and shows the fix, instead of leaving a bare
+-- 'InvalidKebabName' constructor for the model to puzzle out. This pins that
+-- rendering directly (no compile needed: 'renderNameError' is pure), and
+-- keeps the plain-kebab rendering for a non-path rejection unchanged.
+renderNameErrorTeachesGroupPaths :: IO ()
+renderNameErrorTeachesGroupPaths = do
+  let pathRejection = renderNameError (InvalidKebabName "correction-20260924/core-execution")
+  assertContains "group-path rejection names the offending path"
+    "\"correction-20260924/core-execution\"" (Text.unpack pathRejection)
+  assertContains "group-path rejection says it is a path, not a label"
+    "is a path, not a label" (Text.unpack pathRejection)
+  assertContains "group-path rejection points at subgroup's relative contract"
+    "`subgroup` is already relative to your own path" (Text.unpack pathRejection)
+  assertContains "group-path rejection shows how to build a two-segment path"
+    "`batch campaign group`" (Text.unpack pathRejection)
+  assertEqual "a non-path invalid label keeps the plain kebab rule"
+    "label \"Bad Label\" is not kebab-case: lowercase ASCII letters, digits and single hyphens only, not starting or ending with a hyphen"
+    (Text.unpack (renderNameError (InvalidKebabName "Bad Label")))
+
+-- | GHC's own "Ambiguous occurrence" diagnostic already names each candidate,
+-- but not in a form a model can paste back as a fix, and it never says what
+-- to do. 'Tidepool.DiagJson.envelopeToDiag' appends one line naming every
+-- candidate in copyable, fully-qualified form plus the two fixes: qualify
+-- the use, or hide one import. This compiles a genuine two-import ambiguity
+-- through the same 'diagsFromSourceError' path every cell and extraction
+-- error renders through (see @app/Main.hs@'s @reportDiags@) and checks the
+-- rendered message names both qualified candidates and both fixes.
+ambiguousOccurrenceHintCompilation :: IO ()
+ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let reviewPath = root </> "Review.hs"
+      workPath = root </> "Work.hs"
+      targetPath = root </> "AmbiguousTarget.hs"
+  writeFile reviewPath $ unlines
+    [ "module Review (candidateSummary) where"
+    , "candidateSummary :: Int"
+    , "candidateSummary = 1"
+    ]
+  writeFile workPath $ unlines
+    [ "module Work (candidateSummary) where"
+    , "candidateSummary :: Int"
+    , "candidateSummary = 2"
+    ]
+  writeFile targetPath $ unlines
+    [ "module AmbiguousTarget where"
+    , "import Review"
+    , "import Work"
+    , "result :: Int"
+    , "result = candidateSummary"
+    ]
+  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+    rejected <- try (runRequest $ \compiler ->
+        compiler CheckedEnvironment mempty GeneralCompile Nothing targetPath [root] Nothing)
+      :: IO (Either SourceError CheckedEnvironmentResult)
+    case rejected of
+      Right _ -> fail "ambiguous candidateSummary occurrence unexpectedly compiled"
+      Left sourceError -> do
+        let rendered = intercalate "\n" (map dMessage (diagsFromSourceError sourceError))
+        assertContains "ambiguous occurrence names the first qualified candidate"
+          "Review.candidateSummary" rendered
+        assertContains "ambiguous occurrence names the second qualified candidate"
+          "Work.candidateSummary" rendered
+        assertContains "ambiguous occurrence suggests qualifying the use"
+          "qualify the use" rendered
+        assertContains "ambiguous occurrence suggests hiding an import"
+          "hide one import" rendered
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-ambiguous-occurrence"
       hClose handle
       removeFile path
       createDirectory path

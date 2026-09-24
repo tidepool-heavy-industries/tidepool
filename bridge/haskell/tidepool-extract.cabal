@@ -81,6 +81,22 @@ library tidepool-extract-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+-- Exposes only the model-facing name-error vocabulary ('renderNameError' and
+-- friends) to host-side tests, without adding the rest of 'lib/Tidepool' (the
+-- eval stdlib, a runtime GHC include path — see the note above
+-- 'tidepool-extract-bin') as a host hs-source-dir, which would collide on
+-- module names ('Tidepool.Introspection' exists both here and under 'src/')
+-- with 'tidepool-extract-internal' proper.
+library assignment-internal
+  hs-source-dirs:   lib
+  exposed-modules:  Tidepool.Agent.Assignment.Internal
+  build-depends:
+    base >= 4.20 && < 5,
+    text
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
 test-suite cell-splitter-test
   type:             exitcode-stdio-1.0
   main-is:          CellSplitterTest.hs
@@ -90,6 +106,8 @@ test-suite cell-splitter-test
     ghc >= 9.12 && < 9.13,
     directory,
     filepath,
+    text,
+    assignment-internal,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall

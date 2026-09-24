@@ -15,14 +15,19 @@ module Tidepool.DiagJson
 
 import Control.Exception (Exception, SomeException)
 import Data.Foldable (toList)
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
+import qualified Data.List.NonEmpty as NE
 
 import GHC (SrcSpan(..), srcSpanFile, srcSpanStartLine, srcSpanStartCol, srcSpanEndLine, srcSpanEndCol)
 import GHC.Types.Error (MsgEnvelope(..), Severity(..), diagnosticMessage, getMessages, NoDiagnosticOpts(..))
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
-import GHC.Driver.Errors.Types (GhcMessage, GhcMessageOpts(..), DriverMessageOpts(..))
-import GHC.Tc.Errors.Types (TcRnMessageOpts(..))
+import GHC.Driver.Errors.Types (GhcMessage(..), GhcMessageOpts(..), DriverMessageOpts(..))
+import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), TcRnMessageOpts(..))
 import GHC.Iface.Errors.Types (IfaceMessageOpts(..), BuildingCabalPackage(..))
+import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Reader (GlobalRdrElt, gre_name)
+import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Utils.Error (formatBulleted)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(..), mkErrStyle)
 import GHC.Data.FastString (unpackFS)
@@ -61,11 +66,40 @@ envelopeToDiag :: MsgEnvelope GhcMessage -> Diag
 envelopeToDiag env = Diag
   { dFile     = spanOf (errMsgSpan env)
   , dSeverity = severityOf (errMsgSeverity env)
-  , dMessage  = renderWithContext ctx
-                  (formatBulleted (diagnosticMessage diagOpts (errMsgDiagnostic env)))
+  , dMessage  = rendered ++ maybe "" ("\n" ++) (ambiguousOccurrenceHint (errMsgDiagnostic env))
   }
   where
     ctx = defaultSDocContext { sdocStyle = mkErrStyle (errMsgContext env) }
+    rendered = renderWithContext ctx
+                 (formatBulleted (diagnosticMessage diagOpts (errMsgDiagnostic env)))
+
+-- | GHC's own "Ambiguous occurrence" rendering already names each candidate
+-- ("either 'A.candidateSummary' ... or 'B.candidateSummary' ...") but never
+-- says what to do about it. This appends one line naming every candidate in
+-- copyable, fully-qualified form and the two fixes: qualify the use, or hide
+-- one of the imports. Unwraps the same 'TcRnMessageWithInfo'/
+-- 'TcRnWithHsDocContext' context wrappers 'rejectedCellInstances' in
+-- "Tidepool.GhcPipeline" already unwraps for other 'TcRnMessage' matches.
+ambiguousOccurrenceHint :: GhcMessage -> Maybe String
+ambiguousOccurrenceHint (GhcTcRnMessage message) = go message
+  where
+    go (TcRnMessageWithInfo _ (TcRnMessageDetailed _ inner)) = go inner
+    go (TcRnWithHsDocContext _ inner) = go inner
+    go (TcRnAmbiguousName _ _ candidates) = Just $
+      "qualify the use (" ++ intercalate " or " (map quoted qualifiedNames)
+        ++ ") or hide one import"
+      where
+        qualifiedNames = nub (map qualifiedCandidateName (NE.toList candidates))
+        quoted name = "`" ++ name ++ "`"
+    go _ = Nothing
+ambiguousOccurrenceHint _ = Nothing
+
+qualifiedCandidateName :: GlobalRdrElt -> String
+qualifiedCandidateName gre = case nameModule_maybe name of
+  Just m -> moduleNameString (moduleName m) ++ "." ++ occNameString (nameOccName name)
+  Nothing -> occNameString (nameOccName name)
+  where
+    name = gre_name gre
 
 -- | The rendering options a caught diagnostic is formatted with. GHC's own
 -- 'GHC.Types.Error.defaultDiagnosticOpts' hardcodes @tcOptsShowContext =
