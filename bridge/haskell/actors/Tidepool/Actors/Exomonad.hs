@@ -91,6 +91,7 @@ module Tidepool.Actors.Exomonad
   , ForkEffort (..)
   , Model (..)
   , withEffort
+  , withReport
   , withModel
   , WorkerContext
   , inherited

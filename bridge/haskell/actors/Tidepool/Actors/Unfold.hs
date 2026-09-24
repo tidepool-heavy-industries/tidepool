@@ -35,6 +35,7 @@ module Tidepool.Actors.Unfold
   , ForkEffort (..)
   , Model (..)
   , withEffort
+  , withReport
   , withModel
   , WorkerContext
   , inherited
@@ -99,7 +100,7 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
 import Tidepool.Agent.Watch (Settlement, Watch, WatchLabel, Watches, awaitSettled, watch)
 import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
-import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), assignment, labelText)
+import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), SettlementReporting, assignment, labelText)
 import Tidepool.Agent.Watch.Internal (WatchLabel (..))
 import Tidepool.Agent.Launch
   ( ActorPath (..), GitBranchPrefix (..), ForkRole (..)
@@ -331,6 +332,13 @@ previewBranch (Branch role seed effects options assigned) = do
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
 withEffort effort (Branch role seed effects options assigned) =
   Branch role seed effects (options { branchEffort = Just effort }) assigned
+
+-- | Who hears the child's settlement: 'NotifyOwner' (the default) wakes the
+-- admitting actor with a settlement notice; 'Silent' leaves settlement to a
+-- watch or record-actor router that consumes the response.
+withReport :: SettlementReporting -> Branch child input result -> Branch child input result
+withReport reporting (Branch role seed effects options assigned) =
+  Branch role seed effects options (assigned { report = reporting })
 
 -- | Provider model selection is independent of transcript ancestry.
 withModel :: Model -> Branch child input result -> Branch child input result
