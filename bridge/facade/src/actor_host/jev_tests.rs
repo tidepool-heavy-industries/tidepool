@@ -1731,6 +1731,25 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
         backend.requests.lock()
     );
 
+    // The real result text `trivialCall` reads carries three fixed lines
+    // before the command's own output -- `retained as jobN :: Cmd.Job`,
+    // `session_id: ...`, and the `terminal: yes ...` status line -- none of
+    // which count against `Project.Shell.rawLineThreshold` (15): the shell
+    // itself renders this output raw (no Jev output scoring) by that same
+    // bound, measured on the output alone. Exactly 15 lines of real output
+    // must still abstain; counting the header lines against the same bound
+    // would wrongly push this over it and run the heuristics battery.
+    let boundary_output = (1..=15)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    run_bash(&mut campaign, &policy, "ls -la", &boundary_output).await;
+    assert!(
+        backend.requests.lock().is_empty(),
+        "a bash call whose output is exactly rawLineThreshold lines must still abstain: {:?}",
+        backend.requests.lock()
+    );
+
     run_bash(
         &mut campaign,
         &policy,

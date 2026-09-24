@@ -154,16 +154,18 @@ recentToolActivity = do
 -- Trips only for the @bash@ tool, and only when all three hold: the result
 -- reads as a clean exit (@terminal: yes@ over @CommandExited 0@, the prefix
 -- 'Project.Shell.tools' always writes for a finished command); the displayed
--- output is no more than 'Project.Shell.rawLineThreshold' lines, the same
--- bound the shell itself uses to skip Jev on display; and the command text
--- carries none of 'destructiveTokens'. Anything else -- a non-bash tool, a
--- failed or non-terminal result, an oversized result, or one destructive
--- token anywhere in the command -- falls through to the ordinary battery.
+-- output -- everything after that status heading, not the whole
+-- 'ToolResult' text -- is no more than 'Project.Shell.rawLineThreshold'
+-- lines, the same bound the shell itself uses to skip Jev on display; and
+-- the command text carries none of 'destructiveTokens'. Anything else -- a
+-- non-bash tool, a failed or non-terminal result, an oversized result, or
+-- one destructive token anywhere in the command -- falls through to the
+-- ordinary battery.
 trivialCall :: ToolCall -> ToolResult -> Maybe Text
 trivialCall call result
   | Just command <- bashCommandText call
-  , cleanExit (toolResultOutput result)
-  , countTextLines (toolResultOutput result) <= Shell.rawLineThreshold
+  , Just body <- displayedOutputBody (toolResultOutput result)
+  , countTextLines body <= Shell.rawLineThreshold
   , not (any hasDestructiveToken (map T.words (splitOnOperators command)))
   = Just "trivial call: successful bash call, short output, no destructive tokens"
   | otherwise = Nothing
@@ -178,10 +180,29 @@ bashCommandText call
         _ -> Nothing
       _ -> Nothing
 
--- | The prefix 'Project.Shell.statusHeading' always writes for a command that
--- ran to completion with exit code zero.
-cleanExit :: Text -> Bool
-cleanExit = T.isInfixOf "terminal: yes \183 CommandExited 0"
+-- | The exact marker 'Project.Shell.statusHeading' writes on a finished
+-- command's status line for a clean (zero) exit, regardless of cleanup
+-- state. A bash tool result also carries a host-written
+-- @retained as ... :: Cmd.Job@ line before this heading (see
+-- 'Tidepool.Command.Types.Job') and a @session_id: ...@ line above it, in
+-- addition to this line itself.
+cleanExitMarker :: Text
+cleanExitMarker = "terminal: yes \183 CommandExited 0"
+
+-- | The command's own displayed output: everything after the status line
+-- carrying 'cleanExitMarker', not the whole 'ToolResult' text. The real
+-- result text is @retained as jobN :: Cmd.Job@, then @session_id: ...@, then
+-- this status line, then the command's output -- three fixed lines that are
+-- no part of what 'Project.Shell.rawLineThreshold' bounds. Counting them
+-- against that bound would trip this gate later than the shell's own
+-- raw-display decision ('Project.Shell.prepare'), which measures only the
+-- output that follows the same heading. 'Nothing' when the marker is absent
+-- (not a clean-exit result).
+displayedOutputBody :: Text -> Maybe Text
+displayedOutputBody text = case T.breakOn cleanExitMarker text of
+  (_, rest)
+    | T.null rest -> Nothing
+    | otherwise -> Just (T.drop 1 (T.dropWhile (/= '\n') rest))
 
 countTextLines :: Text -> Int
 countTextLines text
