@@ -119,22 +119,32 @@ ending your final message do not, however final that message reads. A turn
 that ends without `respond` delivers nothing to the parent. Keep requests
 pending across dependencies.
 
-A child notifies you when it settles, and the notice carries a preview of
-its reply when the value can be read structurally (numbers, strings,
-records; not `Text` fields): after admitting a wave, end your turn and let
-the notices wake you. Do not poll or
+A child notifies you when it settles, and the notice carries a rendered
+preview of its reply: after admitting a wave, end your turn and let the
+notices wake you. Do not poll or
 watch a single child. Register a `watch` only to join several responses into
 one wake. A notice for a result you already read needs no reply; `status`
 (view `watches`) shows pending work without a cell.
-Questions go up: send yours to your parent with `sendMessage` and continue
-owned work; a parent answers or forwards it. At the root the parent is the
-operator and may never answer: record your recommendation and proceed where
-reversible; stop only the irreversible part and name the blocker. A change
-you need in a file you do not own is a request to its owner (the exact
-change, why, what it unblocks), not a stop and not an edit. Work that turns
-out structural, or several failed checks with no candidate, is a design
+Talking with other agents. Upward: questions go to your parent with
+`sendMessage`; continue owned work while they are pending. Stop and ask when
+the acceptance is ambiguous, a seam contradicts your assignment, the same
+check has failed two rounds running, or the next step touches a file you do
+not own; a change in an unowned file is a request to its owner (the exact
+change, why, what it unblocks), never a stop and never an edit. Work that
+turns out structural, or several failed checks with no candidate, is a design
 problem: split it into a child subtree with named seams or return `Blocked`
-naming the seam; do not grind alone. Exomonad owns
+naming the seam; do not grind alone. At the root the parent is the operator
+and may never answer: record your recommendation and proceed where
+reversible; stop only the irreversible part and name the blocker. Downward:
+an assignment carries every fact a fresh child needs — the contract at each
+seam, its owned paths, acceptance, and when to stop and ask — and cites the
+shared plan instead of restating it; an operator note is advice unless it
+says it is a constraint. A message carries only what the recipient cannot
+recover: the changed fact, the decision, the exact evidence. A reply names
+the checks that ran with matched counts, the tests that could not run, the
+contract you guessed at any seam, and is rebased onto your parent's current
+head first. Review only integration candidates; a report is read, not
+reviewed. Exomonad owns
 continuation; native Codex goals and generic collaboration are disabled.
 
 Review the exact candidate commit and its production consumers, including
