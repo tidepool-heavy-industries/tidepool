@@ -3984,10 +3984,8 @@ where
         fragment: ResidentWorkbenchFragment,
         outcome: ResidentOutcome,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        if let (
-            ResidentOutcome::Completed { .. },
-            WorkbenchDisplay::Observation { .. },
-        ) = (&outcome, &fragment.display)
+        if let (ResidentOutcome::Completed { .. }, WorkbenchDisplay::Observation { .. }) =
+            (&outcome, &fragment.display)
         {
             return self
                 .settle_observation_render_split(context, fragment, outcome)
@@ -4054,7 +4052,12 @@ where
             let snapshot = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_display_compile(session, context, &snapshot_source, &snapshot_type_modules)
+                    snapshot_display_compile(
+                        session,
+                        context,
+                        &snapshot_source,
+                        &snapshot_type_modules,
+                    )
                 })
                 .await?;
             let generation = snapshot.view.next_value_generation().0;
@@ -4083,27 +4086,30 @@ where
             let compile_metadata_name = metadata_name.clone();
             let compile_cancellation = cancellation.clone();
             let compiled = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-                    compile_block_off_checkout(
-                        &compile_context,
-                        &compile_source,
-                        &compile_effects,
-                        &block,
-                        None,
-                        compile_view,
-                        &[],
-                        Some(&generated_binds_verdict(&[
-                            compile_page_name,
-                            compile_metadata_name,
-                            "cellDisplay".into(),
-                        ])),
-                        None,
-                        None,
-                        &compile_retained,
-                        &compile_visible_names,
-                        None,
-                    )
-                })
+                tidepool_runtime::with_compiler_transaction_cancellable(
+                    compile_cancellation,
+                    || {
+                        compile_block_off_checkout(
+                            &compile_context,
+                            &compile_source,
+                            &compile_effects,
+                            &block,
+                            None,
+                            compile_view,
+                            &[],
+                            Some(&generated_binds_verdict(&[
+                                compile_page_name,
+                                compile_metadata_name,
+                                "cellDisplay".into(),
+                            ])),
+                            None,
+                            None,
+                            &compile_retained,
+                            &compile_visible_names,
+                            None,
+                        )
+                    },
+                )
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -4169,11 +4175,8 @@ where
                             "display bundle did not produce bindings".into(),
                         ));
                     };
-                    let (page, metadata, cell_display) = display_bundle_binders(
-                        &bound,
-                        &install_page_name,
-                        &install_metadata_name,
-                    )?;
+                    let (page, metadata, cell_display) =
+                        display_bundle_binders(&bound, &install_page_name, &install_metadata_name)?;
                     let bundle = session
                         .run_display_bundle_with_sites(
                             compiled.into_code(),
@@ -5301,7 +5304,9 @@ fn display_bundle_binders<'a>(
             "display bundle must bind page, metadata, and alias".into(),
         ));
     };
-    if page.name != page_name || metadata.name != metadata_name || cell_display.name != "cellDisplay"
+    if page.name != page_name
+        || metadata.name != metadata_name
+        || cell_display.name != "cellDisplay"
     {
         return Err(ResidentActorWorkbenchError::CompileInfrastructure(
             "display bundle returned compiler binders in an unexpected order".into(),
@@ -9854,8 +9859,7 @@ mod request_tests {
     /// type is known at check time, so a display bundle's compile needs no
     /// checkout at all, only its install/execute does.
     #[test]
-    fn display_bundle_split_compile_then_install_matches_single_checkout_render_cell_observation()
-    {
+    fn display_bundle_split_compile_then_install_matches_single_checkout_render_cell_observation() {
         let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
@@ -9952,8 +9956,8 @@ mod request_tests {
                 ready.generation,
             )
             .expect("display bundle runs");
-        let split_output = decode_display_bundle(&bundle, "displaySplitSeen")
-            .expect("display bundle decodes");
+        let split_output =
+            decode_display_bundle(&bundle, "displaySplitSeen").expect("display bundle decodes");
 
         let direct_output = render_cell_observation(
             &mut direct_session,
@@ -11230,16 +11234,9 @@ mod request_tests {
         // Actor A's split snapshot, taken BEFORE actor B declares —
         // captures the CURRENT `next_declaration_module()` as this cell's
         // (unused, since it has no `Decl` item) candidate.
-        let (source_a, snapshot_a) = snapshot_cell_split(
-            &mut session,
-            &context_a,
-            source,
-            &[],
-            None,
-            None,
-            None,
-        )
-        .expect("actor A's split snapshot");
+        let (source_a, snapshot_a) =
+            snapshot_cell_split(&mut session, &context_a, source, &[], None, None, None)
+                .expect("actor A's split snapshot");
 
         // Actor B commits a declaration in its OWN isolated scope, between
         // actor A's snapshot and its reservation — advancing the session-
@@ -11744,13 +11741,8 @@ mod request_tests {
     #[tokio::test]
     async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
         let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
-        let split_workbench = ResidentActorWorkbench::new(
-            split_machines,
-            split_source.clone(),
-            None,
-            None,
-            vec![],
-        );
+        let split_workbench =
+            ResidentActorWorkbench::new(split_machines, split_source.clone(), None, None, vec![]);
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
 

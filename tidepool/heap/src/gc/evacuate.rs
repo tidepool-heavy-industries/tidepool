@@ -144,9 +144,11 @@ impl ParcelPayload {
 /// as a value; imported once.
 pub struct Parcel {
     arena: DescriptorArena,
-    /// The evacuated root: a tagged address inside `arena`, a shared static
-    /// address, or 0 for a null reference.
-    root: usize,
+    /// The evacuated roots, in the order they were given: each a tagged
+    /// address inside `arena`, a shared static address, or 0 for a null
+    /// reference. The first is the value; the rest are the import slots the
+    /// value's images depend on.
+    roots: Vec<usize>,
     payloads: Vec<ParcelPayload>,
     externals: usize,
 }
@@ -157,8 +159,61 @@ pub struct Parcel {
 unsafe impl Send for Parcel {}
 
 impl Parcel {
+    /// The value's root (the first root given to the export).
     pub fn root(&self) -> usize {
-        self.root
+        self.roots.first().copied().unwrap_or(0)
+    }
+
+    pub fn roots(&self) -> &[usize] {
+        &self.roots
+    }
+
+    /// Every distinct header word an object in the arena carries.
+    pub fn headers(&self) -> Result<Vec<usize>, DescriptorTraceError> {
+        self.descriptor_headers()
+    }
+
+    /// Every distinct address the parcel refers to outside its own arena: a
+    /// root or an object field naming a static region (null excluded). The
+    /// importer resolves each to the image that owns the region.
+    pub fn static_references(&self) -> Result<Vec<usize>, DescriptorTraceError> {
+        let range = self.arena.allocation_range();
+        let mut found: Vec<usize> = Vec::new();
+        let mut note = |encoded: usize| -> Result<(), DescriptorTraceError> {
+            let address = untag(encoded);
+            if address == 0 || range.contains(&address) || found.contains(&address) {
+                return Ok(());
+            }
+            found
+                .try_reserve(1)
+                .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+            found.push(address);
+            Ok(())
+        };
+        for &root in &self.roots {
+            note(root)?;
+        }
+        self.arena.walk_sealed(|object, descriptor| {
+            if descriptor.external_kind().is_some() {
+                return Ok(());
+            }
+            let extent = descriptor.allocation_extent() as usize;
+            let mut error = None;
+            // SAFETY: walk_sealed proved the object start and extent.
+            unsafe {
+                descriptor.for_each_trace_slot(object, extent, |slot| {
+                    if error.is_some() {
+                        return;
+                    }
+                    let value = std::ptr::read(slot) as usize;
+                    if let Err(failure) = note(value) {
+                        error = Some(failure);
+                    }
+                })?;
+            }
+            error.map_or(Ok(()), Err)
+        })?;
+        Ok(found)
     }
 
     pub fn bytes(&self) -> usize {
@@ -242,9 +297,10 @@ impl Parcel {
         descriptors: &mut DescriptorSpace,
         admitted: Option<&dyn DescriptorOldSpace>,
         external: &dyn ExternalPayloadOwner,
-    ) -> Result<(usize, CopyResult), DescriptorTraceError> {
-        let mut root: *mut u8 = self.root as *mut u8;
-        let root_ptrs = [&mut root as *mut *mut u8];
+    ) -> Result<(Vec<usize>, CopyResult), DescriptorTraceError> {
+        let mut slots: Vec<*mut u8> = self.roots.iter().map(|&root| root as *mut u8).collect();
+        let root_ptrs: Vec<*mut *mut u8> =
+            slots.iter_mut().map(|slot| slot as *mut *mut u8).collect();
         prepare_descriptor_copy_from_space(
             &root_ptrs,
             &self.arena,
@@ -261,7 +317,10 @@ impl Parcel {
             Some(external),
         )?;
         destination.seal(copied.bytes_copied)?;
-        Ok((root as usize, copied))
+        Ok((
+            slots.into_iter().map(|slot| slot as usize).collect(),
+            copied,
+        ))
     }
 }
 
@@ -355,8 +414,9 @@ unsafe impl ExternalPayloadOwner for ExportPayloads<'_> {
 /// The smallest destination an export tries before growing.
 const INITIAL_PARCEL_BYTES: usize = 64 * 1024;
 
-/// Export the graph reachable from `root` (a tagged managed reference into
-/// `source`, a static address, or 0) into a fresh parcel.
+/// Export the graph reachable from `roots` (each a tagged managed reference
+/// into `source`, a static address, or 0) into a fresh parcel; the first
+/// root is the value, the rest are the import slots its images depend on.
 ///
 /// `descriptors` is the source machine's descriptor space (its static
 /// catalog resolves static references; its scratch drives the copy);
@@ -369,7 +429,7 @@ const INITIAL_PARCEL_BYTES: usize = 64 * 1024;
 /// The source machine is quiescent and exclusively borrowed for the whole
 /// call: no generated frame is live and no mutator runs.
 pub unsafe fn export_reachable(
-    root: usize,
+    roots: &[usize],
     source: &dyn DescriptorSourceSpace,
     external_handles: usize,
     descriptors: &mut DescriptorSpace,
@@ -385,8 +445,9 @@ pub unsafe fn export_reachable(
             failure: RefCell::new(None),
         };
         let mut arena = DescriptorArena::reserve(capacity, arena_descriptors.iter().cloned())?;
-        let mut relocated: *mut u8 = root as *mut u8;
-        let root_ptrs = [&mut relocated as *mut *mut u8];
+        let mut slots: Vec<*mut u8> = roots.iter().map(|&root| root as *mut u8).collect();
+        let root_ptrs: Vec<*mut *mut u8> =
+            slots.iter_mut().map(|slot| slot as *mut *mut u8).collect();
         prepare_reachable_copy_from_space(
             &root_ptrs,
             source,
@@ -419,7 +480,7 @@ pub unsafe fn export_reachable(
                 })?;
                 let parcel = Parcel {
                     arena,
-                    root: relocated as usize,
+                    roots: slots.iter().map(|&slot| slot as usize).collect(),
                     payloads: payloads.copies.into_inner(),
                     externals,
                 };
