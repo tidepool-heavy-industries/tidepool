@@ -165,10 +165,28 @@ impl JevBackend for SectionScoreJev {
 
 /// Scores every offered declaration as directly useful, or fails on demand.
 /// This tests selection limits without depending on a provider's judgment.
+/// Every actor's after-tool watchdog also asks this backend, one noul battery
+/// per tool call; those answer as untriggered and are counted separately.
 struct LookupScoreJev {
     requests: Mutex<Vec<serde_json::Value>>,
     fail: Mutex<bool>,
     score: Mutex<u8>,
+}
+
+impl LookupScoreJev {
+    /// The candidate-scoring batches received, without the watchdog's.
+    fn scoring_requests(&self) -> Vec<serde_json::Value> {
+        self.requests
+            .lock()
+            .iter()
+            .filter(|request| {
+                request["questions"].as_object().is_some_and(|questions| {
+                    questions.keys().any(|key| key.starts_with("candidates."))
+                })
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl JevBackend for LookupScoreJev {
@@ -195,9 +213,13 @@ impl JevBackend for LookupScoreJev {
             .expect("batched score questions")
             .iter()
             .map(|(key, question)| {
-                let legend = question["criteria"]
-                    .as_array()
-                    .expect("ordered rubric")
+                let Some(criteria) = question["criteria"].as_array() else {
+                    return (
+                        key.clone(),
+                        serde_json::json!({"type": "noul", "noul": 0.0}),
+                    );
+                };
+                let legend = criteria
                     .iter()
                     .enumerate()
                     .map(|(index, label)| (index.to_string(), label.clone()))
@@ -352,12 +374,13 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
         4,
         "four-declaration cap: {output}"
     );
+    let scoring = backend.scoring_requests();
     assert_eq!(
-        backend.requests.lock().len(),
+        scoring.len(),
         1,
         "one scoring batch; no recursive expansion"
     );
-    let request = backend.requests.lock()[0].clone();
+    let request = scoring[0].clone();
     assert!(
         request["questions"]
             .as_object()
@@ -389,7 +412,7 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
         missing.contains("alternativeRoot"),
         "qualified-module alternative missing: {missing}"
     );
-    assert_eq!(backend.requests.lock().len(), 1);
+    assert_eq!(backend.scoring_requests().len(), 1);
 
     *backend.score.lock() = 0;
     backend.requests.lock().clear();
@@ -407,7 +430,7 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
         !irrelevant.contains("Related declarations"),
         "irrelevant additions: {irrelevant}"
     );
-    assert_eq!(backend.requests.lock().len(), 1);
+    assert_eq!(backend.scoring_requests().len(), 1);
 
     *backend.fail.lock() = true;
     backend.requests.lock().clear();
@@ -425,7 +448,7 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
         "ordinary result lost on Jev failure: {fallback}"
     );
     assert!(!fallback.contains("Related declarations"), "{fallback}");
-    assert_eq!(backend.requests.lock().len(), 1);
+    assert_eq!(backend.scoring_requests().len(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
