@@ -23,6 +23,7 @@ import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
+import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -930,18 +931,27 @@ data QuasiQuoteOrigins
 -- | Walk a parsed module's quasiquote occurrences ('HsQuasiQuote' nodes,
 -- present in the parser's own output before renaming ever expands them) and
 -- resolve each occurrence's quoter identifier against the allowlist above.
-classifyQuasiQuoteOrigins :: ParsedModule -> QuasiQuoteOrigins
-classifyQuasiQuoteOrigins parsed
-  | null occurrences = NoQuasiQuotes
-  | all isAllowlisted resolved =
-      AllPureQuasiQuotes (Set.fromList [origin | Just origin <- resolved])
-  | otherwise =
-      HasUntrackedQuasiQuote (Set.fromList (map (fromMaybe "<unresolved>") resolved))
+-- Resolution consults 'HscEnv' (the current session's home package table)
+-- to find each candidate import's *defining* module for the occurrence --
+-- not just the module named in the import declaration -- so a quoter
+-- re-exported through a convenience module (e.g. 'Tidepool.Actors.Exomonad'
+-- re-exporting 'Tidepool.QQ.Label.label') still resolves to the allowlist
+-- key of its true origin. Dependency modules are already compiled and
+-- resident in the HPT by the time this runs (batch compile visits imports
+-- before importers); a module not yet resident (impossible in practice
+-- for this pipeline) simply fails to disambiguate, same as today.
+classifyQuasiQuoteOrigins :: HscEnv -> ParsedModule -> IO QuasiQuoteOrigins
+classifyQuasiQuoteOrigins hscEnv parsed
+  | null occurrences = pure NoQuasiQuotes
+  | otherwise = do
+      resolved <- mapM (resolveQuoterOrigin hscEnv imports) occurrences
+      pure $ if all isAllowlisted resolved
+        then AllPureQuasiQuotes (Set.fromList [origin | Just origin <- resolved])
+        else HasUntrackedQuasiQuote (Set.fromList (map (fromMaybe "<unresolved>") resolved))
   where
     hsMod = unLoc (pm_parsed_source parsed)
     imports = hsmodImports hsMod
     occurrences = everything (++) (mkQ [] quasiQuoteRdrName) hsMod
-    resolved = map (resolveQuoterOrigin imports) occurrences
     isAllowlisted (Just origin) = Set.member origin pureQuasiQuoters
     isAllowlisted Nothing = False
 
@@ -960,32 +970,39 @@ renderQuasiQuoteOrigins (AllPureQuasiQuotes origins) = "pure:" ++ intercalate ",
 renderQuasiQuoteOrigins (HasUntrackedQuasiQuote origins) = "untracked:" ++ intercalate "," (Set.toList origins)
 
 -- | Resolve one quasiquote occurrence's syntactic quoter identifier to a
--- "Module.Path.name" origin string, using only this module's own import
--- declarations -- not full renaming. 'Nothing' whenever that resolution is
--- not unambiguous from the import list alone (including: the identifier is
--- defined locally in this module rather than imported, so no import
--- provides it). Callers must treat 'Nothing' as unlisted/unknown, never as
--- allowlisted: failing closed here is what keeps this resolver sound
+-- "Module.Path.name" origin string naming its *defining* module -- not the
+-- module named in the import that brought it into this file's scope. A
+-- candidate import module's defining module for the occurrence comes from
+-- 'definingModuleForOcc', which follows the already-loaded interface's
+-- export list (so a quoter re-exported through a convenience module, e.g.
+-- 'Tidepool.Actors.Exomonad' re-exporting 'Tidepool.QQ.Label.label',
+-- resolves to "Tidepool.QQ.Label.label" either way). 'Nothing' whenever
+-- that resolution is not unambiguous (including: the identifier is defined
+-- locally in this module rather than imported, so no import provides it;
+-- or more than one candidate import resolves the occurrence to a different
+-- defining module). Callers must treat 'Nothing' as unlisted/unknown, never
+-- as allowlisted: failing closed here is what keeps this resolver sound
 -- without needing full renamer-grade name resolution.
-resolveQuoterOrigin :: [LImportDecl GhcPs] -> RdrName -> Maybe String
-resolveQuoterOrigin imports rdrName = case rdrName of
-  Qual qualifier occ -> case
-      [ moduleNameString (unLoc (ideclName decl))
+resolveQuoterOrigin :: HscEnv -> [LImportDecl GhcPs] -> RdrName -> IO (Maybe String)
+resolveQuoterOrigin hscEnv imports rdrName = case rdrName of
+  Qual qualifier occ -> resolveCandidates occ
+      [ unLoc (ideclName decl)
       | L _ decl <- imports
       , unLoc (ideclName decl) == qualifier || fmap unLoc (ideclAs decl) == Just qualifier
-      ] of
-    (origin : _) -> Just (origin ++ "." ++ occNameString occ)
-    [] -> Nothing
-  Unqual occ -> case nub
-      [ moduleNameString (unLoc (ideclName decl))
+      ]
+  Unqual occ -> resolveCandidates occ
+      [ unLoc (ideclName decl)
       | L _ decl <- imports
       , ideclQualified decl == NotQualified
       , importBringsOccIntoScope decl occ
-      ] of
-    [origin] -> Just (origin ++ "." ++ occNameString occ)
-    _ -> Nothing
-  _ -> Nothing
+      ]
+  _ -> pure Nothing
   where
+    resolveCandidates occ candidateModNames = do
+      defining <- mapM (\mn -> definingModuleForOcc hscEnv mn occ) (nub candidateModNames)
+      pure $ case nub [ mn | Just mn <- defining ] of
+        [definingModName] -> Just (moduleNameString definingModName ++ "." ++ occNameString occ)
+        _ -> Nothing
     importBringsOccIntoScope decl occ = case ideclImportList decl of
       Nothing -> True
       Just (Exactly, L _ ies) -> occ `elem` importListOccs ies
@@ -995,6 +1012,29 @@ resolveQuoterOrigin imports rdrName = case rdrName of
     ieRdrNameOcc (Unqual o) = [o]
     ieRdrNameOcc (Qual _ o) = [o]
     ieRdrNameOcc _ = []
+
+-- | The module that actually defines the exported entity named 'occ', as
+-- seen through the already-loaded interface of home-package module 'modName'
+-- -- not necessarily 'modName' itself, since an export list can re-export a
+-- name whose 'Name' still carries its original defining module. Consults
+-- only the resident home package table ('lookupHpt'): by the time a module
+-- is classified, this pipeline has already compiled its import dependencies
+-- in topological order, so any module actually in scope here is HPT-resident.
+-- A module not found there (not yet compiled, or a non-home package) yields
+-- 'Nothing', which 'resolveQuoterOrigin' treats as "this candidate does not
+-- resolve" -- failing closed, exactly like an unrecognized import shape.
+definingModuleForOcc :: HscEnv -> ModuleName -> OccName -> IO (Maybe ModuleName)
+definingModuleForOcc hscEnv modName occ = pure $ case lookupHpt (hsc_HPT hscEnv) modName of
+  Nothing -> Nothing
+  Just hmi -> case
+      [ definingModule
+      | avail <- mi_exports (hm_iface hmi)
+      , nm <- availNames avail
+      , nameOccName nm == occ
+      , Just definingModule <- [nameModule_maybe nm]
+      ] of
+    (m : _) -> Just (moduleName m)
+    [] -> Nothing
 
 -- Facts needed even when a module contributes no executable body. Keeping
 -- these separately lets an unchanged re-export or validation-only module
@@ -1267,9 +1307,14 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               compileFront modSum0 = do
                 liftIO (modifyIORef' frontCountRef (+ 1))
                 let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+                -- Classification needs the session's HPT as it stands right
+                -- before this module's own typecheck (to resolve import
+                -- origins -- see 'classifyQuasiQuoteOrigins'); dependency
+                -- modules are already resident by this point in the batch.
+                classifyEnv <- getSession
                 ((typechecked, quasiQuoteOrigins), tcMs) <- timeSection $ do
                   parsed <- parseModule modSum
-                  let origins = classifyQuasiQuoteOrigins parsed
+                  origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
                   typed <- typecheckModule (pvTransformParsed variant modSum parsed)
                   pure (typed, origins)
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
