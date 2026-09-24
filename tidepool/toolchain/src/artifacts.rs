@@ -67,9 +67,9 @@ pub struct SiteType {
     pub heads: Vec<NominalHead>,
 }
 
-/// The typed-suspension sidecar indexed by site id. The artifact retains its
-/// historical `asks.json` filename for now, but its in-memory contract is no
-/// longer ask-specific.
+/// The typed-suspension sidecar indexed by site id, covering every typed
+/// suspension site rather than only `ask`s; the on-disk filename (`asks.json`)
+/// is a naming holdover and does not constrain what it holds.
 #[derive(Debug, Clone, Default)]
 pub struct YieldSites {
     by_site: HashMap<u64, YieldSite>,
