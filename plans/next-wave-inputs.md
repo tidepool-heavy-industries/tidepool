@@ -83,3 +83,18 @@ cold (fix in flight). Once workers stay warm, the remaining cell cost is:
   keep stub modules out of the downsweep when nothing in the request imports
   them, or retire superseded tool-call bindings at the workbench instead of
   keeping every one live.
+
+## From wave 3 (2026-09-24, run 8a782b2b)
+
+Twelve actors on warm workers (zero replacements, lowering median 1.4 s):
+the daemon fix held. The tree then serialized on one machine checkout:
+every child gets its parent's `SessionId` unconditionally
+(`resident_workbench.rs` request build, `start.rs` `capture_decoded`), so
+all 12 actors queue on one registry slot. 6741 admissions in 30 minutes,
+2879 s cumulative wait, average wait per call about 17 s with ten actors
+active; `checkout_wait_ms` was most of every bash, cell and lookup call.
+A `selected`-context child (the `lunaTask` default) uses none of the shared
+session's scope chain or generations; it only needs its own machine, carrier
+mounts and the compiled workspace, which the daemon memo and build products
+already share across sessions. First step: mint a fresh session for
+`SelectedContext` children; `InheritedContext` children keep the parent's.
