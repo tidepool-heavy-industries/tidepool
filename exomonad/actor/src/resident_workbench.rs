@@ -567,6 +567,110 @@ impl<H, O> ResidentMachineAccess<H, O> {
     }
 }
 
+/// Keeps `prepare_cell`'s split-mounted request-input host binding alive
+/// (leased, never retired) across every checkout the split releases and
+/// re-acquires, and guarantees it is retired exactly once. A normal exit
+/// path calls [`Self::retire`] directly, folding the retirement into a
+/// checkout already in hand. If this guard is instead dropped still armed —
+/// an error propagated through `?`, or `prepare_cell`'s own future being
+/// cancelled — [`Drop`] spawns one more checkout in the background to
+/// retire the binding there, since `Drop` cannot itself run the `async`
+/// checkout. Not generic over `H`/`O`: a `Drop` impl cannot add bounds
+/// beyond the type's own definition, so the checkout this performs is
+/// captured, fully monomorphized, as a boxed closure at construction time
+/// instead (see [`Self::new`]).
+struct HostInputRetirement {
+    context: crate::ActorSessionContext,
+    input: MountedHostInput,
+    // Retained only so the leased identity survives at least until
+    // `retire` (or the background cleanup) removes its owner; dropping the
+    // lease needs no checkout of its own.
+    lease: Option<tidepool_runtime::session::resident::BindingLease>,
+    retired: bool,
+    background_retire: Box<dyn FnOnce() + Send>,
+}
+
+impl HostInputRetirement {
+    fn new<H, O>(
+        access: &ResidentMachineAccess<H, O>,
+        context: crate::ActorSessionContext,
+        input: MountedHostInput,
+        lease: tidepool_runtime::session::resident::BindingLease,
+    ) -> Self
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let background_retire: Box<dyn FnOnce() + Send> = {
+            let machines = Arc::clone(&access.machines);
+            let source = access.source.clone();
+            let context = context.clone();
+            let binder = input.binder.clone();
+            Box::new(move || {
+                tokio::spawn(async move {
+                    let access = ResidentMachineAccess::new(machines, source);
+                    if let Err(error) = access
+                        .with_machine(context, move |session, _, _| {
+                            session.retire_host_binding_owner(&binder);
+                            Ok(())
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            "failed to retire an abandoned split cell's request input binding"
+                        );
+                    }
+                });
+            })
+        };
+        Self {
+            context,
+            input,
+            lease: Some(lease),
+            retired: false,
+            background_retire,
+        }
+    }
+
+    fn mounted_input(&self) -> &MountedHostInput {
+        &self.input
+    }
+
+    /// Retire the mounted binding through the checkout `access` gives,
+    /// consuming this guard so its `Drop` never spawns background cleanup
+    /// afterward.
+    async fn retire<H, O>(mut self, access: &ResidentMachineAccess<H, O>)
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        self.retired = true;
+        self.lease = None;
+        let binder = self.input.binder.clone();
+        let context = self.context.clone();
+        if let Err(error) = access
+            .with_machine(context, move |session, _, _| {
+                session.retire_host_binding_owner(&binder);
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!(%error, "failed to retire a split cell's request input binding");
+        }
+    }
+}
+
+impl Drop for HostInputRetirement {
+    fn drop(&mut self) {
+        if self.retired {
+            return;
+        }
+        let background = std::mem::replace(&mut self.background_retire, Box::new(|| {}));
+        background();
+    }
+}
+
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
@@ -2404,23 +2508,64 @@ where
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
         const MAX_SPLIT_ATTEMPTS: u32 = 3;
-        // The split retires a mounted request input before its compiles
-        // read the input's module; until the input stays leased across the
-        // released checkouts, such cells take the single-checkout path.
-        if self.json_input.is_some() {
-            return self.prepare_cell_single_checkout(context, cell_source).await;
-        }
-        let json_input = self.json_input.clone();
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
         let effects = context.haskell_effects_alias.clone();
 
+        // Mount the request's JSON input carrier once, before any checkout
+        // this split releases, and keep it leased — never retired — across
+        // every one of them, so a later checkout's freshly re-derived view
+        // still resolves it. `HostInputRetirement` retires it on every exit
+        // path below (explicitly on the ones taken here; in the background,
+        // on drop, for an error `?` return or this future's own
+        // cancellation).
+        let mut leased_input = match &self.json_input {
+            Some(input) => {
+                let mount_context = context.clone();
+                let mount_source = self.access.source.clone();
+                let mount_type_modules = Arc::clone(&type_modules);
+                let mount_input = input.clone();
+                let (mounted, lease) = self
+                    .access
+                    .with_machine(mount_context, move |session, context, _| {
+                        let mounted = mount_json_input(
+                            session,
+                            context,
+                            &mount_source,
+                            &mount_type_modules,
+                            &mount_input,
+                        )?;
+                        let lease =
+                            session.lease_bindings(&[tidepool_repr::VarId(mounted.binder.var_id)]);
+                        Ok((mounted, lease))
+                    })
+                    .await?;
+                Some(HostInputRetirement::new(
+                    &self.access,
+                    context.clone(),
+                    mounted,
+                    lease,
+                ))
+            }
+            None => None,
+        };
+
+        // Carries one cancellation edge across every off-checkout GHC call
+        // this split makes, the same shape `prepare_cell_single_checkout`
+        // arms for its own (single-checkout) compile: dropping this future
+        // before it settles interrupts whichever compile is in flight,
+        // rather than leaving it to finish unobserved.
+        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+
         for _ in 0..MAX_SPLIT_ATTEMPTS {
             let snapshot_source = self.access.source.clone();
             let snapshot_type_modules = Arc::clone(&type_modules);
             let snapshot_response = response.clone();
-            let snapshot_json_input = json_input.clone();
+            let snapshot_mounted_input = leased_input
+                .as_ref()
+                .map(|guard| guard.mounted_input().clone());
             let (source, snapshot) = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
@@ -2431,7 +2576,7 @@ where
                         &snapshot_type_modules,
                         snapshot_response.as_ref(),
                         request,
-                        snapshot_json_input.as_ref(),
+                        snapshot_mounted_input.as_ref(),
                     )
                 })
                 .await?;
@@ -2442,10 +2587,17 @@ where
             let check_source = source.clone();
             let check_effects = effects.clone();
             let check_cell_source = cell_source.clone();
+            let check_cancellation = cancellation.clone();
             let (snapshot, checked) = spawn_blocking_in_span(move || {
-                let checked =
-                    check_cell_off_checkout(&snapshot, &check_source, &check_effects, &check_cell_source);
-                checked.map(|checked| (snapshot, checked))
+                tidepool_runtime::with_compiler_transaction_cancellable(check_cancellation, || {
+                    let checked = check_cell_off_checkout(
+                        &snapshot,
+                        &check_source,
+                        &check_effects,
+                        &check_cell_source,
+                    );
+                    checked.map(|checked| (snapshot, checked))
+                })
             })
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -2458,8 +2610,13 @@ where
                 // Declaration staging writes and validates the next Lib
                 // module in the shared session root: that must stay fully
                 // serialized, so abandon the split and run the original
-                // single-checkout path (which repeats the whole-cell check
-                // under its own checkout).
+                // single-checkout path (which repeats the whole-cell check,
+                // and mounts its own request input, under its own
+                // checkout).
+                if let Some(guard) = leased_input.take() {
+                    guard.retire(&self.access).await;
+                }
+                cancel_on_drop.0 = None;
                 return self.prepare_cell_single_checkout(context, cell_source).await;
             }
 
@@ -2499,24 +2656,31 @@ where
             let compile_cell_source = cell_source.clone();
             let compile_context = context.clone();
             let compile_view = c_view.clone();
+            let compile_cancellation = cancellation.clone();
             let (checked, outcome) = spawn_blocking_in_span(move || {
-                let outcome = compile_cell_items_off_checkout(
-                    &compile_context,
-                    &compile_source,
-                    &compile_effects,
-                    &checked,
-                    &compile_cell_source,
-                    compile_view,
-                    &retained,
-                    &visible_names,
-                );
-                outcome.map(|outcome| (checked, outcome))
+                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
+                    let outcome = compile_cell_items_off_checkout(
+                        &compile_context,
+                        &compile_source,
+                        &compile_effects,
+                        &checked,
+                        &compile_cell_source,
+                        compile_view,
+                        &retained,
+                        &visible_names,
+                    );
+                    outcome.map(|outcome| (checked, outcome))
+                })
             })
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
 
             let items = match outcome {
                 CellItemsOutcome::Rejected { index, diagnostic } => {
+                    if let Some(guard) = leased_input.take() {
+                        guard.retire(&self.access).await;
+                    }
+                    cancel_on_drop.0 = None;
                     return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
                 }
                 CellItemsOutcome::Ready(items) => items,
@@ -2541,7 +2705,13 @@ where
                 })
                 .await?;
             match install {
-                CellInstall::Ready(prepared) => return Ok((checked, prepared)),
+                CellInstall::Ready(prepared) => {
+                    if let Some(guard) = leased_input.take() {
+                        guard.retire(&self.access).await;
+                    }
+                    cancel_on_drop.0 = None;
+                    return Ok((checked, prepared));
+                }
                 CellInstall::Stale => continue,
             }
         }
@@ -2549,6 +2719,10 @@ where
         // Contention exhausted the bounded split-compile retries — fall
         // back to the original single-checkout path, whose one exclusive
         // borrow cannot itself observe a stale view.
+        if let Some(guard) = leased_input.take() {
+            guard.retire(&self.access).await;
+        }
+        cancel_on_drop.0 = None;
         self.prepare_cell_single_checkout(context, cell_source).await
     }
 
@@ -3055,6 +3229,13 @@ where
         verdict: Option<TurnClassification>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         const MAX_SPLIT_ATTEMPTS: u32 = 3;
+        // Carries one cancellation edge across every off-checkout GHC call
+        // this split makes, the same shape `prepare_cell_single_checkout`
+        // arms for its own (single-checkout) compile: dropping this future
+        // before it settles interrupts whichever compile is in flight,
+        // rather than leaving it to finish unobserved.
+        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         for _ in 0..MAX_SPLIT_ATTEMPTS {
             let snapshot_source = source.clone();
             let snapshot_type_modules = type_modules.clone();
@@ -3079,20 +3260,54 @@ where
             let compile_source = source.clone();
             let compile_block_text = block.clone();
             let effects = context.haskell_effects_alias.clone();
+            let compile_cancellation = cancellation.clone();
             let (snapshot, compiled) = spawn_blocking_in_span(move || {
-                let compiled = compile_fragment_off_checkout(
-                    &snapshot,
-                    &compile_source,
-                    &effects,
-                    &compile_block_text,
-                );
-                compiled.map(|compiled| (snapshot, compiled))
+                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
+                    let compiled = compile_fragment_off_checkout(
+                        &snapshot,
+                        &compile_source,
+                        &effects,
+                        &compile_block_text,
+                    );
+                    compiled.map(|compiled| (snapshot, compiled))
+                })
             })
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
             let ready = match compiled {
                 CompiledBlock::Rejected(diagnostic) => {
-                    return Ok(ResidentWorkbenchStep::Rejected(diagnostic))
+                    // The rejection was derived from `snapshot.view`, taken
+                    // before the machine was released for this compile.
+                    // Re-derive the view once more before trusting it: if
+                    // something else wrote to a scope this compile actually
+                    // read from in the meantime, the rejection is stale and
+                    // this attempt must recompile against a fresh snapshot,
+                    // exactly as an install-time mismatch already does.
+                    let revalidate_source = source.clone();
+                    let revalidate_type_modules = type_modules.clone();
+                    let revalidate_against = snapshot.view.clone();
+                    let still_current = self
+                        .access
+                        .with_machine(context.clone(), move |session, context, _| {
+                            if session.machine_disposition()
+                                == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+                            {
+                                return Err(ResidentActorWorkbenchError::MachineLost);
+                            }
+                            let fresh_view = actor_compile_view(
+                                session,
+                                context,
+                                &revalidate_source,
+                                &revalidate_type_modules,
+                            )?;
+                            Ok(fresh_view.compile_relevant_eq(&revalidate_against))
+                        })
+                        .await?;
+                    if still_current {
+                        cancel_on_drop.0 = None;
+                        return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+                    }
+                    continue;
                 }
                 CompiledBlock::Ready(ready) => *ready,
             };
@@ -3103,6 +3318,11 @@ where
             let outcome = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
+                    if session.machine_disposition()
+                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+                    {
+                        return Err(ResidentActorWorkbenchError::MachineLost);
+                    }
                     let fresh_view = actor_compile_view(
                         session,
                         context,
@@ -3129,7 +3349,10 @@ where
                 })
                 .await?;
             match outcome {
-                FragmentInstall::Installed(step) => return Ok(step),
+                FragmentInstall::Installed(step) => {
+                    cancel_on_drop.0 = None;
+                    return Ok(step);
+                }
                 FragmentInstall::Stale => continue,
             }
         }
@@ -3137,6 +3360,7 @@ where
         // Contention exhausted the bounded split-compile retries — fall back
         // to the original single-checkout path, whose one exclusive borrow
         // cannot itself observe a stale view.
+        cancel_on_drop.0 = None;
         self.access
             .with_machine(context, move |session, context, _| {
                 begin_fragment(
@@ -6257,11 +6481,13 @@ struct CellSplitSnapshot {
 }
 
 /// Take the checkout-scoped snapshot a split cell preparation needs, then
-/// release the checkout. Mounts the request's JSON input carrier — kept
-/// under this first checkout exactly as the single-checkout path does, GHC
-/// compile and all — and retires its temporary owner lease before
-/// releasing, so an abandoned split attempt (a `Decl` item, or exhausted
-/// retries) never leaves an un-retired binding behind.
+/// release the checkout. The request's JSON input carrier, when present, is
+/// mounted once by the caller before the retry loop begins (`prepare_cell`)
+/// and stays leased and un-retired across every checkout this split releases
+/// and re-acquires — this only extends `source`'s imports/preamble to name
+/// the already-mounted binding, so a later checkout's fresh view still
+/// resolves it. See `prepare_cell`'s `HostInputRetirement` for the matching
+/// retire-on-every-exit-path half of that contract.
 #[allow(clippy::too_many_arguments)]
 fn snapshot_cell_split<H, O>(
     session: &mut ResidentSession<H, O>,
@@ -6270,16 +6496,13 @@ fn snapshot_cell_split<H, O>(
     type_modules: &[String],
     response: Option<&ResponseExpectation>,
     request: Option<crate::RequestId>,
-    json_input: Option<&serde_json::Value>,
+    mounted_input: Option<&MountedHostInput>,
 ) -> Result<(ActorWorkbenchSource, CellSplitSnapshot), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let mounted_input = json_input
-        .map(|input| mount_json_input(session, context, &source, type_modules, input))
-        .transpose()?;
-    if let Some(input) = &mounted_input {
+    if let Some(input) = mounted_input {
         source
             .workbench_imports
             .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
@@ -6288,9 +6511,6 @@ where
             source.preamble, input.name
         )
         .into();
-    }
-    if let Some(input) = &mounted_input {
-        session.retire_host_binding_owner(&input.binder);
     }
     if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
     {
@@ -6430,6 +6650,10 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    {
+        return Err(ResidentActorWorkbenchError::MachineLost);
+    }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
     if !fresh_view.compile_relevant_eq(&snapshot.view)
         || session.next_declaration_module() != Some(snapshot.candidate_module)
@@ -6579,6 +6803,10 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    {
+        return Err(ResidentActorWorkbenchError::MachineLost);
+    }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
     if !fresh_view.compile_relevant_eq(compiled_against)
         || session.next_declaration_module() != Some(candidate_module)
@@ -6914,6 +7142,7 @@ fn compile_host_binding_off_checkout(
     Ok((bound.remove(0), compiled))
 }
 
+#[derive(Clone)]
 struct MountedHostInput {
     binder: BoundBinder,
     module: String,
@@ -9263,6 +9492,61 @@ mod request_tests {
         assert!(
             matches!(items.remove(0).ready, PreparedCellStep::Declaration { .. }),
             "the declaration item must use the declaration plane, not the split's item compile"
+        );
+    }
+
+    /// A request workbench's mounted JSON input must stay resolvable across
+    /// every checkout `prepare_cell`'s split releases and re-acquires: the
+    /// input is mounted once, before the retry loop, and must not be
+    /// retired until every off-checkout step that reads it (the whole-cell
+    /// check and each item's compile) has finished. A two-item bind cell
+    /// with one item reading `input` reproduces the exact shape that used
+    /// to fail — the input's module went unresolved once the split reached
+    /// its off-checkout compiles.
+    #[tokio::test]
+    async fn cell_split_prepares_a_two_item_bind_cell_that_reads_a_request_workbench_json_input() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        // A request workbench's preamble always declares `respond`, whether
+        // or not the cell calls it, and its signature needs `Replies` in
+        // the effect stack to typecheck. `Exomonad` (qualified) is already
+        // in scope everywhere this fixture compiles — `host_mount_fixture`
+        // bakes it into `source.preamble` — and re-exports `Replies`.
+        context.haskell_effects_alias = "'[Exomonad.Replies]".into();
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            source,
+            Some(ResponseExpectation::new("()")),
+            Some(crate::RequestId(1)),
+            vec![],
+        )
+        .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
+        let cell = "seen <- pure input\nechoed <- pure seen".to_string();
+
+        let (checked, prepared) = workbench
+            .prepare_cell(context, cell)
+            .await
+            .expect("a two-item bind cell with a request input prepares through the split");
+        assert_eq!(
+            checked.items.len(),
+            2,
+            "both bind statements must classify as items: {checked:?}"
+        );
+        assert!(
+            checked
+                .items
+                .iter()
+                .all(|item| item.verdict.kind == TurnKind::Bind),
+            "neither item is a declaration: {checked:?}"
+        );
+        let PreparedCell::Ready { items, .. } = prepared else {
+            panic!("a two-item bind cell should prepare as Ready");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| matches!(item.ready, PreparedCellStep::Executable(_))),
+            "both items compile through the split's item loop, not the declaration plane"
         );
     }
 
