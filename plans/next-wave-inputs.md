@@ -243,3 +243,25 @@ the run with session size.
   settlement value as the two or three pages Jev picked instead of a
   truncated dump. Pairs with the "text as artifact" card: once command output
   and previews are Rust-held artifacts, the same pager serves them.
+
+## From wave 4's first hour (2026-09-24, run 535e56ca)
+
+- **Agent spec vs child effect rows is a launch-time check, not a first-
+  admission failure.** The harness `AgentSpec` required `Journal` for its
+  after-tool hook; children carry no `Journal`, so the first wave's
+  admissions failed and the root spent its first minutes amending the spec
+  (`babfb4d`). `exomonad check --workspace` compiles the spec but never
+  resolves it against the effect rows the workspace's fork helpers produce.
+  Resolve each configured role's row against the spec's constraints at
+  check time and fail there.
+- **The watchdog abstains on size.** 185 of 186 after-tool dispositions in
+  the first 40 minutes were `Abstained` because the tool result exceeded the
+  evidence bound (`Project.Watchdog` 8000 chars), so the hook judged almost
+  nothing; the one `Annotated` was the whole yield. Bound by selecting (the
+  `sift` scorer, head+tail, or the receipt's summary), not by abstaining.
+- **Long bash jobs read as failures.** Actor 9 (core-correction) showed 19
+  "tool execution failures" that were 30 s observation windows expiring on
+  cargo builds, followed by `write_stdin` waits — the intended pattern, but
+  each expiry costs a turn and reads like an error. Default the yield window
+  for `cargo`/`nix` invocations higher, or return the retained-job receipt
+  as a normal result rather than a failed observation.
