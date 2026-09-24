@@ -2231,7 +2231,12 @@ registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> HomeInterfaceUs
   -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
   -> Ghc (Maybe Integer, Maybe RegisteredInterface)
 registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified
-  | not (needsPreparedInterface interfaceUse) = pure (Nothing, Nothing)
+  | not (needsPreparedInterface interfaceUse) = do
+      when timing $ liftIO $ hPutStrLn stderr $
+        "tidepool-prepared-interface-elided module="
+          ++ moduleNameString (ms_mod_name modSum)
+          ++ " reason=no-later-home-importer"
+      pure (Nothing, Nothing)
   | otherwise = do
       ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
       liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))

@@ -394,8 +394,15 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
           fail ("unchanged validation-only module was recompiled: " ++ name)
       when ("tidepool-memo-miss module=WarmChain" `isInfixOf` warmLog) $
         fail "unchanged validation-only chain was recompiled"
+      -- Since 3b5e38e76 ("fix: pair prepared home code with its compiler
+      -- interfaces"), 'compileReachable' reruns 'compileFront' after the
+      -- reachability pass so a module's prepared body sees the exact
+      -- interfaces its own dependencies just registered, rather than the
+      -- ones 'load'' saw. The evicted target is therefore front-compiled
+      -- twice per warm cycle (once for the reachability walk, once for the
+      -- real recompile) while core2core/prepare still run once.
       assertContains "warm compile prepares only its evicted target"
-        "front_compiles=1 core_compiles=1 prepared_compiles=1" warmLog)
+        "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
@@ -612,7 +619,7 @@ requestMemoLifecycle root = do
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-      let compile purpose compiler = compiler CheckedEnvironment mempty purpose Nothing targetPath [root] Nothing
+      let compile purpose compiler = compiler PreparedStg mempty purpose Nothing targetPath [root] Nothing
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
           targetMiss = "tidepool-memo-miss module=MemoTarget"
@@ -626,7 +633,7 @@ requestMemoLifecycle root = do
         assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
         writeFile dependencyPath invalidDependency
         (changed, changedLog) <- captureStderr root "memo-changed"
-          (try (compile GeneralCompile compiler) :: IO (Either SourceError CheckedEnvironmentResult))
+          (try (compile GeneralCompile compiler) :: IO (Either SourceError PreparedPipelineResult))
         case changed of
           Left _ -> pure ()
           Right _ -> fail "changed invalid session dependency reused a stale memo entry"
