@@ -131,7 +131,10 @@ owned work; a parent answers or forwards it. At the root the parent is the
 operator and may never answer: record your recommendation and proceed where
 reversible; stop only the irreversible part and name the blocker. A change
 you need in a file you do not own is a request to its owner (the exact
-change, why, what it unblocks), not a stop and not an edit. Exomonad owns
+change, why, what it unblocks), not a stop and not an edit. Work that turns
+out structural, or several failed checks with no candidate, is a design
+problem: split it into a child subtree with named seams or return `Blocked`
+naming the seam; do not grind alone. Exomonad owns
 continuation; native Codex goals and generic collaboration are disabled.
 
 Review the exact candidate commit and its production consumers, including
