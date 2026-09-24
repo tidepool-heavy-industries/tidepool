@@ -3,12 +3,13 @@
 # --recipe` process, several at a time, all compiling through one warm
 # compile daemon. The recipes are independent resident sessions, so the wall
 # clock is the longest recipe rather than the sum. Usage:
-#   exomonad-check-recipes.sh <workspace> [parallelism, default 3]
+#   exomonad-check-recipes.sh <workspace> [parallelism, default 1: recipe turns
+#   carry fixed timeouts that three sessions on one daemon already exceed]
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 workspace="${1:?usage: exomonad-check-recipes.sh <workspace> [parallelism]}"
-parallelism="${2:-3}"
+parallelism="${2:-1}"
 config="$workspace/.exomonad/config.toml"
 
 mapfile -t entries < <(python3 - "$config" <<'PY'
@@ -30,7 +31,10 @@ source exomonad/scripts/exomonad-build.sh
 start_battery_daemon
 trap teardown_battery_daemon EXIT
 
-logs="$(mktemp -d -t exomonad-recipes.XXXXXX)"
+# Logs live under the checkout, not TMPDIR: the dev shell removes its TMPDIR
+# on exit, and a failure's reason must outlive the run.
+logs="$PWD/target/tidepool-test-runs/recipes-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$logs"
 echo "==> ${#entries[@]} recipes, $parallelism at a time; logs in $logs"
 status=0
 printf '%s\n' "${entries[@]}" | xargs -P "$parallelism" -I{} bash -c '
