@@ -3984,10 +3984,8 @@ where
         fragment: ResidentWorkbenchFragment,
         outcome: ResidentOutcome,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        if let (
-            ResidentOutcome::Completed { .. },
-            WorkbenchDisplay::Observation { .. },
-        ) = (&outcome, &fragment.display)
+        if let (ResidentOutcome::Completed { .. }, WorkbenchDisplay::Observation { .. }) =
+            (&outcome, &fragment.display)
         {
             return self
                 .settle_observation_render_split(context, fragment, outcome)
@@ -4054,7 +4052,12 @@ where
             let snapshot = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_display_compile(session, context, &snapshot_source, &snapshot_type_modules)
+                    snapshot_display_compile(
+                        session,
+                        context,
+                        &snapshot_source,
+                        &snapshot_type_modules,
+                    )
                 })
                 .await?;
             let generation = snapshot.view.next_value_generation().0;
@@ -4083,27 +4086,30 @@ where
             let compile_metadata_name = metadata_name.clone();
             let compile_cancellation = cancellation.clone();
             let compiled = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-                    compile_block_off_checkout(
-                        &compile_context,
-                        &compile_source,
-                        &compile_effects,
-                        &block,
-                        None,
-                        compile_view,
-                        &[],
-                        Some(&generated_binds_verdict(&[
-                            compile_page_name,
-                            compile_metadata_name,
-                            "cellDisplay".into(),
-                        ])),
-                        None,
-                        None,
-                        &compile_retained,
-                        &compile_visible_names,
-                        None,
-                    )
-                })
+                tidepool_runtime::with_compiler_transaction_cancellable(
+                    compile_cancellation,
+                    || {
+                        compile_block_off_checkout(
+                            &compile_context,
+                            &compile_source,
+                            &compile_effects,
+                            &block,
+                            None,
+                            compile_view,
+                            &[],
+                            Some(&generated_binds_verdict(&[
+                                compile_page_name,
+                                compile_metadata_name,
+                                "cellDisplay".into(),
+                            ])),
+                            None,
+                            None,
+                            &compile_retained,
+                            &compile_visible_names,
+                            None,
+                        )
+                    },
+                )
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -4169,11 +4175,8 @@ where
                             "display bundle did not produce bindings".into(),
                         ));
                     };
-                    let (page, metadata, cell_display) = display_bundle_binders(
-                        &bound,
-                        &install_page_name,
-                        &install_metadata_name,
-                    )?;
+                    let (page, metadata, cell_display) =
+                        display_bundle_binders(&bound, &install_page_name, &install_metadata_name)?;
                     let bundle = session
                         .run_display_bundle_with_sites(
                             compiled.into_code(),
@@ -5301,7 +5304,9 @@ fn display_bundle_binders<'a>(
             "display bundle must bind page, metadata, and alias".into(),
         ));
     };
-    if page.name != page_name || metadata.name != metadata_name || cell_display.name != "cellDisplay"
+    if page.name != page_name
+        || metadata.name != metadata_name
+        || cell_display.name != "cellDisplay"
     {
         return Err(ResidentActorWorkbenchError::CompileInfrastructure(
             "display bundle returned compiler binders in an unexpected order".into(),
@@ -6987,12 +6992,76 @@ where
             .await
     }
 
+    /// Borrow-export a value from `from`'s machine -- never consumed, so the
+    /// source root stays live for a later caller to export again -- and mint
+    /// a brand new [`RootCustody`] importing it into `to`'s machine, owned
+    /// by `owner` there. For a value more than one destination machine may
+    /// need to read independently, such as a request's published progress
+    /// snapshot: see [`Self::resume_progress_observation`]. Callers with
+    /// `from == to` must not call this -- there is no "import my own root
+    /// back into myself" operation, and none is needed.
+    pub(crate) async fn import_shared_custody(
+        &self,
+        custody: Arc<RootCustody>,
+        from: tidepool_repr::SessionId,
+        to: tidepool_repr::SessionId,
+        owner: RealmId,
+    ) -> Result<RootCustody, ResidentActorWorkbenchError> {
+        let parcel = self
+            .access
+            .with_host_machine("progress-export-shared", from, None, move |session, _| {
+                session
+                    .export_shared(&custody)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await?;
+        tracing::info!(
+            from = ?from,
+            to = ?to,
+            parcel_bytes = parcel.bytes(),
+            "resident shared value exported across a session boundary"
+        );
+        self.access
+            .with_host_machine("progress-import-shared", to, None, move |session, _| {
+                session
+                    .import_parcel(parcel, owner)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_progress_observation(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
         observation: Result<(Option<crate::request::ProgressSnapshot>, bool), crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        // A snapshot rooted on another session must be imported into this
+        // observer's own machine BEFORE the resume checkout below -- the
+        // borrowed export leaves the publishing session's root untouched,
+        // so a later observer (or a retry of this one) can still export it.
+        // Same-session (today's only reachable case) skips this entirely.
+        let observation = match observation {
+            Ok((Some(snapshot), closed)) if snapshot.session != context.placement.session => {
+                let imported = self
+                    .import_shared_custody(
+                        Arc::clone(&snapshot.value),
+                        snapshot.session,
+                        context.placement.session,
+                        context.placement.resource_scope,
+                    )
+                    .await?;
+                Ok((
+                    Some(crate::request::ProgressSnapshot {
+                        revision: snapshot.revision,
+                        value: Arc::new(imported),
+                        session: context.placement.session,
+                    }),
+                    closed,
+                ))
+            }
+            other => other,
+        };
         self.access
             .with_machine(context, move |session, _, _| {
                 let table = session.data_con_table();
@@ -7278,6 +7347,113 @@ where
                     .rehome_custody(custody, owner)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 Ok(crate::MailboxValue::new(session_id, custody))
+            })
+            .await
+    }
+
+    /// Move a rooted value from one resident session's machine to another,
+    /// owned by `owner` on the destination. Decomposes through
+    /// [`crate::MailboxValue::into_transfer`] first -- a `Runtime` custody
+    /// still lives in its own recorded session and is handled exactly as
+    /// before (same-session is [`Self::rehome_mailbox_value`], kept for its
+    /// `context`-driven actor execution setup so that path is provably
+    /// unchanged; cross-session goes through [`Self::transfer_custody`]); a
+    /// `Parcel` has no machine affinity of its own (see
+    /// `crate::mailbox`'s module doc) and is always imported straight into
+    /// `to`, regardless of its nominal origin tag -- never routed through
+    /// [`crate::MailboxValue::into_custody`], which panics on that variant.
+    pub(crate) async fn transfer_mailbox_value(
+        &self,
+        context: crate::ActorSessionContext,
+        value: crate::MailboxValue,
+        to: tidepool_repr::SessionId,
+        owner: RealmId,
+    ) -> Result<crate::MailboxValue, ResidentActorWorkbenchError> {
+        match value.into_transfer() {
+            crate::mailbox::MailboxTransfer::Runtime {
+                session: from,
+                custody,
+            } => {
+                if from == to {
+                    return self
+                        .rehome_mailbox_value(
+                            context,
+                            crate::MailboxValue::new(from, custody),
+                            owner,
+                        )
+                        .await;
+                }
+                let custody = self.transfer_custody(custody, from, to, owner).await?;
+                Ok(crate::MailboxValue::new(to, custody))
+            }
+            crate::mailbox::MailboxTransfer::Parcel(parcel) => {
+                tracing::info!(
+                    to = ?to,
+                    parcel_bytes = parcel.bytes(),
+                    "resident parcel value imported across a session boundary"
+                );
+                let custody = self
+                    .access
+                    .with_host_machine("transfer-import-parcel", to, None, move |session, _| {
+                        session
+                            .import_parcel(parcel, owner)
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    })
+                    .await?;
+                Ok(crate::MailboxValue::new(to, custody))
+            }
+            #[cfg(test)]
+            crate::mailbox::MailboxTransfer::ProbeRuntime { .. }
+            | crate::mailbox::MailboxTransfer::ProbeParcel(_) => {
+                unreachable!("test probes never reach the resident workbench's own transfer path")
+            }
+        }
+    }
+
+    /// Move a rooted [`RootCustody`] from `from`'s resident session machine
+    /// to `to`'s, owned by `owner` on the destination. Same-session moves
+    /// straight through [`ResidentSession::rehome_custody`] under one
+    /// checkout of that session; cross-session evacuates via
+    /// [`ResidentSession::export_custody`]/[`ResidentSession::import_parcel`]
+    /// (see `tidepool_runtime::session::resident`), each under its own
+    /// checkout -- the two machines never share a checkout, and the source
+    /// machine is released before the destination one is touched.
+    pub(crate) async fn transfer_custody(
+        &self,
+        custody: RootCustody,
+        from: tidepool_repr::SessionId,
+        to: tidepool_repr::SessionId,
+        owner: RealmId,
+    ) -> Result<RootCustody, ResidentActorWorkbenchError> {
+        if from == to {
+            return self
+                .access
+                .with_host_machine("transfer", from, None, move |session, _| {
+                    session
+                        .rehome_custody(custody, owner)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .await;
+        }
+        let parcel = self
+            .access
+            .with_host_machine("transfer-export", from, None, move |session, _| {
+                session
+                    .export_custody(custody)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await?;
+        tracing::info!(
+            from = ?from,
+            to = ?to,
+            parcel_bytes = parcel.bytes(),
+            "resident value transferred across a session boundary"
+        );
+        self.access
+            .with_host_machine("transfer-import", to, None, move |session, _| {
+                session
+                    .import_parcel(parcel, owner)
+                    .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
     }
@@ -9854,8 +10030,7 @@ mod request_tests {
     /// type is known at check time, so a display bundle's compile needs no
     /// checkout at all, only its install/execute does.
     #[test]
-    fn display_bundle_split_compile_then_install_matches_single_checkout_render_cell_observation()
-    {
+    fn display_bundle_split_compile_then_install_matches_single_checkout_render_cell_observation() {
         let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
@@ -9952,8 +10127,8 @@ mod request_tests {
                 ready.generation,
             )
             .expect("display bundle runs");
-        let split_output = decode_display_bundle(&bundle, "displaySplitSeen")
-            .expect("display bundle decodes");
+        let split_output =
+            decode_display_bundle(&bundle, "displaySplitSeen").expect("display bundle decodes");
 
         let direct_output = render_cell_observation(
             &mut direct_session,
@@ -11174,6 +11349,448 @@ mod request_tests {
         assert!(machines.kind(context.placement.session).is_some());
     }
 
+    /// This crate's own minimal counterpart to
+    /// `tidepool/runtime/tests/prepared_residency.rs`'s `Notebook::bind`:
+    /// compile and run one `name <- pure (expr)` turn directly against a
+    /// bare, unbootstrapped session (no actor context, no declared effects)
+    /// -- just enough to mint one live [`RootCustody`] to move around.
+    fn bind_bare_value(
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        session_id: tidepool_repr::SessionId,
+        session_root: &std::path::Path,
+        surface: &tidepool_testing::effect_surface::TestEffectSurface,
+        generation: u64,
+        name: &str,
+        expr: &str,
+    ) -> RootCustody {
+        let templates = resident_workbench_templates(surface.preamble(), surface.row(), "");
+        let include: Vec<_> = surface
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
+        let text = format!("{name} <- pure ({expr})");
+        let result = run_turn(TurnRequest {
+            session_id: Some(session_id),
+            turn_text: &text,
+            templates: &templates,
+            include: &include,
+            session_root,
+            inject_modules: &[],
+            gen: generation,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .unwrap_or_else(|failure| {
+            panic!(
+                "{text:?} failed to compile: {}",
+                tidepool_runtime::classify_compile(&failure.error).message
+            )
+        });
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = result
+        else {
+            panic!("{text:?} did not classify as a bind");
+        };
+        let [binder] = bound.as_slice() else {
+            panic!("{text:?} bound {} names", bound.len());
+        };
+        let outcome = session
+            .run_bind_with_sites(
+                "transfer_custody_test",
+                compiled.code(),
+                binder,
+                tidepool_repr::Generation(generation),
+            )
+            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        assert!(
+            matches!(outcome, ResidentOutcome::Completed { .. }),
+            "{text:?}: {outcome:?}"
+        );
+        session
+            .prepared_binding_handle(name)
+            .expect("bound value custody")
+    }
+
+    /// [`ResidentActorRunner::transfer_custody`]: same-session behaves
+    /// exactly as [`ResidentSession::rehome_custody`] (no handle count
+    /// change on the one machine involved); cross-session moves the value
+    /// out of its origin machine and into the destination's, with an exact
+    /// -1/+1 handle delta on each side (no leak, no double-release) and the
+    /// content round-tripping byte-for-byte -- modeled on
+    /// `parcel_crosses_two_resident_sessions_sharing_one_image_registry` in
+    /// `tidepool/runtime/tests/prepared_residency.rs`, adapted to two real
+    /// sessions sharing one [`ActorMachineRegistry`] and driven through
+    /// [`ResidentActorRunner`] rather than raw [`ResidentSession`] calls.
+    #[tokio::test]
+    async fn transfer_custody_moves_a_value_between_two_resident_sessions() {
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
+            .expect("materialize minimal effect surface");
+
+        let session_a_id = tidepool_repr::SessionId(0xA0_A0);
+        let session_b_id = tidepool_repr::SessionId(0xB0_B0);
+        let (mut session_a, root_a) = bare_session_at(session_a_id);
+        let (mut session_b, root_b) = bare_session_at(session_b_id);
+
+        // Warm each machine with a throwaway turn before sharing a registry:
+        // `set_image_registry` is a no-op before a machine exists.
+        let _warm_a = bind_bare_value(
+            &mut session_a,
+            session_a_id,
+            root_a.path(),
+            &surface,
+            1,
+            "warmA",
+            "0 :: Int",
+        );
+        let _warm_b = bind_bare_value(
+            &mut session_b,
+            session_b_id,
+            root_b.path(),
+            &surface,
+            1,
+            "warmB",
+            "0 :: Int",
+        );
+
+        let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        session_a.set_image_registry(Arc::clone(&registry));
+        session_b.set_image_registry(Arc::clone(&registry));
+
+        let same_session_value = bind_bare_value(
+            &mut session_a,
+            session_a_id,
+            root_a.path(),
+            &surface,
+            2,
+            "sameSession",
+            "111 :: Int",
+        );
+        let same_session_before = session_a
+            .render_retained_preview(&same_session_value, 64)
+            .expect("session A can render its own custody");
+
+        let crossing_value = bind_bare_value(
+            &mut session_a,
+            session_a_id,
+            root_a.path(),
+            &surface,
+            3,
+            "crossing",
+            "222 :: Int",
+        );
+        let crossing_before = session_a
+            .render_retained_preview(&crossing_value, 64)
+            .expect("session A can render the value before it crosses");
+        // A bound value's own top is a static CAF, so import only resolves
+        // it when the destination installed the SAME compiled image --
+        // exactly `parcel_crosses_two_resident_sessions_sharing_one_image_registry`'s
+        // setup in `tidepool/runtime/tests/prepared_residency.rs`. Session B
+        // runs the identical turn at the identical generation so the shared
+        // `registry` records the hit before the parcel crosses.
+        let _crossing_warm_b = bind_bare_value(
+            &mut session_b,
+            session_b_id,
+            root_b.path(),
+            &surface,
+            3,
+            "crossing",
+            "222 :: Int",
+        );
+        assert!(
+            registry.hits() > 0,
+            "session A and B's identical `crossing` bind should share one compiled image"
+        );
+
+        let machines = Arc::new(ActorMachineRegistry::<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >::new());
+        machines.insert_idle(session_a_id, Box::new(session_a));
+        machines.insert_idle(session_b_id, Box::new(session_b));
+        let source = ActorWorkbenchSource::new(
+            surface.preamble().to_string(),
+            surface.include_paths().to_vec(),
+        );
+        let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
+            ResidentActorRunner::new(Arc::clone(&machines), source);
+
+        async fn handle_count(
+            runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            session_id: tidepool_repr::SessionId,
+        ) -> usize {
+            runner
+                .access
+                .with_host_machine("count", session_id, None, |session, _| {
+                    Ok(session.value_handle_count())
+                })
+                .await
+                .expect("checkout for counting handles")
+        }
+
+        let owner = RealmId::fresh();
+
+        // (a) same session: exactly `rehome_custody` -- no handle count
+        // change on the one machine involved.
+        let a_before_rehome = handle_count(&runner, session_a_id).await;
+        let rehomed = runner
+            .transfer_custody(same_session_value, session_a_id, session_a_id, owner)
+            .await
+            .expect("same-session transfer succeeds");
+        let a_after_rehome = handle_count(&runner, session_a_id).await;
+        assert_eq!(
+            a_after_rehome, a_before_rehome,
+            "same-session transfer neither adds nor drops a handle"
+        );
+        let rehomed_render = runner
+            .access
+            .with_host_machine("render", session_a_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&rehomed, 64))
+            })
+            .await
+            .expect("checkout for rendering")
+            .expect("session A can still render the rehomed value");
+        assert_eq!(
+            rehomed_render, same_session_before,
+            "same-session transfer preserves content"
+        );
+
+        // (b) cross-session: an exact -1/+1 handle delta, content intact.
+        let a_before_cross = handle_count(&runner, session_a_id).await;
+        let b_before_cross = handle_count(&runner, session_b_id).await;
+        let imported = runner
+            .transfer_custody(crossing_value, session_a_id, session_b_id, owner)
+            .await
+            .expect("cross-session transfer succeeds");
+        let a_after_cross = handle_count(&runner, session_a_id).await;
+        let b_after_cross = handle_count(&runner, session_b_id).await;
+        assert_eq!(
+            a_after_cross,
+            a_before_cross - 1,
+            "export releases the handle on the origin machine exactly once"
+        );
+        assert_eq!(
+            b_after_cross,
+            b_before_cross + 1,
+            "import mints exactly one new handle on the destination machine"
+        );
+        let imported_render = runner
+            .access
+            .with_host_machine("render", session_b_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&imported, 64))
+            })
+            .await
+            .expect("checkout for rendering")
+            .expect("session B can render the imported value");
+        assert_eq!(
+            imported_render, crossing_before,
+            "the value round-trips byte-for-byte across sessions"
+        );
+    }
+
+    /// [`ResidentActorRunner::import_shared_custody`]: the non-consuming,
+    /// borrowing counterpart `transfer_custody` cannot stand in for, used by
+    /// `resume_progress_observation` when an observer's session differs
+    /// from a published `ProgressSnapshot`'s owning session. A published
+    /// snapshot may be observed by several observers off the SAME retained
+    /// `Arc<RootCustody>` -- proves: (a) two independent observers each get
+    /// their own readable custody from one shared owning root; (b) the
+    /// owning root's own handle count is UNCHANGED by either import (the
+    /// export never consumes it, so a later observer -- or a retry of an
+    /// earlier one -- can still export it again); (c) both imported
+    /// custodies are independently discardable with no double-free.
+    #[tokio::test]
+    async fn import_shared_custody_lets_two_observers_read_one_published_root() {
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
+            .expect("materialize minimal effect surface");
+
+        let owner_id = tidepool_repr::SessionId(0xC0_C0);
+        let observer_one_id = tidepool_repr::SessionId(0xC1_C1);
+        let observer_two_id = tidepool_repr::SessionId(0xC2_C2);
+        let (mut owner_session, owner_root) = bare_session_at(owner_id);
+        let (mut observer_one, observer_one_root) = bare_session_at(observer_one_id);
+        let (mut observer_two, observer_two_root) = bare_session_at(observer_two_id);
+
+        let _warm_owner = bind_bare_value(
+            &mut owner_session,
+            owner_id,
+            owner_root.path(),
+            &surface,
+            1,
+            "warmOwner",
+            "0 :: Int",
+        );
+        let _warm_one = bind_bare_value(
+            &mut observer_one,
+            observer_one_id,
+            observer_one_root.path(),
+            &surface,
+            1,
+            "warmOne",
+            "0 :: Int",
+        );
+        let _warm_two = bind_bare_value(
+            &mut observer_two,
+            observer_two_id,
+            observer_two_root.path(),
+            &surface,
+            1,
+            "warmTwo",
+            "0 :: Int",
+        );
+
+        let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        owner_session.set_image_registry(Arc::clone(&registry));
+        observer_one.set_image_registry(Arc::clone(&registry));
+        observer_two.set_image_registry(Arc::clone(&registry));
+
+        let progress_value = bind_bare_value(
+            &mut owner_session,
+            owner_id,
+            owner_root.path(),
+            &surface,
+            2,
+            "progress",
+            "333 :: Int",
+        );
+        let progress_before = owner_session
+            .render_retained_preview(&progress_value, 64)
+            .expect("the owning session can render its own custody");
+        // Every observer must independently install the SAME image for its
+        // import to resolve the exported static top -- same reasoning as
+        // `transfer_custody`'s own cross-session case above.
+        let _progress_warm_one = bind_bare_value(
+            &mut observer_one,
+            observer_one_id,
+            observer_one_root.path(),
+            &surface,
+            2,
+            "progress",
+            "333 :: Int",
+        );
+        let _progress_warm_two = bind_bare_value(
+            &mut observer_two,
+            observer_two_id,
+            observer_two_root.path(),
+            &surface,
+            2,
+            "progress",
+            "333 :: Int",
+        );
+
+        let machines = Arc::new(ActorMachineRegistry::<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >::new());
+        machines.insert_idle(owner_id, Box::new(owner_session));
+        machines.insert_idle(observer_one_id, Box::new(observer_one));
+        machines.insert_idle(observer_two_id, Box::new(observer_two));
+        let source = ActorWorkbenchSource::new(
+            surface.preamble().to_string(),
+            surface.include_paths().to_vec(),
+        );
+        let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
+            ResidentActorRunner::new(Arc::clone(&machines), source);
+
+        async fn handle_count(
+            runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            session_id: tidepool_repr::SessionId,
+        ) -> usize {
+            runner
+                .access
+                .with_host_machine("count", session_id, None, |session, _| {
+                    Ok(session.value_handle_count())
+                })
+                .await
+                .expect("checkout for counting handles")
+        }
+
+        let owner = RealmId::fresh();
+        let shared = Arc::new(progress_value);
+
+        let owner_before = handle_count(&runner, owner_id).await;
+
+        let one_before = handle_count(&runner, observer_one_id).await;
+        let imported_one = runner
+            .import_shared_custody(Arc::clone(&shared), owner_id, observer_one_id, owner)
+            .await
+            .expect("first observer imports its own custody");
+        let one_after = handle_count(&runner, observer_one_id).await;
+        assert_eq!(
+            one_after,
+            one_before + 1,
+            "the first observer mints exactly one new handle"
+        );
+
+        let owner_after_one = handle_count(&runner, owner_id).await;
+        assert_eq!(
+            owner_after_one, owner_before,
+            "a borrowed export never changes the owning session's own handle count"
+        );
+
+        let two_before = handle_count(&runner, observer_two_id).await;
+        let imported_two = runner
+            .import_shared_custody(Arc::clone(&shared), owner_id, observer_two_id, owner)
+            .await
+            .expect("a second observer can export the SAME still-live root again");
+        let two_after = handle_count(&runner, observer_two_id).await;
+        assert_eq!(
+            two_after,
+            two_before + 1,
+            "the second observer mints its own, independent new handle"
+        );
+
+        let owner_after_two = handle_count(&runner, owner_id).await;
+        assert_eq!(
+            owner_after_two, owner_before,
+            "the second (repeated) export still never touches the owning session's handle count"
+        );
+
+        let render_one = runner
+            .access
+            .with_host_machine("render", observer_one_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&imported_one, 64))
+            })
+            .await
+            .expect("checkout for rendering")
+            .expect("observer one can render its independent import");
+        let render_two = runner
+            .access
+            .with_host_machine("render", observer_two_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&imported_two, 64))
+            })
+            .await
+            .expect("checkout for rendering")
+            .expect("observer two can render its independent import");
+        assert_eq!(
+            render_one, progress_before,
+            "observer one sees the published content"
+        );
+        assert_eq!(
+            render_two, progress_before,
+            "observer two sees the published content"
+        );
+
+        // The owning root is still live and unconsumed after both imports --
+        // a later (third) observer, or a retry, could still export it again.
+        let owner_final_render = runner
+            .access
+            .with_host_machine("render", owner_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&shared, 64))
+            })
+            .await
+            .expect("checkout for rendering")
+            .expect("the owning session can still render its own retained root");
+        assert_eq!(
+            owner_final_render, progress_before,
+            "the owning root outlives both borrowed exports, unconsumed"
+        );
+    }
+
     #[test]
     fn spawn_child_session_without_an_installed_factory_is_a_named_error() {
         let (machines, _context, source, _root) = actor_registry_fixture();
@@ -11230,16 +11847,9 @@ mod request_tests {
         // Actor A's split snapshot, taken BEFORE actor B declares —
         // captures the CURRENT `next_declaration_module()` as this cell's
         // (unused, since it has no `Decl` item) candidate.
-        let (source_a, snapshot_a) = snapshot_cell_split(
-            &mut session,
-            &context_a,
-            source,
-            &[],
-            None,
-            None,
-            None,
-        )
-        .expect("actor A's split snapshot");
+        let (source_a, snapshot_a) =
+            snapshot_cell_split(&mut session, &context_a, source, &[], None, None, None)
+                .expect("actor A's split snapshot");
 
         // Actor B commits a declaration in its OWN isolated scope, between
         // actor A's snapshot and its reservation — advancing the session-
@@ -11744,13 +12354,8 @@ mod request_tests {
     #[tokio::test]
     async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
         let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
-        let split_workbench = ResidentActorWorkbench::new(
-            split_machines,
-            split_source.clone(),
-            None,
-            None,
-            vec![],
-        );
+        let split_workbench =
+            ResidentActorWorkbench::new(split_machines, split_source.clone(), None, None, vec![]);
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
 

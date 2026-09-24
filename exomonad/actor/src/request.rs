@@ -320,6 +320,14 @@ struct RequestRecord {
 pub(crate) struct ProgressSnapshot {
     pub revision: u64,
     pub value: std::sync::Arc<tidepool_runtime::session::RootCustody>,
+    /// The resident session whose machine `value`'s handle actually lives
+    /// on -- the publishing actor's own session at the moment it called
+    /// `publish_progress`. An observer on a different session must export
+    /// this root (borrowed, not consumed -- see
+    /// `tidepool_runtime::session::ResidentSession::export_shared`) and
+    /// import its own independent custody before it can read the value at
+    /// all; same-session observation needs neither.
+    pub session: tidepool_repr::SessionId,
 }
 
 #[derive(Debug, Clone)]
@@ -612,6 +620,7 @@ impl RequestRegistry {
         target: ActorRef,
         request: RequestId,
         value: tidepool_runtime::session::RootCustody,
+        session: tidepool_repr::SessionId,
     ) -> Result<(u64, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
@@ -625,6 +634,7 @@ impl RequestRegistry {
         record.progress = Some(ProgressSnapshot {
             revision,
             value: std::sync::Arc::new(value),
+            session,
         });
         record.publish_source_progress();
         Ok((revision, reevaluate_watches(&mut state)))

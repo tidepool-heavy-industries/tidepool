@@ -1919,22 +1919,13 @@ where
         let target_context = kernel
             .session_context(target)
             .ok_or_else(|| ResidentCallError::Call(KernelCallFailure::TargetUnavailable(target)))?;
-        if target_context.placement.session != context.placement.session {
-            return Err(ResidentCallError::Call(
-                KernelCallFailure::MachineBoundary {
-                    caller: context.actor,
-                    caller_session: context.placement.session,
-                    target,
-                    target_session: target_context.placement.session,
-                },
-            ));
-        }
         let request = self
             .environment
             .runner
-            .rehome_mailbox_value(
+            .transfer_mailbox_value(
                 context.clone(),
                 request,
+                target_context.placement.session,
                 target_context.placement.resource_scope,
             )
             .await
@@ -2168,6 +2159,13 @@ where
         } else {
             None
         };
+        // Left as a hard gate, not converted to a transfer: no launch mints a
+        // child session independent of its parent yet (that is per-actor
+        // machines parcel 7). A child's placement always names the same
+        // session as its parent today, so this can never fire in production;
+        // once parcel 7 lets a child actually start on a session of its own,
+        // there is a real destination machine to evacuate the child's entry
+        // value into and this gate becomes a transfer like the mailbox sites.
         if descriptor.placement().session != context.placement.session {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "child actor entry crossed a resident machine boundary".into(),
@@ -2231,23 +2229,13 @@ where
                         KernelCallFailure::TargetUnavailable(target).to_string(),
                     )
                 })?;
-                if target_context.placement.session != context.placement.session {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::MachineBoundary {
-                            caller: context.actor,
-                            caller_session: context.placement.session,
-                            target,
-                            target_session: target_context.placement.session,
-                        }
-                        .to_string(),
-                    ));
-                }
                 let request = self
                     .environment
                     .runner
-                    .rehome_mailbox_value(
+                    .transfer_mailbox_value(
                         context.clone(),
                         request,
+                        target_context.placement.session,
                         target_context.placement.resource_scope,
                     )
                     .await?;
@@ -3483,16 +3471,19 @@ where
                         KernelCallFailure::TargetUnavailable(wait.target).to_string(),
                     )
                 })?;
-                let target_context = kernel.session_context(wait.target).ok_or_else(|| {
+                // Still resolved (and discarded) only to prove the target
+                // actor's placement exists at all -- `kernel.resolve` above
+                // already proved the actor itself is live.
+                let _target_context = kernel.session_context(wait.target).ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         KernelCallFailure::TargetUnavailable(wait.target).to_string(),
                     )
                 })?;
-                if target_context.placement.session != context.placement.session {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "awaitExit crossed a resident machine boundary".into(),
-                    ));
-                }
+                // No session-equality gate here: the value that crosses,
+                // `ActorTerminal { kind, summary }`, is plain data with no
+                // machine-rooted custody in it at all (see
+                // `crate::termination::ActorTerminal`), so there was never
+                // anything for a machine-boundary check to protect.
                 self.record_child_observation(wait.target);
                 let terminal = target.terminal().wait().await;
                 self.environment
@@ -3540,13 +3531,18 @@ where
                     .effective_role()
                     .effect_keys()
                     .contains(&crate::ActorEffectKey::Notifications);
-                let destination = kernel.resolve(target).zip(kernel.session_context(target));
+                // `message` here is a decoded `String` (see
+                // `resident_workbench.rs`'s `decode_address`/`message`
+                // params), not a resident value -- there is nothing rooted
+                // in either machine for a session-equality gate to protect,
+                // so liveness is the only thing checked below.
+                let destination = kernel.resolve(target);
                 let outcome = if !permitted {
                     Err(crate::NotificationError::Unauthorized)
-                } else if destination.as_ref().is_none_or(|(actor, target_context)| {
-                    actor.terminal().get().is_some()
-                        || target_context.placement.session != context.placement.session
-                }) {
+                } else if destination
+                    .as_ref()
+                    .is_none_or(|actor| actor.terminal().get().is_some())
+                {
                     Err(crate::NotificationError::Unavailable)
                 } else {
                     let (command, receive) =
@@ -3629,19 +3625,22 @@ where
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 let target = kernel.resolve(submission.target);
                 let target_context = kernel.session_context(submission.target);
-                let deliverable = target.as_ref().zip(target_context.as_ref()).filter(
-                    |(target, target_context)| {
-                        target.terminal().get().is_none()
-                            && target_context.placement.session == context.placement.session
-                    },
-                );
+                // Session equality is no longer part of deliverability: a
+                // target on another resident session still receives the
+                // message, via `transfer_mailbox_value` below, rather than
+                // being excluded here.
+                let deliverable = target
+                    .as_ref()
+                    .zip(target_context.as_ref())
+                    .filter(|(target, _target_context)| target.terminal().get().is_none());
                 if let Some((target, target_context)) = deliverable {
                     let message = self
                         .environment
                         .runner
-                        .rehome_mailbox_value(
+                        .transfer_mailbox_value(
                             context.clone(),
                             submission.message,
+                            target_context.placement.session,
                             target_context.placement.resource_scope,
                         )
                         .await?;
@@ -3716,10 +3715,12 @@ where
                 request,
                 value,
             } => Box::pin(async move {
-                let published =
-                    self.environment
-                        .requests
-                        .publish_progress(context.actor, request, value);
+                let published = self.environment.requests.publish_progress(
+                    context.actor,
+                    request,
+                    value,
+                    context.placement.session,
+                );
                 let outcome = match published {
                     Ok((revision, notifications)) => {
                         self.publish_watch_notifications(notifications).await;
@@ -4735,15 +4736,15 @@ where
                 ));
             }
         };
-        if request.session() != context.placement.session {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "mailbox value crossed a resident machine boundary".into(),
-            ));
-        }
         let request = self
             .environment
             .runner
-            .rehome_mailbox_value(context.clone(), request, context.placement.resource_scope)
+            .transfer_mailbox_value(
+                context.clone(),
+                request,
+                context.placement.session,
+                context.placement.resource_scope,
+            )
             .await?;
         let InstalledReceiver {
             site,
@@ -4860,9 +4861,10 @@ where
             Some(
                 self.environment
                     .runner
-                    .rehome_mailbox_value(
+                    .transfer_mailbox_value(
                         context.clone(),
                         value,
+                        caller_context.placement.session,
                         caller_context.placement.resource_scope,
                     )
                     .await?,

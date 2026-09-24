@@ -98,6 +98,26 @@ pub enum MailboxDelivery {
     Probe(DropProbe),
 }
 
+/// [`MailboxValue::into_transfer`]'s decomposition: which primitive the
+/// actor kernel's cross-machine transfer must run to move `self` into a new
+/// destination machine. A `Runtime` custody still lives in its recorded
+/// `session`'s machine and must be exported from there; a `Parcel` is
+/// already detached and only needs importing into the destination.
+pub(crate) enum MailboxTransfer {
+    Runtime {
+        session: SessionId,
+        custody: RootCustody,
+    },
+    Parcel(Parcel),
+    #[cfg(test)]
+    ProbeRuntime {
+        session: SessionId,
+        drop: DropProbe,
+    },
+    #[cfg(test)]
+    ProbeParcel(DropProbe),
+}
+
 impl fmt::Debug for MailboxDelivery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -154,6 +174,32 @@ impl MailboxValue {
             MailboxRoot::Parcel(_) => panic!("parcel root has no runtime custody"),
             #[cfg(test)]
             MailboxRoot::Probe { .. } => panic!("test root has no runtime custody"),
+        }
+    }
+
+    /// Decompose `self` for a cross-machine TRANSFER, before any destination
+    /// is known to already hold it -- unlike [`Self::deliver`], which
+    /// classifies a value that already belongs to (or, for a `Parcel`, is
+    /// about to be imported into) one particular destination. A `Runtime`
+    /// custody keeps its recorded origin `session`, since the caller (the
+    /// actor kernel's `transfer_mailbox_value`) still has to check that
+    /// machine out to export from it; a `Parcel` carries no machine affinity
+    /// at all, so there is nothing to record beyond the parcel itself.
+    pub(crate) fn into_transfer(self) -> MailboxTransfer {
+        match self.root {
+            MailboxRoot::Runtime(custody) => MailboxTransfer::Runtime {
+                session: self.session,
+                custody,
+            },
+            MailboxRoot::Parcel(parcel) => MailboxTransfer::Parcel(parcel),
+            #[cfg(test)]
+            MailboxRoot::Probe { _drop, kind } => match kind {
+                ProbeKind::Runtime => MailboxTransfer::ProbeRuntime {
+                    session: self.session,
+                    drop: _drop,
+                },
+                ProbeKind::Parcel => MailboxTransfer::ProbeParcel(_drop),
+            },
         }
     }
 
@@ -306,6 +352,42 @@ mod tests {
         let value = MailboxValue::probe_parcel(SessionId(4), Arc::clone(&dropped));
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         drop(value);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn into_transfer_decomposes_a_runtime_value_with_its_recorded_session() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let value = MailboxValue::probe(SessionId(3), Arc::clone(&dropped));
+        let MailboxTransfer::ProbeRuntime { session, drop } = value.into_transfer() else {
+            panic!("expected a Runtime transfer form");
+        };
+        assert_eq!(session, SessionId(3));
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "still held, not yet dropped"
+        );
+        std::mem::drop(drop);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn into_transfer_decomposes_a_parcel_value_regardless_of_its_nominal_tag() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        // A `Parcel` value never needs its own session to transfer -- unlike
+        // the `Runtime` case above, `into_transfer` carries no session for
+        // this arm at all.
+        let value = MailboxValue::probe_parcel(SessionId(9), Arc::clone(&dropped));
+        let MailboxTransfer::ProbeParcel(drop) = value.into_transfer() else {
+            panic!("expected a Parcel transfer form");
+        };
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "still held, not yet dropped"
+        );
+        std::mem::drop(drop);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 }

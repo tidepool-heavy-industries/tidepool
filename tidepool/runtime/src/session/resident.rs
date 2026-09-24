@@ -2304,6 +2304,28 @@ where
         Ok(parcel)
     }
 
+    /// Export the value `custody` roots as a detached [`Parcel`], WITHOUT
+    /// consuming or releasing `custody` -- the borrowing counterpart to
+    /// [`Self::export_custody`], for a value more than one destination
+    /// machine may need to import independently (a request's published
+    /// progress snapshot, read by however many observers poll it, is the
+    /// motivating case). `PreparedEngine::export_parcel` is already a
+    /// non-consuming read of the machine (see [`Self::export_custody`]'s own
+    /// doc); this only differs by skipping the `discard_handle` after it, so
+    /// the root stays live here for the next caller to export again.
+    pub fn export_shared(&mut self, custody: &RootCustody) -> Result<Parcel, ResidentError> {
+        self.settle_dropped_custody();
+        let Some(handle) = custody.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let Some(engine) = self.state.prepared_mut() else {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!("cannot export {handle:?}: the prepared machine is not installed"),
+            ))));
+        };
+        Ok(engine.export_parcel(handle)?)
+    }
+
     /// Import `parcel` under `owner`, rooting its value as a new old-space
     /// arena in this session's machine (`PreparedEngine::import_parcel`),
     /// and mint a [`RootCustody`] over it with this session's own

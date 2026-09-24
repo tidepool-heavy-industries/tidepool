@@ -5,7 +5,6 @@
 //! through these messages under Rust ownership.
 
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
 use crate::{
@@ -61,15 +60,6 @@ pub enum KernelCallFailure {
     TargetUnavailable(ActorRef),
     #[error("target actor {0} has closed mailbox admission")]
     MailboxClosed(ActorRef),
-    #[error(
-        "call from {caller:?} in session {caller_session} to {target:?} in session {target_session} crosses a machine boundary"
-    )]
-    MachineBoundary {
-        caller: ActorRef,
-        caller_session: SessionId,
-        target: ActorRef,
-        target_session: SessionId,
-    },
     #[error("target actor {actor:?} failed while handling the call: {detail}")]
     Handler { actor: ActorRef, detail: String },
 }

@@ -279,6 +279,12 @@ where
             launch_worktrees,
             fork_workspace,
         } = definition.child;
+        // Left as a hard gate, not converted to a transfer: same reasoning
+        // as the child-entry gate in `resident_actor.rs` -- a replacement's
+        // child descriptor can only name the session it will actually start
+        // on once per-actor machines parcel 7 lets a launch mint a session
+        // independent of its parent. Until then this can never fire, and
+        // there is no destination machine yet for anything to transfer into.
         if descriptor.placement().session != self.descriptor.placement().session {
             return Err(reject("replacement crossed a resident machine boundary"));
         }
