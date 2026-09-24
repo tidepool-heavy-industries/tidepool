@@ -125,3 +125,9 @@ already share across sessions. First step: mint a fresh session for
   with `observation budget 100000 exhausted` after delivering a response, and
   each appended "[after-tool] This result is unannotated ..." to the model's
   tool result. Lane in flight.
+- **Fresh-context children do not know the cell environment.** A Luna
+  review child in wave 3 failed six cells in a row on `Data.Text.pack`,
+  `Text.unlines`, and `String` versus `Text`; the cell offers Text only as
+  `T` and nothing in a fresh context says so. Either expose `Text` as an
+  alias next to `T` in the cell preamble, or make a not-in-scope error for a
+  `Data.Text` name state the alias that exists.
