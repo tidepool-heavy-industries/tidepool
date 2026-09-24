@@ -22,10 +22,6 @@ invariant is dead or covered elsewhere.
   one named budget set.
 - **Retirement deadline** (`bridge/facade/src/actor_host/scoped_custody.rs`):
   recovery can consume the whole budget and leave none for finalize.
-- **Launcher TODOs.** `bridge/handlers/src/handlers/exec.rs` and
-  `bridge/facade/src/exomonad.rs` spawn processes outside the launcher; each
-  site carries a `TODO(launcher)` allow reason (`grep -rn "TODO(launcher)"`).
-
 ## From the exomonad-harness wave (2026-09-23)
 
 The first build wave outside this repository: a GPT-6 Sol root, a core lead and
@@ -33,35 +29,12 @@ two leaves in `~/dev/exomonad-harness`. Their WIP is kept there on `master` and
 the `exomonad/wave0/*` branches. Every agent was interviewed while paused; the
 fixes the run motivated are in git history. Open items:
 
-- **Host-authored bindings still compile per call.** Naming a hosted tool's
-  command job (`bind_command_job` → `compile_host_binding`) runs GHC every call,
-  now outside the machine checkout (12b90f6ee). Reusing one compiled binder with
-  a relabelled generation does not work: GHC writes a `Val.G<gen>.hi` interface
-  keyed by the exact `--bind-gen`, and later turns import it by that name
-  (`tidepool/runtime/src/session/turn.rs` TurnRequest, `extract-cmd` lib.rs
-  `--session-root`). Removing the compile needs a binding path whose interface
-  does not depend on the generation.
 - **No way to list an actor's live descendants.** The root searched for one to
   see whether its lead's leaves had started, and found none.
 - **Ending a turn looks like finishing.** A leaf ended its first turn without
   `respond`, although it knew `respond` settles its assignment: "the normal
   final-answer UI made the opposite feel plausible in the moment." Deferred to
   the standalone harness, which owns turns.
-- **Briefs with split ownership.** "This file is yours" together with "its
-  public signatures belong to the lead" made a leaf ask instead of act, then
-  wait. A brief should say which of the two wins.
-- **Declaration cells still compile under the machine checkout.** Cells with
-  no declaration compile off it (`prepare_cell`'s split path); a cell with a
-  declaration keeps the single-checkout path because staging writes and
-  validates the next `Lib.G<g>` module in the shared session root. Revisit only
-  if a wave shows declaration cells blocking other actors; it needs a private
-  path per staged candidate.
-- **A parked tool-installer hole leaks on cancellation.** `prepare_tools` holds
-  a `ResidentHole` across its second machine checkout; if the task is dropped
-  there, nothing resumes or aborts the parked continuation (`ResidentHole` has
-  no drop cleanup, and every abort path needs a held checkout). Same class:
-  `prepare_cell`'s rejected-item result is returned without revalidating the
-  view it compiled against.
 - **Operator input.** In a Codex pane, Enter steers a running turn; Tab queues
   until the turn ends, which can be many minutes.
 
