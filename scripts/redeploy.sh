@@ -117,7 +117,9 @@ if [ "$NO_SERVERS" -eq 0 ]; then
     | python3 -c 'import json,os,sys; print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] if p["name"] == "tidepool"))')" \
     || { echo "error: no package named tidepool in the workspace" >&2; exit 1; }
   echo "  tidepool package: $tidepool_dir"
-  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --path "$tidepool_dir"
+  # --force: a deploy owns these binary names outright, including one an
+  # older package (a previous exomonad checkout) left in ~/.cargo/bin.
+  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --force --path "$tidepool_dir"
 else
   echo; echo "(skipped: --no-servers)"
 fi
