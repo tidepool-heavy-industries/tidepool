@@ -38,6 +38,8 @@ mod invocation;
 mod machine;
 pub(crate) mod md5_kernel;
 mod no_success;
+mod session_var_id;
+pub use session_var_id::session_var_id;
 #[cfg(test)]
 mod no_success_tests;
 mod observe;

@@ -164,17 +164,30 @@ impl fmt::Display for SessionModule {
 
 /// The stable `VarId` of a session value binder — `Tidepool.Session.Val.G<g>.x`.
 ///
-/// Always `0xFE`-tagged (a real external). **The hash is minted
-/// exactly once, in the Haskell extract** (`Translate.stableVarId`, the
-/// `0xFE<<56 | fingerprintString("<module>:<occ>").hi64` rule), and carried to
-/// Rust on the bind turn's `BoundBinder.var_id`. Rust **stores** that id and
-/// re-seeds it into the `ExternalEnv` for later reference turns — it never
-/// recomputes the MD5 fingerprint, so there is no cross-language drift risk.
+/// Always `0xFE`-tagged (a real external). The formula is
+/// `Translate.stableVarId`'s `0xFE<<56 | fingerprintString("<module>:<occ>").hi64`
+/// rule (`bridge/haskell/src/Tidepool/Identity.hs`). Most binders still carry
+/// an id **minted exactly once, in the Haskell extract**, on the bind turn's
+/// `BoundBinder.var_id`, which Rust stores and re-seeds into the `ExternalEnv`
+/// for later reference turns without recomputing anything.
 ///
-/// Both the bind turn (the binder's `Name` in the synthesized `Val.G<g>` iface)
-/// and every later reference turn (the imported `Name` from that injected iface)
-/// hash `"<module>:<occ>"` identically, so the reference Core's `NVar` matches
-/// the stored id by raw equality — the persistent-binding key.
+/// A binder minted for a host carrier's hand-written `Val.G<g>` source stub
+/// (`tidepool-runtime`'s `HostCarrier::mount_carrier_in`, no bind turn, no
+/// extract compile) has no extract mint to carry — Rust computes its id
+/// directly with `tidepool_codegen::prepared_program::session_var_id`, which
+/// reproduces `fingerprintString` bit-for-bit over GHC's own MD5 kernel
+/// (`tidepool/codegen/src/prepared_program/md5_kernel.rs`) and is checked
+/// against a real extract mint by a parity test
+/// (`tidepool/runtime/tests/prepared_residency.rs`). Both mints agree because
+/// they hash the identical `"<module>:<occ>"` string with the identical
+/// algorithm — there is no cross-language drift risk, extract-minted or
+/// Rust-minted.
+///
+/// Both a bind turn (the binder's `Name` in the synthesized `Val.G<g>` iface)
+/// and every later reference turn (the imported `Name`, whether from that
+/// injected iface or from a hand-written source stub compiled as a home
+/// module) hash `"<module>:<occ>"` identically, so the reference Core's
+/// `NVar` matches the stored id by raw equality — the persistent-binding key.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SessionVarId(VarId);
 
