@@ -33,8 +33,10 @@ mod caller_result_tests;
 pub(crate) mod compile_phases;
 mod emit;
 mod image;
+mod image_registry;
 #[cfg(test)]
 mod invocation;
+pub use image_registry::ImageRegistry;
 mod machine;
 pub(crate) mod md5_kernel;
 mod no_success;
@@ -414,7 +416,59 @@ pub struct CompiledProgram {
     /// Every descriptor header with a published call or enter record. Shared
     /// descriptors are excluded so retirement removes only this owner.
     pub(crate) dispatch_owned_headers: Vec<usize>,
+    /// Set exactly once, by whichever install (on whichever machine, and
+    /// therefore possibly whichever thread) is first to install this image:
+    /// see [`crate::prepared_program::machine::PreparedMachine::install`]'s
+    /// use of [`Self::charge_codegen_once`]. An `ImageRegistry` hit and every
+    /// later `install_shared` of the same `Arc<CompiledProgram>` sees this
+    /// already `true` and charges nothing.
+    codegen_charged: std::sync::atomic::AtomicBool,
 }
+
+// SAFETY: every field above is written only inside `compile_with`, which
+// completes and hands back an owned `CompiledProgram` before any install
+// can see it; nothing an install or a later `run_entry*` does mutates a
+// field of this struct in place. What each field's post-compile life looks
+// like:
+//   - `pipeline` (`CodegenPipeline`, holding `OwnedJitModule`/`JITModule`):
+//     `finalize()` runs inside `compile_with`, before `Self { .. }` is
+//     built. After that, every accessor this crate calls on it
+//     (`get_function_ptr`, `native_frame_maximum`, `functions_defined`,
+//     `code_bytes`, `stack_maps`) takes `&self` and reads already-finalized
+//     tables (`compiled_functions: SecondaryMap`, plain counters). Cranelift
+//     JIT's `JITModule` itself holds a `RefCell<HashMap<..>>` symbol-lookup
+//     cache, but that cache is populated only from `get_address`, which
+//     `finalize_definitions` alone calls (during `compile_with`, under
+//     `&mut self`) -- no post-compile accessor this crate uses reaches it,
+//     so the `RefCell` is never borrowed again once `compile_with` returns.
+//     Its `memory: Box<dyn JITMemoryProvider + Send>` is likewise touched
+//     only by `finalize`/`free_memory`, the latter running from `Drop`,
+//     which -- like any `Arc<CompiledProgram>` drop -- happens on whichever
+//     thread releases the last reference, never concurrently with another
+//     reference's use. `lookup_symbols`/`declarations`/`compiled_functions`/
+//     `compiled_data_objects`/`code_ranges` are likewise read-only once
+//     `finalize_definitions` returns: no accessor this crate calls after
+//     `compile_with` mutates them, and `get_finalized_function`'s raw code
+//     pointer is a stable address into memory this program's `Drop` alone
+//     frees.
+//   - `descriptors`, `descriptor_registry`, `statics`, `top_slots`,
+//     `import_slots`, `interned_constructors`, `byte_tops`, `externals`,
+//     `heap_top_specs`, `callables`, `thunk_entries`, `dispatch_owned_headers`:
+//     plain owned data (`Vec`/`BTreeMap`/`Arc<..>` of `Send + Sync` content,
+//     no `Cell`/`RefCell`/raw pointer), read-only after construction.
+//   - `bytes` (`Arc<static_bytes::PinnedBytes>`): content-addressed,
+//     append-only by construction; this program's own `Arc` is never
+//     mutated after `compile_with` returns (only a machine's OWN pool,
+//     a different value, is later extended by absorption).
+//   - `image_slot`, `root_words`, `force_adapter` (`FuncId`): `Copy` plain
+//     data.
+//   - `codegen_charged`: an `AtomicBool`, synchronized by construction.
+// No field is a raw pointer, `Cell`, or non-atomic interior-mutability cell
+// reachable from more than one thread after `compile_with` returns.
+unsafe impl Send for CompiledProgram {}
+unsafe impl Sync for CompiledProgram {}
+
+static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
     /// Compile with a fresh descriptor interner: a standalone program, or the
@@ -1220,11 +1274,27 @@ impl CompiledProgram {
             _dispatchers: dispatchers,
             thunk_entries,
             dispatch_owned_headers,
+            codegen_charged: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     pub(crate) fn prepared_force_adapter(&self) -> FuncId {
         self.force_adapter
+    }
+
+    /// `true` exactly once across this image's lifetime, for whichever
+    /// install (any machine, any thread) is first to call it: the caller
+    /// that pays for the codegen this compile already did, in its own
+    /// `compiled_functions`/`compiled_code_bytes` counters. Every later
+    /// install of the same `Arc<CompiledProgram>` -- a registry hit, or a
+    /// direct `install_shared` of an `Arc` another machine already
+    /// installed -- sees `false` and adds nothing: the image itself, not
+    /// the machine, is what remembers it was already paid for.
+    pub(crate) fn charge_codegen_once(&self) -> bool {
+        let already_charged = self
+            .codegen_charged
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        !already_charged
     }
 
     /// The words of this program's root block: its tops plus every admitted

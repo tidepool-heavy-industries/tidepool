@@ -7,6 +7,7 @@
 //! disposition, and retained-program reuse cross this boundary in that order.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
@@ -14,10 +15,11 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, ImportBindings, ManagedBuilder, ManagedField,
-    ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle,
-    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
-    PreparedResult, PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
+    CompileError, CompiledProgram, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
+    ManagedField, ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
+    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    RunOptions, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -329,6 +331,14 @@ pub(crate) struct InstallSnapshot {
     plan: EvidencePlan,
     exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     compile: tidepool_codegen::prepared_program::PreparedCompileSnapshot,
+    /// This engine's registry, carried into the off-checkout step so a miss
+    /// there can still be inserted for every other machine sharing it.
+    /// `None` when the engine has none (today's behavior: always compile).
+    registry: Option<Arc<ImageRegistry>>,
+    /// Set when [`PreparedEngine::snapshot_install`] already found this
+    /// content in the registry: [`PreparedEngine::compile_off_checkout`]
+    /// then compiles nothing and just returns this `Arc`.
+    precompiled: Option<Arc<CompiledProgram>>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -1494,6 +1504,12 @@ pub struct PreparedEngine {
     /// a package definition, and is never invalidated: a package's code
     /// cannot change under a live session.
     code_exports: BTreeMap<SymbolIdentity, CodeExport>,
+    /// Shared with every other machine of this run when the composition
+    /// root wires one up ([`Self::set_image_registry`]); `None` keeps
+    /// today's behavior (every install compiles its own image). A registry
+    /// hit installs the already-compiled `Arc<CompiledProgram>` through
+    /// [`PreparedMachine::install_shared`] instead of compiling again.
+    registry: Option<Arc<ImageRegistry>>,
 }
 
 /// One installed package top a later turn may import instead of projecting
@@ -1778,6 +1794,56 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
+    /// Share `registry` with this engine's machine: every later install
+    /// consults it before compiling (see [`Self::install`] and the
+    /// off-checkout split), and the compiling install's image is the one
+    /// every other machine holding the same `Arc<ImageRegistry>` reuses.
+    /// Set once by the composition root that owns a run's machines (e.g. a
+    /// `ChildSessionFactory`); `None` (the default) keeps every install
+    /// compiling its own image, exactly as before this existed.
+    pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
+        self.registry = Some(registry);
+    }
+
+    /// The registry this engine shares its installs with, if any.
+    #[must_use]
+    pub fn image_registry(&self) -> Option<&Arc<ImageRegistry>> {
+        self.registry.as_ref()
+    }
+
+    /// Compile `linked` (or reuse an already-compiled image) and install it,
+    /// consulting [`Self::registry`] when this engine has one. Shared by
+    /// [`Self::install`]'s single-checkout path.
+    fn compile_and_install(
+        &mut self,
+        linked: tidepool_repr::execution_schema::LinkedProgram,
+        imports: ImportBindings,
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        let Some(registry) = self.registry.clone() else {
+            let compiled = self
+                .machine
+                .compile_for_install(&linked)
+                .map_err(PreparedRuntimeError::Compile)?;
+            return self
+                .machine
+                .install_program(compiled, imports)
+                .map_err(PreparedRuntimeError::Run);
+        };
+        let image = match registry.lookup(&linked) {
+            Some(image) => image,
+            None => {
+                let compiled = self
+                    .machine
+                    .compile_for_install(&linked)
+                    .map_err(PreparedRuntimeError::Compile)?;
+                registry.insert(linked, Arc::new(compiled))
+            }
+        };
+        self.machine
+            .install_shared(image, imports)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Create the session's machine from its first turn's program and
     /// install that program. The first turn can import nothing: no prepared
     /// binding exists before the machine does. Uses the default nursery
@@ -1811,6 +1877,7 @@ impl PreparedEngine {
             old_bytes_at_last_major: 0,
             major_collections: 0,
             code_exports: BTreeMap::new(),
+            registry: None,
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
@@ -2010,23 +2077,18 @@ impl PreparedEngine {
         let evidence_ms = lap();
         let linked = link_program(prepared, &values)?;
         let link_ms = lap();
-        let compiled = self
-            .machine
-            .compile_for_install(&linked)
-            .map_err(PreparedRuntimeError::Compile)?;
-        let compile_ms = lap();
-        let program = self
-            .machine
-            .install_program(compiled, imports)
-            .map_err(PreparedRuntimeError::Run)?;
-        let install_ms = lap();
+        // `compile_and_install` consults `self.registry` (when this engine
+        // has one) before compiling: a hit installs the already-compiled
+        // image through `install_shared` and compiles nothing, so
+        // `compile_ms` below also covers a registry lookup on the hit path.
+        let program = self.compile_and_install(linked, imports)?;
+        let compile_install_ms = lap();
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
             resolve_imports_ms,
             evidence_ms,
             link_ms,
-            compile_ms,
-            install_ms,
+            compile_install_ms,
             imports = import_count,
             compiled_off_checkout = false,
             "prepared install"
@@ -2125,6 +2187,10 @@ impl PreparedEngine {
         let facts = ProgramFacts::of(&prepared);
         let plan = self.plan_evidence(&facts)?;
         let linked = link_program(prepared, &values)?;
+        let precompiled = self
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.lookup(&linked));
         let compile = self.machine.compile_snapshot();
         Ok(InstallSnapshot {
             linked,
@@ -2134,16 +2200,32 @@ impl PreparedEngine {
             plan,
             exports,
             compile,
+            registry: self.registry.clone(),
+            precompiled,
         })
     }
 
-    /// Step (b): compile `snapshot`'s linked program off any checkout. Pure
-    /// with respect to the machine; safe to run on a blocking thread while
-    /// other turns hold the checkout.
+    /// Step (b): compile `snapshot`'s linked program off any checkout, or
+    /// reuse an image the registry already had at snapshot time -- either
+    /// way returning an `Arc` so [`Self::revalidate_and_install`] can
+    /// install it with [`PreparedMachine::install_shared`]. A fresh compile
+    /// with a registry attached is inserted here, off-checkout, so every
+    /// other machine sharing that registry sees it as soon as this step
+    /// finishes rather than waiting for `revalidate_and_install`. Pure with
+    /// respect to the machine; safe to run on a blocking thread while other
+    /// turns hold the checkout.
     pub(crate) fn compile_off_checkout(
         snapshot: &mut InstallSnapshot,
-    ) -> Result<CompiledProgram, CompileError> {
-        snapshot.compile.compile(&snapshot.linked)
+    ) -> Result<Arc<CompiledProgram>, CompileError> {
+        if let Some(image) = &snapshot.precompiled {
+            return Ok(Arc::clone(image));
+        }
+        let compiled = snapshot.compile.compile(&snapshot.linked)?;
+        let image = match &snapshot.registry {
+            Some(registry) => registry.insert(snapshot.linked.clone(), Arc::new(compiled)),
+            None => Arc::new(compiled),
+        };
+        Ok(image)
     }
 
     /// Step (c): under the machine checkout again, re-resolve `snapshot`'s
@@ -2157,7 +2239,7 @@ impl PreparedEngine {
     pub(crate) fn revalidate_and_install(
         &mut self,
         snapshot: InstallSnapshot,
-        compiled: CompiledProgram,
+        compiled: Arc<CompiledProgram>,
         bindings: &BindingTable,
         index: &BindingIndex,
     ) -> Result<Option<ProgramId>, PreparedRuntimeError> {
@@ -2169,7 +2251,7 @@ impl PreparedEngine {
         let import_count = snapshot.imports.len();
         let program = self
             .machine
-            .install_program(compiled, snapshot.imports)
+            .install_shared(compiled, snapshot.imports)
             .map_err(PreparedRuntimeError::Run)?;
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
@@ -4842,5 +4924,44 @@ mod tests {
             "expected SiteConflict, got {error:?}"
         );
         assert_eq!(engine.programs.len(), 2);
+    }
+
+    #[test]
+    fn two_engines_sharing_one_registry_the_second_install_is_a_registry_hit() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let registry = Arc::new(ImageRegistry::new());
+        let bootstrap_site = SYNTHETIC_SITE_BIT | 30;
+        let (mut engine_a, _) =
+            PreparedEngine::bootstrap(verb_program(bootstrap_site, TypeNode::Text))
+                .expect("engine a bootstraps");
+        let (mut engine_b, _) =
+            PreparedEngine::bootstrap(verb_program(bootstrap_site, TypeNode::Text))
+                .expect("engine b bootstraps its own, independent machine");
+        engine_a.set_image_registry(Arc::clone(&registry));
+        engine_b.set_image_registry(Arc::clone(&registry));
+
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let shared_site = SYNTHETIC_SITE_BIT | 31;
+
+        engine_a
+            .install(verb_program(shared_site, TypeNode::Text), &bindings, &index)
+            .expect("engine a compiles and registers the image");
+        assert_eq!(
+            registry.misses(),
+            1,
+            "engine a's install is a registry miss"
+        );
+        assert_eq!(registry.hits(), 0);
+
+        engine_b
+            .install(verb_program(shared_site, TypeNode::Text), &bindings, &index)
+            .expect("engine b installs the same content against its own machine");
+        assert_eq!(
+            registry.hits(),
+            1,
+            "engine b's install of the same linked program content is a registry hit"
+        );
+        assert_eq!(registry.misses(), 1, "no second compile happened");
     }
 }

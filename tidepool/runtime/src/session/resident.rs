@@ -925,7 +925,7 @@ impl PendingPreparedInstall {
     pub fn compile_off_checkout(
         &mut self,
     ) -> Result<
-        tidepool_codegen::prepared_program::CompiledProgram,
+        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
         tidepool_codegen::prepared_program::CompileError,
     > {
         super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
@@ -3464,7 +3464,7 @@ where
     pub fn revalidate_and_run_prepared(
         &mut self,
         pending: PendingPreparedInstall,
-        compiled: tidepool_codegen::prepared_program::CompiledProgram,
+        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
         let PendingPreparedInstall {
             snapshot,
