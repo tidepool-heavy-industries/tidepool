@@ -39,7 +39,8 @@ resize, and cancellation remain with the owner. A fresh command constructed
 from an inherited helper runs in the calling actor's checkout; an explicit
 directory stays fixed.
 Recovery reads are contiguous, with an 8 KiB default display budget;
-`max_output_bytes` selects 1024..32768 bytes including metadata. They never use a
+`max_output_bytes` clamps into 1024..32768 bytes including metadata; any positive
+value is accepted. They never use a
 head/tail preview. Positions are original bytes, even for lossy UTF-8.
 None of these operations reruns the command. A finished nonzero exit is a command
 result; inspect its diagnostics. Terminal receipts always show cleanup separately.

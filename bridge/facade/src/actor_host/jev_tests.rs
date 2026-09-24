@@ -637,6 +637,134 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     campaign.hosted.await.unwrap();
 }
 
+/// Output under the raw-display line threshold and within the presentation
+/// budget is shown as-is, without ever asking Jev to score it.
+#[tokio::test]
+async fn template_bash_shows_short_output_raw_without_jev() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "printf 'line1\\nline2\\nline3\\n'",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": null,
+                "intent": "short raw check"
+            }),
+        )
+        .await
+    });
+    let commands = TestCommands::completed_streams("line1\nline2\nline3\n", "");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(
+        output.contains("line1") && output.contains("line3"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("<s"),
+        "short output should not be sectioned or marked up: {output}"
+    );
+    assert!(
+        !any_section_scoring_request(&backend),
+        "short output must not invoke Jev to score sections: {output}\nrequests: {:?}",
+        backend.requests.lock()
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Requests carrying a `Project.Shell` section-relevance question, as
+/// opposed to the campaign's own unrelated per-call heuristics review (a
+/// destructive-command/repeating-itself check the harness runs regardless
+/// of command output, and which never mentions "sections").
+fn any_section_scoring_request(backend: &SectionScoreJev) -> bool {
+    backend.requests.lock().iter().any(|request| {
+        request["questions"]
+            .as_object()
+            .is_some_and(|questions| questions.keys().any(|key| key.starts_with("sections.")))
+    })
+}
+
+/// A `max_output_bytes` below the supported 1024..32768 range is clamped
+/// rather than rejected: the call still starts and completes.
+#[tokio::test]
+async fn template_bash_accepts_undersized_max_output_bytes() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "printf 'ok\\n'",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 800,
+                "intent": "undersized budget"
+            }),
+        )
+        .await
+    });
+    let commands = TestCommands::completed_streams("ok\n", "");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(
+        !output.contains("Rejected"),
+        "an undersized max_output_bytes must be clamped, not rejected: {output}"
+    );
+    assert!(output.contains("ok"), "{output}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect
 /// (`session::dialect::EVAL_PRAGMAS`), so `#not_here` needs no ceremony.
 const CELL: &str = r#"answer <- J.ask1 (J.rawState (String "retry loop in fetch; timeout branch at line 12"))

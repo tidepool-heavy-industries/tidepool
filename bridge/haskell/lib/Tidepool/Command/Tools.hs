@@ -101,15 +101,15 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
-          "Observe an existing session_id; optional chars sends input first. Empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..30000ms (default 250); output 1024..32768 bytes."
+          "Observe an existing session_id; optional chars sends input first. Empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..30000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes (any positive value is accepted)."
           (writeInputWith presenter),
       readOutput =
         tool
-          "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, byte offset 0, 8192 bytes (1024..32768 including metadata). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
+          "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, byte offset 0, 8192 bytes; max_output_bytes clamps to 1024..32768 including metadata (any positive value is accepted). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
           readRetained,
       cancelCommand =
         tool
@@ -119,14 +119,19 @@ toolsWith presenter =
 
 -- Validate observation options before starting a process or sending input.
 -- An invalid option is reported as text; nothing is started or sent.
+-- max_output_bytes is clamped into the supported range rather than rejected:
+-- any positive request is honored, just at whatever budget the range allows,
+-- and the presented output already carries a recovery hint when it is cut
+-- short by that budget.
 observation :: Int -> Maybe Int -> Maybe Int -> Either Text Cmd.Observation
 observation defaultWait wait limit
   | milliseconds < 0 || milliseconds > 30000 = Left "Rejected · nothing started or sent · yield_time_ms must be 0..30000"
-  | bytes < 1024 || bytes > 32768 = Left "Rejected · nothing started or sent · max_output_bytes must be 1024..32768"
+  | requested <= 0 = Left "Rejected · nothing started or sent · max_output_bytes must be positive"
   | otherwise = Right (Cmd.Observation milliseconds bytes)
   where
     milliseconds = fromMaybe defaultWait wait
-    bytes = fromMaybe 32768 limit
+    requested = fromMaybe 32768 limit
+    bytes = max 1024 (min 32768 requested)
 
 execute :: (Member Cmd.Commands effects) => Execute -> Eff effects Text
 execute = executeWith defaultPresenter

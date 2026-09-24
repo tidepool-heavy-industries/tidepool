@@ -57,8 +57,11 @@ import Tidepool.Effects.Core
 
 -- Configuration is ordinary Haskell on purpose: a workspace can tune these
 -- values and reload its spec without changing a runtime protocol.
-jevTriggerTokens, sectionTokens, commandTokens, purposeTokens, recentConversationTokens, selectedOutputTokens, maximumScoredTokens :: Int
-jevTriggerTokens = 100
+rawLineThreshold, sectionTokens, commandTokens, purposeTokens, recentConversationTokens, selectedOutputTokens, maximumScoredTokens :: Int
+-- Whole output shown raw, skipping Jev, when it is under this many lines
+-- and fits the presentation byte budget. Longer output goes through Jev,
+-- which saves frontier-model tokens by filtering it.
+rawLineThreshold = 15
 sectionTokens = 512
 commandTokens = 2048
 purposeTokens = 1024
@@ -110,6 +113,13 @@ tools = Command.toolsWith presentSelected
 estimatedTokens :: Text -> Int
 estimatedTokens text = (T.length text + 3) `div` 4
 
+-- | Line count for the raw-display threshold. Trailing text after the last
+-- newline still counts as one line; empty text counts as none.
+countLines :: Text -> Int
+countLines text
+  | T.null text = 0
+  | otherwise = length (T.lines text)
+
 -- | Deterministic line-aware partitioning. A line longer than one section is
 -- split at the scalar boundary; otherwise the last newline within the budget
 -- closes the section.
@@ -159,7 +169,10 @@ prepare command purpose recent observed = case Cmd.presentedOutput observed of
     case loaded of
       Left issue -> pure (statusHeading observed <> "\n" <> renderIssue issue <> recoveryFor frozen)
       Right sections -> do
-        if estimatedTokens (T.concat (map sectionText sections)) <= jevTriggerTokens
+        let full = T.concat (map sectionText sections)
+            shortEnough = countLines full <= rawLineThreshold
+            fitsBudget = utf8Bytes (statusHeading observed <> "\n" <> full) <= Cmd.presentedByteBudget observed
+        if shortEnough && fitsBudget
           then pure (renderRaw observed frozen sections)
           else do
             scored <- scoreSections command purpose recent sections
