@@ -183,3 +183,13 @@ the run with session size.
   and 21 backup-and-restore cycles on main.rs); watch delivery redesign
   (the new harness's async tool calls replace polling);
   `request_user_input` surfacing to the operator.
+
+## Operator-side typed requests (2026-09-24, idea)
+
+- **`exomonad ask`**: an external command that reserves a typed request on a
+  named actor (`--actor <path> --type <Reply>`, message text as the
+  assignment), waits for the settlement, and prints the reply. It is the
+  actors' own `request`/`respond` pair with the operator as caller, so the
+  brief paste (tmux load-buffer, settle, Enter, re-Enter) and interview pane
+  scraping both become one RPC with a typed answer. Wave-3 interviews and
+  the wave-4 launch still went through tmux.
