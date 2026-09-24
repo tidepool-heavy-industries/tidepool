@@ -60,8 +60,9 @@ main = do
     ["--dependency-evidence"] -> dependencyEvidenceCompilation
     ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
+    ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, or --structural-display EFFECTS_INCLUDE"
 
 untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -185,6 +186,70 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-dependency-evidence"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- | Two checkouts resolving byte-identical dependency modules at different
+-- absolute paths (a worktree-per-actor checkout against the same workspace)
+-- must still hit the memo: the dependency's content is unchanged, only the
+-- selected path differs, and a path string cannot change compiled Core.
+-- 'Dep'/'Target' live under two sibling roots with identical content;
+-- 'Importer' (fixed location, never itself duplicated) imports 'Target'
+-- indirectly so 'Target' is never the compile's own evicted entry — only an
+-- indirect dependency, matching the parent/child worktree shape.
+pathInsensitiveWitnessCompilation :: IO ()
+pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let workDir = root </> "work"
+      rootA = root </> "rootA"
+      rootB = root </> "rootB"
+      importer = workDir </> "Importer.hs"
+      depContent =
+        [ "module Dep where"
+        , "value :: Int"
+        , "value = 1"
+        ]
+      targetContent =
+        [ "module Target where"
+        , "import Dep (value)"
+        , "result :: Int"
+        , "result = value + 1"
+        ]
+  createDirectoryIfMissing True workDir
+  createDirectoryIfMissing True rootA
+  createDirectoryIfMissing True rootB
+  writeFile (rootA </> "Dep.hs") (unlines depContent)
+  writeFile (rootB </> "Dep.hs") (unlines depContent)
+  writeFile (rootA </> "Target.hs") (unlines targetContent)
+  writeFile (rootB </> "Target.hs") (unlines targetContent)
+  writeFile importer $ unlines
+    [ "module Importer where"
+    , "import Target (result)"
+    , "total :: Int"
+    , "total = result + 1"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelectedRequests [workDir] (const (pure ())) $ \runRequest ->
+      runRequest $ \compile -> do
+        (_, coldLog) <- captureStderr root "path-insensitive-cold" $
+          compile PreparedStg mempty GeneralCompile Nothing importer [rootA] Nothing
+        assertContains "cold compile resolves Dep from rootA"
+          "tidepool-memo-miss module=Dep reason=absent" coldLog
+        assertContains "cold compile resolves Target from rootA"
+          "tidepool-memo-miss module=Target reason=dependency-miss:Dep" coldLog
+        (_, warmLog) <- captureStderr root "path-insensitive-warm" $
+          compile PreparedStg mempty GeneralCompile Nothing importer [rootB] Nothing
+        when ("tidepool-memo-miss module=Target" `isInfixOf` warmLog) $
+          fail ("byte-identical Target resolved from a different root missed the memo: " ++ warmLog)
+        when ("tidepool-memo-miss module=Dep" `isInfixOf` warmLog) $
+          fail ("byte-identical Dep resolved from a different root missed the memo: " ++ warmLog))
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-path-insensitive-witness"
       hClose handle
       removeFile path
       createDirectory path

@@ -796,11 +796,25 @@ homeDependencyDigests graph =
       (HomeDependencyDigest BS.empty, Map.empty) components
     digestComponent dependencies children = HomeDependencyDigest $ SHA256.hash $
       BS.concat (map ownFrame dependencies ++ map childFrame (sort children))
+    -- Content-keyed: the selected path is deliberately left out of this
+    -- hash. Two checkouts of the same workspace resolve byte-identical
+    -- dependencies at different absolute paths (a worktree-per-actor
+    -- checkout); that path difference cannot change the dependency's
+    -- compiled Core, so it must not cost a memo hit. 'HomeDependency'
+    -- (module name + boot/ordinary kind) still identifies *what* was
+    -- resolved, and 'Fingerprint' still identifies its content — together
+    -- they preserve the home-resolution-shape guarantee on
+    -- 'memoHomeDependencies' above (home vs. package, or which of several
+    -- home candidates was selected). Only the path *string* naming where
+    -- those same bytes live on disk is dropped. The full witness (path
+    -- included) remains available on 'HomeDependencyWitness' itself and in
+    -- 'gmeDirectWitnesses' for 'TIDEPOOL_MEMO_TRACE' diagnostics; this
+    -- digest is the only place a path was folded into memo validity.
     ownFrame dependency = frame $ BS8.pack $
-      moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show witness
+      moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show fingerprint
       where
         HomeDependency name kind = dependency
-        witness = fst (graph Map.! dependency)
+        HomeDependencyWitness _selectedPath fingerprint = fst (graph Map.! dependency)
     childFrame (HomeDependencyDigest digest) = frame digest
     frame bytes = BS8.pack (show (BS.length bytes) ++ ":") <> bytes
 
