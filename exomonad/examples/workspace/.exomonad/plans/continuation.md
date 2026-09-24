@@ -14,7 +14,8 @@ Supply these bindings:
 - `task :: Task`, the incorporated assignment;
 - `worker :: Response (Outcome Candidate)`, the pending implementer;
 - `reviewer :: Response (Outcome ReviewDecision)`, an available retained reviewer;
-- `reviewLabel, repairLabel :: Label`, labels for the exact requests;
+- `reviewLabel, repairLabel :: Label`, created from compile-checked static
+  literals such as `[label|review|]`;
 - `repairPolicy :: RepairOwner`, `OwnerRepairs` or an explicitly selected available
   `RetainedImplementer`;
 - `onReview :: WorkSink (Outcome ReviewDecision)`, the local notification policy;

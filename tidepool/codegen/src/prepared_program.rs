@@ -51,7 +51,7 @@ pub(crate) mod resolve;
 mod roots;
 pub use observe::{AddressOrigin, ObservationFailure};
 pub use roots::ImageSlot;
-pub use tidepool_heap::gc::evacuate::Parcel;
+pub use evacuation::{Parcel, ParcelImage, ParcelImports};
 mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;

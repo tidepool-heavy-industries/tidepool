@@ -93,7 +93,6 @@ use tidepool_repr::{DataConId, PrincipalId};
 /// bookkeeping `install` folds in -- the same as `Owned`.
 enum ProgramCustody<'code> {
     Borrowed(&'code CompiledProgram),
-    Owned(Rc<CompiledProgram>),
     Shared(Arc<CompiledProgram>),
 }
 
@@ -101,8 +100,16 @@ impl ProgramCustody<'_> {
     fn get(&self) -> &CompiledProgram {
         match self {
             Self::Borrowed(program) => program,
-            Self::Owned(program) => program,
             Self::Shared(program) => program,
+        }
+    }
+
+    /// The shareable image, when this custody is one: a borrowed program
+    /// (test harnesses) has no owner a parcel could carry.
+    fn shared(&self) -> Option<Arc<CompiledProgram>> {
+        match self {
+            Self::Borrowed(_) => None,
+            Self::Shared(program) => Some(Arc::clone(program)),
         }
     }
 }
@@ -736,7 +743,7 @@ impl PreparedMachine<'static> {
     ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
         let id = machine.install(
-            ProgramCustody::Owned(Rc::new(program)),
+            ProgramCustody::Shared(Arc::new(program)),
             &ImportBindings::new(),
         )?;
         Ok((machine, id))
@@ -867,7 +874,7 @@ impl<'code> PreparedMachine<'code> {
         program: CompiledProgram,
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
-        self.install(ProgramCustody::Owned(Rc::new(program)), &imports)
+        self.install(ProgramCustody::Shared(Arc::new(program)), &imports)
     }
 
     /// Install an image this machine did not necessarily compile: an
@@ -884,6 +891,45 @@ impl<'code> PreparedMachine<'code> {
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
         self.install(ProgramCustody::Shared(image), &imports)
+    }
+
+    /// Whether `image` (by identity, not content) is installed here.
+    pub fn has_image(&self, image: &Arc<CompiledProgram>) -> bool {
+        self.programs.values().any(|installed| {
+            matches!(&installed.program, ProgramCustody::Shared(own) if Arc::ptr_eq(own, image))
+        })
+    }
+
+    /// The program whose objects carry `header`, if any program owns it
+    /// (interned constructors are shared and ownerless).
+    pub(super) fn owner_of_header(&self, header: usize) -> Option<ProgramId> {
+        self.header_owners.get(&header).copied()
+    }
+
+    /// The program whose static region holds `address`, if any.
+    pub(super) fn owner_of_static(&self, address: usize) -> Option<ProgramId> {
+        self.programs
+            .iter()
+            .find(|(_, installed)| installed.statics.address_range().contains(&address))
+            .map(|(&id, _)| id)
+    }
+
+    /// The shareable image of an installed program, with the current value
+    /// of each of its import slots (the identity it imported and the
+    /// encoded reference its block holds). `None` for a borrowed program.
+    pub(super) fn image_with_imports(
+        &self,
+        id: ProgramId,
+    ) -> Option<(Arc<CompiledProgram>, super::evacuation::ParcelImports)> {
+        let installed = self.programs.get(&id)?;
+        let image = installed.program.shared()?;
+        let compiled = installed.program.get();
+        let mut imports = Vec::with_capacity(compiled.import_slots.len());
+        for slot in &compiled.import_slots {
+            let word = installed.roots.read(slot.slot).ok()?;
+            imports.push((slot.identity.clone(), word as usize));
+        }
+        Some((image, imports))
     }
 
     fn install(
@@ -4241,8 +4287,95 @@ mod tests {
         assert!(right.release(arrived));
     }
 
+    /// A value whose code lives in an image the receiver never installed:
+    /// the parcel names the image, the receiver installs it, and the value
+    /// runs there. The image (`direct_import_caller`) imports another
+    /// machine's unforced CAF (`thunk_to_closure`), so the parcel also
+    /// carries that import's current value; the receiver's install binds
+    /// the copy and forcing happens on the receiver, with the sender's
+    /// snapshot of the binding.
     #[test]
-    fn import_refuses_a_parcel_from_an_image_this_machine_lacks() {
+    fn a_closure_over_an_imported_binding_runs_on_a_machine_that_never_installed_its_image() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, producer) =
+            PreparedMachine::new(thunk_to_closure_program(), options).expect("left installs A");
+        let caf = left
+            .retain_top(producer, ValueId(0))
+            .expect("A's unforced CAF is retained without running it");
+        let mut imports = ImportBindings::new();
+        imports.insert(thunk_to_closure_identity(), caf);
+        let caller = install_linked(
+            &mut left,
+            &direct_import_caller_program(thunk_to_closure_identity()),
+            imports,
+        )
+        .expect("C installs on the left, importing A's CAF");
+        let entry = left
+            .retain_top(caller, ValueId(0))
+            .expect("C's entry function is retained");
+
+        let parcel = left.export_parcel(entry).expect("export");
+        assert_eq!(
+            parcel.images().len(),
+            2,
+            "the parcel names C (the static function's image) and A (the CAF's image)"
+        );
+        assert!(
+            parcel.images().iter().any(|image| image.imports.len() == 1),
+            "C's one import slot travels as an extra root"
+        );
+
+        let (mut right, base) = PreparedMachine::new(
+            CompiledProgram::compile(&base_program(958)).expect("base"),
+            options,
+        )
+        .expect("right installs an unrelated base image");
+        let before = right.residency().programs;
+        let arrived = right
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("right imports, installing both images");
+        assert_eq!(right.residency().programs, before + 2);
+        // Call the imported entry through a caller that takes a closure.
+        let call_site =
+            install_linked(&mut right, &closure_caller_program(), ImportBindings::new())
+                .expect("right installs a caller");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: true,
+        };
+        let called = right
+            .run_entry_retained(
+                call_site,
+                ValueId(0),
+                &[PreparedInput::Managed(arrived)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect("the imported entry runs on the right, forcing its imported CAF there");
+        let [PreparedResult::Managed(result)] = called.values.as_slice() else {
+            panic!("one managed result");
+        };
+        let PreparedOuter::Constructor { identity, .. } = right
+            .inspect_outer(*result, RealmId::ROOT)
+            .expect("the closure's captured constructor inspects");
+        assert_eq!(identity, tidepool_repr::DataConId(1_301));
+        assert_eq!(right.disposition(), MachineDisposition::Reusable);
+        // The left machine never forced its CAF and still can.
+        let mut left_imports = ImportBindings::new();
+        left_imports.insert(thunk_to_closure_identity(), caf);
+        let _ = base;
+        let left_called = left
+            .run_entry_retained(caller, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("the left machine is untouched by the export");
+        assert_eq!(left_called.values.len(), 1);
+        assert!(right.release(*result));
+        assert!(right.release(arrived));
+    }
+
+    #[test]
+    fn import_refuses_a_parcel_whose_borrowed_image_this_machine_lacks() {
         let compiled = field_constructor_program(971);
         let other = CompiledProgram::compile(&base_program(955)).expect("other compiles");
         let options = PreparedMachineOptions {

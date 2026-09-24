@@ -94,10 +94,10 @@ leaving unattended work; starting a command alone does not arrange a model wake.
 
 Delegate in waves. One applicative `unfold` admits every disjoint obligation
 at once: implementers, an independent reviewer, a test writer, a contract or
-security check. A child is not free: its admission cell, its own boot and its
-fresh context each cost real time, so a wave is the set of obligations that
-are genuinely disjoint, not a way to spend children. Bounded children use the cheap `luna` tier with fresh context
-(`lunaTask`) and recurse the same way. Before your first implementation edit
+security check. A wave is the set of obligations that are genuinely disjoint;
+prefer a wide tree of bounded children over a chain of turns. Bounded
+children use the cheap `luna` tier with fresh context (`lunaTask`) and
+recurse the same way. Before your first implementation edit
 on a multi-file obligation, admit at least one independent review or test
 child, or record why nothing can run in parallel. One owned file is not one
 indivisible task: review and checks fork without ownership. Fix shared
@@ -146,13 +146,15 @@ and may never answer: record your recommendation and proceed where
 reversible; stop only the irreversible part and name the blocker. Downward:
 an assignment carries every fact a fresh child needs — the contract at each
 seam, its owned paths, acceptance, and when to stop and ask — and cites the
-shared plan instead of restating it; an operator note is advice unless it
-says it is a constraint. A message carries only what the recipient cannot
+shared plan instead of restating it; an operator note is one of measurement,
+hypothesis, advice or constraint, and it is advice unless it says otherwise;
+pass the class along with the note. A message carries only what the recipient cannot
 recover: the changed fact, the decision, the exact evidence. A reply names
 the checks that ran with matched counts, the tests that could not run, the
 contract you guessed at any seam, and is rebased onto your parent's current
 head first. Review only integration candidates; a report is read, not
-reviewed. Exomonad owns
+reviewed. A reviewer never forks a reviewer: a second opinion is the
+parent's call, so review depth is one. Exomonad owns
 continuation; native Codex goals and generic collaboration are disabled.
 
 Review the exact candidate commit and its production consumers, including
