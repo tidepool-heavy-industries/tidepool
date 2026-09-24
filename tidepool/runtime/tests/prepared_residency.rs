@@ -49,6 +49,44 @@ impl Notebook {
         Self::with_effects(&[])
     }
 
+    /// [`Self::with_effects`], but the declaration plane's include directory
+    /// IS `root` (rather than a nested `decl-lib` subdirectory) -- the
+    /// production wiring (`SessionLib::open(id, session_root, ..)` in
+    /// `exomonad-actor`'s workbench). A declaration turn's own GHC downsweep
+    /// then resolves `root`-rooted `Val.G<g>` host-carrier stubs the same
+    /// way a later cell's does, so a decl can capture a stub-mounted name.
+    fn with_shared_root(decls: &[tidepool_mcp::EffectDecl]) -> Self {
+        eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(decls).expect("materialize effect surface");
+        let preamble = effects.preamble().to_owned();
+        let effect_stack = effects.row().to_owned();
+        let mut include = effects.include_paths().to_vec();
+        let root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            tidepool_repr::SessionId(1),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("open decl plane")
+        .with_validation_include(vec![eval_harness::prelude_path()]);
+        include.push(lib.include_dir().to_path_buf());
+        let session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        Self {
+            session,
+            preamble,
+            effect_stack,
+            include,
+            root,
+            injected: Vec::new(),
+            generation: 0,
+        }
+    }
+
     fn with_effects(decls: &[tidepool_mcp::EffectDecl]) -> Self {
         eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(decls).expect("materialize effect surface");
@@ -846,5 +884,209 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         ]),
         "expected all four carrier-mounted payloads to read back correctly \
          through their stub modules, including constructor pattern matches"
+    );
+}
+
+/// HIGH regression: retiring a carrier-mounted binding after a declaration
+/// captured its name must delete the binding's `Val.G<g>` stub source (not
+/// just stop excluding it from `--inject-val`), so a later turn that still
+/// imports it through the declaration module fails to find the module
+/// instead of silently compiling and evaluating the stub's own
+/// self-referential body. Bounded by a timeout: a regression here is an
+/// infinite loop at evaluation time, and this test must fail loudly rather
+/// than hang the suite.
+#[test]
+fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
+
+    let mut notebook = Notebook::with_shared_root(&[]);
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile_in_current_value_view(
+        "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
+    ) else {
+        panic!("anchor must compile as a bind");
+    };
+    let [anchor_binder] = bound.as_slice() else {
+        panic!("anchor must produce exactly one binder");
+    };
+    let carrier =
+        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE);
+
+    notebook.generation += 1;
+    let gen = Generation(notebook.generation);
+    let binder = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "capturedCarrier",
+            gen,
+            &carrier,
+            HostPayload::Json(&serde_json::json!({"tag": "captured"})),
+        )
+        .expect("mount carrier binding");
+    notebook.injected.push(binder.module.clone());
+
+    let stub_path = notebook
+        .root
+        .path()
+        .join(tidepool_repr::SessionModule::val(gen).relative_hs_path());
+    assert!(stub_path.exists(), "mount must write its stub source");
+
+    // A declaration captures the carrier binding by name -- `define_scoped`
+    // auto-imports every currently-visible value's exact `Val.G<g>` module,
+    // so the committed `Lib.G<g>` source now names this stub generation.
+    notebook
+        .session
+        .define_scoped(&["capturedUse = capturedCarrier"])
+        .expect("declaration captures the carrier binding");
+
+    // Retire the carrier binding: it must both stop being excluded from
+    // `--inject-val` bookkeeping under its own generation AND delete its
+    // stub source, matching a real binding's eviction instead of leaving a
+    // phantom stub the declaration module can still find.
+    notebook
+        .session
+        .retire_host_binding_owner(notebook.root.path(), &binder);
+    assert!(
+        !stub_path.exists(),
+        "retiring a captured carrier binding must delete its stub source"
+    );
+
+    // A later turn using the declaration must fail loudly with a compile
+    // error -- never hang evaluating the retired stub's self-referential
+    // body. `compile_in_current_value_view` panics on its own compile
+    // failure, so the expected outcome is the compile thread panicking, not
+    // returning a successful classification.
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = notebook.compile_in_current_value_view("capturedUse");
+        tx.send(result).ok();
+    });
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(result) => panic!(
+            "a turn referencing a retired carrier binding through a declaration must fail to \
+             compile, not succeed: {result:?}"
+        ),
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "compiling a turn that references a retired carrier binding through a declaration \
+             hung instead of failing with a compile error"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // The compile thread panicked before sending a result --
+            // `compile_in_current_value_view`'s own `unwrap_or_else(panic!)`
+            // on a real compile failure, exactly the expected outcome.
+            handle.join().expect_err(
+                "the compile thread must have panicked from a compile failure, not from \
+                 something else",
+            );
+        }
+    }
+}
+
+/// MEDIUM regression: `mount_carrier_in` writes its stub source before
+/// mounting the host value. A payload that does not match the carrier's own
+/// compiled type fails inside the mount step, AFTER the stub is already on
+/// disk -- the write, mark, and mount must be one transaction, so a failed
+/// mount leaves no stub behind for a later turn to stumble over.
+#[test]
+fn failed_carrier_mount_leaves_no_stub_source() {
+    use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_repr::DataConTable;
+    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
+
+    /// A payload whose `ToHaskell::visit` always fails -- forces
+    /// `mount_host_value_in` to fail deep inside the build step, AFTER
+    /// `mount_carrier_in` has already written the stub source to disk.
+    struct AlwaysFailsToHaskell;
+    impl tidepool_bridge::sealed::ToHaskellSealed for AlwaysFailsToHaskell {}
+    impl ToHaskell for AlwaysFailsToHaskell {
+        fn visit(
+            &self,
+            _table: &DataConTable,
+            _visitor: &mut dyn HaskellVisitor,
+        ) -> Result<(), BridgeError> {
+            Err(BridgeError::UnknownDataConName(
+                "deliberately unresolvable".into(),
+            ))
+        }
+    }
+
+    let mut notebook = Notebook::with_shared_root(&[]);
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile_in_current_value_view(
+        "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
+    ) else {
+        panic!("anchor must compile as a bind");
+    };
+    let [anchor_binder] = bound.as_slice() else {
+        panic!("anchor must produce exactly one binder");
+    };
+    let carrier =
+        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE);
+
+    notebook.generation += 1;
+    let gen = Generation(notebook.generation);
+    let error = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "unmountable",
+            gen,
+            &carrier,
+            HostPayload::Job(&AlwaysFailsToHaskell),
+        )
+        .expect_err("a payload that fails to visit must fail to mount");
+
+    let stub_path = notebook
+        .root
+        .path()
+        .join(tidepool_repr::SessionModule::val(gen).relative_hs_path());
+    assert!(
+        !stub_path.exists(),
+        "a failed carrier mount must not leave its stub source on disk (mount error: {error})"
+    );
+}
+
+/// MEDIUM regression: a fresh `PersistentSession` reopening a session root
+/// resets `val_gen`/`stub_generations`, so a leftover stub `.hs` from a
+/// prior incarnation could coexist with a REAL, `.hi`-backed bind that
+/// reissues its generation number. `SessionLib::open` must sweep every
+/// stale stub source under the root's `Tidepool/Session/Val` so none can be
+/// found by the new incarnation.
+#[test]
+fn reopening_session_root_removes_stale_stub_sources() {
+    let root = tempfile::tempdir().expect("session root");
+    let stub_dir = root.path().join("Tidepool/Session/Val");
+    std::fs::create_dir_all(&stub_dir).expect("stub directory");
+    let stale_stub = stub_dir.join("G3.hs");
+    std::fs::write(
+        &stale_stub,
+        "module Tidepool.Session.Val.G3 (leftover) where\n\
+         leftover :: ()\n\
+         leftover = ()\n",
+    )
+    .expect("write stale stub");
+    assert!(stale_stub.exists());
+
+    SessionLib::open(
+        tidepool_repr::SessionId(1),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("reopen session root");
+
+    assert!(
+        !stale_stub.exists(),
+        "opening a session must sweep stale stub sources left by a prior incarnation"
     );
 }

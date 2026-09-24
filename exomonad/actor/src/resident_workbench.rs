@@ -717,8 +717,10 @@ impl HostInputRetirement {
                 tokio::spawn(async move {
                     let access = ResidentMachineAccess::new(machines, source);
                     if let Err(error) = access
-                        .with_machine(context, move |session, _, _| {
-                            session.retire_host_binding_owner(&binder);
+                        .with_machine(context, move |session, ctx, _| {
+                            let session_root =
+                                carrier_mount_session_root(session, ctx.placement.lexical_scope)?;
+                            session.retire_host_binding_owner(&session_root, &binder);
                             Ok(())
                         })
                         .await
@@ -757,8 +759,10 @@ impl HostInputRetirement {
         let binder = self.input.binder.clone();
         let context = self.context.clone();
         if let Err(error) = access
-            .with_machine(context, move |session, _, _| {
-                session.retire_host_binding_owner(&binder);
+            .with_machine(context, move |session, ctx, _| {
+                let session_root =
+                    carrier_mount_session_root(session, ctx.placement.lexical_scope)?;
+                session.retire_host_binding_owner(&session_root, &binder);
                 Ok(())
             })
             .await
@@ -3139,7 +3143,9 @@ where
                         Ok((checked, prepared))
                     });
                 if let Some(input) = mounted_input {
-                    session.retire_host_binding_owner(&input.binder);
+                    let session_root =
+                        carrier_mount_session_root(session, context.placement.lexical_scope)?;
+                    session.retire_host_binding_owner(&session_root, &input.binder);
                 }
                 prepared
             })
@@ -3451,7 +3457,7 @@ where
                 if let Err(error) =
                     session.tag_host_text_binding_in(scope, &bound_binder, job.clone())
                 {
-                    session.retire_host_binding_owner(&bound_binder);
+                    session.retire_host_binding_owner(&session_root, &bound_binder);
                     return Err(ResidentActorWorkbenchError::Resident(error));
                 }
                 Ok(binding)
@@ -7485,7 +7491,8 @@ where
         binder
     };
     if let Err(error) = session.hide_host_binding_in(scope, &binder) {
-        session.retire_host_binding_owner(&binder);
+        let session_root = carrier_mount_session_root(session, scope)?;
+        session.retire_host_binding_owner(&session_root, &binder);
         return Err(ResidentActorWorkbenchError::Resident(error));
     }
     Ok(MountedHostInput {
@@ -7683,7 +7690,9 @@ where
     if let Err(error) =
         session.tag_host_text_binding_in(context.placement.lexical_scope, &binder, job.to_owned())
     {
-        session.retire_host_binding_owner(&binder);
+        let session_root =
+            carrier_mount_session_root(session, context.placement.lexical_scope)?;
+        session.retire_host_binding_owner(&session_root, &binder);
         return Err(ResidentActorWorkbenchError::Resident(error));
     }
     Ok(())
@@ -8297,7 +8306,7 @@ mod request_tests {
 
     #[test]
     fn typed_host_mount_carriers_compile_and_bind() {
-        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let (mut session, context, source, session_root) = host_mount_fixture();
         let input = mount_json_input(
             &mut session,
             &context,
@@ -8425,7 +8434,7 @@ mod request_tests {
             text_display.contains("tool output:command job"),
             "Text/Job result: {text_display}"
         );
-        session.retire_host_binding_owner(&input.binder);
+        session.retire_host_binding_owner(session_root.path(), &input.binder);
     }
 
     /// Problem 1 of the compile-path design note: a split compile takes its

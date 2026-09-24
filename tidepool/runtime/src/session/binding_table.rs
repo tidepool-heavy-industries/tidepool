@@ -183,6 +183,14 @@ impl BindingIndex {
         self.live_modules.keys().cloned().collect()
     }
 
+    /// Whether any live binding still resolves to `module_name` — the exact
+    /// refcount `on_evict_record` maintains, read without mutating it. Used
+    /// to tell whether a just-evicted stub generation's module has become
+    /// fully unreferenced (see `PersistentSession::release_binding_roots`).
+    pub(super) fn is_module_live(&self, module_name: &str) -> bool {
+        self.live_modules.contains_key(module_name)
+    }
+
     /// Sorted, deduplicated `(identity, generation)` pairs for every live
     /// prepared binding with a recorded identity.
     pub(super) fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {

@@ -113,6 +113,16 @@ pub struct PersistentSession {
     /// every other live-module computation (unqualified imports, shadowing,
     /// eviction) exactly like a real bind's generation.
     stub_generations: std::collections::BTreeSet<u64>,
+    /// Stub generations [`Self::release_binding_roots`] just found fully
+    /// unreferenced (no live binding resolves to their `Val.G<g>` module
+    /// any more), drained by [`Self::take_retired_stub_sources`]. A caller
+    /// with the session root reaps each one's on-disk source
+    /// (`super::resident::ResidentSession::reap_evicted_stub_sources_in`) so
+    /// a later turn that still names the generation (a declaration module
+    /// that imported it before eviction) fails to find the module instead of
+    /// silently compiling the stub's own self-referential body — see
+    /// `mount_carrier_in`'s doc comment for why that body must never run.
+    retired_stub_sources: Vec<Generation>,
 }
 
 /// The committed fact from moving one name into the persistent binding store.
@@ -158,6 +168,7 @@ impl PersistentSession {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             nursery_size,
             stub_generations: std::collections::BTreeSet::new(),
+            retired_stub_sources: Vec::new(),
         }
     }
 
@@ -170,6 +181,17 @@ impl PersistentSession {
 
     fn is_stub_module(&self, module: SessionModule) -> bool {
         self.stub_generations.contains(&module.gen().0)
+    }
+
+    /// Drain the stub generations [`Self::release_binding_roots`] has found
+    /// fully unreferenced since the last drain. Each one's `.hs` source
+    /// should be deleted by a caller holding the session root; the
+    /// generation itself has already left [`Self::stub_generations`], so it
+    /// no longer appears in [`Self::live_val_modules`] or
+    /// [`Self::prepared_retained`] regardless of when (or whether) the file
+    /// is actually reaped.
+    pub(super) fn take_retired_stub_sources(&mut self) -> Vec<Generation> {
+        std::mem::take(&mut self.retired_stub_sources)
     }
 
     // -- accessors ---------------------------------------------------------
@@ -210,12 +232,27 @@ impl PersistentSession {
     pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
         let mut released = 0usize;
         for entry in entries {
+            let module = entry.module;
             // `on_evict` is the single point of truth for whether any OTHER
             // live entry still shares this root slot (an alias published by
             // `bind_alias_in`, or a same-batch sibling evicted alongside
             // this entry) -- replacing the old whole-table scan. It must run
             // exactly once per entry that leaves `live`, which this is.
             let safe_to_release = self.binding_index.on_evict(&entry);
+            // This is THE single point where any binding -- from ANY
+            // eviction path (a request-carrier retire, a scope close, a
+            // declaration replacing same-scope names, an expired
+            // observation) -- leaves `live`. A stub generation whose module
+            // no longer resolves from any live entry is retired here,
+            // synchronously with the bookkeeping: it stops being excluded
+            // from `--inject-val`-style exclusion via `stub_generations` at
+            // the exact moment it stops being reachable, matching a real
+            // binding's eviction instead of lingering as a phantom stub.
+            if self.is_stub_module(module) && !self.binding_index.is_module_live(&module.module_name())
+            {
+                self.stub_generations.remove(&module.gen().0);
+                self.retired_stub_sources.push(module.gen());
+            }
             if !safe_to_release {
                 continue;
             }

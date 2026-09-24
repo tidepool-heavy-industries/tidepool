@@ -2085,6 +2085,10 @@ where
         payload: HostPayload<'_>,
     ) -> Result<BoundBinder, ResidentError> {
         self.settle_dropped_custody();
+        // Reap any stub sources a prior eviction (in this or an earlier
+        // call) left pending -- opportunistic, since this call already has
+        // the session root a reap needs.
+        self.reap_evicted_stub_sources_in(session_root);
         let module = SessionModule::val(gen).module_name();
         let binder = BoundBinder {
             name: name.to_string(),
@@ -2110,41 +2114,65 @@ where
                 ))))
             })?;
         }
-        std::fs::write(&stub_path, stub_source).map_err(|error| {
-            ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
-                "host carrier stub {}: {error}",
-                stub_path.display()
-            ))))
-        })?;
+        tidepool_atomic_write::write_durable(&stub_path, stub_source.as_bytes()).map_err(
+            |error| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host carrier stub {}: {error}",
+                    error.path.display()
+                ))))
+            },
+        )?;
 
-        match payload {
-            HostPayload::Json(value) => {
-                let layout = json_runtime_layout(&carrier.prepared)?;
+        // write + mount is one transaction: a failed mount below must not
+        // leave a stub source on disk with no binding to authorize it --
+        // that source has never been marked a stub generation, so it would
+        // sit on the include path as an ordinary, undocumented home module.
+        let mount_result = match payload {
+            HostPayload::Json(value) => json_runtime_layout(&carrier.prepared).and_then(|layout| {
                 self.mount_host_value_in(scope, &binder, gen, carrier.code(), |engine, realm, _| {
                     engine.build_host_json(realm, value, &layout)
-                })?;
-            }
-            HostPayload::Text(text) => {
-                self.mount_host_value_in(
-                    scope,
-                    &binder,
-                    gen,
-                    carrier.code(),
-                    |engine, realm, table| engine.build_host_text(realm, text, table),
-                )?;
-            }
-            HostPayload::Job(value) => {
-                self.mount_host_value_in(
-                    scope,
-                    &binder,
-                    gen,
-                    carrier.code(),
-                    |engine, realm, table| engine.build_host_value(realm, value, table),
-                )?;
-            }
+                })
+            }),
+            HostPayload::Text(text) => self.mount_host_value_in(
+                scope,
+                &binder,
+                gen,
+                carrier.code(),
+                |engine, realm, table| engine.build_host_text(realm, text, table),
+            ),
+            HostPayload::Job(value) => self.mount_host_value_in(
+                scope,
+                &binder,
+                gen,
+                carrier.code(),
+                |engine, realm, table| engine.build_host_value(realm, value, table),
+            ),
+        };
+        if let Err(error) = mount_result {
+            std::fs::remove_file(&stub_path).ok();
+            return Err(error);
         }
         self.state.mark_stub_generation(gen);
         Ok(binder)
+    }
+
+    /// Delete the on-disk `.hs` source for every stub generation
+    /// [`super::persistent::PersistentSession::release_binding_roots`] has
+    /// found fully unreferenced since the last reap (any eviction path: a
+    /// request-carrier retire, a scope close, a declaration replacing a
+    /// same-scope name, an expired observation -- see
+    /// [`PersistentSession::take_retired_stub_sources`]). Best-effort: a
+    /// generation with no file (already reaped, or never on this session
+    /// incarnation -- see [`SessionLib::open`]'s stale-stub sweep) is not an
+    /// error.
+    ///
+    /// [`PersistentSession::take_retired_stub_sources`]: super::persistent::PersistentSession::take_retired_stub_sources
+    /// [`SessionLib::open`]: super::SessionLib::open
+    pub fn reap_evicted_stub_sources_in(&mut self, session_root: &Path) {
+        for gen in self.state.take_retired_stub_sources() {
+            let path = session_root.join(SessionModule::val(gen).relative_hs_path());
+            std::fs::remove_file(path).ok();
+        }
     }
 
     /// Record a host `Text` identity after its freshly minted compiler binder
@@ -2207,10 +2235,17 @@ where
 
     /// Withdraw a private request carrier from future source views while any
     /// prepared work that already leased it retains its exact generation.
-    pub fn retire_host_binding_owner(&mut self, binder: &BoundBinder) {
+    ///
+    /// `session_root` is used only to reap a stub generation's `.hs` source
+    /// if this retirement is what drops it to zero live references (see
+    /// [`Self::reap_evicted_stub_sources_in`]); an ordinary compiler-issued
+    /// binding has no stub source and this is then a no-op past the retire
+    /// itself.
+    pub fn retire_host_binding_owner(&mut self, session_root: &Path, binder: &BoundBinder) {
         let id = SessionVarId::from_extract(binder.var_id);
         self.state.retire_binding_owner(id);
         self.hidden_host_bindings.remove(&id);
+        self.reap_evicted_stub_sources_in(session_root);
     }
 
     /// The current materialized binding in `scope` carrying this exact host

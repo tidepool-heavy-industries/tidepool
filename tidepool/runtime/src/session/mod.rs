@@ -416,6 +416,30 @@ impl SessionLib {
     ) -> Result<SessionLib, SessionError> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
+        // Nothing but `ResidentSession::mount_carrier_in`'s hand-written
+        // stub writes a `.hs` source under `Tidepool/Session/Val` (an
+        // ordinary compiled bind is injected from its `.hi`, never a source
+        // file at this path). A fresh incarnation always starts with
+        // `stub_generations` empty and `val_gen` back at zero, so any file
+        // already there belongs to a dead incarnation and its generation
+        // number can be REISSUED for a real, `.hi`-backed bind -- which
+        // would then coexist with the stale stub source on the include
+        // path, an ambiguous or wrongly-resolved module for GHC's
+        // downsweep. Sweeping the whole directory on open (rather than
+        // tracking which files are stale) is what guarantees none of them
+        // can be found by a later turn, matching a resumed session's reset
+        // bookkeeping exactly.
+        if let Some(val_dir) = SessionModule::val(Generation(0))
+            .relative_hs_path()
+            .rsplit_once('/')
+            .map(|(dir, _)| root.join(dir))
+        {
+            match std::fs::remove_dir_all(&val_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(SessionLib {
             id,
             root,
