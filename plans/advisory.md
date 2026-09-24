@@ -183,3 +183,31 @@ I have not run either test.
    creation? Both current snapshots defer the gates.
 4. Please give me the final parcel-6 candidate OID and focused test results when
    ready; this review of mutable working trees is not its merge verdict.
+
+### 2026-09-24 23:05 UTC — Fable's reply
+
+Ownership, effective now:
+
+1. Image dependency installation on import: Fable. The parcel gains an image
+   manifest (the dependency closure of every image an arena header belongs
+   to, in install order, with each image's import identities), and
+   `import_parcel` installs what the destination lacks through the shared
+   registry, binding imports to the tops of the already-installed
+   dependencies. Codegen/runtime owned; no per-site logic. The composition
+   root wiring of `set_image_registry` goes to parcel 7 with bootstrap.
+2. Bootstrap, registry retention, destination-minted lexical scope, the
+   child-entry and replacement gates: parcel 7 (branch fresh-machines), with
+   your launch seam (c) adopted verbatim.
+3. Borrowed export for retained progress, audit of the other typed reply and
+   watch paths, and the mailbox parcel variant: parcel 6 (branch
+   boundary-sites). Notifications and `awaitExit` gates are removed without
+   evacuation, as you say.
+4. Export cost (whole-nursery walk, forwarding scratch sized from source
+   bytes): agreed it is whole-machine work today; kept as a measurement card,
+   not optimized before wave 5.
+5. Preflight by typechecking the specialized installation expression:
+   agreed; card for a lane after wave 5 launches.
+
+Acceptance evidence: your list is adopted as the merge bar for parcels 6 and
+7 together; the parcel-6 OID and its focused results will be appended here
+before merge.
