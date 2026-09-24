@@ -7540,9 +7540,22 @@ where
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
-    if !fresh_view.compile_relevant_eq(&snapshot.view)
-        || session.next_declaration_module() != Some(snapshot.candidate_module)
-    {
+    // `next_declaration_module()` is the session-wide declaration log's
+    // NEXT generation counter (`SessionLib::next_module`, one monotonic
+    // counter for the whole session, not scoped per lexical scope the way
+    // `library`/`compile_relevant_eq` already are — see
+    // `ActorCompileView::compile_relevant_eq`'s doc comment and
+    // `SessionCompileView::compile_relevant_eq`). It only names the
+    // candidate module THIS cell's own `Decl` item would claim; a cell
+    // with no `Decl` item never reads or writes that module, so another
+    // actor committing a declaration and advancing the counter cannot make
+    // this cell's own compile stale. Checking it unconditionally treated
+    // every actor's declaration as invalidating every other actor's
+    // in-flight split compile, which is what produced the stale-retry
+    // storm the split compile exists to avoid.
+    let candidate_stale = declaration_receipt.is_some()
+        && session.next_declaration_module() != Some(snapshot.candidate_module);
+    if !fresh_view.compile_relevant_eq(&snapshot.view) || candidate_stale {
         return Ok(CellReservation::Stale);
     }
     if value_item_count > 0 {
@@ -10708,6 +10721,68 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context_a, context_b, source, root)
+    }
+
+    /// A non-`Decl` cell in one actor must not go stale merely because a
+    /// DIFFERENT actor, in its own isolated scope, commits a declaration
+    /// between this cell's split snapshot and its reservation:
+    /// `next_declaration_module()` is the session-wide declaration log's
+    /// next-generation counter (`SessionLib::next_module`), but a cell with
+    /// no `Decl` item of its own never reads or writes that candidate
+    /// module (see `reserve_cell_generations`). Before this fix, the
+    /// unconditional `next_declaration_module()` comparison treated every
+    /// actor's declaration as staling every OTHER actor's in-flight split
+    /// compile, even one that could never have read or written the
+    /// generation that moved.
+    #[test]
+    fn cell_reservation_ignores_another_actors_declaration_between_snapshot_and_reserve() {
+        let (mut session, context_a, source, _root) = host_mount_fixture();
+        let scope_b = session.mint_isolated_scope();
+
+        // Actor A's split snapshot, taken BEFORE actor B declares —
+        // captures the CURRENT `next_declaration_module()` as this cell's
+        // (unused, since it has no `Decl` item) candidate.
+        let (source_a, snapshot_a) = snapshot_cell_split(
+            &mut session,
+            &context_a,
+            source,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("actor A's split snapshot");
+
+        // Actor B commits a declaration in its OWN isolated scope, between
+        // actor A's snapshot and its reservation — advancing the session-
+        // wide `next_declaration_module()` counter without touching actor
+        // A's own declaration chain, imports, or visible values.
+        session
+            .define_scoped_with_imports_in(
+                scope_b,
+                &["otherActorDecl x = x + (1 :: Int)"],
+                &SourceImports::default(),
+            )
+            .expect("actor B's declaration commits");
+
+        // Actor A's cell has no `Decl` item of its own, so reserving its
+        // generations must succeed even though the global candidate-module
+        // counter moved out from under its snapshot.
+        let reservation = reserve_cell_generations(
+            &mut session,
+            &context_a,
+            &source_a,
+            &[],
+            &snapshot_a,
+            1,
+            None,
+        )
+        .expect("reservation does not error");
+        assert!(
+            matches!(reservation, CellReservation::Ready(_)),
+            "another actor's declaration must not stale a cell with no Decl \
+             item of its own"
+        );
     }
 
     /// `ResidentActorWorkbench::prepare_cell` must detect a `Decl` item from
