@@ -337,10 +337,12 @@ pub(crate) enum LookupInterpretation {
     TypeSearch,
 }
 
-#[cfg(test)]
 impl LookupInterpretation {
-    /// What this interpretation reports when it finds nothing.
-    fn miss(self) -> &'static str {
+    /// What this interpretation reports when it finds nothing. Rendered by
+    /// the production lookup path (`lookup.rs`'s conversion to the wire
+    /// `LookupOutcome::Missing`), not only by tests: a bare "name" hides
+    /// which question was asked (see the module doc above `describe_misses`).
+    pub(crate) fn miss(self) -> &'static str {
         match self {
             Self::Name => "not in scope as a name",
             Self::Module => "no module of that name",
@@ -796,6 +798,20 @@ mod tests {
             availability: InspectionAvailability::Available,
             usage_pointer: None,
         }
+    }
+
+    #[test]
+    fn miss_phrasing_names_which_question_was_asked() {
+        // `LookupInterpretation::miss` used to be cfg(test)-only; the
+        // production path (`lookup.rs`'s conversion to the wire
+        // `LookupOutcome::Missing`) now renders this same text instead of a
+        // bare "name"/"module"/"type search" label.
+        assert_eq!(LookupInterpretation::Name.miss(), "not in scope as a name");
+        assert_eq!(LookupInterpretation::Module.miss(), "no module of that name");
+        assert_eq!(
+            LookupInterpretation::TypeSearch.miss(),
+            "no value with that type"
+        );
     }
 
     #[test]

@@ -207,14 +207,7 @@ impl From<lookup_tool::LookupResult> for LookupResult {
                 } => LookupOutcome::Missing(
                     attempted
                         .into_iter()
-                        .map(|a| {
-                            match a {
-                                lookup_tool::LookupInterpretation::Name => "name",
-                                lookup_tool::LookupInterpretation::Module => "module",
-                                lookup_tool::LookupInterpretation::TypeSearch => "type search",
-                            }
-                            .into()
-                        })
+                        .map(|a| a.miss().to_owned())
                         .collect(),
                     suggestions,
                 ),
@@ -259,6 +252,28 @@ pub(crate) fn queries(
             | lookup_tool::PreparedLookupKind::Rejected(_) => vec![],
         })
         .collect()
+}
+
+/// Bare names bound only while a typed request is being presented to this
+/// actor (`Tidepool.RequestWorkbenchScope`'s preamble, mounted only for the
+/// `Interactive` workbench). A miss on one of these looks exactly like any
+/// other unresolved name; `note_request_only_bindings` names the reason when
+/// no request is currently outstanding.
+pub(crate) const REQUEST_ONLY_BINDINGS: [&str; 4] =
+    ["respond", "sessionReply", "sessionInput", "reportProgress"];
+
+/// Append a hint to a miss on a request-only binding, queried while no
+/// typed request is outstanding for this actor. Call only when the caller
+/// has confirmed there is no such request; a lookup made while one is
+/// outstanding already resolves these names.
+pub(crate) fn note_request_only_bindings(batch: &mut LookupBatch) {
+    for result in &mut batch.results {
+        if REQUEST_ONLY_BINDINGS.contains(&result.query.as_str()) {
+            if let LookupOutcome::Missing(attempted, _) = &mut result.outcome {
+                attempted.push("mounted only while a request is pending".to_owned());
+            }
+        }
+    }
 }
 
 pub(crate) fn execute(
@@ -1074,6 +1089,53 @@ mod tests {
             }
             _ => panic!("expected the signature query to be rejected"),
         }
+    }
+    fn missing(query: &str) -> LookupResult {
+        LookupResult {
+            query: query.into(),
+            outcome: LookupOutcome::Missing(vec!["not in scope as a name".into()], vec![]),
+        }
+    }
+    #[test]
+    fn note_request_only_bindings_hints_a_miss_on_a_request_only_name() {
+        let mut batch = LookupBatch {
+            results: vec![missing("respond"), missing("otherName")],
+            candidates: vec![],
+            view: "view".into(),
+            issue: None,
+        };
+        note_request_only_bindings(&mut batch);
+        let LookupOutcome::Missing(attempted, _) = &batch.results[0].outcome else {
+            panic!("expected a miss");
+        };
+        assert!(
+            attempted
+                .iter()
+                .any(|line| line == "mounted only while a request is pending"),
+            "{attempted:?}"
+        );
+        // An unrelated miss is untouched.
+        let LookupOutcome::Missing(attempted, _) = &batch.results[1].outcome else {
+            panic!("expected a miss");
+        };
+        assert_eq!(attempted, &["not in scope as a name"]);
+    }
+    #[test]
+    fn note_request_only_bindings_leaves_a_found_request_only_name_alone() {
+        let mut batch = LookupBatch {
+            results: vec![LookupResult {
+                query: "respond".into(),
+                outcome: LookupOutcome::Found(vec![], false),
+            }],
+            candidates: vec![],
+            view: "view".into(),
+            issue: None,
+        };
+        note_request_only_bindings(&mut batch);
+        assert!(matches!(
+            batch.results[0].outcome,
+            LookupOutcome::Found(_, false)
+        ));
     }
 }
 

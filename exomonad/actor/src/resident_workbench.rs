@@ -3318,6 +3318,11 @@ where
         }
         .source(&self.access.source, &context);
         let type_modules = Arc::clone(&self.type_modules);
+        // Whether this workbench is currently presenting a typed request:
+        // `Tidepool.RequestWorkbenchScope`'s preamble binds `respond`/
+        // `sessionReply`/`sessionInput`/`reportProgress` only then, and a
+        // miss on one of those names outside that window should say so.
+        let request_pending = self.request.is_some();
         self.access
             .with_machine(context, move |session, context, _| {
                 let view = actor_compile_view(session, context, &source, &type_modules)?;
@@ -3332,7 +3337,7 @@ where
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
-                let answer = crate::lookup::execute(
+                let mut answer = crate::lookup::execute(
                     request,
                     provenance.fingerprint,
                     &prepared.imports,
@@ -3355,6 +3360,9 @@ where
                         .map_err(|error| error.to_string())
                     },
                 );
+                if !request_pending {
+                    crate::lookup::note_request_only_bindings(&mut answer);
+                }
                 session
                     .resume_classified(hole, answer)
                     .map_err(classify_resumption)

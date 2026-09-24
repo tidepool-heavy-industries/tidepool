@@ -525,6 +525,31 @@ enum ResidentBoot {
     Replacement(Box<replacement::PreparedSuccessor>),
 }
 
+/// A lightweight, cloneable record of a typed request presented to this
+/// actor and not yet settled by a reply or cancellation acknowledgement.
+/// Tracked independently of `standing` (which owns the actual suspended
+/// continuation, in `ResidentStanding::Interactive`) so workbench and lookup
+/// selection can keep serving `respond`/`sessionReply`/`sessionInput`
+/// bindings for the request even if `standing` itself has moved on to
+/// `Receiving` — the receive loop's own next-message wait does not by
+/// itself mean the earlier request was answered.
+#[derive(Clone)]
+struct OutstandingInteractive {
+    response: crate::ResponseExpectation,
+    request: crate::RequestId,
+    type_modules: Vec<String>,
+}
+
+impl OutstandingInteractive {
+    fn new(request: &crate::interactive_session::InteractiveSessionRequest) -> Self {
+        Self {
+            response: request.response.clone(),
+            request: request.request,
+            type_modules: request.type_modules(),
+        }
+    }
+}
+
 enum ResidentStanding {
     Workbench,
     Boot,
@@ -533,6 +558,25 @@ enum ResidentStanding {
     Interactive(crate::interactive_session::ResidentInteractiveAwait),
     Terminal,
     Paused(PausedHandler),
+}
+
+impl ResidentStanding {
+    /// A short label and the request this standing itself is tracking, if
+    /// any (an `Interactive` standing only — `Receiving` and the rest never
+    /// embed a request). Used only for status text and standing-transition
+    /// logging; `outstanding_interactive` on the actor is the source of
+    /// truth for whether a reply is owed.
+    fn describe(&self) -> (&'static str, Option<crate::RequestId>) {
+        match self {
+            Self::Workbench => ("workbench", None),
+            Self::Boot => ("boot", None),
+            Self::Receiving(_) => ("receiving", None),
+            Self::Tools(_) => ("tools", None),
+            Self::Interactive(awaiting) => ("interactive", Some(awaiting.request.request)),
+            Self::Terminal => ("terminal", None),
+            Self::Paused(_) => ("paused", None),
+        }
+    }
 }
 
 struct PausedHandler {
@@ -887,6 +931,9 @@ pub struct ResidentKernelBehavior<H, O> {
     pending_reply: Option<crate::RequestId>,
     pending_cancellation: Option<crate::RequestId>,
     suspended_cast: Option<SuspendedCast>,
+    /// The request `standing == Interactive` is presenting, tracked
+    /// independently of `standing` itself. See [`OutstandingInteractive`].
+    outstanding_interactive: Option<OutstandingInteractive>,
     child_exit_observations: ChildExitObservations,
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
@@ -942,6 +989,24 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn pending_in_tool_block(&self, target: ActorRef) -> bool {
         self.active_fork_boundary.is_some() && self.environment.fork_groups.is_pending_child(target)
+    }
+
+    /// Replace `standing`, logging the transition. The sole place `standing`
+    /// changes so every from/to pair, and the request either side is
+    /// tracking, is visible without instrumenting each call site by hand.
+    fn set_standing(&mut self, actor: ActorRef, next: ResidentStanding) -> ResidentStanding {
+        let previous = std::mem::replace(&mut self.standing, next);
+        let (from, from_request) = previous.describe();
+        let (to, to_request) = self.standing.describe();
+        tracing::info!(
+            ?actor,
+            from,
+            ?from_request,
+            to,
+            ?to_request,
+            "resident actor standing transition"
+        );
+        previous
     }
 
     fn record_child_observation(&mut self, child: ActorRef) {
@@ -1011,6 +1076,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             pending_reply: None,
             pending_cancellation: None,
             suspended_cast: None,
+            outstanding_interactive: None,
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
@@ -1216,7 +1282,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let (standing, current_request) = match &self.standing {
             ResidentStanding::Workbench => ("operator-workbench", None),
             ResidentStanding::Boot => ("booting", None),
-            ResidentStanding::Receiving(_) => ("receiving", None),
+            ResidentStanding::Receiving(_) => (
+                "receiving",
+                self.outstanding_interactive
+                    .as_ref()
+                    .map(|outstanding| outstanding.request),
+            ),
             ResidentStanding::Tools(_) => ("awaiting-tool", None),
             ResidentStanding::Interactive(awaiting) => {
                 ("request-active", Some(awaiting.request.request))
@@ -1681,6 +1752,41 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// The workbench a cell, tool call, or lookup should run against right
+    /// now, or `None` when nothing is installed to run one. A pending typed
+    /// request's `respond`/`sessionReply`/`sessionInput`/`reportProgress`
+    /// bindings are owed for as long as `outstanding_interactive` is set,
+    /// independent of `standing`: a native delivery or mailbox turn that
+    /// advances `standing` past `Interactive` to `Receiving` does not by
+    /// itself mean the request was answered. The sole selection point for
+    /// both [`Self::execute_workbench`] and lookup resolution so the two
+    /// cannot drift.
+    fn active_workbench(&self) -> Option<crate::ResidentActorWorkbench<H, O>> {
+        let live_standing = !matches!(
+            self.standing,
+            ResidentStanding::Terminal | ResidentStanding::Paused(_) | ResidentStanding::Boot
+        );
+        if let Some(outstanding) = self
+            .outstanding_interactive
+            .as_ref()
+            .filter(|_| live_standing)
+        {
+            return Some(self.environment.runner.workbench(
+                outstanding.response.clone(),
+                outstanding.request,
+                outstanding.type_modules.clone(),
+            ));
+        }
+        match &self.standing {
+            ResidentStanding::Workbench | ResidentStanding::Receiving(_)
+                if self.policy_installed =>
+            {
+                Some(self.environment.runner.application_workbench())
+            }
+            _ => None,
+        }
+    }
+
     fn schedule_request_deadline(
         &self,
         owner: ActorRef,
@@ -2144,6 +2250,13 @@ where
             }
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
                 ResidentStanding::Interactive(awaiting) if awaiting.request.request == request => {
+                    tracing::info!(
+                        actor = ?context.actor,
+                        from = "interactive",
+                        ?request,
+                        to = "boot",
+                        "resident actor standing transition"
+                    );
                     awaiting
                 }
                 standing => {
@@ -2165,6 +2278,10 @@ where
                     return Err(error);
                 }
             };
+            // The reply landed: this request no longer owes `respond`
+            // bindings, whatever `standing` now reads while the resumed
+            // program is stabilized.
+            self.outstanding_interactive = None;
             self.pending_program = Some(outcome);
             self.pending_reply = Some(request);
             Ok(())
@@ -2380,9 +2497,12 @@ where
                 continuation,
                 request,
             } => Box::pin(async move {
-                self.environment
-                    .runner
-                    .application_workbench()
+                // Use the same selection as workbench cell execution: a
+                // lookup issued while a typed request is outstanding must
+                // see `respond`/`sessionReply`/`sessionInput`/
+                // `reportProgress` as bound, not report them missing.
+                self.active_workbench()
+                    .unwrap_or_else(|| self.environment.runner.application_workbench())
                     .resume_lookup(
                         context.clone(),
                         continuation,
@@ -3742,7 +3862,7 @@ where
             {
                 ResidentActorBoundary::Completed => {
                     self.active_input = None;
-                    self.standing = ResidentStanding::Terminal;
+                    self.set_standing(context.actor, ResidentStanding::Terminal);
                     return Ok(KernelStep::Stop {
                         output: (),
                         terminal: completed_terminal(),
@@ -3759,7 +3879,23 @@ where
                     }
                     self.active_input = None;
                     self.input_origin = ActorInputOrigin::ActorStartup;
-                    self.standing = ResidentStanding::Receiving(receiver);
+                    if let Some(outstanding) = &self.outstanding_interactive {
+                        // The receive loop is advancing to its next native
+                        // message while a typed request presented earlier is
+                        // still unsettled (no reply, no cancellation
+                        // acknowledgement). `outstanding_interactive` is
+                        // tracked independently of `standing` precisely so
+                        // this is not a silent loss: workbench and lookup
+                        // selection keep serving that request's
+                        // `respond`/`sessionReply`/`sessionInput` bindings
+                        // until it settles, whatever `standing` reads.
+                        tracing::info!(
+                            actor = ?context.actor,
+                            request = ?outstanding.request,
+                            "resident actor receive loop advanced with an interactive request still outstanding"
+                        );
+                    }
+                    self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::Checkpoint {
@@ -3824,7 +3960,7 @@ where
                         self.publish_installation(installation);
                         self.policy_installed = true;
                     }
-                    self.standing = ResidentStanding::Tools(awaiting);
+                    self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentSession(session) => {
@@ -3912,11 +4048,14 @@ where
             contract.message(request.request, request.initial_user_message.as_deref());
         self.install_interactive_policy(kernel, context, Some(request_message.clone()))
             .await?;
-        self.standing =
+        self.outstanding_interactive = Some(OutstandingInteractive::new(&request));
+        self.set_standing(
+            context.actor,
             ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {
                 request,
                 hole,
-            });
+            }),
+        );
         let active_request = match &self.standing {
             ResidentStanding::Interactive(awaiting) => awaiting.request.request,
             _ => unreachable!(),
@@ -4253,7 +4392,7 @@ where
                 unreachable!("replacement bootstrap parks before initialization")
             }
             ResidentBoot::Workbench => {
-                self.standing = ResidentStanding::Workbench;
+                self.set_standing(context.actor, ResidentStanding::Workbench);
                 self.policy_installed = true;
                 return Ok(KernelStep::Continue(()));
             }
@@ -5564,34 +5703,24 @@ where
                 None,
             )));
         }
-        let workbench = match &self.standing {
-            ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
-                awaiting.request.response.clone(),
-                awaiting.request.request,
-                awaiting.request.type_modules(),
-            ),
-            ResidentStanding::Workbench | ResidentStanding::Receiving(_)
-                if self.policy_installed =>
-            {
-                self.environment.runner.application_workbench()
-            }
-            _ => {
-                return Err(workbench_failure(
+        let workbench = self
+            .active_workbench()
+            .ok_or_else(|| {
+                workbench_failure(
                     &[],
                     0,
                     request.items.len(),
                     ResidentActorWorkbenchError::ActorProtocol(
                         "actor application has no active Haskell workbench".into(),
                     ),
-                ));
-            }
-        }
-        .with_json_input(
-            request
-                .input
-                .as_ref()
-                .map(tidepool_runtime::session::normalize_workbench_input),
-        );
+                )
+            })?
+            .with_json_input(
+                request
+                    .input
+                    .as_ref()
+                    .map(tidepool_runtime::session::normalize_workbench_input),
+            );
         if let Some(call) = status_call {
             let view = crate::status_tool::parse(call.arguments).map_err(|error| {
                 workbench_failure(
@@ -6217,6 +6346,13 @@ where
                             ResidentStanding::Interactive(awaiting)
                                 if awaiting.request.request == request_id =>
                             {
+                                tracing::info!(
+                                    actor = ?context.actor,
+                                    from = "interactive",
+                                    request = ?request_id,
+                                    to = "boot",
+                                    "resident actor standing transition"
+                                );
                                 awaiting
                             }
                             ResidentStanding::Interactive(awaiting) => {
@@ -6292,6 +6428,9 @@ where
                         }
                     };
                     drop(awaiting);
+                    // The cancellation landed: this request no longer owes
+                    // `respond` bindings.
+                    self.outstanding_interactive = None;
                     self.pending_program = Some(outcome);
                     self.pending_cancellation = Some(request_id);
                     receipts.push(WorkbenchItemReceipt {
@@ -6627,7 +6766,7 @@ where
             detail = %failure.detail,
             "retaining paused handler custody"
         );
-        self.standing = ResidentStanding::Paused(failure);
+        self.set_standing(kernel.identity(), ResidentStanding::Paused(failure));
         if let Some(actor) = kernel.resolve(kernel.identity()) {
             actor.terminal().publish_paused(detail.to_owned());
         }
@@ -6956,7 +7095,7 @@ where
                 tool.name == invocation.name
                     && exomonad_tool::HostedTool::from(tool.clone()).accepts(&invocation.arguments)
             }) {
-                self.standing = ResidentStanding::Tools(awaiting);
+                self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                 return Err(KernelInvocationFailure::Rejected {
                     actor: context.actor,
                     detail: "unknown tool or invalid argument kind".into(),
@@ -7005,7 +7144,7 @@ where
                             actor: context.actor,
                             detail: "actor awaited another tool invocation without replying".into(),
                         })?;
-                        self.standing = ResidentStanding::Tools(next);
+                        self.set_standing(context.actor, ResidentStanding::Tools(next));
                         return Ok(KernelStep::Continue(result));
                     }
                     ResidentActorBoundary::Completed => {
@@ -7013,7 +7152,7 @@ where
                             actor: context.actor,
                             detail: "actor completed a tool invocation without replying".into(),
                         })?;
-                        self.standing = ResidentStanding::Terminal;
+                        self.set_standing(context.actor, ResidentStanding::Terminal);
                         return Ok(KernelStep::Stop {
                             output: result,
                             terminal: completed_terminal(),
@@ -7540,7 +7679,8 @@ where
             self.active_input = None;
             self.pending_checkpoint = None;
             self.checkpoint = None;
-            self.standing = ResidentStanding::Terminal;
+            self.outstanding_interactive = None;
+            self.set_standing(context.actor, ResidentStanding::Terminal);
             self.boot = None;
             self.sources.clear();
             let mut retained_errors = Vec::new();
