@@ -1888,24 +1888,24 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     for (questions, expected, effects) in [
         ("[first]", "[[\"question-a\"]]", "1"),
         ("[first]", "[[\"question-a\"]]", "1"),
-        ("[first,second]", "[[\"question-a\",\"question-b\"]]", "2"),
+        ("[first,second]", "[[\"question-a\", \"question-b\"]]", "2"),
     ] {
         committed(
             producer.policy.as_ref(),
-            &format!("reportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
+            &format!("import Tidepool.Agent.Reply (pollReply)\nreportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
         )
         .await;
-        let observed = committed(root.as_ref(), "view <- Actor.call forwarding WorkSnapshot\ninspectFull (map (map questionKey . workQuestions . sourceProgress) (collectedWork view))\nActor.call wakes (RoutingCount 0 id)").await;
+        let observed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map (map questionKey . workQuestions . sourceProgress) (collectedWork view))\nActor.call wakes (RoutingCount 0 id)").await;
         assert_eq!(observed["items"][1]["output"], expected, "{observed}");
         assert_eq!(observed["items"][2]["output"], effects, "{observed}");
     }
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- Actor.call forwarding WorkSnapshot\ninspectFull (map sourceStatus (collectedWork view))\nActor.drainActor forwarding\nActor.awaitExit forwarding").await;
+    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Project.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
     assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
     assert!(
-        closed["items"][3]["output"]
+        closed["items"][2]["output"]
             .as_str()
             .unwrap()
             .starts_with("Completed"),
@@ -3277,7 +3277,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     admit_notification(&message, key.into(), &inbox);
     publication.await.unwrap();
     let wrong_owner = committed(root.as_ref(),
-        "view <- Actor.call collector WorkSnapshot\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\npollNotification receipt"
+        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\npollNotification receipt"
     ).await;
     assert!(
         wrong_owner.to_string().contains("NotificationUnauthorized"),
@@ -3287,7 +3287,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let query = tokio::spawn(async move {
         committed(
             policy.as_ref(),
-            "Actor.call collector (WorkNotification receipt)",
+            "R.call (workNotification (R.client collector)) receipt",
         )
         .await
     });
@@ -3311,7 +3311,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
         "{result}"
     );
     let replaced = committed(root.as_ref(),
-        "collector <- Actor.replaceActor collector (workDefinition sources (notifyWork owner (workMessage id)))\nActor.call collector (WorkNotification receipt)"
+        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\nR.call (workNotification (R.client collector)) receipt"
     ).await;
     assert!(
         replaced.to_string().contains("NotificationUnauthorized"),
@@ -3319,13 +3319,13 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     );
     let retained = committed(
         root.as_ref(),
-        "inspectFull . length . workNotices <$> Actor.call collector WorkSnapshot",
+        "inspectFull . length . workNotices <$> readWork collector",
     )
     .await;
     assert_eq!(retained["items"][0]["output"], "1", "{retained}");
     committed(
         root.as_ref(),
-        "Actor.drainActor collector\nActor.awaitExit collector",
+        "finishWork collector",
     )
     .await;
     campaign.forest.shutdown().await;
