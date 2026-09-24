@@ -287,6 +287,10 @@
               postPatch = ''
                 sed -i '/^\[lints\]/,/^$/d' Cargo.toml
               '';
+              # Its unit tests read the Haskell protocol sources by relative
+              # path for tag parity; they run in-workspace under `just`, not
+              # against this standalone tree.
+              doCheck = false;
               # The daemon integration test needs the separately packaged GHC
               # worker; the final wrapper is exercised by the repository battery.
               cargoTestFlags = [ "--lib" ];
