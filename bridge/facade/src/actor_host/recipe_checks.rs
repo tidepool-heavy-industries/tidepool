@@ -413,13 +413,15 @@ impl Driver {
                     .installations
                     .get(&activation.id.actor())
                     .ok_or("activation without installation")?;
+                let model = actor
+                    .model
+                    .as_ref()
+                    .map(|model| super::resolve_model(&self.config, model))
+                    .transpose()
+                    .map_err(runtime_error)?;
                 cx.respond((
                     self.actor_key(actor.actor.identity())?,
-                    (
-                        actor.label.clone(),
-                        activation.message,
-                        actor.model.as_ref().map(|model| model.value().to_owned()),
-                    ),
+                    (actor.label.clone(), activation.message, model),
                 ))?
             }
             RecipeGit(actor, arguments) => cx.respond(

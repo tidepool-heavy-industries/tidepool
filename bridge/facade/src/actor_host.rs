@@ -1032,6 +1032,26 @@ fn worker_launch_resolver(config: &ActorHostConfig) -> exomonad_actor::WorkerLau
     Arc::new(move |request| resolve_worker_launch(&config, request, &fingerprint))
 }
 
+/// Resolve a requested `Model` (an alias into the frozen workspace's model
+/// table, or an already-literal provider model name) against the host
+/// config. Shared by the real launch preview below and by recipe checks'
+/// `RecipeActivation`, so both report the same resolved model string instead
+/// of one of them echoing the alias back unresolved.
+pub(crate) fn resolve_model(
+    config: &ActorHostConfig,
+    model: &exomonad_actor::Model,
+) -> std::result::Result<String, String> {
+    match model {
+        exomonad_actor::Model::Alias(alias) => config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|workspace| workspace.models.get(alias))
+            .cloned()
+            .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}")),
+        exomonad_actor::Model::Literal(model) => Ok(model.clone()),
+    }
+}
+
 fn resolve_worker_launch(
     config: &ActorHostConfig,
     request: &exomonad_actor::WorkerLaunchRequest,
@@ -1044,18 +1064,11 @@ fn resolve_worker_launch(
         request.instructions.as_deref(),
     );
     append_inheritance_authority(&mut instructions);
-    let model = match &request.model {
-        Some(exomonad_actor::Model::Alias(alias)) => Some(
-            config
-                .workspace_inputs
-                .as_ref()
-                .and_then(|workspace| workspace.models.get(alias))
-                .cloned()
-                .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}"))?,
-        ),
-        Some(exomonad_actor::Model::Literal(model)) => Some(model.clone()),
-        None => None,
-    };
+    let model = request
+        .model
+        .as_ref()
+        .map(|model| resolve_model(config, model))
+        .transpose()?;
     Ok(exomonad_actor::WorkerLaunchPreview {
         model: model.or_else(|| {
             (request.context == exomonad_actor::ForkContext::SelectedContext)
