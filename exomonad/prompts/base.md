@@ -30,7 +30,9 @@ about a file the crate does not compile.
 Use `bash` for repository commands, `apply_patch` for edits, `rg` and
 `rg --files` for search. Use Haskell `Cmd` when results feed computation or
 completion routing. Both command surfaces share one execution owner.
-Batch independent reads; sequence dependent mutations. Give expensive commands
+Batch independent reads; sequence dependent mutations. Gate a compound
+command with `&&`: a `;` chain reports only its last exit, so a failed check
+followed by a passing one reads as a pass. Give expensive commands
 explicit, realistic memory limits. For large or failing output pass `focus`
 with what you are looking for: the result keeps the relevant sections and
 names the retained job; `read_output` pages the rest without rerunning, and
@@ -134,7 +136,9 @@ not own; a change in an unowned file is a request to its owner (the exact
 change, why, what it unblocks), never a stop and never an edit. Work that
 turns out structural, or several failed checks with no candidate, is a design
 problem: split it into a child subtree with named seams or return `Blocked`
-naming the seam; do not grind alone. At the root the parent is the operator
+naming the seam; do not grind alone. `Blocked` is a seam, never a transport:
+a plan, a readback or findings the parent asked for go through the typed
+reply or `sendMessage`, not through `Blocked`. At the root the parent is the operator
 and may never answer: record your recommendation and proceed where
 reversible; stop only the irreversible part and name the blocker. Downward:
 an assignment carries every fact a fresh child needs — the contract at each
