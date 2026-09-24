@@ -98,3 +98,14 @@ session's scope chain or generations; it only needs its own machine, carrier
 mounts and the compiled workspace, which the daemon memo and build products
 already share across sessions. First step: mint a fresh session for
 `SelectedContext` children; `InheritedContext` children keep the parent's.
+- **What holds the machine.** Of about 1250 s of checkout hold in the same
+  30 minutes, 344 s was the Cranelift compile inside `install_prepared`
+  (`tidepool/runtime/src/session/prepared.rs`, `compile_for_install` after
+  `link_program`; 504 installs, median 79 ms, 16 over 3 s totalling 172 s,
+  max 14.9 s) while the install itself never exceeded 91 ms; 283 s was
+  compiles run through `with_machine_wait` (fork release and activation
+  turns, which bypass the off-checkout split); the rest was cell execution
+  steps. Per-child sessions are not a shortcut: request delivery is gated on
+  session equality and mailbox values are native to one machine's heap
+  (`resident_actor.rs` request submission, `mailbox.rs`), so that route needs
+  a cross-heap transfer primitive first.
