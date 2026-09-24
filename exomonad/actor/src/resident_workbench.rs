@@ -1916,33 +1916,35 @@ where
         let publication_resolved = resolved.clone();
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = "HostedToolEffects".into();
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: format!(
+                "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
+            ),
+        };
+        let verdict = TurnClassification {
+            kind: TurnKind::Bind,
+            binders: Vec::new(),
+            items: Vec::new(),
+        };
+        // Compile with the resident machine checked out only for the
+        // snapshot and the install-and-run step (`begin_fragment_split`),
+        // released for the GHC compile in between. The suspension this
+        // fragment produces is plain session-held data, so reading it back
+        // out below is an ordinary later checkout, the same shape every
+        // `resume_*` method already uses against a held hole.
+        let step = self
+            .begin_fragment_split(
+                compile_context.clone(),
+                source,
+                Vec::new(),
+                block,
+                Some(verdict),
+            )
+            .await?;
         self.access
-            .with_machine(context, move |session, context, _| {
-                let block = ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: format!(
-                        "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
-                    ),
-                };
-                let verdict = TurnClassification {
-                    kind: TurnKind::Bind,
-                    binders: Vec::new(),
-                    items: Vec::new(),
-                };
-                let step = begin_fragment(
-                    session,
-                    &compile_context,
-                    &source,
-                    RequestWorkbenchScope {
-                        response: None,
-                        request: None,
-                        type_modules: &[],
-                    },
-                    block,
-                    None,
-                    Some(&verdict),
-                )?;
+            .with_machine(compile_context, move |session, context, _| {
                 let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                     let detail = match step {
                         ResidentWorkbenchStep::Rejected(detail) => detail.output,
@@ -2858,6 +2860,126 @@ where
             .await
     }
 
+    /// Compile-and-run one scope-free Bind/Expr fragment — the tool
+    /// installer's own shape, with no request/response context — with the
+    /// resident machine checked out only for the snapshot and the
+    /// install-and-run step, released for the GHC compile in between. The
+    /// same split [`Self::bind_command_job`] applies to the Job carrier
+    /// compile (Problem 1 of the compile-path design note), reusing
+    /// [`crate::ActorCompileView::compile_relevant_eq`] to detect a stale
+    /// snapshot and recompile against a fresh one, up to `MAX_SPLIT_ATTEMPTS`
+    /// times; beyond that this falls back to the original single-checkout
+    /// [`begin_fragment`].
+    pub(crate) async fn begin_fragment_split(
+        &self,
+        context: crate::ActorSessionContext,
+        source: ActorWorkbenchSource,
+        type_modules: Vec<String>,
+        block: ParsedBlock,
+        verdict: Option<TurnClassification>,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        const MAX_SPLIT_ATTEMPTS: u32 = 3;
+        for _ in 0..MAX_SPLIT_ATTEMPTS {
+            let snapshot_source = source.clone();
+            let snapshot_type_modules = type_modules.clone();
+            let snapshot_block = block.clone();
+            let snapshot_verdict = verdict.clone();
+            let snapshot = self
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    snapshot_fragment_compile(
+                        session,
+                        context,
+                        &snapshot_source,
+                        &snapshot_type_modules,
+                        &snapshot_block,
+                        snapshot_verdict.as_ref(),
+                    )
+                })
+                .await?;
+
+            // No checkout held here: the GHC compile runs concurrently with
+            // every other actor's turn against this session.
+            let compile_source = source.clone();
+            let compile_block_text = block.clone();
+            let effects = context.haskell_effects_alias.clone();
+            let (snapshot, compiled) = spawn_blocking_in_span(move || {
+                let compiled = compile_fragment_off_checkout(
+                    &snapshot,
+                    &compile_source,
+                    &effects,
+                    &compile_block_text,
+                );
+                compiled.map(|compiled| (snapshot, compiled))
+            })
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+            let ready = match compiled {
+                CompiledBlock::Rejected(diagnostic) => {
+                    return Ok(ResidentWorkbenchStep::Rejected(diagnostic))
+                }
+                CompiledBlock::Ready(ready) => *ready,
+            };
+
+            let install_source = source.clone();
+            let install_type_modules = type_modules.clone();
+            let install_block = block.clone();
+            let outcome = self
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    let fresh_view = actor_compile_view(
+                        session,
+                        context,
+                        &install_source,
+                        &install_type_modules,
+                    )?;
+                    if !fresh_view.compile_relevant_eq(&snapshot.view) {
+                        return Ok(FragmentInstall::Stale);
+                    }
+                    let step = begin_ready_block(
+                        session,
+                        context,
+                        &install_source,
+                        RequestWorkbenchScope {
+                            response: None,
+                            request: None,
+                            type_modules: &install_type_modules,
+                        },
+                        install_block,
+                        ready,
+                        8192,
+                    )?;
+                    Ok(FragmentInstall::Installed(step))
+                })
+                .await?;
+            match outcome {
+                FragmentInstall::Installed(step) => return Ok(step),
+                FragmentInstall::Stale => continue,
+            }
+        }
+
+        // Contention exhausted the bounded split-compile retries — fall back
+        // to the original single-checkout path, whose one exclusive borrow
+        // cannot itself observe a stale view.
+        self.access
+            .with_machine(context, move |session, context, _| {
+                begin_fragment(
+                    session,
+                    context,
+                    &source,
+                    RequestWorkbenchScope {
+                        response: None,
+                        request: None,
+                        type_modules: &type_modules,
+                    },
+                    block,
+                    None,
+                    verdict.as_ref(),
+                )
+            })
+            .await
+    }
+
     /// Service structured inspection without holding the resident machine
     /// while the compiler worker runs. The suspended continuation remains the
     /// actor's exclusive turn, and the immutable compile-view fingerprint is
@@ -3015,6 +3137,161 @@ where
             return name;
         }
         index += 1;
+    }
+}
+
+/// The outcome of `begin_fragment_split`'s re-checkout install step.
+enum FragmentInstall {
+    Installed(ResidentWorkbenchStep),
+    /// The re-derived view no longer matches the one this compile ran
+    /// against; the caller must recompile against a fresh snapshot.
+    Stale,
+}
+
+/// A short-checkout snapshot for `begin_fragment_split`'s split compile:
+/// the exact source-side view this compile targets, its reserved value
+/// generation, the prepared programs still linked against every live
+/// prepared binding, the turn classification a bare-expression item resolves
+/// to (GHC-sourced when not already known), and — for an expression item —
+/// a fresh observation name unique among this scope's visible bindings at
+/// snapshot time. Mirrors `bind_command_job`'s `BindJobPrepare`.
+struct FragmentCompileSnapshot {
+    view: crate::ActorCompileView,
+    generation: tidepool_repr::Generation,
+    retained: Vec<(SymbolIdentity, u64)>,
+    verdict: Option<TurnClassification>,
+    observation_name: Option<String>,
+}
+
+/// Take the checkout-scoped snapshot a split fragment compile needs, then
+/// release the checkout. Read-only against the session except for the
+/// atomic generation reservation — mirrors `bind_command_job`'s snapshot
+/// step (Problem 1 of the compile-path design note).
+fn snapshot_fragment_compile<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    block: &ParsedBlock,
+    checked_verdict: Option<&TurnClassification>,
+) -> Result<FragmentCompileSnapshot, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let view = actor_compile_view(session, context, source, type_modules)?;
+    let generation = view.next_value_generation();
+    let verdict = match checked_verdict {
+        Some(checked) => Some(checked.clone()),
+        None => tidepool_runtime::session::classify_block(&[&block.source])
+            .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
+            .into_iter()
+            .next(),
+    };
+    if verdict.as_ref().is_none_or(|verdict| verdict.kind != TurnKind::Decl) {
+        session.reserve_value_generations_through(generation);
+    }
+    let retained = session.prepared_retained();
+    let observation_name = if verdict
+        .as_ref()
+        .is_some_and(|verdict| verdict.kind == TurnKind::Expr)
+    {
+        let visible = session.workbench_bindings_in(context.placement.lexical_scope);
+        let mut name = format!("observation{}", generation.0);
+        while visible.iter().any(|binding| binding.name == name) {
+            name.push('_');
+        }
+        Some(name)
+    } else {
+        None
+    };
+    Ok(FragmentCompileSnapshot {
+        view,
+        generation,
+        retained,
+        verdict,
+        observation_name,
+    })
+}
+
+/// The GHC-compile half of a split fragment compile: everything
+/// [`snapshot_fragment_compile`]'s checkout-only prerequisites make
+/// possible once they are already in hand. No session or checkout touched
+/// here; `begin_fragment_split`'s retry loop runs this with the machine
+/// released. Restricted to `begin_fragment`'s own calling convention (no
+/// binder pins, no staged cell prefix, no prologue/expression-plan
+/// override) — the shape the tool installer and every other
+/// `begin_fragment_split` caller compiles.
+fn compile_fragment_off_checkout(
+    snapshot: &FragmentCompileSnapshot,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    block: &ParsedBlock,
+) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
+    let prepared = source.prepare(&snapshot.view);
+    let mut templates = resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
+    let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+    let mut verdict = snapshot.verdict.clone();
+    let observation = if let Some(name) = &snapshot.observation_name {
+        let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
+        let lifts = vec![
+            tidepool_runtime::session::ExpressionLift::Effectful,
+            tidepool_runtime::session::ExpressionLift::Pure,
+        ];
+        templates = lifts
+            .into_iter()
+            .map(|lift| tidepool_runtime::session::TurnTemplate {
+                kind: tidepool_runtime::session::TemplateSelector::Bind,
+                source: tidepool_runtime::session::turn::assemble_observation_module(
+                    &preamble,
+                    "__result",
+                    effect_stack,
+                    "{{TURN}}",
+                    lift,
+                    None,
+                ),
+            })
+            .collect();
+        verdict = Some(TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec![name.clone()],
+            items: Vec::new(),
+        });
+        Some((name.clone(), ExpressionPresentation::Rendered, None))
+    } else {
+        None
+    };
+    let request = TurnRequest {
+        turn_text: &block.source,
+        templates: &templates,
+        include: &include_refs,
+        session_root: snapshot.view.session_root(),
+        inject_modules: &prepared.injected,
+        gen: snapshot.generation.0,
+        verdict,
+        target: None,
+        retained_imports: &snapshot.retained,
+    };
+    match run_turn(request) {
+        Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
+            result,
+            generation: snapshot.generation,
+            declaration_source: block.source.clone(),
+            declaration_imports: snapshot.view.workbench_imports(),
+            observation,
+        }))),
+        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
+            let label = format!("<cell item {}>", block.ordinal);
+            Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
+                &failure.error,
+                failure.attempted_source.as_deref(),
+                &block.source,
+                &label,
+            )))
+        }
+        Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
+            classify_compile(&failure.error).message,
+        )),
     }
 }
 
@@ -7141,6 +7418,225 @@ mod request_tests {
             session.host_text_binding_in(scope, "retry command job"),
             Some("job_binding2".into())
         );
+    }
+
+    /// The same split shape as `command_job_split_compile_then_install_
+    /// binds_the_same_as_mount_command_job`, but for an ordinary workbench
+    /// fragment (`begin_fragment`/`begin_ready_block`): snapshotting via
+    /// `snapshot_fragment_compile`, compiling off-checkout via
+    /// `compile_fragment_off_checkout`, revalidating, then installing and
+    /// running via `begin_ready_block` must commit the exact same output and
+    /// bindings as calling the original single-checkout `begin_fragment`
+    /// directly against an identically-constructed session.
+    #[test]
+    fn ordinary_fragment_split_compile_then_install_matches_single_checkout_begin_fragment() {
+        let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
+        let (mut direct_session, direct_context, direct_source, _direct_root) = host_mount_fixture();
+
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: "x <- pure (1 :: Int)".into(),
+        };
+        let verdict = TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec!["x".into()],
+            items: Vec::new(),
+        };
+
+        let snapshot = snapshot_fragment_compile(
+            &mut split_session,
+            &split_context,
+            &split_source,
+            &[],
+            &block,
+            Some(&verdict),
+        )
+        .expect("fragment compile snapshot");
+        let compiled = compile_fragment_off_checkout(
+            &snapshot,
+            &split_source,
+            &split_context.haskell_effects_alias,
+            &block,
+        )
+        .expect("fragment compiles off-checkout");
+        let ready = match compiled {
+            CompiledBlock::Ready(ready) => *ready,
+            CompiledBlock::Rejected(diagnostic) => {
+                panic!("fragment unexpectedly rejected: {diagnostic:?}")
+            }
+        };
+
+        let fresh_view =
+            actor_compile_view(&split_session, &split_context, &split_source, &[])
+                .expect("fresh view");
+        assert!(
+            fresh_view.compile_relevant_eq(&snapshot.view),
+            "no mutation happened between snapshot and install: views must still match"
+        );
+
+        let split_step = begin_ready_block(
+            &mut split_session,
+            &split_context,
+            &split_source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            block.clone(),
+            ready,
+            8192,
+        )
+        .expect("split compile installs and runs");
+
+        let direct_step = begin_fragment(
+            &mut direct_session,
+            &direct_context,
+            &direct_source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            block,
+            None,
+            Some(&verdict),
+        )
+        .expect("single-checkout begin_fragment installs and runs");
+
+        let ResidentWorkbenchStep::Committed {
+            output: split_output,
+            installed_bindings: split_bindings,
+            ..
+        } = split_step
+        else {
+            panic!("split compile-then-install did not commit");
+        };
+        let ResidentWorkbenchStep::Committed {
+            output: direct_output,
+            installed_bindings: direct_bindings,
+            ..
+        } = direct_step
+        else {
+            panic!("single-checkout begin_fragment did not commit");
+        };
+        assert_eq!(split_output, direct_output);
+        assert_eq!(split_bindings, direct_bindings);
+    }
+
+    /// A write to the same scope between an ordinary fragment's split-compile
+    /// snapshot and its re-checkout (here, another mount standing in for a
+    /// concurrent actor's install) must be detected by `compile_relevant_eq`
+    /// before installing the stale compile, and a fresh snapshot must still
+    /// recompile and install cleanly — the same invariant
+    /// `a_mutation_between_split_checkouts_invalidates_the_snapshot_and_
+    /// blocks_install` proves for the Job carrier path.
+    #[test]
+    fn a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile(
+    ) {
+        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let scope = context.placement.lexical_scope;
+
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: "x <- pure (1 :: Int)".into(),
+        };
+        let verdict = TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec!["x".into()],
+            items: Vec::new(),
+        };
+
+        let snapshot =
+            snapshot_fragment_compile(&mut session, &context, &source, &[], &block, Some(&verdict))
+                .expect("fragment compile snapshot");
+        let compiled = compile_fragment_off_checkout(
+            &snapshot,
+            &source,
+            &context.haskell_effects_alias,
+            &block,
+        )
+        .expect("fragment compiles off-checkout");
+        let ready = match compiled {
+            CompiledBlock::Ready(ready) => *ready,
+            CompiledBlock::Rejected(diagnostic) => {
+                panic!("fragment unexpectedly rejected: {diagnostic:?}")
+            }
+        };
+
+        // Stand in for another actor writing to this exact scope while this
+        // compile ran off-checkout: mount an unrelated Text carrier, which
+        // changes `visible_values`/`shadowing`.
+        mount_text_binding(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            "interloper",
+            "interloper text",
+        )
+        .expect("interloping carrier mounts");
+
+        let fresh_view =
+            actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        assert!(
+            !fresh_view.compile_relevant_eq(&snapshot.view),
+            "an interleaved mutation to the same scope must invalidate the snapshot"
+        );
+
+        // The split path must refuse to install against a stale view — no
+        // binding named by the compiled fragment ever reaches the workbench.
+        assert!(session
+            .workbench_bindings_in(scope)
+            .into_iter()
+            .all(|binding| binding.name != "x"));
+        drop(ready);
+
+        // A fresh snapshot recompiles and installs cleanly — the
+        // bounded-retry recovery `begin_fragment_split` relies on.
+        let retry_snapshot =
+            snapshot_fragment_compile(&mut session, &context, &source, &[], &block, Some(&verdict))
+                .expect("retry snapshot");
+        let retry_compiled = compile_fragment_off_checkout(
+            &retry_snapshot,
+            &source,
+            &context.haskell_effects_alias,
+            &block,
+        )
+        .expect("retry compiles off-checkout");
+        let retry_ready = match retry_compiled {
+            CompiledBlock::Ready(ready) => *ready,
+            CompiledBlock::Rejected(diagnostic) => {
+                panic!("retry compile unexpectedly rejected: {diagnostic:?}")
+            }
+        };
+        let retry_fresh_view =
+            actor_compile_view(&session, &context, &source, &[]).expect("retry fresh view");
+        assert!(retry_fresh_view.compile_relevant_eq(&retry_snapshot.view));
+
+        let step = begin_ready_block(
+            &mut session,
+            &context,
+            &source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            block,
+            retry_ready,
+            8192,
+        )
+        .expect("retry installs and runs");
+        let ResidentWorkbenchStep::Committed {
+            installed_bindings, ..
+        } = step
+        else {
+            panic!("retry did not commit");
+        };
+        assert_eq!(installed_bindings, vec!["x".to_string()]);
     }
 
     fn introspection_error_table() -> DataConTable {
