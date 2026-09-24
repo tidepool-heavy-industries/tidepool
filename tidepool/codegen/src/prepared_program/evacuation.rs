@@ -12,7 +12,13 @@
 //! images' import slots hold, copied in the same pass so the imported
 //! copies share structure with the value (an image installs on the
 //! importer bound to the copies, so a closure over an earlier binding sees
-//! the sender's snapshot of that binding). Static references and code are
+//! the sender's snapshot of that binding). An image the importer already
+//! installed keeps its root block and import bindings, whether those slots
+//! hold package tops or earlier notebook bindings: transferred code runs in
+//! the importer's existing import environment, which the first parcel that
+//! installed the image seeded, and a later parcel's copies of those slots
+//! are released. Two closures from one image on one machine therefore
+//! always share one environment. Static references and code are
 //! shared by address with any machine that installed the same image
 //! (`CompiledProgram::shared_statics`). What never crosses: a continuation
 //! or an object under evaluation (typed refusals), and identity: a MutVar
