@@ -3011,7 +3011,8 @@ where
                         .cleanup_campaign_metadata(owner, &targets);
                     forgotten_responses.extend(forgotten.forgotten_responses);
                     forgotten_watches.extend(forgotten.forgotten_watches);
-                    self.publish_watch_notifications(forgotten.watch_notifications).await;
+                    self.publish_watch_notifications(forgotten.watch_notifications)
+                        .await;
                 }
                 forgotten_responses.sort_unstable();
                 forgotten_watches.sort_unstable();
@@ -3715,10 +3716,10 @@ where
                 request,
                 value,
             } => Box::pin(async move {
-                let published = self
-                    .environment
-                    .requests
-                    .publish_progress(context.actor, request, value);
+                let published =
+                    self.environment
+                        .requests
+                        .publish_progress(context.actor, request, value);
                 let outcome = match published {
                     Ok((revision, notifications)) => {
                         self.publish_watch_notifications(notifications).await;

@@ -2590,6 +2590,93 @@ pub(crate) fn validate_workspace_program(
     Ok(())
 }
 
+/// One configured launchable role: the label diagnostics name it by, and the
+/// constructor for its effect row.
+type LaunchableRole = (&'static str, fn() -> exomonad_actor::EffectiveRole);
+
+/// Every role `exomonad check --workspace` can launch a child into, paired
+/// with the label its diagnostics name it by. Root is not among them: it is
+/// never admitted as a child, so no role row can omit anything from it.
+const LAUNCHABLE_ROLES: &[LaunchableRole] = &[
+    ("research", exomonad_actor::EffectiveRole::research),
+    ("coding", exomonad_actor::EffectiveRole::coding),
+    ("scaffolding", scaffolding_default),
+    ("integration", exomonad_actor::EffectiveRole::integration),
+];
+
+fn scaffolding_default() -> exomonad_actor::EffectiveRole {
+    // A scaffolding role's effect row does not depend on the descendant
+    // budget passed here; any budget answers the same row.
+    exomonad_actor::EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
+        maximum_depth: 0,
+        maximum_active_children: Some(0),
+    })
+}
+
+/// Resolve the workspace's installed agent spec and report, for every
+/// launchable child role, each effect its `Member` constraints require that
+/// the role's effect row does not hold — a diagnostic naming the role, the
+/// missing effect, and the spec entry, not a silent grant.
+///
+/// A spec found by convention (`AgentSpec.hs`) or named by a configured entry
+/// point (`[haskell] spec`/`tools`) are both covered: whichever
+/// `exomonad_actor::agent_spec::resolve` would install for an actor with no
+/// checkout of its own is exactly what a project root installs, and what
+/// every configured child role's spec is compiled from. A workspace with no
+/// spec at all has no tool surface to require anything, so it reports
+/// nothing.
+pub(crate) fn spec_effect_preflight(
+    workspace: &crate::exomonad::workspace::FrozenWorkspace,
+) -> Vec<String> {
+    let roots = workspace.captured_source_roots().to_vec();
+    let resolved = exomonad_actor::agent_spec::resolve(
+        &roots,
+        workspace.spec.as_deref(),
+        workspace.tools.as_deref(),
+    );
+    let Some(entry) = resolved.entry.as_deref() else {
+        return Vec::new();
+    };
+    let Some((_, value)) = entry.rsplit_once('.') else {
+        return Vec::new();
+    };
+    let source = resolved
+        .file
+        .as_deref()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .or_else(|| find_module_source(&roots, entry));
+    let Some(source) = source else {
+        return Vec::new();
+    };
+    let required = exomonad_actor::agent_spec::required_effects_from_signature(&source, value);
+    if required.is_empty() {
+        return Vec::new();
+    }
+    LAUNCHABLE_ROLES
+        .iter()
+        .flat_map(|(label, role)| {
+            role()
+                .missing_effect_names(&required)
+                .into_iter()
+                .map(move |effect| {
+                    format!("role {label} lacks effect {effect} required by {entry}")
+                })
+        })
+        .collect()
+}
+
+/// Find the `.hs` file a module entry point resolves to among `roots`, the
+/// same directories GHC would search — used when the spec's entry names a
+/// module (`[haskell] spec`/`tools`) rather than a file discovery already
+/// found (`AgentSpec.hs`, carried on `ResolvedSpec::file`).
+fn find_module_source(roots: &[PathBuf], entry: &str) -> Option<String> {
+    let (module, _) = entry.rsplit_once('.')?;
+    let relative = PathBuf::from(module.replace('.', "/")).with_extension("hs");
+    roots
+        .iter()
+        .find_map(|root| std::fs::read_to_string(root.join(&relative)).ok())
+}
+
 /// Compile the driver against a CANDIDATE source revision. This is the whole
 /// reload check: GHC's own module graph, rooted at the driver and every
 /// configured workspace module, decides whether the candidate's
@@ -5440,7 +5527,8 @@ async fn deliver_pending_checked(
         // and not resolving), any settlement/watch notice queued behind it
         // would otherwise never reach the model. Surface those out of band
         // before attempting the stuck row itself.
-        deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation).await?;
+        deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
+            .await?;
         return deliver_tracked_message(
             actor,
             inbox,
@@ -5613,11 +5701,12 @@ async fn deliver_out_of_order_notices(
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
 ) -> Result<(), String> {
     let beyond_inbox = Arc::clone(inbox);
-    let beyond =
-        tidepool_runtime::spawn_blocking_in_span(move || beyond_inbox.legacy_notices_beyond_barrier())
-            .await
-            .map_err(|error| format!("inbox reader task: {error}"))?
-            .map_err(|error| error.to_string())?;
+    let beyond = tidepool_runtime::spawn_blocking_in_span(move || {
+        beyond_inbox.legacy_notices_beyond_barrier()
+    })
+    .await
+    .map_err(|error| format!("inbox reader task: {error}"))?
+    .map_err(|error| error.to_string())?;
     if beyond.is_empty() {
         return Ok(());
     }
@@ -5634,7 +5723,10 @@ async fn deliver_out_of_order_notices(
         .push(cwd, thread, &rendered)
         .await
         .map_err(|error| error.to_string())?;
-    let sequences = beyond.iter().map(|message| message.sequence).collect::<Vec<_>>();
+    let sequences = beyond
+        .iter()
+        .map(|message| message.sequence)
+        .collect::<Vec<_>>();
     inbox.mark_surfaced_out_of_order(sequences.iter().copied());
     tracing::info!(
         actor = ?actor,

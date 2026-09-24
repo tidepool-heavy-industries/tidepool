@@ -446,6 +446,28 @@ impl EffectiveRole {
             .all(|effect| self.effect_keys.contains(effect))
     }
 
+    /// Names out of `required` — Haskell effect names, spelled the way a
+    /// spec's `Member` constraints and [`ActorEffectKey::haskell_name`] both
+    /// spell them — that this role's effect row does not hold.
+    ///
+    /// The one place a required-effect name is checked against a role's
+    /// granted effect row; `exomonad check --workspace` and, at admission,
+    /// child launch both resolve through this rather than each keeping their
+    /// own copy of the comparison.
+    #[must_use]
+    pub fn missing_effect_names(&self, required: &[String]) -> Vec<String> {
+        required
+            .iter()
+            .filter(|name| {
+                !self
+                    .effect_keys
+                    .iter()
+                    .any(|key| key.haskell_name() == name.as_str())
+            })
+            .cloned()
+            .collect()
+    }
+
     #[must_use]
     pub fn respects_role_ceiling(&self) -> bool {
         let ceiling = match self.role {
@@ -500,6 +522,21 @@ const fn workspace_rank(access: WorkspaceAccess) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spec that requires `Journal` names it as missing for a child role
+    /// whose effect row omits it, and names nothing for a role that holds it
+    /// — the fact the root's own AgentSpec/Journal friction turned on.
+    #[test]
+    fn missing_effect_names_reports_only_what_the_role_lacks() {
+        let required = vec!["Commands".to_owned(), "Journal".to_owned()];
+        assert_eq!(
+            EffectiveRole::coding().missing_effect_names(&required),
+            vec!["Journal".to_owned()]
+        );
+        assert!(EffectiveRole::root()
+            .missing_effect_names(&required)
+            .is_empty());
+    }
 
     #[test]
     fn unlimited_concurrency_inherits_without_escaping_finite_authority() {
