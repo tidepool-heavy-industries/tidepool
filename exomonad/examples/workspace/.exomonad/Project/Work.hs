@@ -10,7 +10,7 @@
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
-  , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
+  , lunaTask, lunaTaskFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
   , candidateAtSubmission
   , requestIncorporation, consultDesign
   , settledValue
@@ -82,12 +82,26 @@ updateDecision
   => Response result -> AcceptedDecision -> Eff effects (Either ReplyError RequestUpdate)
 updateDecision response = updateRequest response . decisionContext
 
+-- Model placement: the "luna" alias is the cheap, fast tier and the default
+-- for bounded implementation and review children; fork many of them. A Luna
+-- child starts from fresh context selected from its Task, since a different
+-- model cannot reuse this conversation. The "executor" alias (Sol) inherits
+-- context and is for children that own design judgment or an integration
+-- loop of their own.
+lunaTask :: Label -> Task -> Branch CodingEffects Task result
+lunaTask label = lunaTaskFrom label currentCheckout
+
 solTask :: Label -> Task -> Branch CodingEffects Task result
 solTask label = solTaskFrom label currentCheckout
 
 -- Source and context are independent choices. currentCheckout selects the
 -- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
+lunaTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+lunaTaskFrom label source task = withInstructions (projectPrompt "task") $
+  withContext (selected taskContext) $ withModel "luna" $ withEffort Medium $
+  coding source ((assignment label task) { report = Silent })
+
 solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label source task = withInstructions (projectPrompt "task") $
   withContext inherited $ withModel "executor" $ withEffort Medium $
@@ -97,7 +111,7 @@ implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (solTask [label|implement|] task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
@@ -116,7 +130,7 @@ reviewCandidate
   => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "executor" $ withEffort Medium $
+  withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
     ((assignment [label|review|] (ReviewTask task candidate owner)) { report = Silent })
 

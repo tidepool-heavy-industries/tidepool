@@ -70,8 +70,8 @@ Start from the accepted `Task` and a checked shared source. Bind the shared plan
 once. An ordinary local selector can make short, disjoint assignments without
 a new workspace workstream registry. This cell assumes `baseline :: GitOid` is bound
 to the source being split. Both branches deliberately inherit the current
-reasoning and use the live root source; `solTaskFrom` selects the executor alias
-and Medium effort. The current branch is checkpointed before capture.
+reasoning and use the live root source; `lunaTaskFrom` selects the cheap `luna` alias
+and Medium effort (`solTaskFrom` is the Sol-tier variant for design-owning children). The current branch is checkpointed before capture.
 
 ```haskell
 data WorkSlice = InterfaceSlice | ConsumerSlice deriving (Show, Eq)
@@ -99,7 +99,7 @@ let sliceTask slice = shared
       { obligation = sliceName slice <> ": implement and check the assigned slice"
       , ownedPaths = slicePaths slice
       }
-let sliceBranch slice = solTaskFrom (sliceName slice) projectHead (sliceTask slice)
+let sliceBranch slice = lunaTaskFrom (sliceName slice) projectHead (sliceTask slice)
 ((interface, interfaceProgress), (consumer, consumerProgress)) <- unfold group $
   (,) <$> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch InterfaceSlice)
       <*> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch ConsumerSlice)
@@ -117,7 +117,7 @@ state <- readWork router
 inspectFull (workSnapshotSummary candidateSummary state)
 ```
 
-`solTaskFrom` sets `report = Silent` because the record actor owns settlement
+`lunaTaskFrom` sets `report = Silent` because the record actor owns settlement
 delivery. Routine progress stays in `state`; a question, unavailable result,
 terminal result, or candidate checkpoint wakes the owner. On wake, inspect the
 relevant candidate and source receipt before incorporating it. Mark handled

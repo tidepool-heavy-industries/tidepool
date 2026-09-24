@@ -91,11 +91,12 @@ Observation expiry may leave execution alive. Register a completion route before
 leaving unattended work; starting a command alone does not arrange a model wake.
 
 Delegate bounded independent obligations after fixing shared semantics, types,
-source baseline, acceptance, and integration ownership. Use typed `unfold`;
+source baseline, acceptance, and integration ownership. Bounded children
+use the cheap `luna` tier with fresh context (`lunaTask`) and recurse. Use typed `unfold`;
 its applicative frontier starts after the admitting cell returns. Never await
-children inside their admission cell. Context inheritance is a snapshot, not
-shared mutable scope; later definitions and decisions require explicit delivery.
-Effect membership does not confer runtime authority. Inherited bindings keep
+children inside their admission cell. Context inheritance is a snapshot;
+later definitions and decisions require explicit delivery.
+Inherited bindings keep
 their full values and handles: inspect shared results and retained output, and
 register your own watch for a pending response. Control remains with the owner
 or an explicit grant; never drain another actor's listener. A Ready wake asks

@@ -9,24 +9,29 @@ contents. A child using `withContext (selected taskContext)` reads relevant skil
 itself or receives the needed facts in its assignment. Its request-local bindings
 come from its own assignment, not the parent's history.
 
-`solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
-builds a branch value. `Task` is a record, not a module; use `taskSource`,
+`lunaTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
+builds a branch value on the `luna` alias: the cheap, fast tier, and the default
+for bounded implementation and review children, so fork many of them in one
+frontier. It selects fresh context from the Task (a Luna cannot reuse a Sol
+conversation), so the assignment must carry every fact the child needs.
+`solTaskFrom` has the same shape on the `executor` (Sol) alias with inherited
+context; use it only for a child that owns design judgment or its own
+integration loop. `Task` is a record, not a module; use `taskSource`,
 `planPath`, `obligation`, and `acceptedDecisions` directly.
 
 Given your authored `task :: Task` and `source :: WorktreeSeed`, this launches a
-fresh Sol Medium owner returning `Outcome Candidate`, with a progress stream:
+fresh Luna Medium implementer returning `Outcome Candidate`, with a progress stream:
 
 ```haskell
 let workerLabel = [label|implementation|]
-let branch = withEffort Medium $ withContext (selected taskContext) $ solTaskFrom workerLabel source task
+let branch = lunaTaskFrom workerLabel source task
 (worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
 ```
 
 Choose `source = currentCheckout` for the executing actor's checkout (root
 project checkout or child's bound checkout), `projectHead` for the project source
-explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Omit
-`withContext (selected taskContext)` when related children should inherit your
-completed reasoning. Fresh context is useful after bulky reconciliation or for
+explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Use
+`solTaskFrom` when a related Sol child should inherit your completed reasoning. Fresh context is useful after bulky reconciliation or for
 independent review; descendants within a focused subtree can inherit.
 
 Compose independent children with `((,) <$> child a <*> child b)` inside one

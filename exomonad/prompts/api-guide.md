@@ -39,9 +39,8 @@ admission checkpoints eligible edits on the source branch without hooks or
 checks; inspect omission/fallback receipts.
 Commit useful units without mistaking checkpoints for accepted delivery.
 
-`withModel "executor"` selects a workspace alias; `withModel (Literal "provider-model")`
-selects an explicit model. `withEffort Medium` sets effort. Omitted settings follow
-the native launch selector's defaults; `previewBranch` shows resolved policy.
+`withModel "luna"` selects a workspace alias; `withModel (Literal "provider-model")`
+selects an explicit model (`luna`: cheap tier; `executor`: Sol tier). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
 `withContext (selected render)` selects fresh context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
