@@ -201,10 +201,6 @@ struct ExternalStorage {
     base: *mut u8,
     layout: Layout,
     published_offset: usize,
-    #[allow(
-        dead_code,
-        reason = "consumed by the independently integrated major collector"
-    )]
     kind: ExternalStorageKind,
     logical_len: usize,
     generation: ExternalGeneration,
@@ -212,10 +208,6 @@ struct ExternalStorage {
 }
 
 /// Validated pointer-bearing slots in one tracked external payload.
-#[allow(
-    dead_code,
-    reason = "consumed by the independently integrated major collector"
-)]
 pub(crate) struct ExternalPayloadView {
     pub(crate) logical_len: usize,
     pub(crate) pointer_slots: tidepool_heap::external_storage::ExternalPointerSlots,
@@ -223,10 +215,6 @@ pub(crate) struct ExternalPayloadView {
 
 /// Allocation-bearing sweep plan produced before a major collector commits.
 /// Fields remain private so callers cannot fabricate a partial dead set.
-#[allow(
-    dead_code,
-    reason = "consumed by the independently integrated major collector"
-)]
 pub(crate) struct ExternalSweepPlan {
     revision: u64,
     allocated_objects: usize,
@@ -1779,7 +1767,6 @@ impl MachineState {
     /// # Safety
     /// The returned borrow is bounded by the synchronous invocation scope
     /// that installed the stable compiled-program owner.
-    #[allow(dead_code, reason = "used by the prepared JSON intrinsic sink")]
     pub(crate) unsafe fn active_intrinsic_program(
         &self,
     ) -> Option<&crate::prepared_program::CompiledProgram> {
@@ -2937,10 +2924,6 @@ impl MachineState {
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "consumed by the independently integrated major collector"
-    )]
     fn validate_external_record(
         published: *mut u8,
         record: &ExternalStorage,
@@ -3057,10 +3040,6 @@ impl MachineState {
 
     /// Validate a wrapper's published payload identity before exposing boxed
     /// reference slots to graph traversal. Byte payloads yield no heap edges.
-    #[allow(
-        dead_code,
-        reason = "consumed by the independently integrated major collector"
-    )]
     pub(crate) fn external_payload_view(
         &self,
         published: *mut u8,
@@ -3139,10 +3118,7 @@ impl MachineState {
 
     /// Validate the complete ledger and stage the exact unmarked allocation
     /// identities. Staging allocates; commit below does not.
-    #[allow(
-        dead_code,
-        reason = "consumed by the independently integrated major collector"
-    )]
+    #[cfg(test)]
     pub(crate) fn plan_external_sweep(
         &self,
         marked: &HashSet<*mut u8>,
@@ -3173,10 +3149,6 @@ impl MachineState {
     /// Commit a previously validated sweep without allocating. The major
     /// collector holds exclusive machine access between plan and commit; the
     /// counters still fence accidental stale-plan reuse before any mutation.
-    #[allow(
-        dead_code,
-        reason = "consumed by the independently integrated major collector"
-    )]
     pub(crate) fn commit_external_sweep(
         &self,
         plan: ExternalSweepPlan,
