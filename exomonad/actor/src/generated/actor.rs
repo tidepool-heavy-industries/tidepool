@@ -14,6 +14,7 @@ use tidepool_bridge_derive::FromHaskell;
 #[allow(
     dead_code,
     clippy::enum_variant_names,
+    clippy::large_enum_variant,
     clippy::type_complexity,
     reason = "decode-only shape mirrors the Haskell GADT constructor's nested \
               argument tuple exactly; a local type alias would name a shape \

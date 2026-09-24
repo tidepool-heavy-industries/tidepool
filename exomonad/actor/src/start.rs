@@ -500,6 +500,7 @@ fn child_session_eligibility(
 /// string-literal escaping (`escape_workbench_haskell_string`) rather than
 /// depending on it, since a wire label is untrusted the same way workbench
 /// key text is.
+#[allow(dead_code, reason = "wired by the child-session launch parcel")]
 fn escape_haskell_string_literal(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     for ch in text.chars() {
@@ -526,6 +527,7 @@ fn escape_haskell_string_literal(text: &str) -> String {
 /// specific shape, alone, can carry a standalone signature at all), so
 /// `effect_stack` below names it exactly; nothing here depends on the
 /// session's own declared workbench effects.
+#[allow(dead_code, reason = "wired by the child-session launch parcel")]
 pub(crate) fn run_unbound_entry_reconstruction<H, O>(
     session: &mut ResidentSession<H, O>,
     session_root: &Path,

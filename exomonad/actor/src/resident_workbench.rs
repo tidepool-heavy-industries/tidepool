@@ -1761,6 +1761,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// fails, or `session_id` somehow already names a live entry (it is
     /// minted fresh by the caller — `tidepool_repr::SessionId` collision is
     /// not expected, but silently overwriting a live session is never safe).
+    #[allow(dead_code, reason = "wired by the child-session launch parcel")]
     pub(crate) fn spawn_child_session(
         &self,
         session_id: tidepool_repr::SessionId,
