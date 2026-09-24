@@ -315,3 +315,28 @@ the run with session size.
   request), not per effect. The daemon pool is not the bottleneck (slot 2
   never served). Missing spans: the command service's process launch, and
   one per-cell sum of checkout waits.
+
+## Per-actor machines with an evacuation bus (2026-09-24, direction chosen)
+
+- Decision: remove the shared machine by giving each actor its own
+  `PreparedMachine`, and make the bus between machines a copying-GC
+  primitive — evacuate the graph reachable from a handle into another heap
+  (constructors copied; closures and thunks copied with shared code;
+  MutVars snapshotted; static-region objects shared by reference, never
+  copied). Mailbox delivery, replies (`RootCustody`/`ExitCell`) and exits
+  become evacuate-on-delivery, which dissolves the three walls the
+  per-child-sessions lane hit. Boundaries are quiescent, so no blackhole
+  crosses. Arbitrary values still cross: anything the heap can hold, at a
+  cost proportional to the reachable non-static graph; only identity of
+  mutable cells changes (copy, not share). Fable drives the GC-invariant
+  work; Sonnet takes mechanical parcels. Frozen regions (generalizing
+  `static_region` to live values: shared workspace image, O(1) context
+  inheritance, overlay tables for thunk updates) stay the longer target.
+- Companion facts from the Opus reviews: the after-tool hook never runs for
+  `haskell` cells (`run_after_tool` only takes hosted tool calls,
+  resident_actor.rs ~5370); informational tools (`sendMessage`, `readWork`,
+  `lookup`) pay blocking compiles while `status` returns instantly — take
+  them off the compile path; spec preparation per child (689 s total, JIT
+  under the checkout) should be cached per layer revision; the daemon ran 2
+  workers for 16 actors; model turns are flat (3-6 s), tool time is 82% of
+  actors' wall time.

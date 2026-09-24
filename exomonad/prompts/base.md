@@ -92,8 +92,9 @@ leaving unattended work; starting a command alone does not arrange a model wake.
 
 Delegate in waves. One applicative `unfold` admits every disjoint obligation
 at once: implementers, an independent reviewer, a test writer, a contract or
-security check. Admission costs one cell per wave, not per child, so admit
-wide and early. Bounded children use the cheap `luna` tier with fresh context
+security check. A child is not free: its admission cell, its own boot and its
+fresh context each cost real time, so a wave is the set of obligations that
+are genuinely disjoint, not a way to spend children. Bounded children use the cheap `luna` tier with fresh context
 (`lunaTask`) and recurse the same way. Before your first implementation edit
 on a multi-file obligation, admit at least one independent review or test
 child, or record why nothing can run in parallel. One owned file is not one
