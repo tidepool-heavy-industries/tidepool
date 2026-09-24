@@ -703,7 +703,7 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection Nothing Nothing retained timing requestIdentity sessionT0 variant path
+    runCompileCycle selection Nothing Nothing retained Nothing timing requestIdentity sessionT0 variant path
 
 -- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
@@ -734,6 +734,20 @@ data MemoValidity = MemoValidity
     -- a home module and a package module. Preserve the home-resolution shape
     -- that produced the body so removing a shadow cannot reuse stale Core.
   , memoHomeDependencies :: Map.Map HomeDependency HomeDependencyDigest
+    -- | The session incarnation this entry was produced under (the Rust
+    -- @SessionId@, decimal text), for a @Tidepool.Session.*@ module only --
+    -- 'Nothing' for every ordinary library entry. A @Tidepool.Session.Val@/
+    -- @Lib@ module name is per-incarnation-local (its generation counter
+    -- resets to 0 on a fresh incarnation at the same session root, or names
+    -- a wholly different session on the same warm daemon), so identical
+    -- source bytes do not imply identical content: two incarnations' same-
+    -- named hand-written carrier stub can be byte-for-byte equal while a
+    -- real bind's same-named module differs in what it imports or the
+    -- '.hi' it was compiled from. 'lookupValidMemo' requires this field to
+    -- match the CURRENT request's incarnation, in addition to the source
+    -- hash and home-dependency checks above, before reusing a session
+    -- module's entry -- see 'sanitizeMemo'.
+  , memoIncarnation :: Maybe String
   }
 
 data HomeSourceKind = OrdinaryHomeSource | BootHomeSource
@@ -1079,8 +1093,8 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- constant for the whole cycle.
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Set.Set SymbolIdentity -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessionT0 variant path = do
+  -> Set.Set SymbolIdentity -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
+runCompileCycle selection mCache mMemoRef retained incarnation timing requestIdentity sessionT0 variant path = do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
     target <- guessTarget path Nothing Nothing
@@ -1496,6 +1510,25 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                               sameRetained = memoRetained validity == retainedFor modSum
                               sameHomeDependencies =
                                 memoHomeDependencies validity == homeDependencyWitnesses modSum
+                              -- A 'Tidepool.Session.*' module's name is only
+                              -- unique within one session incarnation (its
+                              -- generation counter restarts at 0 on a fresh
+                              -- incarnation at the same root, and a warm
+                              -- daemon can serve several incarnations'
+                              -- requests). 'sanitizeMemo' lets a session
+                              -- entry outlive its producing transaction only
+                              -- when the request carries an incarnation
+                              -- identity, so this entry's own recorded
+                              -- incarnation must match the CURRENT request's
+                              -- one -- an absent identity on either side
+                              -- (an older caller, or a one-shot compile)
+                              -- never matches, so it always misses exactly
+                              -- as it did before this check existed. Every
+                              -- non-session module is exempt: its identity
+                              -- is not incarnation-scoped.
+                              sameIncarnation =
+                                not (isJust (parseSessionModule (moduleNameString (ms_mod_name modSum))))
+                                  || (isJust incarnation && memoIncarnation validity == incarnation)
                               -- Reached only once Cpp/TemplateHaskell are
                               -- both ruled out above, so any remaining
                               -- 'hasUntrackedCompileTimeExecution' is due to
@@ -1525,6 +1558,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                               && sameHash
                               && sameRetained
                               && sameHomeDependencies
+                              && sameIncarnation
                             then pure (Just entry)
                             else if not compileTimeExecutionTracked
                               -- A QuasiQuotes-only module whose recorded
@@ -1547,12 +1581,14 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                                   , "same-hash=" ++ show sameHash
                                   , "same-retained=" ++ show sameRetained
                                   , "same-home-dependencies=" ++ show sameHomeDependencies
+                                  , "same-incarnation=" ++ show sameIncarnation
                                   , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (gmeFacts entry)) ]
                                 memoMissTrace modSum (unwords
                                   [ "dependent-files=" ++ show (moduleFactHasDependentFiles (gmeFacts entry))
                                   , "same-hash=" ++ show sameHash
                                   , "same-retained=" ++ show sameRetained
                                   , "same-home-dependencies=" ++ show sameHomeDependencies
+                                  , "same-incarnation=" ++ show sameIncarnation
                                   , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (gmeFacts entry)) ]) (Just entry)
                                 pure Nothing
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
@@ -1589,7 +1625,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                           (MemoValidity
                             (ms_hs_hash modSum)
                             (retainedFor modSum)
-                            (homeDependencyWitnesses modSum))
+                            (homeDependencyWitnesses modSum)
+                            incarnation)
                           facts
                           (Just r)
                           prepared
@@ -1671,7 +1708,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             (MemoValidity
                               (ms_hs_hash modSum)
                               (retainedFor modSum)
-                              (homeDependencyWitnesses modSum))
+                              (homeDependencyWitnesses modSum)
+                              incarnation)
                             moduleFacts
                             (Just output)
                             prepared
@@ -1718,7 +1756,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             (MemoValidity
                               (ms_hs_hash modSum)
                               (retainedFor modSum)
-                              (homeDependencyWitnesses modSum))
+                              (homeDependencyWitnesses modSum)
+                              incarnation)
                             moduleFacts
                             Nothing
                             Nothing
@@ -2050,17 +2089,25 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     requestTargetsRef <- liftIO (newIORef Set.empty)
+    requestIncarnationRef <- liftIO (newIORef Nothing)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
       let finishRequest = do
             targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
+            incarnation <- readIORef requestIncarnationRef
             forM_ (Set.toList targets) $ \targetModName' -> do
-              sanitizeMemo targetModName' memoRef
+              sanitizeMemo targetModName' incarnation memoRef
               evictRecovery targetModName'
           compile :: Word64 -> ResidentCompiler
           compile requestIdentity selection retained purpose mscope path extraIncludes buildProductsDir = do
             targetModName' <- targetModuleNameFor path
             modifyIORef' requestTargetsRef (Set.insert targetModName')
+            -- A transaction's every compile call shares one caller and one
+            -- session, so the last call's incarnation (if any) is this
+            -- transaction's incarnation -- 'writeIORef', not a fold, is
+            -- correct here for the same reason 'retainedRef' below is
+            -- plain-written per call rather than accumulated.
+            writeIORef requestIncarnationRef (mscope >>= ssIncarnation)
             -- The target's parsed tree depends on the compile purpose (for
             -- example, lookup compilation normalizes wildcards). Source and
             -- dependency hashes cannot distinguish those variants, so never
@@ -2124,20 +2171,59 @@ residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPath
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
-  runCompileCycle selection (Just cache) (Just memoRef) retained timing requestIdentity sessionT0 variant path
+  let incarnation = mscope >>= ssIncarnation
+  runCompileCycle selection (Just cache) (Just memoRef) retained incarnation timing requestIdentity sessionT0 variant path
 
--- | Strip every transaction-scoped entry from the shared 'GutsMemo' after a
--- compiler transaction: every target module compiled by it and any
+-- | Retained-entry cap for @Tidepool.Session.*@ 'GutsMemo' entries once
+-- 'sanitizeMemo' lets them outlive their producing transaction (below).
+-- Sized for SEVERAL live incarnations sharing one warm daemon at once --
+-- the per-child-sessions lane mints a fresh 'ssIncarnation' for each
+-- selected-context child, so a busy daemon is not serving one session's
+-- worth of growth -- not tuned from a measured per-entry byte size; revisit
+-- once that measurement exists.
+sessionMemoCap :: Int
+sessionMemoCap = 8000
+
+-- | Strip transaction-scoped entries from the shared 'GutsMemo' after a
+-- compiler transaction: always the target module compiled by it, and any
 -- @Tidepool.Session.*@ module ('parseSessionModule' recognizes both @Val@
 -- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
--- rather than a second hand-rolled prefix check).
---
--- Reusable library entries stay warm, while @__result@ and session-value
--- guts cannot leak into a later transaction that reuses the same module name.
-sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
-sanitizeMemo targetModName' memoRef =
-  modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
-    mn /= targetModName' && isNothing (parseSessionModule (moduleNameString mn))
+-- rather than a second hand-rolled prefix check) UNLESS this transaction
+-- carried a session incarnation identity (@incarnation@, from
+-- 'ssIncarnation'), in which case a session entry is left in place instead.
+-- That is safe, not just faster: 'lookupValidMemo' additionally requires a
+-- session entry's own recorded 'memoIncarnation' to match the CURRENT
+-- request's incarnation before ever reusing it, so a same-named module from
+-- a different incarnation (a restart, whose generation counter restarts at
+-- 0, or a different session on the same warm daemon) still misses by
+-- construction — this eviction only stops discarding what a LATER request
+-- in the SAME incarnation could safely reuse. 'incarnation = Nothing' (an
+-- older caller with no incarnation field, or a one-shot compile) keeps the
+-- original unconditional eviction exactly as before this parameter existed.
+-- Reusable library entries stay warm either way; capped by recency
+-- ('gmeCycle', the request identity that produced or last reused an entry)
+-- once retained session entries exceed 'sessionMemoCap', so an unbounded
+-- accumulation across a long-lived session or several concurrent
+-- incarnations cannot grow the memo forever.
+sanitizeMemo :: ModuleName -> Maybe String -> IORef GutsMemo -> IO ()
+sanitizeMemo targetModName' incarnation memoRef =
+  modifyIORef' memoRef $ capSessionEntries . Map.filterWithKey keep
+  where
+    keep mn _ = mn /= targetModName'
+      && (isJust incarnation || isNothing (parseSessionModule (moduleNameString mn)))
+    capSessionEntries memo =
+      let (sessionEntries, otherEntries) = Map.partitionWithKey
+            (\mn _ -> isJust (parseSessionModule (moduleNameString mn))) memo
+          overflow = Map.size sessionEntries - sessionMemoCap
+      in if overflow <= 0
+        then memo
+        else
+          -- Oldest-'gmeCycle'-first, so the entries a later cycle just
+          -- reused (a fresh 'gmeCycle' stamped on every insert, including a
+          -- promoted validation-only entry) are never the ones dropped.
+          let oldestFirst = sortOn (gmeCycle . snd) (Map.toList sessionEntries)
+              retained = drop overflow oldestFirst
+          in Map.union otherEntries (Map.fromList retained)
 
 evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
 evictTargetMemo targetModName' memoRef =

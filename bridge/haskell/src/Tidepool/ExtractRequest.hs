@@ -33,6 +33,7 @@ data RequestField
   | Include FilePath
   | BindGen Word64
   | SessionRoot FilePath
+  | SessionIncarnation String
   | InjectVal String
   | Turn
   | TurnTemplate String FilePath
@@ -72,6 +73,13 @@ data WorkerRequest = WorkerRequest
   , requestFiles :: [FilePath]
   , requestBindGen :: Maybe Word64
   , requestSessionRoot :: Maybe FilePath
+  -- | This session's incarnation identity (decimal text, the Rust
+  -- @SessionId@), when the caller has one. Lets the resident worker's
+  -- 'Tidepool.GhcPipeline.GutsMemo' retain a @Tidepool.Session.*@ entry
+  -- across transactions within one incarnation instead of evicting it
+  -- unconditionally at every transaction boundary; absent for a one-shot
+  -- compile or an older caller, which keeps today's full eviction.
+  , requestSessionIncarnation :: Maybe String
   , requestInjectVals :: [String]
   , requestTurn :: Bool
   , requestTurnTemplates :: [(String, FilePath)]
@@ -110,6 +118,7 @@ emptyWorkerRequest = WorkerRequest
   , requestFiles = []
   , requestBindGen = Nothing
   , requestSessionRoot = Nothing
+  , requestSessionIncarnation = Nothing
   , requestInjectVals = []
   , requestTurn = False
   , requestTurnTemplates = []
@@ -179,6 +188,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       Include path -> request { requestIncludes = requestIncludes request ++ [path] }
       BindGen generation -> request { requestBindGen = Just generation }
       SessionRoot path -> request { requestSessionRoot = Just path }
+      SessionIncarnation incarnation -> request { requestSessionIncarnation = Just incarnation }
       InjectVal name -> request { requestInjectVals = requestInjectVals request ++ [name] }
       Turn -> request { requestTurn = True }
       TurnTemplate kind path -> request
@@ -259,6 +269,7 @@ encodeField field = case field of
   Include value -> taggedText 8 value
   BindGen value -> BS.singleton 11 <> putU64 value
   SessionRoot value -> taggedText 12 value
+  SessionIncarnation value -> taggedText 44 value
   InjectVal value -> taggedText 13 value
   Turn -> BS.singleton 16
   TurnTemplate kind path -> BS.singleton 17 <> textFrame kind <> textFrame path
@@ -357,6 +368,7 @@ pField bytes = do
     11 -> mapParser BindGen pWord64 rest
     12 -> mapParser SessionRoot pText rest
     13 -> mapParser InjectVal pText rest
+    44 -> mapParser SessionIncarnation pText rest
     14 -> retired tag
     16 -> Right (Turn, rest)
     17 -> do

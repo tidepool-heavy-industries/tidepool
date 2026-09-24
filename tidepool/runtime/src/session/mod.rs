@@ -972,6 +972,7 @@ impl SessionLib {
             ),
         };
         let turn_result = run_turn(TurnRequest {
+                session_id: Some(self.session_id()),
             turn_text: &combined,
             templates: std::slice::from_ref(&decl_template),
             include: &binder_include,
@@ -1791,6 +1792,7 @@ mod tests {
             effects[1].as_path(),
         ];
         let bound = run_turn(TurnRequest {
+                session_id: None,
             turn_text: "old <- pure (OldVersion 1)",
             templates: std::slice::from_ref(&bind_template),
             include: &includes,

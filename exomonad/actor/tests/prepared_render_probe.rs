@@ -32,6 +32,7 @@ fn probe(label: &str, text: &str, gen: u64) {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
     let result = run_turn(TurnRequest {
+                session_id: None,
         turn_text: text,
         templates: &templates,
         include: &include_refs,

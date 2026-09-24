@@ -540,6 +540,15 @@ impl ExtractCmd {
         self
     }
 
+    /// `--session-incarnation <id>` — this session's incarnation identity
+    /// (decimal text), so the worker's `GutsMemo` can retain a
+    /// `Tidepool.Session.*` entry across transactions within one
+    /// incarnation instead of evicting it unconditionally.
+    pub fn session_incarnation(&mut self, id: impl AsRef<OsStr>) -> &mut Self {
+        self.request.session_incarnation(id);
+        self
+    }
+
     /// `--inject-val <module>`. Repeatable; order preserved.
     pub fn inject_val(&mut self, module: impl AsRef<OsStr>) -> &mut Self {
         self.request.inject_val(module);

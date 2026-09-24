@@ -200,10 +200,16 @@ sessionHiPath root sm = root </> dotsToSlashes (sessionModuleString sm) <.> "hi"
 data SessionScope = SessionScope
   { ssRoot      :: !FilePath          -- ^ dir the session @.hi@ files live under
   , ssValIfaces :: ![SessionModule]   -- ^ inject these (readIface raw -> HPT)
+  , ssIncarnation :: !(Maybe String)
+    -- ^ This session's incarnation identity (the Rust @SessionId@, decimal
+    -- text), when the caller has one. 'Tidepool.GhcPipeline.sanitizeMemo'
+    -- reads it to decide whether a @Tidepool.Session.*@ 'GutsMemo' entry may
+    -- outlive this transaction; 'Nothing' keeps that eviction unconditional,
+    -- matching every caller from before this field existed.
   } deriving (Show)
 
 emptySessionScope :: SessionScope
-emptySessionScope = SessionScope "" []
+emptySessionScope = SessionScope "" [] Nothing
 
 isSessionScopeActive :: SessionScope -> Bool
 isSessionScopeActive = not . null . ssValIfaces

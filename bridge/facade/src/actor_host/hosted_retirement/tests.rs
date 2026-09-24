@@ -967,6 +967,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     let roots: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let directory = tempfile::tempdir().unwrap();
     let compiled = match run_turn(HaskellTurnRequest {
+                session_id: None,
         turn_text: include_str!("failed_child.hs"),
         templates: &templates,
         include: &roots,

@@ -383,6 +383,7 @@ scopeFromWorkerRequest :: WorkerRequest -> SessionScope
 scopeFromWorkerRequest args = SessionScope
   { ssRoot      = fromMaybe "" (requestSessionRoot args)
   , ssValIfaces = mapMaybe parseValModule (requestInjectVals args)
+  , ssIncarnation = requestSessionIncarnation args
   }
 
 processFile

@@ -489,7 +489,7 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       valueModule = SessionModule ValMod (Generation 1)
       seed = root </> "SessionSeed.hs"
       target = root </> "PreparedSessionLeaf.hs"
-      scope = SessionScope scopeRoot [valueModule]
+      scope = SessionScope scopeRoot [valueModule] Nothing
   writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
   seeded <- runPipelineSelected PreparedStg seed [root]
   let environment = prHscEnv (pprPipelineResult seeded)

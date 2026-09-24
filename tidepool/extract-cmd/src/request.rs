@@ -71,6 +71,12 @@ enum Field {
     TurnPin(String),
     BuildProductsDir(OsString),
     SessionRoot(OsString),
+    /// The session's incarnation identity (the Rust `SessionId`, rendered as
+    /// decimal text) -- absent for a one-shot compile or an older caller.
+    /// Lets the worker's `GutsMemo` retain a `Tidepool.Session.*` entry
+    /// across transactions within one incarnation instead of evicting it
+    /// unconditionally: see `bridge/haskell/CLAUDE.md`'s memo-eviction note.
+    SessionIncarnation(OsString),
     InjectVal(OsString),
     BindGen(u64),
     HarnessProfile,
@@ -146,6 +152,8 @@ impl ExtractRequest {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
                 }
                 Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
+                Some("--session-incarnation") => request
+                    .session_incarnation(value(&mut args, "--session-incarnation")?),
                 Some("--inject-val") => request.inject_val(value(&mut args, "--inject-val")?),
                 Some("--bind-gen") => {
                     let raw = text_value(&mut args, "--bind-gen")?;
@@ -223,6 +231,7 @@ impl ExtractRequest {
                 9 | 10 | 14 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 11 => Field::BindGen(decoder.u64()?),
                 12 => Field::SessionRoot(decoder.os_string()?),
+                44 => Field::SessionIncarnation(decoder.os_string()?),
                 13 => Field::InjectVal(decoder.os_string()?),
                 16 => Field::Turn,
                 17 => Field::TurnTemplate {
@@ -397,6 +406,11 @@ impl ExtractRequest {
             .push(Field::SessionRoot(value.as_ref().to_owned()));
     }
 
+    pub(crate) fn session_incarnation(&mut self, value: impl AsRef<OsStr>) {
+        self.fields
+            .push(Field::SessionIncarnation(value.as_ref().to_owned()));
+    }
+
     pub(crate) fn inject_val(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::InjectVal(value.as_ref().to_owned()));
@@ -491,6 +505,9 @@ impl ExtractRequest {
                 Field::TurnPin(value) => flag(&mut flags, "--turn-pin", OsStr::new(value)),
                 Field::BuildProductsDir(value) => flag(&mut flags, "--build-products-dir", value),
                 Field::SessionRoot(value) => flag(&mut flags, "--session-root", value),
+                Field::SessionIncarnation(value) => {
+                    flag(&mut flags, "--session-incarnation", value)
+                }
                 Field::InjectVal(value) => flag(&mut flags, "--inject-val", value),
                 Field::BindGen(value) => {
                     flag(&mut flags, "--bind-gen", OsStr::new(&value.to_string()))
@@ -815,6 +832,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
         Field::SessionRoot(value) => tagged_frame(out, 12, value),
+        Field::SessionIncarnation(value) => tagged_frame(out, 44, value),
         Field::InjectVal(value) => tagged_frame(out, 13, value),
         Field::BindGen(value) => {
             out.push(11);
@@ -1207,6 +1225,8 @@ mod tests {
             "/tmp/build".into(),
             "--session-root".into(),
             "/tmp/session".into(),
+            "--session-incarnation".into(),
+            "12345".into(),
             "--inject-val".into(),
             "M".into(),
             "--bind-gen".into(),

@@ -2654,6 +2654,7 @@ where
                 let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
                 let retained = session.prepared_retained();
                 let result = run_activation_turn(TurnRequest {
+                session_id: Some(view.session_id()),
                     turn_text: "sessionInput <- pure undefined",
                     templates: &templates,
                     include: &include,
@@ -3162,6 +3163,7 @@ where
                             .map(PathBuf::as_path)
                             .collect::<Vec<_>>();
                         let cell_check_request = || CellCheckRequest {
+                session_id: Some(compile_view.session_id()),
                             cell_text: &cell_source,
                             template: &template,
                             include: &include,
@@ -4017,6 +4019,7 @@ fn compile_fragment_off_checkout(
         None
     };
     let request = TurnRequest {
+                session_id: Some(snapshot.view.session_id()),
         turn_text: &block.source,
         templates: &templates,
         include: &include_refs,
@@ -7240,6 +7243,7 @@ fn check_cell_off_checkout(
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let cell_check_request = || CellCheckRequest {
+                session_id: Some(compile_view.session_id()),
         cell_text: cell_source,
         template: &template,
         include: &include,
@@ -7914,6 +7918,7 @@ fn compile_host_binding_off_checkout(
         )
     };
     let result = run_turn(TurnRequest {
+                session_id: Some(view.session_id()),
         turn_text: &turn,
         templates: &templates,
         include: &include,
@@ -8499,6 +8504,7 @@ fn compile_block_off_checkout(
         "compiling resident actor workbench item"
     );
     let request = TurnRequest {
+                session_id: Some(compile_view.session_id()),
         turn_text: &block.source,
         templates: &templates,
         include: &include_refs,
@@ -9855,6 +9861,7 @@ mod request_tests {
             prepared: &'a WorkbenchCompilation,
         ) -> CellCheckRequest<'a> {
             CellCheckRequest {
+                session_id: None,
                 cell_text: cell_2,
                 template,
                 include: include_refs,
@@ -9951,6 +9958,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let expression_checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: expression,
             template: &expression_template,
             include: &expression_include,
@@ -10021,6 +10029,7 @@ mod request_tests {
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>();
             let checked = check_cell(CellCheckRequest {
+                session_id: None,
                 cell_text,
                 template: &template,
                 include: &include_refs,
@@ -10202,6 +10211,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let direct_checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: cell,
             template: &direct_template,
             include: &direct_include,

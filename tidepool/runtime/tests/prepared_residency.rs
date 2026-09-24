@@ -133,6 +133,7 @@ impl Notebook {
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         run_turn(TurnRequest {
+                session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -179,6 +180,7 @@ impl Notebook {
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
         run_turn(TurnRequest {
+                session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -706,6 +708,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         let injected = notebook.session.inject_val_modules();
         let retained = notebook.session.prepared_retained();
         run_turn(TurnRequest {
+                session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -1091,4 +1094,293 @@ fn reopening_session_root_removes_stale_stub_sources() {
         !stale_stub.exists(),
         "opening a session must sweep stale stub sources left by a prior incarnation"
     );
+}
+
+/// One incarnation's compile plumbing, sharing `root` with a sibling
+/// incarnation (unlike `Notebook`, which always opens its own fresh
+/// `tempdir`). Mirrors `Notebook::with_shared_root` field for field so the
+/// two behave identically except for `id`/`root`.
+struct Incarnation {
+    session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    preamble: String,
+    effect_stack: String,
+    include: Vec<PathBuf>,
+    root: PathBuf,
+    injected: Vec<String>,
+    generation: u64,
+    id: tidepool_repr::SessionId,
+    /// When false, every compile forwards `session_id: None` regardless of
+    /// `id` -- the "before this feature" behavior, for the A/B measurement
+    /// in `stub_growth_admission_compile_time`. `true` everywhere else.
+    send_incarnation: bool,
+}
+
+impl Incarnation {
+    fn open(id: tidepool_repr::SessionId, root: &Path) -> Self {
+        let effects = TestEffectSurface::minimal(&[]).expect("materialize effect surface");
+        let preamble = effects.preamble().to_owned();
+        let effect_stack = effects.row().to_owned();
+        let mut include = effects.include_paths().to_vec();
+        let lib = SessionLib::open(id, root, ModuleEnv::standalone_default())
+            .expect("open decl plane")
+            .with_validation_include(vec![eval_harness::prelude_path()]);
+        include.push(lib.include_dir().to_path_buf());
+        include.push(root.to_path_buf());
+        let session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        Self {
+            session,
+            preamble,
+            effect_stack,
+            include,
+            root: root.to_path_buf(),
+            injected: Vec::new(),
+            generation: 0,
+            id,
+            send_incarnation: true,
+        }
+    }
+
+    fn compile_in_current_value_view(&mut self, text: &str) -> TurnResult {
+        self.generation += 1;
+        let imports = self
+            .session
+            .current_val_modules()
+            .into_iter()
+            .map(|module| format!("{module}\n"))
+            .collect::<String>();
+        let templates = resident_workbench_templates(&self.preamble, &self.effect_stack, &imports);
+        let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
+        let injected = self.session.inject_val_modules();
+        let retained = self.session.prepared_retained();
+        run_turn(TurnRequest {
+            session_id: self.send_incarnation.then_some(self.id),
+            turn_text: text,
+            templates: &templates,
+            include: &include,
+            session_root: &self.root,
+            inject_modules: &injected,
+            gen: self.generation,
+            verdict: None,
+            target: None,
+            retained_imports: &retained,
+        })
+        .unwrap_or_else(|failure| {
+            panic!(
+                "{text:?} failed to compile: {}\n{}",
+                tidepool_runtime::classify_compile(&failure.error).message,
+                failure
+                    .attempted_source
+                    .as_deref()
+                    .unwrap_or("<no attempted source>")
+            )
+        })
+    }
+
+    fn mount_json(
+        &mut self,
+        carrier: &tidepool_runtime::session::HostCarrier,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> tidepool_runtime::session::BoundBinder {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_runtime::session::HostPayload;
+        self.generation += 1;
+        let gen = tidepool_repr::Generation(self.generation);
+        let binder = self
+            .session
+            .mount_carrier_in(
+                &self.root,
+                ScopeId::ROOT,
+                name,
+                gen,
+                carrier,
+                HostPayload::Json(value),
+            )
+            .expect("mount json carrier payload");
+        self.injected.push(binder.module.clone());
+        binder
+    }
+
+    fn json_anchor(&mut self) -> tidepool_runtime::session::HostCarrier {
+        use tidepool_runtime::session::{HostBindingType, HostCarrier};
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = self.compile_in_current_value_view(
+            "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
+        ) else {
+            panic!("json anchor must compile as a bind");
+        };
+        let [anchor_binder] = bound.as_slice() else {
+            panic!("json anchor must produce exactly one binder");
+        };
+        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE)
+    }
+}
+
+/// Scratch measurement, not part of the default suite: admission-compile
+/// wall time at stub count 10 vs. 200, with vs. without a session
+/// incarnation identity (i.e. `sanitizeMemo`'s old unconditional
+/// `Tidepool.Session.*` eviction vs. the new incarnation-scoped one), all
+/// against ONE already-warm daemon process (set `$TIDEPOOL_EXTRACT_DAEMON_SOCKET`
+/// to a private daemon; the shared battery daemon must never be used for
+/// this). Run with `cargo test --release -- --ignored --nocapture
+/// stub_growth_admission_compile_time`, set `MEASURE_INCARNATION=1` for the
+/// "after" run and unset it for the "before" run (two separate invocations,
+/// so each starts from a fresh, empty `GutsMemo`).
+#[test]
+#[ignore]
+fn stub_growth_admission_compile_time() {
+    eval_harness::require_extract();
+    let use_incarnation = std::env::var("MEASURE_INCARNATION").is_ok();
+    let root = tempfile::tempdir().expect("session root");
+    let mut incarnation = Incarnation::open(tidepool_repr::SessionId(1), root.path());
+    incarnation.send_incarnation = use_incarnation;
+    let carrier = incarnation.json_anchor();
+
+    const CHECKPOINTS: &[usize] = &[10, 200];
+    let mut next_checkpoint = 0;
+    // One admission compile PER mount, matching the real workload: a bash
+    // call mounts a stub, then the next cell's admission compile sees it.
+    // Compiling only at sparse checkpoints (against a cold, never-before-
+    // compiled batch of modules) would make every checkpoint a first-time
+    // miss regardless of incarnation and hide exactly the effect being
+    // measured -- the point is that stubs 1..N-1 are HITS by the time
+    // stub N's admission compile runs, in the "after" condition.
+    for i in 1..=200usize {
+        let name = format!("carried{i}");
+        incarnation.mount_json(&carrier, &name, &serde_json::json!({"tag": i}));
+        let t0 = std::time::Instant::now();
+        let _ = incarnation.compile_in_current_value_view("()");
+        let elapsed = t0.elapsed();
+        if next_checkpoint < CHECKPOINTS.len() && i == CHECKPOINTS[next_checkpoint] {
+            eprintln!(
+                "stub_growth_admission_compile_time incarnation={} stubs={} wall_ms={}",
+                use_incarnation, i, elapsed.as_millis()
+            );
+            next_checkpoint += 1;
+        }
+    }
+}
+
+/// HIGH: the resident worker's `GutsMemo` is process-lifetime, shared by
+/// every session a warm daemon serves. `Val.G<g>` generation numbers are
+/// per-incarnation-local (a fresh incarnation at the SAME session root
+/// resets `val_gen` back to 0 -- exactly what a process restart does), so
+/// two unrelated incarnations can mint the exact same module name
+/// (`Tidepool.Session.Val.G1`) with GENUINELY DIFFERENT content. Before the
+/// `ssIncarnation`/`memoIncarnation` check, a warm daemon serving both
+/// incarnations back to back risked the second incarnation's compile
+/// silently reusing the first's cached guts for that name. This test opens
+/// TWO incarnations at ONE session root (mirroring a restart), mounts a
+/// same-named, DIFFERENT-content carrier binding in each, and asserts the
+/// second incarnation's read-back sees its OWN value -- never the first's.
+#[test]
+fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generations() {
+    eval_harness::require_extract();
+    let root = tempfile::tempdir().expect("shared session root");
+
+    let mut first = Incarnation::open(tidepool_repr::SessionId(910_001), root.path());
+    let first_carrier = first.json_anchor();
+    let first_binder = first.mount_json(&first_carrier, "carried", &serde_json::json!({"who": "first"}));
+
+    // A fresh incarnation at the SAME root: `SessionLib::open` sweeps the
+    // first incarnation's stub sources (existing behavior), and `val_gen`
+    // restarts at 0, so this mount reissues the exact SAME generation
+    // number the first incarnation used.
+    let mut second = Incarnation::open(tidepool_repr::SessionId(910_002), root.path());
+    let second_carrier = second.json_anchor();
+    let second_binder =
+        second.mount_json(&second_carrier, "carried", &serde_json::json!({"who": "second"}));
+    assert_eq!(
+        first_binder.module, second_binder.module,
+        "the second incarnation must reissue the first's generation number (same module name) \
+         for this test to exercise a real same-name collision"
+    );
+
+    let TurnResult::Expr { compiled, .. } =
+        second.compile_in_current_value_view("case carried of { Aeson.Object o -> Map.lookup \"who\" o }")
+    else {
+        panic!("reading the carried value must compile as an expression");
+    };
+    let outcome = second
+        .session
+        .run_with_sites("read_second_incarnation", compiled.into_code())
+        .expect("read second incarnation's carried value");
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("reading the carried value did not complete: {outcome:?}");
+    };
+    assert_eq!(
+        result.to_json(),
+        serde_json::json!(["second", "Just String \"second\""]),
+        "the second incarnation must read back its OWN value for a same-named generation, \
+         never the first incarnation's -- a stale cross-incarnation GutsMemo hit would silently \
+         resolve to the first incarnation's compiled guts instead"
+    );
+}
+
+/// MEDIUM: within ONE incarnation, a `Val.G<g>` carrier stub is written
+/// once and never rewritten (`Generation::next`'s monotonic contract), so
+/// its `GutsMemo` entry may now legitimately outlive the transaction that
+/// produced it. This mounts 50 JSON carrier payloads under one incarnation
+/// and reads all of them back in two SEPARATE compiles (two transactions),
+/// asserting both give the same, correct answer -- the correctness half of
+/// the narrowed eviction. (Asserting the SECOND compile actually took the
+/// memo-hit path, not just the correct-answer path, needs the worker's
+/// `TIDEPOOL_TIMING=1` stderr captured back to the caller, which `run_turn`
+/// does not yet expose; the admission-compile-time measurement in
+/// `plans/` is the intended stand-in until that plumbing exists.)
+#[test]
+fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() {
+    eval_harness::require_extract();
+    let root = tempfile::tempdir().expect("session root");
+    let mut incarnation = Incarnation::open(tidepool_repr::SessionId(920_001), root.path());
+    let carrier = incarnation.json_anchor();
+
+    const COUNT: usize = 50;
+    let mut names = Vec::with_capacity(COUNT);
+    for i in 0..COUNT {
+        let name = format!("carried{i}");
+        incarnation.mount_json(&carrier, &name, &serde_json::json!({"tag": i}));
+        names.push(name);
+    }
+
+    let read_back_expr = format!(
+        "[ v | Aeson.Object o <- [{}], Just v <- [Map.lookup \"tag\" o] ]",
+        names.join(", ")
+    );
+
+    let expected: Vec<serde_json::Value> = (0..COUNT).map(|i| serde_json::json!(i)).collect();
+
+    for attempt in 0..2 {
+        let TurnResult::Expr { compiled, .. } =
+            incarnation.compile_in_current_value_view(&read_back_expr)
+        else {
+            panic!("reading all 50 carried values must compile as an expression");
+        };
+        let outcome = incarnation
+            .session
+            .run_with_sites("read_fifty_carried", compiled.into_code())
+            .unwrap_or_else(|error| panic!("attempt {attempt}: read all 50 values: {error}"));
+        let ResidentOutcome::Completed { result, .. } = outcome else {
+            panic!("attempt {attempt}: reading carried values did not complete: {outcome:?}");
+        };
+        let show_string = format!(
+            "[{}]",
+            expected
+                .iter()
+                .map(|tag| format!("Number {tag}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(
+            result.to_json(),
+            serde_json::json!([serde_json::Value::Array(expected.clone()), show_string]),
+            "attempt {attempt}: all 50 accumulated stubs must read back their own tag in order"
+        );
+    }
 }

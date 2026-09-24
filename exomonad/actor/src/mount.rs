@@ -183,6 +183,14 @@ impl ActorCompileView {
         self.session.session_root()
     }
 
+    /// This view's session incarnation identity, forwarded to a spawned
+    /// compile so its worker-side memo can retain `Tidepool.Session.*`
+    /// entries across transactions within this incarnation.
+    #[must_use]
+    pub fn session_id(&self) -> tidepool_repr::SessionId {
+        self.session.session()
+    }
+
     #[must_use]
     pub fn injected_module_names(&self) -> Vec<String> {
         self.session.injected_module_names()

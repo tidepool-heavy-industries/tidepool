@@ -143,6 +143,7 @@ impl Notebook {
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         run_turn(TurnRequest {
+                session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,

@@ -364,6 +364,12 @@ pub struct CellCheckRequest<'a> {
     pub inject_modules: &'a [String],
     pub compile_generation: u64,
     pub compile_view_evidence: &'a str,
+    /// This session's incarnation identity, forwarded as
+    /// `--session-incarnation` when present. `None` for a caller with no
+    /// session identity in hand (a one-shot check) — the worker keeps its
+    /// unconditional `Tidepool.Session.*` memo eviction in that case,
+    /// exactly as before this field existed.
+    pub session_id: Option<tidepool_repr::SessionId>,
 }
 
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
@@ -499,6 +505,12 @@ pub struct TurnRequest<'a> {
     /// Executable imports retained by this turn. Empty for declarations and
     /// for the first turn in a machine session.
     pub retained_imports: &'a [(SymbolIdentity, u64)],
+    /// This session's incarnation identity, forwarded as
+    /// `--session-incarnation` when present. `None` for a caller with no
+    /// session identity in hand (a one-shot eval) — the worker keeps its
+    /// unconditional `Tidepool.Session.*` memo eviction in that case,
+    /// exactly as before this field existed.
+    pub session_id: Option<tidepool_repr::SessionId>,
 }
 
 /// `tidepool-extract-cmd` is a dependency leaf and cannot name
@@ -2131,6 +2143,9 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailu
         .includes(req.include)
         .session_root(req.session_root)
         .inject_vals(req.inject_modules);
+    if let Some(session_id) = req.session_id {
+        cmd.session_incarnation(session_id.0.to_string());
+    }
     let endpoint = cmd.bind().map_err(map_notfound)?;
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
@@ -2318,6 +2333,9 @@ fn run_turn_with_pin(
         .session_root(req.session_root)
         .inject_vals(req.inject_modules)
         .bind_gen(req.gen);
+    if let Some(session_id) = req.session_id {
+        cmd.session_incarnation(session_id.0.to_string());
+    }
     if let Some(target) = req.target {
         cmd.target(target);
     }
@@ -3886,6 +3904,7 @@ mod tests {
             "value\n",
         );
         let checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: cell,
             template,
             include: &include,
@@ -3921,6 +3940,7 @@ mod tests {
         let first_pins = checked.pins_for_item(0).unwrap();
         let first = run_turn_pinned(
             TurnRequest {
+                session_id: None,
                 turn_text: &checked.items[0].source,
                 templates: &first_templates,
                 include: &[],
@@ -3944,6 +3964,7 @@ mod tests {
         let second_pins = checked.pins_for_item(1).unwrap();
         let second = run_turn_pinned(
             TurnRequest {
+                session_id: None,
                 turn_text: &checked.items[1].source,
                 templates: &second_templates,
                 include: &[],
@@ -4002,6 +4023,7 @@ mod tests {
             "fixed\n",
         );
         let checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: cell,
             template,
             include: &include,
@@ -4059,6 +4081,7 @@ mod tests {
         }];
         let staged = run_turn_pinned(
             TurnRequest {
+                session_id: None,
                 turn_text: &checked.items[1].source,
                 templates: &templates,
                 include: &[root.path(), prelude.as_path()],
@@ -4173,6 +4196,7 @@ mod tests {
         ] {
             let evidence = "compile-view-a";
             let checked = check_cell(CellCheckRequest {
+                session_id: None,
                 cell_text: cell,
                 template: &template,
                 include: &include,
@@ -4242,6 +4266,7 @@ mod tests {
         // Named class defaulting selects the exact effect row in the first
         // whole-cell check; no diagnostic-triggered retry is involved.
         let checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4294,6 +4319,7 @@ mod tests {
         let cell = format!("{EFF_DECLS}1 + 1 :: Int\n");
 
         let checked = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4314,6 +4340,7 @@ mod tests {
 
         // Repeating the same request makes the same compiler-owned decision.
         let repeated = check_cell(CellCheckRequest {
+                session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4723,6 +4750,7 @@ mod tests {
     fn run_turn_missing_template_is_clean_error_not_panic() {
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
         let req = TurnRequest {
+                session_id: None,
             turn_text: "1 + 1",
             templates: &[],
             include: &[],
@@ -4763,6 +4791,7 @@ mod tests {
             },
         ];
         let err = run_turn(TurnRequest {
+                session_id: None,
             turn_text: "1 :: Int",
             templates: &templates,
             include: &[],
@@ -4801,6 +4830,7 @@ mod tests {
             source: format!("module Expr where\n__result = {name}\n"),
         });
         let failure = run_turn(TurnRequest {
+                session_id: None,
             turn_text: "()",
             templates: &templates,
             include: &[],

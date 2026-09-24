@@ -34,6 +34,7 @@ fn named_profile_compile_failures() {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().expect("compile-failure root");
     let error = run_turn(HaskellTurnRequest {
+                session_id: None,
         turn_text: include_str!("profile_compile_failures/read_only_fs_write.hs"),
         templates: &templates,
         include: &include_refs,
