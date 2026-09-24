@@ -1112,9 +1112,13 @@ fn render_retained_layer(
     // cons cells over boxed `Char`s, so it prints as one quoted string
     // instead of a wall of nested `(: 'o' (: 'r' ...))`.
     if name == ":" && fields.len() == 2 {
-        let mut cons_fields = fields.into_iter();
-        let head = cons_fields.next().expect("cons field 0");
-        let tail = cons_fields.next().expect("cons field 1");
+        let [head, tail]: [_; 2] = match fields.try_into() {
+            Ok(pair) => pair,
+            Err(_) => {
+                push_bounded(out, "?", budget);
+                return;
+            }
+        };
         if is_char_element(engine, table, &head) {
             render_char_list_string(engine, table, head, tail, budget, out);
             return;
@@ -1291,10 +1295,9 @@ fn render_char_list_string(
                     .map(|dc| dc.name.as_str())
                     .unwrap_or("?");
                 engine.release(tail_handle);
-                if tail_name == ":" && tail_fields.len() == 2 {
-                    let mut it = tail_fields.into_iter();
-                    next_head = it.next();
-                    tail = it.next().expect("cons field 1");
+                if let (":", Ok([head, rest])) = (tail_name, <[_; 2]>::try_from(tail_fields)) {
+                    next_head = Some(head);
+                    tail = rest;
                 } else {
                     // The proper `[]` end, or anything else: either way the
                     // spine ends here.
