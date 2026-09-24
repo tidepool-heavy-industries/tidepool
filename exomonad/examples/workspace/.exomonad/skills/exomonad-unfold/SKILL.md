@@ -137,6 +137,18 @@ refusal and uncertain delivery; `doc request` is a hosted query, not Haskell
 source for a notebook cell.
 Use `exomonad-cleanup` for `stopAgent`, `planCleanup`, and `executeCleanup`.
 
+A child reaches its own parent the same way, through `parentAgent`, not a
+retained handle — it has none. `sendMessage` returns
+`Either NotificationError NotificationReceipt`, a plain value to inspect, not
+one to `respond` with. It is progress only: the receipt is admission evidence,
+and the assignment stays open until the child calls `respond`.
+
+```haskell
+parentAgent >>= \case
+  Nothing -> pure ()
+  Just parent -> void (sendMessage parent "starting the migration; will check back before merging")
+```
+
 Assignment values and explicit worktree seeds keep ordinary Haskell value
 semantics and are not reevaluated at startup. A later failure in the cell stops
 its suffix but preserves the unfolds that already succeeded. `doc unfold` holds

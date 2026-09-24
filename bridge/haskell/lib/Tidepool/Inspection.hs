@@ -310,6 +310,16 @@ instance HasField "text" (DisplayPage effects) Text where
 instance HasField "more" (DisplayPage effects) (Eff effects (DisplayPage effects)) where
   getField = more
 
+-- | A page's continuation is an action, not a displayable value; the tree
+-- reports only whether one is pending, mirroring 'pageHasMore'.
+instance Display (DisplayPage effects) where
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence page = precedenceParens precedence $ treeParts "DisplayPage {" "}"
+    [ Concat [TextLeaf "text = ", displayTree (text page)]
+    , Concat [TextLeaf "hasMore = ", TextLeaf (if pageHasMore page then "True" else "False")]
+    , Concat [TextLeaf "unavailable = ", TextLeaf (if pageUnavailable page then "True" else "False")]
+    ]
+
 -- | Before the first display, each actor starts with an empty page. A retained
 -- actor-local value shadows this polymorphic default after a successful display.
 cellDisplay :: DisplayPage effects

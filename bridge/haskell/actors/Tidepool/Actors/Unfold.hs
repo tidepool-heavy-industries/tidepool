@@ -156,8 +156,10 @@ import Tidepool.Inspection (WorkbenchDisplay (..), PageDisplay (..), compactDisp
 
 -- Data makes the constructor match force its IsString validator before the fork effect.
 data CampaignLabel = CampaignLabel Text
+  deriving (Show, Eq)
 -- Data makes the constructor match force its IsString validator before the fork effect.
 data ForkGroupLabel = ForkGroupLabel Text
+  deriving (Show, Eq)
 data ForkGroupPath = ForkGroupPath Bool Text
   deriving (Show, Eq)
 

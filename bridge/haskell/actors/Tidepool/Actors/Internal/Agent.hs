@@ -147,6 +147,7 @@ data AgentSpec
   | ReadonlyWorktreeAgent WorktreeHandle
   | ScaffoldingAgent WorktreeHandle
   | IntegrationAgent WorktreeHandle
+  deriving (Show, Eq)
 
 -- | Repeatable lifecycle observation of one exact actor incarnation.
 data AgentState
@@ -697,6 +698,7 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
+  deriving (Show, Eq)
 
 -- | Admit normal steering into the existing TUI conversation. The receipt is
 -- admission evidence, not incorporation or successful execution. No response

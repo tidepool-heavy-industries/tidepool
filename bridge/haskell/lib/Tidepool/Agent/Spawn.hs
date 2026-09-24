@@ -248,6 +248,7 @@ spawnAgent spec = spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)
 -- is not a handle, and a handle whose @r@ an author could choose after the fact
 -- would decode a payload against a schema the child was never held to.
 newtype AgentHandle r = AgentHandle CycleId
+  deriving (Show)
 
 -- | Start a cycle and hand back its handle as soon as it is ADMITTED — not
 -- when it finishes.
