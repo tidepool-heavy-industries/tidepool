@@ -784,10 +784,10 @@ impl<'code> PreparedMachine<'code> {
     /// so at install time
     /// [`super::interner::DescriptorInterner::check_absorb`] finds each declaration
     /// already agreeing with what it staged and keeps the existing `Arc`
-    /// rather than minting a second one -- a fresh compile's own externals
-    /// are likewise absorbed, or, for a genuinely divergent descriptor,
-    /// refused as [`ExecutionError::ForeignExternals`], never accepted by a
-    /// slot reservation.
+    /// rather than minting a second one -- a fresh compile's own external
+    /// wrapper descriptors are minted from the same process-wide singleton
+    /// (see [`super::interner::ExternalDescriptors`]) as every other
+    /// compile, on this machine or any other, so they always agree.
     pub fn compile_for_install(
         &mut self,
         linked: &tidepool_repr::execution_schema::LinkedProgram,
@@ -953,11 +953,7 @@ impl<'code> PreparedMachine<'code> {
                     identity,
                     existing,
                 },
-                super::interner::AbsorbConflict::Externals => ExecutionError::ForeignExternals,
             })?;
-        self.interner
-            .check_externals(&compiled.externals)
-            .map_err(|_| ExecutionError::ForeignExternals)?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared
         // import before any other install side effect -- no statics
@@ -1982,7 +1978,10 @@ impl<'code> PreparedMachine<'code> {
     /// inspection or run result. `rep` and the owning `realm` are recovered
     /// from the handle ledger itself -- never assumed -- since a mint can be
     /// `UnliftedRef` as well as the ordinary lifted case.
-    pub fn inspect_retained(&mut self, handle: ValueHandle) -> Result<PreparedOuter, ExecutionError> {
+    pub fn inspect_retained(
+        &mut self,
+        handle: ValueHandle,
+    ) -> Result<PreparedOuter, ExecutionError> {
         let entry = self
             .handles
             .handle(handle)
@@ -8561,5 +8560,43 @@ mod tests {
             Err(ExecutionError::UnknownProgram(id)) if id == program_a
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Two machines, each installing a program compiled against its own
+    /// fresh interner (`CompiledProgram::compile`, never `compile_for_install`
+    /// on the other machine), still see identical external wrapper header
+    /// words: the boxed-array and byte-array descriptors come from the
+    /// process-wide singleton (`ExternalDescriptors::shared`), not from
+    /// either machine's own state, so a `Text` or boxed array one machine
+    /// builds is readable by generated code on the other.
+    #[test]
+    fn two_independently_compiled_machines_share_external_header_words() {
+        let compiled_a = caf_program(0, false, UpdatePolicy::Memoize);
+        let compiled_b = caf_program(0, false, UpdatePolicy::Memoize);
+        let headers_a = compiled_a.externals.headers();
+        let headers_b = compiled_b.externals.headers();
+        assert_eq!(
+            headers_a, headers_b,
+            "two independently compiled programs must share external wrapper header words"
+        );
+
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (machine_a, _) = PreparedMachine::new(compiled_a, options).expect("machine A");
+        let (machine_b, _) = PreparedMachine::new(compiled_b, options).expect("machine B");
+
+        let cached_a = machine_a
+            .interner
+            .shared_externals()
+            .expect("A cached its externals on install")
+            .headers();
+        let cached_b = machine_b
+            .interner
+            .shared_externals()
+            .expect("B cached its externals on install")
+            .headers();
+        assert_eq!(cached_a, headers_a);
+        assert_eq!(cached_b, headers_a);
     }
 }
