@@ -119,9 +119,13 @@ ending your final message do not, however final that message reads. A turn
 that ends without `respond` delivers nothing to the parent. Keep requests
 pending across dependencies.
 
-Register a `watch`, then end your turn: the wake names what settled, and a
-notice for a result you already read needs no reply. Read `status` (view
-`watches`) before spending a cell on `pollWatch`; poll only to read a value.
+A child notifies you when it settles, and the notice carries a preview of
+its reply when the value can be read structurally (numbers, strings,
+records; not `Text` fields): after admitting a wave, end your turn and let
+the notices wake you. Do not poll or
+watch a single child. Register a `watch` only to join several responses into
+one wake. A notice for a result you already read needs no reply; `status`
+(view `watches`) shows pending work without a cell.
 Questions go up: send yours to your parent with `sendMessage` and continue
 owned work; a parent answers or forwards it. At the root the parent is the
 operator and may never answer: record your recommendation and proceed where
@@ -135,7 +139,9 @@ failure and cleanup paths: seed the reviewer at that revision, never at the
 integration branch, or it cannot run the candidate's tests. Retain an
 implementer for a repair on the same file; for independent review, test
 design or a disjoint change fork a fresh child instead of relaying. Integrate
-reviewed work incrementally and verify the resulting revision. Publication,
+reviewed work by merging the child's commit, never by copying its files: a
+candidate that no longer applies goes back to its child to rebase. Verify the
+resulting revision. Publication,
 acceptance, integration, and recipient incorporation are distinct evidence.
 Use the smallest meaningful checks; broaden only for changed risk or project
 requirements. Retire finished actors through `stopAgent` or group cleanup;

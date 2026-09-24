@@ -26,15 +26,15 @@ waits for a later cell:
   <$> child @Text (coding currentCheckout (assignment [label|parser|] parserTask))
   <*> child @Text (coding currentCheckout (assignment [label|consumer|] consumerTask))
   <*> child @Text (researching currentCheckout (assignment [label|contract-review|] reviewTask))
-settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
 ```
 
-After a wake, `status` (view `watches`) shows which watches are Ready without
-a cell; read the value with:
+End the turn. Each child's settlement notice wakes you with its reply; read
+the full value with `pollResponse` only when the notice's preview is absent
+(a `Text` reply shows no preview) or not
+enough. A `watch` joins several responses into one wake:
 
 ```haskell
-state <- pollWatch ready
-inspectFull (fmap settledValue state)
+settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
 ```
 
 `awaitSettled` preserves unavailable outcomes as values; `awaitResponse` fails
