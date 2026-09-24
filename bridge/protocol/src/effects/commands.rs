@@ -130,7 +130,7 @@ pub fn commands() -> Effect {
                 vec![
                     ("CommandExited", vec![HsType::Int]),
                     ("CommandSignalled", vec![HsType::Int]),
-                    ("CommandOutOfMemory", vec![]),
+                    ("CommandOutOfMemory", vec![HsType::Int]),
                     ("CommandCancelled", vec![]),
                     ("CommandFailed", vec![HsType::Text]),
                     ("CommandUnconfirmed", vec![HsType::Text]),

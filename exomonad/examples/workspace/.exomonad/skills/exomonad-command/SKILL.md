@@ -52,7 +52,7 @@ value for `watch`; see the routing example linked below.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Execution defaults: 256 MiB and a 30-second observation; `yield_time_ms` accepts
+Execution defaults: 1024 MiB and a 30-second observation; `yield_time_ms` accepts
 0..300000, so a long-running command can be observed in one call instead of
 polling with `write_stdin` every 30 seconds. Expiry leaves the
 command alive.
@@ -143,7 +143,7 @@ inspects intent without executing. Use `pwd` in a command when location is evide
 An actor with no process of its own also has no terminal: run its commands
 with piped or closed input, never `TerminalInput`.
 
-Ordinary commands use 256 MiB. Choose realistic explicit memory for builds/tests,
+Ordinary commands use 1024 MiB. Choose realistic explicit memory for builds/tests,
 e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
 `start` returns immediately; admission queues automatically. Retain the job,
 do other work, and observe it later. Memory is a hard limit and admission weight.

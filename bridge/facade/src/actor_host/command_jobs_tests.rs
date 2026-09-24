@@ -10,6 +10,10 @@ pub(super) struct TestCommands {
     stdout: Mutex<String>,
     stderr: Mutex<String>,
     exit_code: std::sync::atomic::AtomicI64,
+    /// Nonzero selects `CommandOutOfMemory(mib)` over the exit-code outcome —
+    /// this backend bypasses real resource admission entirely, so an OOM
+    /// outcome has to be injected directly to exercise how it presents.
+    oom_mib: std::sync::atomic::AtomicI64,
     degraded_output: std::sync::atomic::AtomicBool,
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
@@ -77,6 +81,7 @@ impl TestCommands {
             stdout: Mutex::new("result".into()),
             stderr: Mutex::new(String::new()),
             exit_code: 0.into(),
+            oom_mib: 0.into(),
             degraded_output: false.into(),
             finish: watch::channel(false).0,
             cancelled: false.into(),
@@ -92,6 +97,17 @@ impl TestCommands {
             short_slice_read: 0.into(),
             hang_cancel: false.into(),
         })
+    }
+
+    /// A command finished by the resource owner killing it for memory, with
+    /// `mib` as the applied cap the model-facing heading should name.
+    pub(super) fn completed_oom(mib: i64) -> Arc<Self> {
+        let backend = Self::new();
+        backend
+            .oom_mib
+            .store(mib, std::sync::atomic::Ordering::Release);
+        backend.finish.send_replace(true);
+        backend
     }
 
     /// A `control(.., Cancel)` call on this backend never resolves. Exercises
@@ -125,8 +141,11 @@ impl CommandBackend for TestCommands {
             while !*done.borrow_and_update() {
                 done.changed().await.unwrap();
             }
+            let oom_mib = self.oom_mib.load(std::sync::atomic::Ordering::Acquire);
             CommandResult {
-                outcome: if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                outcome: if oom_mib != 0 {
+                    CommandOutcome::CommandOutOfMemory(oom_mib)
+                } else if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     CommandOutcome::CommandCancelled
                 } else {
                     CommandOutcome::CommandExited(
@@ -367,7 +386,7 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
         script,
         "script is data, including Haskell delimiters"
     );
-    assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
+    assert_eq!(backend.specs.lock()[0].memory, 1024 * 1024 * 1024);
     let mut changed = invocation;
     changed.arguments = ToolArguments::Structured(serde_json::json!({"cmd":"changed"}));
     assert!(policy.dispatch_boxed(changed).await.is_err());
@@ -1259,6 +1278,31 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
 }
 
 #[tokio::test]
+async fn oom_command_result_names_the_applied_limit_and_a_rerun_hint() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let launched = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), "Cmd.run [bash|python3 -c oom|]").await
+    });
+    let backend = TestCommands::completed_oom(2048);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let run = launched.await.unwrap();
+    assert_eq!(run["status"], "committed", "{run}");
+
+    let output = run["items"][0]["output"].as_str().unwrap();
+    assert!(
+        output.contains("out of memory · memory_mib=2048 exceeded · rerun with a larger memory_mib"),
+        "{run}"
+    );
+    // A killed process does not read as a real exit code.
+    assert!(!output.contains("CommandExited"), "{run}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_command_result_projects_and_later_cells_still_run() {
     let mut campaign = TestCampaign::start().await;
     committed(&campaign, "job <- Cmd.start [bash|sleep 30|]").await;
@@ -1751,7 +1795,7 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     assert_eq!(first["status"], "committed", "{first}");
     let result = committed(&campaign, examples.next().unwrap()).await;
     assert!(result.to_string().contains("result"), "{result}");
-    assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
+    assert_eq!(backend.specs.lock()[0].memory, 1024 * 1024 * 1024);
     assert!(backend.specs.lock()[0].environment.is_empty());
     let description = committed(&campaign, examples.next().unwrap()).await;
     assert!(

@@ -84,9 +84,10 @@ impl NativeCommandBackend {
         spec: CommandSpec,
         phase: watch::Sender<CommandStatus>,
     ) -> Result<CommandResult, String> {
+        let memory = spec.memory;
         let mut cancelled = self.cancelled.subscribe();
         self.resources
-            .submit(&self.actor, id, spec.memory as u64)
+            .submit(&self.actor, id, memory as u64)
             .await
             .map_err(detail)?;
         let resource = tokio::select! {
@@ -157,7 +158,7 @@ impl NativeCommandBackend {
                         _ => CommandCleanup::CommandRetained,
                     };
                     let outcome = if matches!(resource, Resource::ResourceExhausted) {
-                        CommandOutcome::CommandOutOfMemory
+                        CommandOutcome::CommandOutOfMemory(memory_mib(memory))
                     } else if cancelled || stop_sent {
                         CommandOutcome::CommandCancelled
                     } else {
@@ -202,6 +203,14 @@ impl NativeCommandBackend {
 
 fn detail(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+/// The applied cap, in MiB, for the model-facing `CommandOutOfMemory` heading —
+/// rounded up so a cap that isn't an exact MiB multiple never reads as smaller
+/// than what was actually enforced.
+fn memory_mib(bytes: i64) -> i64 {
+    const MIB: i64 = 1024 * 1024;
+    let bytes = bytes.max(0);
+    (bytes + MIB - 1) / MIB
 }
 async fn wait_until_set(cancelled: &mut watch::Receiver<bool>) {
     while !*cancelled.borrow_and_update() {
@@ -531,7 +540,7 @@ impl HostCommandBackend {
             _ => CommandCleanup::CommandRetained,
         };
         let outcome = if matches!(resource, Resource::ResourceExhausted) {
-            CommandOutcome::CommandOutOfMemory
+            CommandOutcome::CommandOutOfMemory(memory_mib(spec.memory))
         } else if stop_sent {
             CommandOutcome::CommandCancelled
         } else {

@@ -1113,6 +1113,26 @@ impl CommandResources {
                 let oom = read_counter(&dir.join("memory.events"), "oom_kill")?;
                 if populated > 0 {
                     entry.started = true;
+                    // `memory.oom.group=1` means the kernel has already decided
+                    // to kill every process in this cgroup once `oom_kill` is
+                    // nonzero; it does not wait for them to be reaped. A
+                    // grandchild that lags the process a caller is waiting on
+                    // (a build's own process tree, say) can leave the cgroup
+                    // populated for a few more milliseconds, so a caller
+                    // polling `status` right after that process exits must not
+                    // see `Running` and fall back to its raw exit status.
+                    // Surface the disposition now; directory cleanup still
+                    // waits for the cgroup to actually drain, below.
+                    if oom > 0
+                        && !matches!(
+                            *entry.status.borrow(),
+                            CommandResourceStatus::ResourceExhausted
+                        )
+                    {
+                        entry
+                            .status
+                            .send_replace(CommandResourceStatus::ResourceExhausted);
+                    }
                     return Ok(false);
                 }
                 if !entry.started {
@@ -1435,6 +1455,16 @@ mod tests {
     }
 
     fn fake_allocation(root: &Path, actor: &str, command: &str, populated: u64) {
+        fake_allocation_with_oom(root, actor, command, populated, 0);
+    }
+
+    fn fake_allocation_with_oom(
+        root: &Path,
+        actor: &str,
+        command: &str,
+        populated: u64,
+        oom_kill: u64,
+    ) {
         let directory = root.join(actor).join(command);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("memory.max"), MIB.to_string()).unwrap();
@@ -1443,7 +1473,11 @@ mod tests {
             format!("populated {populated}\n"),
         )
         .unwrap();
-        std::fs::write(directory.join("memory.events"), "oom_kill 0\n").unwrap();
+        std::fs::write(
+            directory.join("memory.events"),
+            format!("oom_kill {oom_kill}\n"),
+        )
+        .unwrap();
     }
 
     fn allocated_events(started: bool) -> Vec<JournalEvent> {
@@ -1487,6 +1521,40 @@ mod tests {
         let observation = owner.observation();
         assert_eq!(observation.active, 1);
         assert_eq!(observation.retained_allocations, 1);
+    }
+
+    // Reproduces the classification miss from a live run: a child agent's
+    // command was OOM-killed, but `status` was read the instant the process
+    // a caller was waiting on exited, before the cgroup had fully drained
+    // (`cgroup.events` `populated` still 1 — a grandchild, or a wrapper that
+    // is not itself the OOM victim, can still be mid-exit). The old
+    // `observe` only ever consulted `memory.events` `oom_kill` once
+    // `populated` read 0, so a caller polling `status` synchronously right
+    // after its own wait saw `Running` and fell back to the process's raw
+    // exit code — `CommandExited(137)` instead of `CommandOutOfMemory`.
+    // `memory.oom.group=1` means the kernel has already decided the fate of
+    // the whole cgroup the moment `oom_kill` is nonzero; a caller must not
+    // have to wait for every process to be reaped to learn that.
+    #[test]
+    fn oom_kill_is_visible_before_the_cgroup_drains() {
+        let root = tempfile::tempdir().unwrap();
+        // populated=1: the cgroup has not drained yet, exactly the state a
+        // caller's `status` call can race against right after its own
+        // process exits.
+        fake_allocation_with_oom(root.path(), "actor-1", "command-1", 1, 1);
+        let owner = owner(root.path());
+
+        owner.reconcile(allocated_events(true)).unwrap();
+
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::ResourceExhausted,
+            "an oom_kill already recorded must be surfaced even while the cgroup is still populated"
+        );
+        // Still active: cleanup (directory removal) waits for the real
+        // cgroup to drain, same as before this fix — only the disposition
+        // a caller observes moves earlier.
+        assert_eq!(owner.observation().active, 1);
     }
 
     #[test]

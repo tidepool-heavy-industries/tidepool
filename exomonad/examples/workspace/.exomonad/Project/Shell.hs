@@ -219,10 +219,20 @@ statusHeading observed =
     CommandRunning -> "terminal: no · running"
     CommandStopping -> "terminal: no · stopping; cancellation not yet confirmed"
     CommandFinished result ->
-      "terminal: yes · " <> T.pack (show (commandOutcome result)) <> " · cleanup: " <> cleanupText (commandCleanup result)
+      "terminal: yes · " <> outcomeText (commandOutcome result) <> " · cleanup: " <> cleanupText (commandCleanup result)
   where
     cleanupText CommandClean = "clean"
     cleanupText other = T.pack (show other)
+
+-- | Model-facing rendering of a command outcome, matching
+-- 'Tidepool.Command.outcomeText': an out-of-memory kill and a raw signal are
+-- named directly rather than shown as an opaque exit code.
+outcomeText :: CommandOutcome -> Text
+outcomeText (CommandOutOfMemory limit) =
+  "out of memory · memory_mib=" <> T.pack (show limit) <> " exceeded · rerun with a larger memory_mib"
+outcomeText (CommandSignalled signal) =
+  "killed by signal " <> T.pack (show signal)
+outcomeText other = T.pack (show other)
 
 jobText :: Cmd.Job -> Text
 jobText (Job key) = key

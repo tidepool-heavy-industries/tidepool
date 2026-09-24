@@ -103,7 +103,7 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter. focus, when present, filters the output to the sections relevant to that text (example: \"the failing test and its assertion\"); omit for plain bounded output."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter. focus, when present, filters the output to the sections relevant to that text (example: \"the failing test and its assertion\"); omit for plain bounded output."
           (executeWith presenter),
       writeStdin =
         tool
@@ -158,7 +158,7 @@ executeWith presenter
         let command =
               maybe id Cmd.inDirectory directory $
                 Cmd.withEnvironment (maybe [] Map.toList env) $
-                  Cmd.withMemory (Cmd.MiB (fromMaybe 256 memory)) $
+                  Cmd.withMemory (Cmd.MiB (fromMaybe 1024 memory)) $
                     input (Cmd.bashCommand script)
             input =
               if fromMaybe False terminal

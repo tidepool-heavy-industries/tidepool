@@ -318,7 +318,7 @@ stderr Finished {capturedOutput = captured} = outputText (commandStderr captured
 failure :: RunResult -> Maybe Text
 failure result@Finished {commandResult = outcome} = case commandOutcome outcome of
   CommandExited 0 -> Nothing
-  other -> Just (T.pack (show other) <> said)
+  other -> Just (outcomeText other <> said)
   where
     said = case filter (not . T.null) (map T.strip [stderr result, spoken]) of
       [] -> ""
@@ -559,10 +559,21 @@ displayOutput budget captured =
 resultHeading :: CommandResult -> Text
 resultHeading result =
   "terminal: yes · "
-    <> T.pack (show (commandOutcome result))
+    <> outcomeText (commandOutcome result)
     <> case commandCleanup result of
       CommandClean -> " · cleanup: clean\nnext: inspect outcome and output; read_output for omitted diagnostics"
       other -> " · cleanup: " <> T.pack (show other) <> "\nnext: inspect cleanup and retained job before releasing resources"
+
+-- | Model-facing rendering of a command outcome. 'CommandOutOfMemory' and
+-- 'CommandSignalled' get their own text so a caller reads a rerun hint and an
+-- applied limit instead of guessing what an exit code of 137 or the like
+-- means; every other outcome keeps its derived 'Show'.
+outcomeText :: CommandOutcome -> Text
+outcomeText (CommandOutOfMemory limit) =
+  "out of memory · memory_mib=" <> T.pack (show limit) <> " exceeded · rerun with a larger memory_mib"
+outcomeText (CommandSignalled signal) =
+  "killed by signal " <> T.pack (show signal)
+outcomeText other = T.pack (show other)
 
 outputHeading :: Text -> CommandPage -> Text
 outputHeading stream page = outputMetadata stream page <> "\n" <> outputText page <> "\n"

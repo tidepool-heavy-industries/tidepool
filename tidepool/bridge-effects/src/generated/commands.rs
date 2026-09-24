@@ -35,7 +35,7 @@ pub enum CommandOutcome {
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandSignalled(i64),
     #[haskell(module = "Tidepool.Effects.Core")]
-    CommandOutOfMemory,
+    CommandOutOfMemory(i64),
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandCancelled,
     #[haskell(module = "Tidepool.Effects.Core")]
