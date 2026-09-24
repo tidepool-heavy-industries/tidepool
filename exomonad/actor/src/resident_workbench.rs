@@ -771,6 +771,77 @@ impl Drop for HostInputRetirement {
     }
 }
 
+/// Guards a [`ResidentHole`] a caller holds between the checkout that parked
+/// it and a later checkout that will resume or abort it, so a task dropped
+/// while awaiting that later checkout still settles the hole instead of
+/// leaking a parked continuation. [`Self::disarm`] once the owning checkout
+/// is actually in hand — from that point the hole's fate is decided
+/// synchronously inside one held checkout, the same as every other
+/// `resume_*`/abort call, and this guard is no longer needed. If instead
+/// dropped still armed, [`Drop`] spawns one more checkout in the background
+/// to abort the hole there, since `Drop` cannot itself run async code. Same
+/// shape as [`HostInputRetirement`]; not generic over `H`/`O`, for the same
+/// reason.
+struct ParkedHoleAbortGuard {
+    background_abort: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ParkedHoleAbortGuard {
+    fn new<H, O>(
+        access: &ResidentMachineAccess<H, O>,
+        context: crate::ActorSessionContext,
+        cont_id: String,
+        reason: String,
+    ) -> Self
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let machines = Arc::clone(&access.machines);
+        let source = access.source.clone();
+        let background_abort: Box<dyn FnOnce() + Send> = Box::new(move || {
+            tokio::spawn(async move {
+                let access = ResidentMachineAccess::new(machines, source);
+                if let Err(error) = access
+                    .with_machine(context, move |session, _, _| {
+                        if let Err(abort_error) = session.abort(&cont_id, reason) {
+                            tracing::warn!(
+                                %cont_id,
+                                %abort_error,
+                                "failed to abort a hole abandoned before its resuming checkout"
+                            );
+                        }
+                        Ok(())
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        "failed to check out the machine to abort a hole abandoned before its resuming checkout"
+                    );
+                }
+            });
+        });
+        Self {
+            background_abort: Some(background_abort),
+        }
+    }
+
+    /// The owning checkout is in hand: the hole's fate is now decided
+    /// synchronously within it, so no background cleanup is needed.
+    fn disarm(mut self) {
+        self.background_abort = None;
+    }
+}
+
+impl Drop for ParkedHoleAbortGuard {
+    fn drop(&mut self) {
+        if let Some(background) = self.background_abort.take() {
+            background();
+        }
+    }
+}
+
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
@@ -2151,20 +2222,36 @@ where
                 Some(verdict),
             )
             .await?;
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            let detail = match step {
+                ResidentWorkbenchStep::Rejected(detail) => detail.output,
+                _ => "installer completed without publishing its handler".into(),
+            };
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "tool installation: {detail}"
+            )));
+        };
+        let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
+            unreachable!("running fragment has a suspension")
+        };
+        // `hole` is plain session-held data held across the checkout below
+        // being acquired; if this future is dropped while still awaiting
+        // that checkout, nothing else resumes or aborts the continuation it
+        // parked. `ParkedHoleAbortGuard` covers that gap the same way
+        // `HostInputRetirement` covers the split cell's mounted input:
+        // Drop can't await, so it spawns one more checkout in the
+        // background to abort the hole there. Disarmed the moment the
+        // checkout below is actually in hand, since everything past that
+        // point settles the hole synchronously inside it.
+        let abort_guard = ParkedHoleAbortGuard::new(
+            &self.access,
+            compile_context.clone(),
+            hole.cont_id().to_string(),
+            "tool installer's parked hole was abandoned before its resuming checkout".into(),
+        );
         self.access
             .with_machine(compile_context, move |session, context, _| {
-                let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-                    let detail = match step {
-                        ResidentWorkbenchStep::Rejected(detail) => detail.output,
-                        _ => "installer completed without publishing its handler".into(),
-                    };
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "tool installation: {detail}"
-                    )));
-                };
-                let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
-                    unreachable!("running fragment has a suspension")
-                };
+                abort_guard.disarm();
                 let publication = (|| {
                     let ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
@@ -2791,11 +2878,40 @@ where
 
             let items = match outcome {
                 CellItemsOutcome::Rejected { index, diagnostic } => {
-                    if let Some(guard) = leased_input.take() {
-                        guard.retire(&self.access).await;
+                    // The rejection was derived from `c_view`, taken before
+                    // the machine was released for this compile. Re-derive
+                    // the view once more before trusting it: if something
+                    // else wrote to a scope this compile actually read from
+                    // in the meantime, the rejection is stale and this
+                    // attempt must recompile against a fresh snapshot,
+                    // exactly as `begin_fragment_split`'s off-checkout
+                    // rejection and this same split's install-time mismatch
+                    // already do.
+                    let revalidate_source = source.clone();
+                    let revalidate_type_modules = Arc::clone(&type_modules);
+                    let revalidate_against = c_view.clone();
+                    let revalidate_candidate_module = snapshot.candidate_module;
+                    let revalidation = self
+                        .access
+                        .with_machine(context.clone(), move |session, context, _| {
+                            revalidate_cell_rejection(
+                                session,
+                                context,
+                                &revalidate_source,
+                                &revalidate_type_modules,
+                                revalidate_candidate_module,
+                                &revalidate_against,
+                            )
+                        })
+                        .await?;
+                    if matches!(revalidation, CellRejectionRevalidation::StillCurrent) {
+                        if let Some(guard) = leased_input.take() {
+                            guard.retire(&self.access).await;
+                        }
+                        cancel_on_drop.0 = None;
+                        return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
                     }
-                    cancel_on_drop.0 = None;
-                    return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
+                    continue;
                 }
                 CellItemsOutcome::Ready(items) => items,
             };
@@ -6868,6 +6984,47 @@ fn compile_cell_items_off_checkout(
     Ok(CellItemsOutcome::Ready(result))
 }
 
+/// The outcome of [`revalidate_cell_rejection`]'s re-checkout: either the
+/// view [`compile_cell_items_off_checkout`] rejected against is still
+/// current, so the rejection stands, or the caller must retry the whole
+/// split from a fresh snapshot instead of trusting a stale rejection.
+enum CellRejectionRevalidation {
+    StillCurrent,
+    Stale,
+}
+
+/// Re-checkout after an off-checkout item compile rejects, to check whether
+/// the rejection is trustworthy: `compile_cell_items_off_checkout` ran with
+/// the machine released, so a concurrent write to a scope this compile
+/// actually read from can make what looks like a real compile error just
+/// staleness. Same shape as [`finalize_cell_install`]'s revalidation
+/// (nothing to lease or install for a rejection, so no `PreparedCell` is
+/// produced here).
+fn revalidate_cell_rejection<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    candidate_module: tidepool_repr::SessionModule,
+    compiled_against: &crate::ActorCompileView,
+) -> Result<CellRejectionRevalidation, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    {
+        return Err(ResidentActorWorkbenchError::MachineLost);
+    }
+    let fresh_view = actor_compile_view(session, context, source, type_modules)?;
+    if !fresh_view.compile_relevant_eq(compiled_against)
+        || session.next_declaration_module() != Some(candidate_module)
+    {
+        return Ok(CellRejectionRevalidation::Stale);
+    }
+    Ok(CellRejectionRevalidation::StillCurrent)
+}
+
 /// The outcome of [`finalize_cell_install`]'s re-checkout: either the
 /// snapshot the items compiled against is still fresh and the cell installs,
 /// or the caller must retry the whole split from a fresh snapshot.
@@ -9892,5 +10049,290 @@ mod request_tests {
              A's GHC compile",
             total.as_millis()
         );
+    }
+
+    /// A rejection `revalidate_cell_rejection` was produced against — the
+    /// exact `c_view` `compile_cell_items_off_checkout` compiled against —
+    /// must not be trusted once another binding invalidates that view before
+    /// the revalidation checkout runs: it must be reported `Stale`, exactly
+    /// as `finalize_cell_install`'s own revalidation already is proven by
+    /// `cell_split_scope_mutation_before_final_checkout_forces_a_recompile`.
+    /// A fresh snapshot recompiles and installs cleanly afterward — the
+    /// bounded-retry recovery `prepare_cell` relies on when a rejection
+    /// turns out stale.
+    #[test]
+    fn cell_split_item_rejection_before_revalidation_checkout_is_retried_on_a_stale_view() {
+        let (mut session, context, base_source, _root) = host_mount_fixture();
+        let cell = "onlyItem <- pure (1 :: Int)";
+
+        let (source, snapshot) = snapshot_cell_split(
+            &mut session,
+            &context,
+            base_source.clone(),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot");
+        let checked =
+            check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
+                .expect("whole-cell check");
+        let reservation = reserve_cell_generations(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &snapshot,
+            checked.items.len(),
+        )
+        .expect("reserve generations");
+        let CellReservation::Ready(ready) = reservation else {
+            panic!("no interleaved mutation yet: the reservation must be fresh");
+        };
+        let CellReservationReady { view, .. } = *ready;
+
+        // Nothing has mutated yet: a rejection compiled against this exact
+        // view must still be reported current.
+        let revalidation = revalidate_cell_rejection(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            snapshot.candidate_module,
+            &view,
+        )
+        .expect("revalidate against the unmutated view");
+        assert!(
+            matches!(revalidation, CellRejectionRevalidation::StillCurrent),
+            "an untouched view must settle as still current"
+        );
+
+        // Stand in for another actor writing to this exact scope between the
+        // off-checkout item compile and the revalidation checkout.
+        mount_text_binding(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            "interloper",
+            "interloper text",
+        )
+        .expect("interloping carrier mounts");
+
+        let revalidation = revalidate_cell_rejection(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            snapshot.candidate_module,
+            &view,
+        )
+        .expect("revalidate against the mutated view");
+        assert!(
+            matches!(revalidation, CellRejectionRevalidation::Stale),
+            "an interleaved mutation must invalidate the rejected view, not settle it as current"
+        );
+
+        // A fresh snapshot recompiles and installs cleanly — the
+        // bounded-retry recovery `prepare_cell` relies on once a rejection
+        // is found stale. Snapshots again from the pristine base source, not
+        // the mutated one above.
+        let (source, retry_snapshot) =
+            snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
+                .expect("retry snapshot");
+        let retry_checked = check_cell_off_checkout(
+            &retry_snapshot,
+            &source,
+            &context.haskell_effects_alias,
+            cell,
+        )
+        .expect("retry whole-cell check");
+        let retry_reservation = reserve_cell_generations(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &retry_snapshot,
+            retry_checked.items.len(),
+        )
+        .expect("retry reserve generations");
+        let CellReservation::Ready(retry_ready) = retry_reservation else {
+            panic!("retry reservation must be fresh");
+        };
+        let CellReservationReady {
+            view: retry_view,
+            retained: retry_retained,
+            visible_names: retry_visible_names,
+        } = *retry_ready;
+        let retry_outcome = compile_cell_items_off_checkout(
+            &context,
+            &source,
+            &context.haskell_effects_alias,
+            &retry_checked,
+            cell,
+            retry_view.clone(),
+            &retry_retained,
+            &retry_visible_names,
+        )
+        .expect("retry item compile");
+        let CellItemsOutcome::Ready(retry_items) = retry_outcome else {
+            panic!("retry item must compile");
+        };
+        let retry_install = finalize_cell_install(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            retry_snapshot.candidate_module,
+            &retry_view,
+            retry_items,
+        )
+        .expect("retry finalize install");
+        assert!(
+            matches!(
+                retry_install,
+                CellInstall::Ready(PreparedCell::Ready { .. })
+            ),
+            "the cell must prepare once retried against a fresh view"
+        );
+    }
+
+    /// A fragment fixture whose evaluation genuinely suspends waiting on a
+    /// host answer (`ActorContext`'s query, since this bare test session has
+    /// no local actor context handler) — the same shape `prepare_tools` gets
+    /// back from `begin_fragment_split` before its second checkout decodes
+    /// and resumes it.
+    fn suspending_fragment() -> (ParsedBlock, TurnClassification) {
+        (
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "notified <- maybe (pure (Left NotificationUnauthorized)) \
+                          (\\p -> Exomonad.sendMessage p \"hello\") =<< Exomonad.parentAgent"
+                    .into(),
+            },
+            TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec!["notified".into()],
+                items: Vec::new(),
+            },
+        )
+    }
+
+    /// `prepare_tools` holds a suspended `ResidentHole` (from
+    /// `begin_fragment_split`) across the `await` for a second machine
+    /// checkout that decodes and resumes it. If the task driving that await
+    /// is dropped before the checkout is granted, nothing else resumes or
+    /// aborts the parked continuation — unless `ParkedHoleAbortGuard`, armed
+    /// across exactly that gap, is still attached. This reproduces the gap's
+    /// shape directly against the guard (not the full tool-installer
+    /// pipeline, which needs a real spec file this unit test has no reason
+    /// to stand up): park a hole through `begin_fragment_split`, arm a guard
+    /// over it, and drop the task carrying the guard before it ever reaches
+    /// (and disarms) a checkout — the same failure `prepare_tools` itself
+    /// cannot observe without this guard.
+    #[tokio::test]
+    async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let mut suspend_context = context.clone();
+        suspend_context.haskell_effects_alias =
+            "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone(),
+            None,
+            None,
+            vec![],
+        ));
+
+        let (block, verdict) = suspending_fragment();
+        let step = workbench
+            .begin_fragment_split(
+                suspend_context.clone(),
+                source,
+                Vec::new(),
+                block,
+                Some(verdict),
+            )
+            .await
+            .expect("fragment split suspends waiting on a host answer");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("expected a suspension: {}", describe_step(&step));
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("running fragment has a suspension")
+        };
+        let cont_id = hole.cont_id().to_string();
+
+        let parked_before = workbench
+            .access
+            .with_machine(suspend_context.clone(), {
+                let cont_id = cont_id.clone();
+                move |session, _, _| Ok(session.parked_holes().contains(&cont_id.as_str()))
+            })
+            .await
+            .expect("checkout");
+        assert!(
+            parked_before,
+            "the suspended fragment must have parked {cont_id}"
+        );
+
+        // Build the guard exactly as `prepare_tools` does — armed, keyed on
+        // the hole's cont_id, standing between the checkout that parked it
+        // and the one meant to resume it — inside a task we then cancel
+        // before it ever reaches (and disarms) that second checkout.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancelled_task = {
+            let workbench = Arc::clone(&workbench);
+            let context = suspend_context.clone();
+            let cont_id = cont_id.clone();
+            tokio::spawn(async move {
+                let guard = ParkedHoleAbortGuard::new(
+                    &workbench.access,
+                    context,
+                    cont_id,
+                    "test: task cancelled before its resuming checkout".into(),
+                );
+                ready_tx
+                    .send(())
+                    .expect("test still waiting on the ready signal");
+                // Stand in for the second checkout never being granted before
+                // this task is dropped.
+                std::future::pending::<()>().await;
+                guard.disarm(); // unreachable: the task is aborted first
+            })
+        };
+        ready_rx
+            .await
+            .expect("the guard was constructed before cancellation");
+        cancelled_task.abort();
+        let join_result = cancelled_task.await;
+        assert!(
+            join_result.is_err_and(|error| error.is_cancelled()),
+            "the task must have been cancelled, not merely finished"
+        );
+
+        // The guard's `Drop` spawns its own background checkout to abort the
+        // hole, racing this poll — wait for it to land.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let still_parked = workbench
+                .access
+                .with_machine(suspend_context.clone(), {
+                    let cont_id = cont_id.clone();
+                    move |session, _, _| Ok(session.parked_holes().contains(&cont_id.as_str()))
+                })
+                .await
+                .expect("checkout");
+            if !still_parked {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the parked hole was never aborted after the guard was dropped armed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 }
