@@ -50,6 +50,8 @@ pub enum ImportShapeFact {
 pub enum ExecutionError {
     #[error("entry {0:?} is not exported by this program")]
     MissingEntry(ValueId),
+    #[error("evacuation: {0}")]
+    Evacuation(tidepool_heap::execution_descriptor::DescriptorTraceError),
     #[error("entry arguments: expected {expected} physical scalar slots, got {actual}")]
     Arguments { expected: usize, actual: usize },
     #[error("entry argument {index} has representation {actual:?}; expected {expected:?}")]

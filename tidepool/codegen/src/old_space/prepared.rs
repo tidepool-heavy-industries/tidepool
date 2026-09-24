@@ -371,6 +371,26 @@ impl super::OldSpace {
         Ok(retained)
     }
 
+    /// Give an already-stable reference (an old-space object, a static
+    /// address) its own persistently registered root slot, as
+    /// [`Self::retain_prepared`] does after promotion. No copying.
+    pub(crate) fn adopt_root(
+        &mut self,
+        machine: &MachineState,
+        pointer: *mut u8,
+    ) -> Result<super::RootSlot, RuntimeError> {
+        self.slots
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        let mut cell = Box::new(pointer);
+        let address: *mut *mut u8 = &mut *cell;
+        self.slots.push(cell);
+        machine.register_persistent_root(address);
+        // SAFETY: the boxed cell is owned by this old space for its whole
+        // life and was just registered as a persistent root.
+        Ok(unsafe { super::RootSlot::new(address) })
+    }
+
     /// # Safety
     /// No generated frames are live. Selected slots belong to the complete
     /// invocation root registry; vmctx/machine/OldSpace belong to that same

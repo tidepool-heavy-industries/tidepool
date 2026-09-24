@@ -40,6 +40,14 @@ pub struct DescriptorSpace {
     /// any. The catalog is address sorted, so rollback removes logged starts
     /// rather than truncating an installation-order vector.
     owner_log: Option<OwnerLog>,
+    /// Source headers this copy overwrote with forwarding words, with the two
+    /// words they replaced, while an evacuation (`gc::evacuate`) borrows the
+    /// space. An evacuation copies a reachable subgraph out of a live heap
+    /// that keeps running afterwards, so every forwarding write is undone
+    /// from this log once the copy is sealed. Reserved before forwarding
+    /// begins; a full log is an integrity failure, never a mid-copy
+    /// allocation.
+    forwarding_log: Option<Vec<(usize, u64, u64)>>,
 }
 
 /// Registration checkpoint for a prepared-program install, opened by
@@ -128,7 +136,59 @@ impl DescriptorSpace {
             updated_path: Vec::new(),
             external_payloads: HashMap::new(),
             owner_log: None,
+            forwarding_log: None,
         })
+    }
+
+    /// Start logging forwarding writes for an evacuation. `objects` bounds
+    /// the number of source objects the copy may forward (the destination
+    /// capacity divided by the smallest object plus the longest updated
+    /// chain); reserved here so no forwarding write allocates.
+    pub(crate) fn begin_forwarding_log(
+        &mut self,
+        objects: usize,
+    ) -> Result<(), DescriptorTraceError> {
+        let mut log = Vec::new();
+        log.try_reserve_exact(objects)
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        self.forwarding_log = Some(log);
+        Ok(())
+    }
+
+    /// Undo every forwarding write logged since [`Self::begin_forwarding_log`],
+    /// newest first, and stop logging. Restores the two header words of each
+    /// forwarded source object exactly.
+    ///
+    /// # Safety
+    /// Every logged object is still allocated at the logged address.
+    pub(crate) unsafe fn restore_forwarding_log(&mut self) {
+        let Some(log) = self.forwarding_log.take() else {
+            return;
+        };
+        for &(address, first, second) in log.iter().rev() {
+            let object = address as *mut u64;
+            std::ptr::write_unaligned(object, first);
+            std::ptr::write_unaligned(object.add(1), second);
+        }
+    }
+
+    /// Record the words a forwarding write at `address` is about to replace.
+    /// No-op unless a log is open. Full log: integrity failure BEFORE the
+    /// write, so the log stays exact.
+    unsafe fn log_forwarding(&mut self, address: usize) -> Result<(), DescriptorTraceError> {
+        let Some(log) = self.forwarding_log.as_mut() else {
+            return Ok(());
+        };
+        if log.len() == log.capacity() {
+            return Err(DescriptorTraceError::MetadataIntegrity);
+        }
+        let object = address as *const u64;
+        log.push((
+            address,
+            std::ptr::read_unaligned(object),
+            std::ptr::read_unaligned(object.add(1)),
+        ));
+        Ok(())
     }
 
     /// Union another installed program's pinned layouts into this space.
@@ -577,6 +637,45 @@ pub(crate) unsafe fn prepare_descriptor_copy_from_space(
     tospace: &mut [u8],
     descriptors: &mut DescriptorSpace,
 ) -> Result<(), DescriptorTraceError> {
+    prepare_copy_from_space(
+        root_ptrs,
+        source,
+        external_handles,
+        tospace,
+        descriptors,
+        true,
+    )
+}
+
+/// [`prepare_descriptor_copy_from_space`] for a copy of one reachable
+/// subgraph rather than the whole source: the destination need not hold
+/// every source byte, and a subgraph that does not fit surfaces as
+/// `InsufficientSpace` from the copy itself.
+pub(crate) unsafe fn prepare_reachable_copy_from_space(
+    root_ptrs: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    external_handles: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+) -> Result<(), DescriptorTraceError> {
+    prepare_copy_from_space(
+        root_ptrs,
+        source,
+        external_handles,
+        tospace,
+        descriptors,
+        false,
+    )
+}
+
+unsafe fn prepare_copy_from_space(
+    root_ptrs: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    external_handles: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    whole_source: bool,
+) -> Result<(), DescriptorTraceError> {
     let source = CopySource::Arenas(source);
     let source_bytes = source.bytes();
     let to_base = tospace.as_mut_ptr() as usize;
@@ -589,7 +688,7 @@ pub(crate) unsafe fn prepare_descriptor_copy_from_space(
     {
         return Err(DescriptorTraceError::InvalidRange);
     }
-    if tospace.len() < source_bytes {
+    if whole_source && tospace.len() < source_bytes {
         return Err(DescriptorTraceError::InsufficientSpace {
             required: source_bytes,
             available: tospace.len(),
@@ -691,6 +790,7 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
         descriptors,
         admitted,
         external,
+        true,
     )
 }
 
@@ -713,6 +813,30 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_from_space(
         descriptors,
         admitted,
         external,
+        true,
+    )
+}
+
+/// Copy the subgraph reachable from `root_ptrs` out of a source space into
+/// a destination that need not hold the whole source; prepared by
+/// [`prepare_reachable_copy_from_space`]. Used by `gc::evacuate`, which
+/// restores the source's forwarded headers afterwards.
+pub(crate) unsafe fn copy_reachable_from_space(
+    root_ptrs: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn DescriptorOldSpace>,
+    external: Option<&dyn ExternalPayloadOwner>,
+) -> Result<CopyResult, DescriptorTraceError> {
+    copy_prevalidated_from_source(
+        root_ptrs,
+        &CopySource::Arenas(source),
+        tospace,
+        descriptors,
+        admitted,
+        external,
+        false,
     )
 }
 
@@ -723,6 +847,7 @@ unsafe fn copy_prevalidated_from_source(
     descriptors: &mut DescriptorSpace,
     admitted: Option<&dyn DescriptorOldSpace>,
     external: Option<&dyn ExternalPayloadOwner>,
+    whole_source: bool,
 ) -> Result<CopyResult, DescriptorTraceError> {
     let source_bytes = source.bytes();
     let to_base = tospace.as_mut_ptr() as usize;
@@ -732,7 +857,7 @@ unsafe fn copy_prevalidated_from_source(
     if !to_base.is_multiple_of(8) || source.overlaps_range(to_base, to_end) {
         return Err(DescriptorTraceError::InvalidRange);
     }
-    if tospace.len() < source_bytes {
+    if whole_source && tospace.len() < source_bytes {
         return Err(DescriptorTraceError::InsufficientSpace {
             required: source_bytes,
             available: tospace.len(),
@@ -1026,7 +1151,15 @@ unsafe fn evacuate_descriptor(
             admitted,
         );
     }
-    copy_descriptor(pointer, tag, descriptor, to_base, to_capacity, free)
+    copy_descriptor(
+        pointer,
+        tag,
+        descriptor,
+        to_base,
+        to_capacity,
+        free,
+        descriptors,
+    )
 }
 
 unsafe fn copy_descriptor(
@@ -1036,6 +1169,7 @@ unsafe fn copy_descriptor(
     to_base: usize,
     to_capacity: usize,
     free: &mut usize,
+    descriptors: &mut DescriptorSpace,
 ) -> Result<usize, DescriptorTraceError> {
     let extent = descriptor.allocation_extent() as usize;
     let required = free
@@ -1056,6 +1190,7 @@ unsafe fn copy_descriptor(
         });
     }
     std::ptr::copy_nonoverlapping(pointer, (to_base + *free) as *mut u8, extent);
+    descriptors.log_forwarding(pointer as usize)?;
     descriptor.install_forwarding(pointer, (to_base + *free) as *mut u8);
     *free = required;
     Ok((to_base + required - extent) | usize::from(tag))
@@ -1127,7 +1262,7 @@ unsafe fn resolve_updated(
                     if let Some(reference) =
                         owner.admit((stored_target & !7) | usize::from(current_tag))?
                     {
-                        forward_updated_path(source, descriptors, reference);
+                        forward_updated_path(source, descriptors, reference)?;
                         return Ok(reference);
                     }
                 }
@@ -1155,7 +1290,7 @@ unsafe fn resolve_updated(
                     });
                 }
                 let relocated = target_address | usize::from(current_tag);
-                forward_updated_path(source, descriptors, relocated);
+                forward_updated_path(source, descriptors, relocated)?;
                 return Ok(relocated);
             }
             if current_tag != 0 {
@@ -1166,12 +1301,12 @@ unsafe fn resolve_updated(
             }
             let stored_target = std::ptr::read(current.add(8).cast::<usize>());
             if let Some(reference) = descriptors.static_reference(stored_target)? {
-                forward_updated_path(source, descriptors, reference);
+                forward_updated_path(source, descriptors, reference)?;
                 return Ok(reference);
             }
             if let Some(owner) = admitted {
                 if let Some(reference) = owner.admit(stored_target)? {
-                    forward_updated_path(source, descriptors, reference);
+                    forward_updated_path(source, descriptors, reference)?;
                     return Ok(reference);
                 }
             }
@@ -1198,7 +1333,7 @@ unsafe fn resolve_updated(
                     tag: target_tag,
                 });
             }
-            forward_updated_path(source, descriptors, target);
+            forward_updated_path(source, descriptors, target)?;
             return Ok(target);
         }
         if actual_state != DescriptorState::Updated {
@@ -1216,10 +1351,17 @@ unsafe fn resolve_updated(
                     tag: current_tag,
                 });
             }
-            let result =
-                copy_descriptor(current, current_tag, descriptor, to_base, to_capacity, free)? & !7;
+            let result = copy_descriptor(
+                current,
+                current_tag,
+                descriptor,
+                to_base,
+                to_capacity,
+                free,
+                descriptors,
+            )? & !7;
             let relocated = result | usize::from(current_tag);
-            forward_updated_path(source, descriptors, relocated);
+            forward_updated_path(source, descriptors, relocated)?;
             return Ok(relocated);
         }
         if !tag_valid(
@@ -1242,7 +1384,7 @@ unsafe fn resolve_updated(
         }
         let target_address = untag(target);
         if let Some(reference) = descriptors.static_reference(target)? {
-            forward_updated_path(source, descriptors, reference);
+            forward_updated_path(source, descriptors, reference)?;
             return Ok(reference);
         }
         if let Some(owner) = admitted {
@@ -1250,7 +1392,7 @@ unsafe fn resolve_updated(
                 // Preserve the evaluated target's evidence exactly as stored
                 // by the update commit; the old owner has validated it at its
                 // exact allocation start.
-                forward_updated_path(source, descriptors, reference);
+                forward_updated_path(source, descriptors, reference)?;
                 return Ok(reference);
             }
         }
@@ -1268,13 +1410,15 @@ unsafe fn forward_updated_path(
     source: &CopySource<'_>,
     descriptors: &mut DescriptorSpace,
     relocated: usize,
-) {
+) -> Result<(), DescriptorTraceError> {
     for index in 0..descriptors.updated_path.len() {
         let thunk = descriptors.updated_path[index];
         let descriptor = &*descriptor_at(thunk as *const u8);
+        descriptors.log_forwarding(thunk)?;
         descriptor.install_forwarding_tagged(thunk as *mut u8, relocated);
     }
     source.leave_updated_path(descriptors);
+    Ok(())
 }
 
 fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {

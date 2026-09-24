@@ -203,11 +203,11 @@ pub struct PreparedMachine<'code> {
     /// or [`Self::close_realm`]; the rooting receipt
     /// (`stowed_roots_count() == parked_continuations`) holds at every
     /// quiescent point, as on the Core machine.
-    handles: ResourceLedger,
+    pub(super) handles: ResourceLedger,
     /// The one heap shared by every installed program -- see the module doc.
-    machine: Rc<MachineState>,
-    vmctx: VMContext,
-    old_space: Box<OldSpace>,
+    pub(super) machine: Rc<MachineState>,
+    pub(super) vmctx: VMContext,
+    pub(super) old_space: Box<OldSpace>,
     /// The descriptor space's one immutable static-region owner. It is set
     /// after the first successful installation and is then shared directly
     /// by collection and non-moving observation.
@@ -216,7 +216,7 @@ pub struct PreparedMachine<'code> {
     /// to `retain_prepared`/`promote_prepared` so a promoted value's
     /// transitive graph is covered no matter which program produced the
     /// objects it reaches.
-    descriptors: Vec<Arc<ObjectDescriptor>>,
+    pub(super) descriptors: Vec<Arc<ObjectDescriptor>>,
     /// One descriptor per constructor identity across every installed
     /// program ([`super::DescriptorInterner`]): later programs compile
     /// against it through [`Self::compile_for_install`], so their `Case`,
@@ -224,7 +224,7 @@ pub struct PreparedMachine<'code> {
     interner: super::DescriptorInterner,
     /// Union of every installed program's descriptor registry (constructor
     /// identity/field-representation metadata for non-forcing observation).
-    descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
+    pub(super) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     /// Every installed program's owned descriptor headers, inverted for
     /// [`Self::mark_live_programs`]: which program a live object's header
     /// belongs to. [`Self::install`] inserts a program's
@@ -269,6 +269,12 @@ pub struct PreparedCallOptions {
 pub struct PreparedHandle {
     raw: ValueHandle,
     rep: RuntimeRep,
+}
+
+impl PreparedHandle {
+    pub(super) fn new(raw: ValueHandle, rep: RuntimeRep) -> Self {
+        Self { raw, rep }
+    }
 }
 
 /// See [`PreparedMachine::compile_snapshot`].
@@ -1076,7 +1082,7 @@ impl<'code> PreparedMachine<'code> {
             }
         }
 
-        let statics = Arc::new(compiled.statics.instantiate()?);
+        let statics = compiled.shared_statics()?;
         let heap_tops: HashSet<_> = compiled.heap_top_specs.iter().map(|spec| spec.id).collect();
         for (&id, &slot) in &compiled.top_slots {
             if heap_tops.contains(&id) {
@@ -2013,7 +2019,7 @@ impl<'code> PreparedMachine<'code> {
         Ok(Some(handle))
     }
 
-    fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
+    pub(super) fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
         if self.machine.disposition() == MachineDisposition::Unavailable {
             return Err(ExecutionError::Runtime(
                 self.machine.last_failure().unwrap_or(MachineFailure {
@@ -4107,6 +4113,158 @@ mod tests {
             .run_entry(right_id, ValueId(0), &[], call, RealmId::ROOT)
             .expect("the right machine outlives the left one on the same image");
         expect_952(&right_again.values);
+    }
+
+    fn evacuation_pair(
+        compiled: &CompiledProgram,
+    ) -> (
+        (PreparedMachine<'_>, ProgramId),
+        (PreparedMachine<'_>, ProgramId),
+    ) {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        (
+            PreparedMachine::from_borrowed(compiled, options).expect("left installs"),
+            PreparedMachine::from_borrowed(compiled, options).expect("right installs"),
+        )
+    }
+
+    #[test]
+    fn exported_constructor_arrives_on_another_machine_with_its_field() {
+        let compiled = field_constructor_program(970);
+        let ((mut left, left_id), (mut right, right_id)) = evacuation_pair(&compiled);
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        left.run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("left evaluates its top");
+        let handle = left
+            .retain_top(left_id, ValueId(0))
+            .expect("left retains the evaluated top");
+        let budget = RunOptions::default().observation_budget;
+        let before = left
+            .observe_handle(left_id, handle, budget)
+            .expect("left observes the value");
+        assert!(matches!(
+            before,
+            tidepool_bridge::HaskellValue::Con(id, ref fields)
+                if id == tidepool_repr::DataConId(970) && fields.len() == 1
+        ));
+
+        let parcel = left.export_parcel(handle).expect("export");
+        assert!(
+            parcel.bytes() > 0,
+            "a heap constructor is copied, not shared"
+        );
+        let arrived = right
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("right imports the parcel");
+        let after = right
+            .observe_handle(right_id, arrived, budget)
+            .expect("right observes the imported value");
+        let rendered = |value: &tidepool_bridge::HaskellValue| format!("{value:?}");
+        assert_eq!(rendered(&after), rendered(&before));
+
+        // The source is untouched: it still observes and still runs, under
+        // a forced collection, and so does the destination.
+        let collect = PreparedCallOptions {
+            collect_before_observation: true,
+            ..call
+        };
+        left.run_entry(left_id, ValueId(0), &[], collect, RealmId::ROOT)
+            .expect("left still runs after exporting");
+        assert_eq!(
+            rendered(
+                &left
+                    .observe_handle(left_id, handle, budget)
+                    .expect("left value survives its export")
+            ),
+            rendered(&before)
+        );
+        right
+            .run_entry(right_id, ValueId(0), &[], collect, RealmId::ROOT)
+            .expect("right runs under a forced collection with an imported arena");
+        assert_eq!(
+            rendered(
+                &right
+                    .observe_handle(right_id, arrived, budget)
+                    .expect("imported value survives a collection")
+            ),
+            rendered(&before)
+        );
+        drop(left);
+        assert_eq!(
+            rendered(
+                &right
+                    .observe_handle(right_id, arrived, budget)
+                    .expect("imported value outlives the exporting machine")
+            ),
+            rendered(&before)
+        );
+        assert!(right.release(arrived));
+    }
+
+    #[test]
+    fn exported_static_root_is_shared_by_address() {
+        // The fixture's second top is a function: a static-image object every
+        // machine that installed the image holds at the same address.
+        let compiled = managed_roundtrip_program();
+        let ((mut left, left_id), (mut right, right_id)) = evacuation_pair(&compiled);
+        let handle = left
+            .retain_top(left_id, ValueId(1))
+            .expect("left retains its static function top");
+        let budget = RunOptions::default().observation_budget;
+        let before = left
+            .observe_handle(left_id, handle, budget)
+            .expect("observe");
+        assert!(matches!(
+            before,
+            HaskellValue::Con(id, ref fields)
+                if id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
+        ));
+        let parcel = left.export_parcel(handle).expect("export");
+        assert_eq!(parcel.bytes(), 0, "a static value is shared, never copied");
+        let arrived = right
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("right imports a static reference");
+        assert_eq!(
+            format!(
+                "{:?}",
+                right
+                    .observe_handle(right_id, arrived, budget)
+                    .expect("observe")
+            ),
+            format!("{before:?}")
+        );
+        assert!(right.release(arrived));
+    }
+
+    #[test]
+    fn import_refuses_a_parcel_from_an_image_this_machine_lacks() {
+        let compiled = field_constructor_program(971);
+        let other = CompiledProgram::compile(&base_program(955)).expect("other compiles");
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, left_id) = PreparedMachine::from_borrowed(&compiled, options).expect("left");
+        let (mut right, _) = PreparedMachine::from_borrowed(&other, options).expect("right");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        left.run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("left runs");
+        let handle = left.retain_top(left_id, ValueId(0)).expect("left retains");
+        let parcel = left.export_parcel(handle).expect("export");
+        assert!(matches!(
+            right.import_parcel(parcel, RealmId::ROOT),
+            Err(ExecutionError::Evacuation(
+                tidepool_heap::execution_descriptor::DescriptorTraceError::UnknownDescriptor { .. }
+            ))
+        ));
+        assert_eq!(right.handle_count(), 0, "a refused import retains nothing");
     }
 
     #[test]

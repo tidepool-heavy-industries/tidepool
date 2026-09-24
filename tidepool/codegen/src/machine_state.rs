@@ -444,6 +444,22 @@ unsafe impl tidepool_heap::external_storage::ExternalPayloadOwner for MachineSta
     }
 }
 
+impl tidepool_heap::gc::evacuate::PayloadExporter for MachineState {
+    fn shape(
+        &self,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<tidepool_heap::gc::evacuate::PayloadShape, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record = Self::checked_external_record(&storage, published, expected)?;
+        Ok(tidepool_heap::gc::evacuate::PayloadShape {
+            kind: record.kind,
+            logical_len: record.logical_len,
+            align: record.layout.align(),
+        })
+    }
+}
+
 impl MachineState {
     pub fn new() -> Self {
         Self {

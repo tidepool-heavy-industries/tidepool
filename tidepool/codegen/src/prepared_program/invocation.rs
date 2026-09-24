@@ -129,7 +129,7 @@ impl<'code> PreparedInvocation<'code> {
             .limit_with_frame_reserve(max_native_frame)
             .map_err(runtime_error_without_machine)?;
 
-        let statics = Arc::new(program.statics.instantiate()?);
+        let statics = program.shared_statics()?;
         let static_catalog = static_catalog(&statics).map_err(runtime_error_without_machine)?;
         // This invocation's own root block carries the program's tops,
         // exactly as an installed machine's block does.

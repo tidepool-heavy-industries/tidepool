@@ -18,6 +18,7 @@ use cranelift_module::{FuncId, Module};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::static_region::StaticRegion;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
     Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
@@ -42,6 +43,7 @@ pub(crate) mod md5_kernel;
 mod no_success;
 mod session_var_id;
 pub use session_var_id::session_var_id;
+mod evacuation;
 #[cfg(test)]
 mod no_success_tests;
 mod observe;
@@ -49,6 +51,7 @@ pub(crate) mod resolve;
 mod roots;
 pub use observe::{AddressOrigin, ObservationFailure};
 pub use roots::ImageSlot;
+pub use tidepool_heap::gc::evacuate::Parcel;
 mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;
@@ -371,6 +374,10 @@ pub struct CompiledProgram {
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) statics: StaticImage,
+    /// The one instantiated static region every machine that installs this
+    /// image shares by address, so a static reference crosses machines
+    /// unchanged. Instantiated on first install.
+    static_region: std::sync::OnceLock<Arc<StaticRegion>>,
     /// Block-local slot of every top; see `image_slot`/`root_words`.
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
@@ -1260,6 +1267,7 @@ impl CompiledProgram {
             descriptors,
             descriptor_registry,
             statics,
+            static_region: std::sync::OnceLock::new(),
             top_slots: plan.top_slots,
             import_slots: plan.import_slots,
             image_slot: plan.image_slot,
@@ -1276,6 +1284,16 @@ impl CompiledProgram {
             dispatch_owned_headers,
             codegen_charged: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// This image's static region, instantiated once and shared by every
+    /// machine that installs the image.
+    pub(crate) fn shared_statics(&self) -> Result<Arc<StaticRegion>, ExecutionError> {
+        if let Some(region) = self.static_region.get() {
+            return Ok(Arc::clone(region));
+        }
+        let region = Arc::new(self.statics.instantiate()?);
+        Ok(Arc::clone(self.static_region.get_or_init(|| region)))
     }
 
     pub(crate) fn prepared_force_adapter(&self) -> FuncId {

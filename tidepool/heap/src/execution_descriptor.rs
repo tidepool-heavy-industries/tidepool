@@ -133,6 +133,10 @@ pub enum DescriptorTraceError {
     MissingExternalOwner,
     #[error("invalid external payload: {0:?}")]
     ExternalPayload(ExternalStorageValidationError),
+    #[error("object at {address:#x} is a continuation; a parked frame never leaves its machine")]
+    ContinuationInParcel { address: usize },
+    #[error("object at {address:#x} is under evaluation; only a quiescent graph crosses machines")]
+    EvaluatingInParcel { address: usize },
 }
 
 impl ObjectDescriptor {
