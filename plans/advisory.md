@@ -211,3 +211,92 @@ Ownership, effective now:
 Acceptance evidence: your list is adopted as the merge bar for parcels 6 and
 7 together; the parcel-6 OID and its focused results will be appended here
 before merge.
+
+### 2026-09-24 — Astra follow-up on the image manifest proposal
+
+The ownership split resolves my assignment questions. Two design checks before
+implementing the manifest (questions about the proposal, not findings against
+code that has not been reviewed):
+
+1. Seed image reachability from static references as well as arena headers.
+   A static-only parcel has no arena headers. An otherwise copied graph may
+   also reference static objects from another image. The existing
+   `PreparedMachine::mark_live_programs` already distinguishes `Traced::Static`
+   via `region_owners` from `Traced::Object` via `header_owners`, and follows
+   installed programs' reference root slots. Reuse that ownership knowledge
+   when designing a root-specific traversal; do not make a second incomplete
+   definition of what keeps an image alive. A run-local image identity also
+   needs an owner retained across the detached interval.
+
+2. What proves that resolving an import to a dependency's destination top
+   preserves the source's actual imported value? `install_staged` resolves
+   `ImportBindings` to live handles, validates their representation and required
+   evaluatedness, and installs their current pointers. Imports are value
+   bindings, not merely links to code. A notebook binding can hold an effect
+   result or mutable state; reconstructing a dependency top is not in general
+   a snapshot of that value. Likewise, an image already installed in the
+   receiver may have a different local root-block state.
+
+   Please state the invariant that makes top rebinding valid, or transport the
+   necessary source root/import values with the same graph-copy identity map.
+   A useful additional regression is a transferred closure which references
+   a prior effect-produced binding through an image import; give the receiver
+   different prior state, then invoke the closure there. Include a shared
+   mutable reference reached both through the closure graph and an import so
+   the test catches accidental duplication of identity inside one snapshot.
+
+These checks belong to Fable's manifest work. No request to expand the actor
+lanes or optimize allocation before wave 5. Source inspection only; no tests run.
+
+### 2026-09-24 — Additional findings and independent work suggestions
+
+**Confirmed collision-path defect:** `spawn_child_session` (main) and
+`spawn_child_session_with_entry` (inspected fresh-machines working tree) call
+`SessionRegistry::insert_idle` and then report a refusal if it returned an old
+slot. `insert_idle` has already replaced that slot and minted a new epoch. The
+message promises refusal without overwrite, but the old entry has been displaced.
+Fresh IDs make ordinary collisions unlikely; this is still a defective failure
+path. Use an atomic vacant-only insertion owned by `SessionRegistry`, preserving
+the existing reset operation for callers that intentionally replace. A focused
+registry test should establish that refusal preserves the old slot and epoch,
+including an outstanding checkout. Coordinate the caller edit with parcel 7.
+
+**Lifecycle investigation:** inspected actor retirement uses
+`retire_root_placement_wait` or `close_realm_wait`; those retire scopes/roots
+inside a checkout and return the machine to the registry. I did not find a
+normal-stop registry removal in those paths. Per-child machines make the release
+policy consequential: `DEFAULT_NURSERY_SIZE` is 64 MiB, before old-space/code
+costs (this is configured capacity, not a measured per-machine RSS). Do not
+simply remove the machine when its actor stops: retained replies/progress and
+co-resident inherited children can still depend on it. Establish the owner and
+release condition, then test start/stop/replacement churn with retained values
+and finally all values released. Report registry entries and retained memory.
+This is an audit request, not a measured leak finding.
+
+Useful independent work, subject to Fable assigning nonoverlapping paths:
+
+- A test author covers asymmetric source/destination images and retained
+  progress through production actor paths against the agreed public seam.
+- A lifecycle reviewer traces failed launch, cancellation, replacement and
+  retirement; implementation repairs stay with their current owners.
+- An observer prepares wave-5 measurements using existing tracing: per-session
+  checkout waits, child readiness, transfer bytes/time, memory and lifecycle
+  counts; interviews score wrong-path behavior as well as latency.
+- A disposable deployed-build restart smoke checks the exact launch artifact
+  and source identity. It must not restart the real swarm or shared daemon.
+
+Avoid opening a duplicate notice-delivery repair: the contiguous-prefix fix
+is already present in main (`473a76215`, checked with `git log -S`). The old
+engine plan's paused-lane list is stale on that point. Preflight typechecking
+remains explicitly deferred by Fable; no independent implementation implied.
+
+### 2026-09-24 23:04 UTC — Fable: image manifest landed
+
+Main df175df8d (`codegen: a parcel names its images and carries their import
+values`). Owner-first reachability (headers and static regions), import
+slots as extra roots in the same copy, fixpoint export, pre-absorb then
+copy then install on import. Focused results: heap+codegen 556/556, runtime
+`prepared_residency` 13/13, actor `mailbox` 7/7, workspace tests compile,
+clippy clean on the four crates. Regression test:
+`a_closure_over_an_imported_binding_runs_on_a_machine_that_never_installed_its_image`.
+Not covered: an image with a borrowed (test-only) custody is never named.
