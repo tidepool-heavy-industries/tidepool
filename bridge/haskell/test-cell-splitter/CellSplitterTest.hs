@@ -69,6 +69,30 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
   let dependency = root </> "QuasiQuoteDependency.hs"
       templateDependency = root </> "TemplateDependency.hs"
       target = root </> "QuasiQuoteTarget.hs"
+      -- A fixture standing in for a real, allowlisted quoter module
+      -- ('bridge/haskell/lib/Tidepool/QQ/Label.hs'): 'pureQuasiQuoters'
+      -- matches purely on qualified name
+      -- ("Tidepool.QQ.Label.label"), so a small local module under that
+      -- same name exercises the same resolution path without depending on
+      -- the deployed stdlib tree.
+      qqDir = root </> "Tidepool" </> "QQ"
+      qqLabel = qqDir </> "Label.hs"
+      -- The compile TARGET itself is always freshly recompiled every
+      -- request ('validationMemoCompilation' asserts this directly); only
+      -- a *dependency* module's memo entry is ever reused. So each
+      -- quasiquoter case below needs its own dependency module, imported
+      -- by a throwaway target, to actually observe a memo hit or miss on
+      -- the quasiquoter-using module itself.
+      labelDependency = root </> "LabelDependency.hs"
+      labelUser = root </> "LabelUser.hs"
+      -- GHC's own stage restriction forbids using a quasiquoter in the
+      -- same module that defines it ("must be imported, not defined
+      -- locally"), so the unlisted quoter lives in its own module,
+      -- imported like any other -- exercising "imported, but not on the
+      -- allowlist" rather than "no import at all provides it".
+      localQuoter = root </> "LocalQuoteQuoter.hs"
+      localQuoteDependency = root </> "LocalQuoteDependency.hs"
+      localQuoteUser = root </> "LocalQuoteUser.hs"
   writeFile dependency $ unlines
     [ "{-# LANGUAGE QuasiQuotes #-}"
     , "module QuasiQuoteDependency (value) where"
@@ -87,12 +111,63 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "import TemplateDependency (other)"
     , "result = value + other"
     ]
+  createDirectoryIfMissing True qqDir
+  writeFile qqLabel $ unlines
+    [ "module Tidepool.QQ.Label (label) where"
+    , "import Language.Haskell.TH (litE, stringL)"
+    , "import Language.Haskell.TH.Quote (QuasiQuoter(..))"
+    , "label :: QuasiQuoter"
+    , "label = QuasiQuoter"
+    , "  { quoteExp = \\source -> litE (stringL source)"
+    , "  , quotePat = \\_ -> fail \"label is expression-only\""
+    , "  , quoteType = \\_ -> fail \"label is expression-only\""
+    , "  , quoteDec = \\_ -> fail \"label is expression-only\""
+    , "  }"
+    ]
+  writeFile labelDependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module LabelDependency (value) where"
+    , "import Tidepool.QQ.Label (label)"
+    , "value :: String"
+    , "value = [label|orbit-motif|]"
+    ]
+  writeFile labelUser $ unlines
+    [ "module LabelUser where"
+    , "import LabelDependency (value)"
+    , "result = value"
+    ]
+  writeFile localQuoter $ unlines
+    [ "module LocalQuoteQuoter (myqq) where"
+    , "import Language.Haskell.TH (litE, stringL)"
+    , "import Language.Haskell.TH.Quote (QuasiQuoter(..))"
+    , "myqq :: QuasiQuoter"
+    , "myqq = QuasiQuoter"
+    , "  { quoteExp = \\source -> litE (stringL source)"
+    , "  , quotePat = \\_ -> fail \"myqq is expression-only\""
+    , "  , quoteType = \\_ -> fail \"myqq is expression-only\""
+    , "  , quoteDec = \\_ -> fail \"myqq is expression-only\""
+    , "  }"
+    ]
+  writeFile localQuoteDependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module LocalQuoteDependency (value) where"
+    , "import LocalQuoteQuoter (myqq)"
+    , "value :: String"
+    , "value = [myqq|hello|]"
+    ]
+  writeFile localQuoteUser $ unlines
+    [ "module LocalQuoteUser where"
+    , "import LocalQuoteDependency (value)"
+    , "result = value"
+    ]
   direct <- runPipelineSelected PreparedStg target [root]
   let evidence = pprDependencies direct
   when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
     fail "QuasiQuotes source produced complete dependency evidence"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  previousMemoTrace <- lookupEnv "TIDEPOOL_MEMO_TRACE"
   setEnv "TIDEPOOL_TIMING" "1"
+  setEnv "TIDEPOOL_MEMO_TRACE" "1"
   (withResidentPipelineSelected [root] $ \compile -> do
       _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
       (_, warmLog) <- captureStderr root "quasiquote-warm" $
@@ -102,8 +177,35 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
         warmLog
       assertContains "TemplateHaskell source remains conservatively uncacheable"
         "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
-        warmLog)
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+        warmLog
+      -- A dependency module whose only compile-time execution is an
+      -- allowlisted, pure quasiquoter reuses the memo on the next
+      -- identical compile (the target itself, 'LabelUser', is always
+      -- freshly recompiled -- see 'validationMemoCompilation' -- so it is
+      -- 'LabelDependency', not 'LabelUser', whose memo status this checks).
+      _ <- compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
+      (_, labelWarmLog) <- captureStderr root "label-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
+      when ("tidepool-memo-miss module=LabelDependency" `isInfixOf` labelWarmLog) $
+        fail ("a dependency using only [label|...|] missed the memo: " ++ labelWarmLog)
+      -- A dependency using a quasiquoter this resolver cannot place on the
+      -- allowlist (here: locally defined, so no import brings it into
+      -- scope) stays conservatively uncacheable, same as raw QuasiQuotes —
+      -- same short TIDEPOOL_TIMING reason — but TIDEPOOL_MEMO_TRACE still
+      -- honestly names the unresolved quoter it actually saw.
+      _ <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+      (_, localWarmLog) <- captureStderr root "local-quote-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+      assertContains "an unlisted (locally-defined) quasiquoter remains conservatively uncacheable"
+        "tidepool-memo-miss module=LocalQuoteDependency reason=untracked-compile-time-execution"
+        localWarmLog
+      assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
+        "tidepool-memo-trace-miss" localWarmLog
+      assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
+        "quasiquotes=untracked:LocalQuoteQuoter.myqq" localWarmLog)
+    `finally` do
+      maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+      maybe (unsetEnv "TIDEPOOL_MEMO_TRACE") (setEnv "TIDEPOOL_MEMO_TRACE") previousMemoTrace
   where
     temporary = do
       parent <- getTemporaryDirectory
