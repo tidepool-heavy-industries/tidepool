@@ -69,6 +69,12 @@ fixes the run motivated are in git history. Open items:
   validates the next `Lib.G<g>` module in the shared session root. Revisit only
   if a wave shows declaration cells blocking other actors; it needs a private
   path per staged candidate.
+- **A parked tool-installer hole leaks on cancellation.** `prepare_tools` holds
+  a `ResidentHole` across its second machine checkout; if the task is dropped
+  there, nothing resumes or aborts the parked continuation (`ResidentHole` has
+  no drop cleanup, and every abort path needs a held checkout). Same class:
+  `prepare_cell`'s rejected-item result is returned without revalidating the
+  view it compiled against.
 - **Operator input.** In a Codex pane, Enter steers a running turn; Tab queues
   until the turn ends, which can be many minutes.
 
