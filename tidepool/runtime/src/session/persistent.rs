@@ -524,7 +524,7 @@ impl PersistentSession {
     pub(crate) fn revalidate_and_install_prepared(
         &mut self,
         snapshot: InstallSnapshot,
-        compiled: tidepool_codegen::prepared_program::CompiledProgram,
+        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
         match self.machine.as_mut() {
             None => Ok(None),

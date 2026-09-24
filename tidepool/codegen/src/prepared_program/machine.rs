@@ -83,9 +83,18 @@ use tidepool_repr::{DataConId, PrincipalId};
 /// generated code. A later resident owner may stow the whole machine under
 /// its existing single-owner protocol; it must not split these fields into
 /// independent registries.
+///
+/// `Shared` is the same image installed on more than one machine (an
+/// `ImageRegistry` hit, or any other caller that already holds an `Arc` to
+/// an image another machine installed): the `Arc` may have been minted on a
+/// different thread, which is exactly what `CompiledProgram: Send + Sync`
+/// (see its own `unsafe impl`) makes sound to move here. This machine still
+/// owns nothing about it but its own root block and the descriptor/static
+/// bookkeeping `install` folds in -- the same as `Owned`.
 enum ProgramCustody<'code> {
     Borrowed(&'code CompiledProgram),
     Owned(Rc<CompiledProgram>),
+    Shared(Arc<CompiledProgram>),
 }
 
 impl ProgramCustody<'_> {
@@ -93,6 +102,7 @@ impl ProgramCustody<'_> {
         match self {
             Self::Borrowed(program) => program,
             Self::Owned(program) => program,
+            Self::Shared(program) => program,
         }
     }
 }
@@ -854,6 +864,22 @@ impl<'code> PreparedMachine<'code> {
         self.install(ProgramCustody::Owned(Rc::new(program)), &imports)
     }
 
+    /// Install an image this machine did not necessarily compile: an
+    /// `ImageRegistry` hit, or any other `Arc<CompiledProgram>` another
+    /// machine (on another thread) already installed. Otherwise identical
+    /// to [`Self::install_program`] -- same import verification, same
+    /// transactional reserve/verify/publish ordering, same descriptor and
+    /// static-region folding. Only the code-generation accounting differs:
+    /// see [`CompiledProgram::charge_codegen_once`] and the `install` call
+    /// site that consults it.
+    pub fn install_shared(
+        &mut self,
+        image: Arc<CompiledProgram>,
+        imports: ImportBindings,
+    ) -> Result<ProgramId, ExecutionError> {
+        self.install(ProgramCustody::Shared(image), &imports)
+    }
+
     fn install(
         &mut self,
         program: ProgramCustody<'code>,
@@ -912,8 +938,17 @@ impl<'code> PreparedMachine<'code> {
             .map(|descriptor| descriptor.initial_header_word())
             .filter(|header| !shared.contains(header))
             .collect();
-        self.compiled_functions += compiled.pipeline.functions_defined();
-        self.compiled_code_bytes += compiled.pipeline.code_bytes();
+        // Codegen is charged to whichever install is first to pay for it --
+        // the machine that actually compiled this image, whether that
+        // happened here or on another machine that installed it earlier and
+        // handed it here as a `Shared` `Arc`. A shared install adds 0 to
+        // this machine's own lifetime counters, matching the field docs on
+        // `compiled_functions`/`compiled_code_bytes` ("how much code
+        // generation did THIS machine pay for").
+        if compiled.charge_codegen_once() {
+            self.compiled_functions += compiled.pipeline.functions_defined();
+            self.compiled_code_bytes += compiled.pipeline.code_bytes();
+        }
         let id = ProgramId(self.next_program);
         self.next_program += 1;
         self.header_owners
@@ -4072,6 +4107,68 @@ mod tests {
             .run_entry(right_id, ValueId(0), &[], call, RealmId::ROOT)
             .expect("the right machine outlives the left one on the same image");
         expect_952(&right_again.values);
+    }
+
+    #[test]
+    fn one_image_shared_by_arc_installs_on_four_machines_each_on_its_own_thread() {
+        // Parcel 3: one `Arc<CompiledProgram>` -- minted on this (the main)
+        // thread -- installed on four machines, each created and run
+        // entirely on its own thread. `CompiledProgram: Send + Sync`
+        // (its own `unsafe impl`, `prepared_program.rs`) is what makes
+        // moving the `Arc` into each thread sound; each machine still lives
+        // and runs only on the thread that created it. Exactly one of the
+        // four machines pays for the codegen this image already did --
+        // whichever install call gets there first (see
+        // `CompiledProgram::charge_codegen_once`).
+        let compiled =
+            Arc::new(CompiledProgram::compile(&base_program(953)).expect("image compiles"));
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: true,
+        };
+        let charged_functions: Vec<u64> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    let image = Arc::clone(&compiled);
+                    scope.spawn(move || {
+                        let mut machine: PreparedMachine<'static> =
+                            PreparedMachine::empty(options).expect("machine allocates");
+                        let id = machine
+                            .install_shared(image, ImportBindings::new())
+                            .expect("shared install succeeds on this machine's own thread");
+                        let run = machine
+                            .run_entry(id, ValueId(0), &[], call, RealmId::ROOT)
+                            .expect("entry runs against this machine's own root block");
+                        (machine.compiled_functions(), run.values)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| {
+                    let (functions, values) = worker.join().expect("worker thread does not panic");
+                    assert!(matches!(
+                        values.as_slice(),
+                        [tidepool_bridge::HaskellValue::Con(id, fields)]
+                            if *id == tidepool_repr::DataConId(953) && fields.is_empty()
+                    ));
+                    functions
+                })
+                .collect()
+        });
+        let paid: Vec<u64> = charged_functions
+            .iter()
+            .copied()
+            .filter(|&functions| functions > 0)
+            .collect();
+        assert_eq!(
+            paid.len(),
+            1,
+            "codegen must be charged to exactly one of the four machines, not {charged_functions:?}"
+        );
     }
 
     #[test]

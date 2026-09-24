@@ -3463,6 +3463,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stacker",
+ "static_assertions",
  "thiserror",
  "tidepool-bignum",
  "tidepool-bridge",

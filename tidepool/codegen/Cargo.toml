@@ -33,6 +33,7 @@ stacker = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 serde.workspace = true
 serde_json.workspace = true
+static_assertions.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
