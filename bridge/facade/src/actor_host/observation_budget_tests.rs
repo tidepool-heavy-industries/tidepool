@@ -26,8 +26,9 @@
 //! routinely do.
 
 use super::command_jobs_tests::{backend_request, TestCommands};
+use super::jev_tests::{selected_shell_workspace, SectionScoreJev};
 use super::test_campaign::TestCampaign;
-use super::tests::dispatch_haskell_script;
+use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
 
 /// Comfortably past the budget, and far enough past that no accounting
@@ -341,6 +342,102 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         "no implicit observation may request an unbounded initial page"
     );
     assert_eq!(backend.control_count(), 1, "polling must not resend input");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A `focus`ed bash call whose command output is large enough that the Jev
+/// request built to SCORE it -- not the command's own retained job binding --
+/// exceeds the observation budget while it sits parked for dispatch.
+///
+/// Live defect (wave 4, run 535e56ca, actor 5): a bash call with
+/// `max_output_bytes` and `focus` set printed ~30 KB, and the whole unit was
+/// reported failed with "observation budget 100000 exhausted" even though
+/// the command's own effect had already committed -- the receipt read
+/// "effects committed; observing the result failed". The site was
+/// `PreparedEngine::park_suspension` (`tidepool_runtime::session::prepared`):
+/// it observes a newly suspended request under `BudgetPolicy::Complete` to
+/// classify and dispatch it (here, the section-scoring `Jev` request the
+/// focused-bash template builds around the command's own output), and an
+/// exhausted budget there propagated as a hard failure.
+///
+/// Every other observation after a commit (`finish_prepared`'s `SettlePlan`
+/// arms, `observe_display_metadata`) already tolerated this by degrading to
+/// `BudgetPolicy::Bounded` -- a cut, sentinel-marked walk. That degradation
+/// is wrong HERE: this observation feeds a typed decode
+/// (`handlers.dispatch` reconstructs a concrete request type, e.g.
+/// `JevAskWith`, from the value field by field), and a `Bounded` cut can
+/// land on any field, swapping in the oversize sentinel in place of an
+/// `Int` or a map entry just as readily as a `Text` -- decode then rejects
+/// it with a confusing type mismatch instead of a clean, budget-attributed
+/// failure (confirmed while developing this fix: a `Bounded` retry here
+/// turned the clean budget error into `expected LitInt or I#, got
+/// Con(DataConId(...))`). The fix instead re-observes under `Complete` with
+/// no display-sized ceiling: the request already exists in full on the
+/// heap, so the real constraint on rematerializing it is memory, not the
+/// 100_000-unit display budget.
+#[tokio::test]
+async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "cat sources.txt",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 30000,
+                "intent": "retain the decisive diagnostic",
+                "focus": "retain the decisive diagnostic"
+            }),
+        )
+        .await
+    });
+    // The live defect's own command printed only ~30 KB, but the budget this
+    // classification spends is dominated by NODE COUNT from `Sift.hs`'s
+    // per-section JSON packet (one score question, with its own rubric, per
+    // ~2 KB section) rather than raw bytes of one packed `Text` -- a 30 KB,
+    // single-repeated-character, no-newline command output (~15 sections)
+    // measured well under the budget in practice. `OVERSIZED_BYTES` (~200
+    // sections) is sized to trip it deterministically regardless of that
+    // per-section accounting detail.
+    let command_output = "e".repeat(OVERSIZED_BYTES);
+    let commands = TestCommands::completed_streams(&command_output, "");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands.clone()));
+    let response = invoked.await.unwrap();
+    assert_eq!(
+        response["status"], "committed",
+        "a command whose effect already committed must not have its unit reported failed \
+         because scoring its own output for `focus` ran past the observation budget: {response}"
+    );
+    assert_eq!(
+        commands.executions(),
+        1,
+        "recovering from an oversized scoring request must not replay the command"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

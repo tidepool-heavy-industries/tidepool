@@ -29,6 +29,36 @@ pub fn oversize_cut() -> HaskellValue {
     HaskellValue::Con(OVERSIZE_SENTINEL, Vec::new())
 }
 
+/// Appended to a byte/Text leaf a bounded walk could not finish copying.
+pub const TRUNCATION_MARKER: &[u8] = b"...[oversize: observation budget exhausted]";
+
+/// Truncate `bytes` to what `remaining` budget can still afford (reserving
+/// room for [`TRUNCATION_MARKER`]) and append the marker.
+///
+/// [`oversize_cut`] swaps a whole subtree for a `Con` sentinel, which is fine
+/// where the caller only ever inspects/re-displays an arbitrary
+/// `HaskellValue`. It does NOT typecheck where a literal is structurally
+/// required -- most concretely, `Text`'s own backing `ByteArray#` field: a
+/// single string too large to finish copying is still exactly one leaf,
+/// never a constructor, so cutting it must stay a (shorter) literal rather
+/// than change shape. Truncation lands on a UTF-8 boundary so a `Text`
+/// backing array stays valid UTF-8; an arbitrary byte string tolerates the
+/// same cut trivially.
+#[must_use]
+pub fn truncate_oversize_bytes(bytes: &[u8], remaining: usize) -> Vec<u8> {
+    let keep = remaining
+        .saturating_sub(TRUNCATION_MARKER.len())
+        .min(bytes.len());
+    let keep = match std::str::from_utf8(&bytes[..keep]) {
+        Ok(_) => keep,
+        Err(error) => error.valid_up_to(),
+    };
+    let mut truncated = Vec::with_capacity(keep + TRUNCATION_MARKER.len());
+    truncated.extend_from_slice(&bytes[..keep]);
+    truncated.extend_from_slice(TRUNCATION_MARKER);
+    truncated
+}
+
 #[must_use]
 pub fn contains_oversize_sentinel(value: &HaskellValue) -> bool {
     let mut pending = vec![value];

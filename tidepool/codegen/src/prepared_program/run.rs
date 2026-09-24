@@ -120,6 +120,20 @@ pub enum ExecutionError {
     Invariant(&'static str),
 }
 
+impl ExecutionError {
+    /// Whether this failure is only an observation budget running out —
+    /// materializing a value stopped because it ran past its byte/node
+    /// ceiling, not because the program, the heap, or the value is actually
+    /// wrong. The one classifier every caller that tolerates an exhausted
+    /// budget (by cutting the walk instead of failing it, or by degrading a
+    /// `Complete` observation to a bounded one) shares, so a caller does not
+    /// re-derive this match against `Observation(BudgetExceeded)` itself.
+    #[must_use]
+    pub fn is_observation_budget_exhausted(&self) -> bool {
+        matches!(self, Self::Observation(ObservationFailure::BudgetExceeded { .. }))
+    }
+}
+
 impl CompiledProgram {
     pub fn run_entry(
         &self,

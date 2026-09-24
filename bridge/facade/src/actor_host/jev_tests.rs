@@ -103,8 +103,12 @@ impl JevBackend for SequentialScoreChoiceJev {
 /// Mirrors every score question and makes sections containing `ESSENTIAL`
 /// outrank the rest. The response legend is copied from the request so the
 /// pinned DSL's exact response validation remains part of the test.
-struct SectionScoreJev {
-    requests: Mutex<Vec<serde_json::Value>>,
+///
+/// `pub(super)`: also used by `observation_budget_tests`, whose focused-bash
+/// scenario is the same shape as the tests here but with output large enough
+/// to drive the Jev request itself past the observation budget.
+pub(super) struct SectionScoreJev {
+    pub(super) requests: Mutex<Vec<serde_json::Value>>,
 }
 
 impl JevBackend for SectionScoreJev {
@@ -495,7 +499,7 @@ async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign
     .await
 }
 
-fn selected_shell_workspace(config: &mut ActorHostConfig) {
+pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../exomonad/examples/workspace")
         .canonicalize()

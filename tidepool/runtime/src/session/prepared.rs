@@ -2516,10 +2516,36 @@ impl PreparedEngine {
             }
         };
         // The request is observed (forced) through the existing observe
-        // path, producing the value reported for a suspension.
-        let observed =
-            self.machine
-                .observe_handle(program, payload, RunOptions::default().observation_budget);
+        // path, producing the value reported for a suspension. This runs
+        // AFTER any prior effect in the same turn already committed (the
+        // continuation being parked here is its own committed answer's
+        // continuation), so an exhausted budget here must not fail the turn
+        // outright the way it would for a fresh, uncommitted observation --
+        // that would report a hard failure for effects that already ran.
+        //
+        // Unlike model-facing display, this observation feeds a TYPED
+        // decode: `handlers.dispatch` below reconstructs a concrete Rust
+        // request type (e.g. `JevAskWith`) from the value, field by field.
+        // `BudgetPolicy::Bounded` is the wrong tool here -- a cut can land on
+        // ANY field, swapping in `OVERSIZE_SENTINEL` in place of whatever
+        // that field's own type was (an `Int`, a `Map` entry, not only a
+        // `Text`), which decode then rejects with a confusing type mismatch
+        // instead of a clean, budget-attributed failure. `100_000` is a
+        // DISPLAY-sized ceiling; the request already exists in full on the
+        // heap, so the real constraint on rematerializing it here is memory,
+        // not that ceiling. Retry under `Complete` with no such ceiling
+        // instead of degrading the shape.
+        let observed = match self.machine.observe_handle(
+            program,
+            payload,
+            RunOptions::default().observation_budget,
+        ) {
+            Ok(request) => Ok(request),
+            Err(error) if error.is_observation_budget_exhausted() => {
+                self.machine.observe_handle(program, payload, usize::MAX)
+            }
+            Err(error) => Err(error),
+        };
         let request = match observed {
             Ok(request) => request,
             Err(error) => {

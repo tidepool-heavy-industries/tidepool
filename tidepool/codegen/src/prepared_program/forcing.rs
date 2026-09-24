@@ -174,12 +174,11 @@ enum Frontier {
 }
 
 /// Whether `error` is only this observation's budget running out — the one
-/// failure a bounded walk answers with a cut instead of propagating.
+/// failure a bounded walk answers with a cut instead of propagating. Delegates
+/// to [`ExecutionError::is_observation_budget_exhausted`], the one classifier
+/// shared with every other caller that tolerates an exhausted budget.
 fn is_budget_exhaustion(error: &ExecutionError) -> bool {
-    matches!(
-        error,
-        ExecutionError::Observation(ObservationFailure::BudgetExceeded { .. })
-    )
+    error.is_observation_budget_exhausted()
 }
 
 /// Materialize results while the invocation nursery is still installed. Each

@@ -1495,31 +1495,20 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // A bare expression's value is DISPLAYED, so unlike a bind this arm
         // really does need a `HaskellValue`. But the budget that bounds
         // materialization is a display limit, and a display limit must not
-        // discard a run whose effects are already committed. So an exhausted
-        // budget is answered with a bounded SELECTION of the value rather than
-        // a rejection: the walk is redone under
-        // `BudgetPolicy::Bounded`, which stops where the budget ran out and
-        // leaves `OVERSIZE_SENTINEL` at each cut. The handle is kept on that
+        // discard a run whose effects are already committed. So this always
+        // observes under `BudgetPolicy::Bounded`, which stops where the
+        // budget runs out and leaves `OVERSIZE_SENTINEL` at each cut instead
+        // of failing, rather than a rejection. The handle is kept on that
         // path exactly as on the successful one, so the part the cut omitted
         // stays reachable through the binding the caller installs (a workbench
         // expression is named `observationN` and bound before it is shown).
         //
-        // The full materializer runs FIRST and unchanged: every observation
-        // the budget can afford behaves to the byte as it always did, and the
-        // second, bounded walk only ever happens where the old code was about
-        // to fail outright. Forcing is memoized, so redoing the walk re-reads
-        // what the first one already evaluated instead of recomputing it.
-        SettlePlan::Observe => match engine.observe(program, handle) {
+        // `Bounded` and `Complete` walk identically until a budget-exceeded
+        // node is reached — every OTHER observation failure still propagates
+        // either way — so there is no second, redone walk here: `Bounded`
+        // subsumes `Complete`'s success case in one pass.
+        SettlePlan::Observe => match engine.observe_bounded(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
-            Err(error) if is_observation_budget_exhausted(&error) => {
-                match engine.observe_bounded(program, handle) {
-                    Ok(value) => Ok(PreparedRun::Done { handle, value }),
-                    Err(error) => {
-                        engine.release(handle);
-                        Err(error)
-                    }
-                }
-            }
             Err(error) => {
                 engine.release(handle);
                 Err(error)
@@ -1620,14 +1609,10 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 });
             }
             if page_tier == ValueTier::ForceData {
-                let forced = match engine.observe(program, page) {
-                    Ok(value) => Ok(value),
-                    Err(error) if is_observation_budget_exhausted(&error) => {
-                        engine.observe_bounded(program, page)
-                    }
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = forced {
+                // Forcing only checks for a genuine error here; the forced
+                // value itself is discarded. `Bounded` subsumes `Complete`'s
+                // success case, so one pass suffices -- see `SettlePlan::Observe`.
+                if let Err(error) = engine.observe_bounded(program, page) {
                     engine.release_all([page, metadata, alias]);
                     return Err(error);
                 }
@@ -1650,14 +1635,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
 /// unobservable object kind — reports that something is actually wrong, and
 /// must still fail the unit.
 fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
-    matches!(
-        error,
-        PreparedRuntimeError::Run(
-            tidepool_codegen::prepared_program::ExecutionError::Observation(
-                tidepool_codegen::prepared_program::ObservationFailure::BudgetExceeded { .. }
-            )
-        )
-    )
+    matches!(error, PreparedRuntimeError::Run(inner) if inner.is_observation_budget_exhausted())
 }
 
 /// A resident JIT session: one long-lived [`PreparedEngine`] whose heap and
@@ -3930,13 +3908,9 @@ where
         alias: PreparedHandle,
     ) -> Result<HaskellValue, ResidentError> {
         self.on_eval_thread(move |engine, _, _, _| {
-            let observed = match engine.observe(program, metadata) {
-                Ok(value) => Ok(value),
-                Err(error) if is_observation_budget_exhausted(&error) => {
-                    engine.observe_bounded(program, metadata)
-                }
-                Err(error) => Err(error),
-            };
+            // `Bounded` subsumes `Complete`'s success case in one pass -- see
+            // `SettlePlan::Observe`.
+            let observed = engine.observe_bounded(program, metadata);
             engine.release_all([metadata, alias]);
             Ok(observed)
         })?

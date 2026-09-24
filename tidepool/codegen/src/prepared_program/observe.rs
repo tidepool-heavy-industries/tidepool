@@ -678,6 +678,15 @@ impl ObservationHeap<'_> {
                 return Ok(ObservationFrame::Leaf(crate::observation::oversize_cut()));
             }};
         }
+        // A byte/Text leaf the budget cannot finish copying stays a
+        // (truncated) literal instead of `spent!`'s `Con` sentinel: a `Con`
+        // does not typecheck where a literal is structurally required --
+        // concretely, `Text`'s own backing `ByteArray#` field -- and a single
+        // string too large to finish copying is exactly one leaf, never a
+        // constructor, so cutting it must not change its shape. Both sites
+        // below inline this rather than sharing a macro, since one can bound
+        // its copy to the kept prefix and the other cannot (no partial-read
+        // primitive over external byte storage).
         loop {
             if budget.remaining == 0 {
                 spent!();
@@ -704,7 +713,24 @@ impl ObservationHeap<'_> {
                         })
                         .ok_or_else(unauthenticated)?;
                     if budget.charge_bytes(length).is_err() {
-                        spent!();
+                        if !policy.cuts() {
+                            return Err(budget.exceeded());
+                        }
+                        let remaining = budget.remaining;
+                        budget.exhaust();
+                        // Only the kept prefix (plus the marker) is copied --
+                        // never the whole oversize value -- by truncating
+                        // inside the same borrow that reads it.
+                        let truncated = owner
+                            .resolve_literal_bytes(|pool| {
+                                pool.logical_suffix(seed.word).map(|full| {
+                                    crate::observation::truncate_oversize_bytes(full, remaining)
+                                })
+                            })
+                            .ok_or_else(unauthenticated)?;
+                        return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                            Literal::LitString(truncated),
+                        )));
                     }
                     let bytes = owner
                         .resolve_literal_bytes(|pool| {
@@ -779,7 +805,22 @@ impl ObservationHeap<'_> {
                             // this is the charge a bounded view most often
                             // cannot afford, and the cut lands here.
                             if budget.charge_bytes(view.logical_len).is_err() {
-                                spent!();
+                                if !policy.cuts() {
+                                    return Err(budget.exceeded());
+                                }
+                                let remaining = budget.remaining;
+                                budget.exhaust();
+                                // No partial-read primitive over external byte
+                                // storage: the full payload is copied and then
+                                // cut down to what the budget can afford.
+                                let bytes = owner
+                                    .copy_external_bytes(published)
+                                    .map_err(external_observation_error)?;
+                                let truncated =
+                                    crate::observation::truncate_oversize_bytes(&bytes, remaining);
+                                return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                                    Literal::LitByteArray(truncated),
+                                )));
                             }
                             let bytes = owner
                                 .copy_external_bytes(published)
@@ -1403,9 +1444,15 @@ mod tests {
         let cut = heap
             .observe_results_bounded(&[encoded as u64], &reps, &layout, 3)
             .unwrap();
+        // A byte/Text payload the budget cannot afford stays a (truncated)
+        // literal instead of switching shape to the `Con` sentinel: a
+        // structural site expecting a literal here (`Text`'s own backing
+        // `ByteArray#` field, in particular) cannot decode a `Con` in its
+        // place. With zero bytes left to spend after the one-unit node
+        // charge, the truncation keeps none of the original payload.
         assert!(
-            matches!(&cut[0], HaskellValue::Con(id, fields) if *id == crate::observation::OVERSIZE_SENTINEL && fields.is_empty()),
-            "an unaffordable payload must cut, not half-copy: {:?}",
+            matches!(&cut[0], HaskellValue::Lit(Literal::LitByteArray(bytes)) if bytes == crate::observation::TRUNCATION_MARKER),
+            "an unaffordable payload must cut to a truncated literal, not a Con sentinel: {:?}",
             cut[0]
         );
         // With the budget for it, the bounded walk reads the payload whole and
