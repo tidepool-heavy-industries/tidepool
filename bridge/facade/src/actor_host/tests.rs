@@ -3285,23 +3285,6 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
-/// A settlement notice's reply preview is read directly off the heap
-/// (`ResidentSession::render_retained_preview`), no Haskell compiled and no
-/// `pollResponse` cell needed. It reads constructor-shaped values -- an
-/// ordinary Haskell `String`/`[Char]` among them -- but not `Data.Text.Text`
-/// (a packed byte array this non-forcing walk cannot see into); this test
-/// exercises the readable case end to end.
-#[tokio::test]
-async fn settlement_notice_carries_a_readable_reply_preview() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"reply-preview-recipient\")\n\
-         let requestName = [label|reply-preview|]\n\
-         answer <- request @String worker (assignment requestName (\"a readable reply\" :: String))",
-    )
-    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -3319,7 +3302,6 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { activation } => Ok(activation),
-                LocalResidentDeployment::SessionReady { .. } => Ok(()),
                 other => Err(other),
             },
         )
@@ -3365,6 +3347,48 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A settlement notice's reply preview is read directly off the heap
+/// (`ResidentSession::render_retained_preview`), no Haskell compiled and no
+/// `pollResponse` cell needed. It reads constructor-shaped values -- an
+/// ordinary Haskell `String`/`[Char]` among them -- but not `Data.Text.Text`
+/// (a packed byte array this non-forcing walk cannot see into); this test
+/// exercises the readable case end to end.
+#[tokio::test]
+async fn settlement_notice_carries_a_readable_reply_preview() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        "worker <- startAgent (readonlyAgent \"reply-preview-recipient\")\n\
+         let requestName = [label|reply-preview|]\n\
+         answer <- request @String worker (assignment requestName (\"a readable reply\" :: String))",
+    )
+    .await;
+    assert_eq!(setup["status"], "committed", "{setup:?}");
+    let child = campaign
+        .next_deployment(
+            "recipient policy",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "original request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: String)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
@@ -3397,6 +3421,7 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
 
 #[tokio::test]
 async fn record_actor_dispatches_typed_routes_and_commits_state() {
