@@ -224,6 +224,67 @@ pub struct CommandResources {
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
+/// Best-effort, cheaply-knowable naming of the compile daemons most likely to
+/// be holding the RSS that starved this admission — the persistent extractor
+/// daemon and its GHC workers, whether this run's own or another run's/the
+/// shared test daemon's. Pure diagnostic: never changes the admission
+/// decision, never blocks meaningfully (one `/proc` walk, best-effort reads),
+/// and silently reports nothing rather than erroring when `/proc` layout is
+/// unavailable or a process disappears mid-read.
+fn competing_daemon_hint() -> Option<String> {
+    competing_daemon_hint_under(Path::new("/proc"))
+}
+
+/// `proc_root` is `/proc` in production and a synthetic directory in tests —
+/// this function reads only the `<pid>/cmdline` and `<pid>/status` shape it
+/// needs, so a test can build exactly that shape without a real process.
+fn competing_daemon_hint_under(proc_root: &Path) -> Option<String> {
+    let mut hits: Vec<(u64, String)> = Vec::new();
+    for entry in std::fs::read_dir(proc_root).ok()?.flatten() {
+        let pid = entry.file_name();
+        let Some(pid) = pid.to_str() else { continue };
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+        let cmdline = cmdline.trim();
+        let label = if cmdline.contains("tidepool-extract-worker") {
+            "tidepool-extract-worker"
+        } else if cmdline.contains("tidepool-extract") {
+            "tidepool-extract"
+        } else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let Some(rss_kib) = status.lines().find_map(|line| {
+            line.strip_prefix("VmRSS:")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+        }) else {
+            continue;
+        };
+        hits.push((rss_kib * 1024, format!("{label} (pid {pid})")));
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let total: u64 = hits.iter().map(|(bytes, _)| *bytes).sum();
+    let detail = hits
+        .iter()
+        .map(|(bytes, label)| format!("{label} {:.1} GiB", *bytes as f64 / GIB as f64))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "{:.1} GiB held by compile daemons: {detail}",
+        total as f64 / GIB as f64
+    ))
+}
 fn read_counter(path: &Path, key: &str) -> std::io::Result<u64> {
     std::fs::read_to_string(path)?
         .lines()
@@ -1134,8 +1195,11 @@ impl CommandResources {
                         last_warn = now;
                     }
                     if now >= deadline {
+                        let hint = competing_daemon_hint()
+                            .map(|hint| format!(" ({hint})"))
+                            .unwrap_or_default();
                         return Err(io_error(format!(
-                            "actor resource admission timed out after {}s; actor not started: {shortfall}",
+                            "actor resource admission timed out after {}s; actor not started: {shortfall}{hint}",
                             start.elapsed().as_secs(),
                         )));
                     }
@@ -1187,6 +1251,65 @@ mod tests {
             actor_start_bytes: GIB,
             ..CommandResourcePolicy::default()
         }
+    }
+
+    /// Writes a synthetic `<proc_root>/<pid>/{cmdline,status}` pair with the
+    /// same shape the real `/proc` exposes: NUL-joined argv and a `VmRSS:`
+    /// line in kB.
+    fn fake_process(proc_root: &Path, pid: u32, cmdline: &[&str], rss_kib: u64) {
+        let dir = proc_root.join(pid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cmdline"), cmdline.join("\0") + "\0").unwrap();
+        std::fs::write(dir.join("status"), format!("VmRSS:\t  {rss_kib} kB\n")).unwrap();
+    }
+
+    #[test]
+    fn competing_daemon_hint_names_matching_processes_by_command_line() {
+        // An admission timeout should not just report a shortfall in the
+        // abstract — it should say what is plausibly holding the memory,
+        // when that is cheaply knowable from `/proc`.
+        let root = tempfile::tempdir().unwrap();
+        fake_process(
+            root.path(),
+            4242,
+            &["/nix/store/x/bin/tidepool-extract-worker", "--daemon"],
+            2 * 1024 * 1024,
+        );
+        fake_process(
+            root.path(),
+            4343,
+            &["/nix/store/x/bin/tidepool-extract", "--persistent"],
+            512 * 1024,
+        );
+        fake_process(
+            root.path(),
+            4444,
+            &["/usr/bin/unrelated-thing"],
+            8 * 1024 * 1024,
+        );
+
+        let hint = competing_daemon_hint_under(root.path())
+            .expect("matching processes in the synthetic proc root must be found");
+        assert!(
+            hint.contains("tidepool-extract-worker (pid 4242) 2.0 GiB"),
+            "hint: {hint}"
+        );
+        assert!(
+            hint.contains("tidepool-extract (pid 4343) 0.5 GiB"),
+            "hint: {hint}"
+        );
+        assert!(!hint.contains("unrelated-thing"), "hint: {hint}");
+        assert!(
+            hint.starts_with("2.5 GiB held by compile daemons:"),
+            "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn competing_daemon_hint_is_none_when_nothing_matches() {
+        let root = tempfile::tempdir().unwrap();
+        fake_process(root.path(), 5555, &["/usr/bin/unrelated-thing"], 1024);
+        assert_eq!(competing_daemon_hint_under(root.path()), None);
     }
 
     #[test]
