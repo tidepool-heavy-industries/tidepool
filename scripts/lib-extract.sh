@@ -594,7 +594,7 @@ daemon_start_persistent() {
   # The daemon outlives this dev shell, whose TMPDIR is removed when it exits;
   # give it a TMPDIR of its own beside its socket.
   mkdir -p "$dir/tmp"
-  TMPDIR="$dir/tmp" PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
+  TMPDIR="$dir/tmp" TMP="$dir/tmp" TEMP="$dir/tmp" TEMPDIR="$dir/tmp" PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
     persistent-daemon-keeper \
     "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} \
     </dev/null >"$log" 2>&1 &
