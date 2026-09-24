@@ -234,6 +234,13 @@ pub struct SettlementNotification {
     pub request: RequestId,
     pub label: String,
     pub transition: SettlementTransition,
+    /// A bounded, best-effort text rendering of the reply value, set only
+    /// for a [`SettlementTransition::Ready`] whose value could be read
+    /// cheaply (no Haskell compiled, no thunk forced) within its budget.
+    /// `None` for `Unavailable`, and `None` for `Ready` when the value
+    /// could not be read this way -- either way the owner falls back to
+    /// `pollResponse` for the full value.
+    pub reply_preview: Option<String>,
     pub occurred_at_unix_ms: u64,
     pub sequence: ActorEventSequence,
     pub watermark: ActorEventSequence,
@@ -285,6 +292,11 @@ struct RequestRecord {
     notify_owner: bool,
     settlement_notified: bool,
     registered_at_unix_ms: u64,
+    /// A bounded, best-effort text rendering of the reply value, attached by
+    /// [`RequestRegistry::finish_reply`] and consumed the one time
+    /// [`reevaluate_watches`] mints this request's `Ready` settlement
+    /// notice. Never set for an `Unavailable` settlement.
+    reply_preview: Option<String>,
 }
 
 /// Snapshots share ownership, not a consumption cursor. Replacing the latest
@@ -989,6 +1001,7 @@ impl RequestRegistry {
                 notify_owner,
                 settlement_notified: false,
                 registered_at_unix_ms: unix_time_ms(),
+                reply_preview: None,
             },
         );
         id
@@ -1144,7 +1157,15 @@ impl RequestRegistry {
         }
     }
 
-    pub(crate) fn finish_reply(&self, request: RequestId) -> Vec<WatchNotification> {
+    /// `reply_preview` is a bounded, best-effort rendering of the value the
+    /// target just replied with (`None` when it could not be read cheaply).
+    /// It rides along only as far as this request's own `Ready` settlement
+    /// notice; nothing else on the request depends on it.
+    pub(crate) fn finish_reply(
+        &self,
+        request: RequestId,
+        reply_preview: Option<String>,
+    ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         let Some(record) = state.requests.get_mut(&request) else {
             return Vec::new();
@@ -1156,6 +1177,7 @@ impl RequestRegistry {
         if record.owner_state == OwnerState::Observing {
             record.owner_state = OwnerState::Ready;
         }
+        record.reply_preview = reply_preview;
         reevaluate_watches(&mut state)
     }
 
@@ -2003,17 +2025,30 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             };
             if let Some(transition) = transition {
                 record.settlement_notified = true;
-                settlements.push((record.owner, *request, record.label.clone(), transition));
+                // The preview describes a successful reply specifically; an
+                // `Unavailable` settlement keeps today's guidance-only text.
+                let reply_preview = match transition {
+                    SettlementTransition::Ready => record.reply_preview.take(),
+                    SettlementTransition::Unavailable(_) => None,
+                };
+                settlements.push((
+                    record.owner,
+                    *request,
+                    record.label.clone(),
+                    transition,
+                    reply_preview,
+                ));
             }
         }
     }
-    for (owner, request, label, transition) in settlements {
+    for (owner, request, label, transition, reply_preview) in settlements {
         let sequence = next_event_sequence(state, owner);
         state.settlement_notifications.push(SettlementNotification {
             owner,
             request,
             label,
             transition,
+            reply_preview,
             occurred_at_unix_ms: unix_time_ms(),
             sequence,
             watermark: sequence,
@@ -2191,14 +2226,14 @@ mod tests {
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
         registry.begin_reply(ready_target, ready).unwrap();
-        registry.finish_reply(ready);
+        registry.finish_reply(ready, None);
 
         let silent =
             registry.reserve_labeled_with_reporting(owner, silent_target, "silent".into(), false);
         registry.mark_queued(owner, silent_target, silent).unwrap();
         registry.present(silent_target, silent).unwrap();
         registry.begin_reply(silent_target, silent).unwrap();
-        registry.finish_reply(silent);
+        registry.finish_reply(silent, None);
 
         let failed =
             registry.reserve_labeled_with_reporting(owner, failed_target, "failed".into(), true);
@@ -2295,7 +2330,7 @@ mod tests {
             };
             barrier.wait();
             registry.begin_reply(target, request).unwrap();
-            let notifications = registry.finish_reply(request);
+            let notifications = registry.finish_reply(request, None);
             let (watch, initial) = registrar.join().unwrap();
             assert_eq!(notifications.len() + initial.len(), 1);
             assert!(matches!(
@@ -2387,7 +2422,7 @@ mod tests {
             )
             .unwrap();
         registry.begin_reply(target, request).unwrap();
-        let notifications = registry.finish_reply(request);
+        let notifications = registry.finish_reply(request, None);
         assert_eq!(notifications.len(), 2);
         assert!(notifications.iter().any(|notice| notice.watch == watch));
         assert!(notifications
@@ -2403,7 +2438,7 @@ mod tests {
             registry.observe_watch_progress(target, watch, request, 0),
             Ok((None, true))
         ));
-        assert!(registry.finish_reply(request).is_empty());
+        assert!(registry.finish_reply(request, None).is_empty());
         let (late, notifications) = registry
             .register_watch_requirements(
                 owner,
@@ -2447,7 +2482,7 @@ mod tests {
         assert!(initial.is_empty());
 
         registry.begin_reply(first_target, first).unwrap();
-        let notifications = registry.finish_reply(first);
+        let notifications = registry.finish_reply(first, None);
         assert_eq!(notifications.len(), 1);
         assert!(matches!(
             registry.observe_watch(owner, watch),
@@ -2467,7 +2502,7 @@ mod tests {
         ));
 
         registry.begin_reply(second_target, second).unwrap();
-        assert!(registry.finish_reply(second).is_empty());
+        assert!(registry.finish_reply(second, None).is_empty());
         assert!(matches!(
             registry.observe_watch_progress(owner, watch, second, 0),
             Ok((None, false))
@@ -2484,7 +2519,7 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         assert!(matches!(
             registry.begin_cleanup(owner, &inspected),
             Err(CleanupAdmissionError::Stale)
@@ -2509,7 +2544,7 @@ mod tests {
             Err(CleanupAdmissionError::Pending)
         ));
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         // Unrelated root work and inspection do not invalidate this decision.
         let outside = registry.reserve(owner, actor(3));
         registry.mark_queued(owner, actor(3), outside).unwrap();
@@ -2548,7 +2583,7 @@ mod tests {
             Err(CleanupAdmissionError::Pending)
         ));
         registry.begin_reply(outside, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         let (_, _) = registry.register_watch(member, vec![request]).unwrap();
         assert!(matches!(
             registry.begin_cleanup(owner, &inspected),
@@ -2579,9 +2614,9 @@ mod tests {
         assert!(initial.is_empty());
 
         registry.begin_reply(left_target, left).unwrap();
-        assert!(registry.finish_reply(left).is_empty());
+        assert!(registry.finish_reply(left, None).is_empty());
         registry.begin_reply(right_target, right).unwrap();
-        let notifications = registry.finish_reply(right);
+        let notifications = registry.finish_reply(right, None);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(notifications[0].label, "watch");
@@ -2590,7 +2625,7 @@ mod tests {
         assert_eq!(notifications[0].sequence, ActorEventSequence(1));
         assert_eq!(notifications[0].watermark, ActorEventSequence(1));
         assert_eq!(notifications[0].transition, WatchTransition::Ready);
-        assert_eq!(registry.finish_reply(right), Vec::new());
+        assert_eq!(registry.finish_reply(right, None), Vec::new());
         assert_eq!(
             registry.begin_reply(right_target, right),
             Err(ReplyError::AlreadySettled)
@@ -2660,7 +2695,7 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         registry.begin_reply(target, request).unwrap();
-        assert!(registry.finish_reply(request).is_empty());
+        assert!(registry.finish_reply(request, None).is_empty());
 
         let (watch, notifications) = registry.register_watch(owner, vec![request]).unwrap();
         assert_eq!(notifications.len(), 1);
@@ -2778,7 +2813,7 @@ mod tests {
         };
         assert!(registry.actor_stopped(failed_target, &terminal).is_empty());
         registry.begin_reply(ready_target, ready).unwrap();
-        let notifications = registry.finish_reply(ready);
+        let notifications = registry.finish_reply(ready, None);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -2977,7 +3012,7 @@ mod tests {
             let notifications = if settlement_fails {
                 registry.fail_reply_settlement(request, "lost result")
             } else {
-                registry.finish_reply(request)
+                registry.finish_reply(request, None)
             };
             assert_eq!(notifications.len(), 1);
             let expected = if settlement_fails {
@@ -3045,7 +3080,7 @@ mod tests {
             Ok(ReplyObservation::Open)
         );
         registry.begin_reply(target, request).unwrap();
-        assert!(registry.finish_reply(request).is_empty());
+        assert!(registry.finish_reply(request, None).is_empty());
         assert_eq!(
             registry.observe_reply(target, request),
             Ok(ReplyObservation::Closed)
@@ -3127,7 +3162,7 @@ mod tests {
         let (child_watch, _) = registry.register_watch(child, vec![request]).unwrap();
 
         registry.begin_reply(target, request).unwrap();
-        let ready_notices = registry.finish_reply(request);
+        let ready_notices = registry.finish_reply(request, None);
         assert_eq!(ready_notices.len(), 2);
         assert!(ready_notices
             .iter()
@@ -3177,7 +3212,7 @@ mod tests {
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(child, vec![request]).unwrap();
         registry.begin_reply(target, request).unwrap();
-        let notices = registry.finish_reply(request);
+        let notices = registry.finish_reply(request, None);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].watch, watch);
         let owner_notices = registry.take_settlement_notifications();
@@ -3202,7 +3237,7 @@ mod tests {
             .register_watch(child, vec![completed, active])
             .unwrap();
         registry.begin_reply(target, completed).unwrap();
-        assert!(registry.finish_reply(completed).is_empty());
+        assert!(registry.finish_reply(completed, None).is_empty());
         assert!(matches!(
             registry.observe_watch(child, watch),
             Ok(WatchObservation::Pending(_))
@@ -3257,7 +3292,7 @@ mod tests {
             )
             .unwrap();
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         assert_eq!(
             registry.observe_watch(child, watch),
             Ok(WatchObservation::Ready(Vec::new()))
@@ -3291,7 +3326,7 @@ mod tests {
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(observer, vec![request]).unwrap();
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
 
         let notifications = registry.forget_terminal_actor_metadata(owner).unwrap();
         assert_eq!(notifications.len(), 1);
@@ -3331,7 +3366,7 @@ mod tests {
             Ok(ForgetWatchOutcome::StillPending)
         );
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         let (outcome, notifications) = registry.forget_response(owner, request).unwrap();
         assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
         assert_eq!(notifications.len(), 1);
@@ -3376,7 +3411,7 @@ mod tests {
         registry.present(ready_target, ready).unwrap();
         let (ready_watch, _) = registry.register_watch(owner, vec![ready]).unwrap();
         registry.begin_reply(ready_target, ready).unwrap();
-        registry.finish_reply(ready);
+        registry.finish_reply(ready, None);
 
         let pending = registry.reserve_labeled(owner, pending_target, "pending".into());
         registry
@@ -3424,7 +3459,7 @@ mod tests {
 
         // The settlement that makes the watch Ready is exactly the transition
         // a publisher would be holding when cleanup runs.
-        let notifications = registry.finish_reply(request);
+        let notifications = registry.finish_reply(request, None);
         assert!(
             notifications.iter().any(|notice| notice.watch == watch),
             "the settled request must produce the watch transition under test"

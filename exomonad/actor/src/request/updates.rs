@@ -530,7 +530,7 @@ mod tests {
             Ok(ResponseObservation::Pending(_))
         ));
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         assert!(matches!(
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Ready)
@@ -549,7 +549,7 @@ mod tests {
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdateTooLate)
         );
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         // Once the reply has settled there is nobody left to show an update to,
         // so the send is refused outright. A caller must not have to make a
         // second observation to discover that its correction went nowhere.
@@ -566,7 +566,7 @@ mod tests {
         // success. It reached nobody, and only a separate observation said so.
         let (registry, owner, target, request) = active();
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         assert_eq!(
             registry
                 .update_request(owner, request, "use this test name instead".into())

@@ -1332,13 +1332,24 @@ impl DurableActorEvent {
                 notification.current,
                 elapsed(notification.occurred_at_unix_ms),
             ),
-            Self::Typed(TypedActorEvent::SettlementChanged { notification }) => format!(
-                "request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
-                notification.request.0,
-                notification.label,
-                notification.transition,
-                elapsed(notification.occurred_at_unix_ms),
-            ),
+            Self::Typed(TypedActorEvent::SettlementChanged { notification }) => {
+                match &notification.reply_preview {
+                    Some(preview) => format!(
+                        "request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nRead the full value with `pollResponse` only if you need more than this preview; settlement is not integration.",
+                        notification.request.0,
+                        notification.label,
+                        notification.transition,
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                    None => format!(
+                        "request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
+                        notification.request.0,
+                        notification.label,
+                        notification.transition,
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                }
+            }
             Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
                 "request {} {:?} has cancellation pending ({:?}; {}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
                 notification.request.0,

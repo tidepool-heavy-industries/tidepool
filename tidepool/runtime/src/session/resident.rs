@@ -13,7 +13,9 @@ use parking_lot::Mutex;
 
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
-use tidepool_codegen::prepared_program::{session_var_id, PreparedHandle, ProgramId};
+use tidepool_codegen::prepared_program::{
+    session_var_id, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
+};
 use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
@@ -1009,6 +1011,297 @@ pub(crate) enum SettlePlan {
     /// the page receives the normal bind-tier forcing here; metadata remains
     /// lazy until the page has entered the persistent binding store.
     Display(ValueTier),
+}
+
+/// How deep [`render_retained_layer`] recurses into nested constructors
+/// before cutting with `…`, independent of the character budget -- bounds
+/// the walk against a deeply nested value even when each layer prints short.
+const RETAINED_PREVIEW_MAX_DEPTH: usize = 8;
+
+/// Note [`truncate_preview_at_line`] appends after a cut, so a reader never
+/// mistakes a truncated preview for the whole value.
+const PREVIEW_TRUNCATED_NOTE: &str = "\n[reply preview truncated]";
+
+/// Append `text` to `out`, spending it from `budget` one byte at a time; once
+/// `budget` reaches zero the remainder is dropped and `…` is appended in its
+/// place (once -- repeated calls after exhaustion append nothing further).
+/// This is only the walk's OWN safety valve against runaway work; the
+/// caller-facing budget is enforced once more, at a line boundary, by
+/// [`truncate_preview_at_line`].
+fn push_bounded(out: &mut String, text: &str, budget: &mut usize) {
+    if *budget == 0 {
+        return;
+    }
+    if text.len() <= *budget {
+        out.push_str(text);
+        *budget -= text.len();
+    } else {
+        let mut cut = *budget;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.push_str(&text[..cut]);
+        out.push('…');
+        *budget = 0;
+    }
+}
+
+/// Enforce `budget` characters (bytes) on a finished preview, cutting at the
+/// last line boundary at or before the limit rather than mid-line, and
+/// appending [`PREVIEW_TRUNCATED_NOTE`] when anything was cut. A value with
+/// no newline before `budget` cuts at the nearest earlier char boundary
+/// instead -- still bounded, just without a line to cut at.
+fn truncate_preview_at_line(text: String, budget: usize) -> String {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut cut = text[..budget].rfind('\n').unwrap_or(budget);
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut truncated = text[..cut].to_string();
+    truncated.push_str(PREVIEW_TRUNCATED_NOTE);
+    truncated
+}
+
+/// How many list elements [`render_char_list_string`] decodes before
+/// stopping regardless of budget -- a runaway spine (a lazily unfolding
+/// infinite list, say) must not walk forever even under a generous budget.
+const RETAINED_PREVIEW_MAX_LIST_ELEMENTS: usize = 4096;
+
+/// One layer of [`ResidentSession::render_retained_preview`]'s walk: read
+/// `handle`'s constructor through [`super::prepared::PreparedEngine::inspect_retained`]
+/// and append its rendering to `out`. Every field handle this call mints is
+/// released before it returns, whether or not the field was itself entered.
+fn render_retained_layer(
+    engine: &mut super::prepared::PreparedEngine,
+    table: &DataConTable,
+    handle: ValueHandle,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut String,
+) {
+    if *budget == 0 {
+        return;
+    }
+    if depth > RETAINED_PREVIEW_MAX_DEPTH {
+        push_bounded(out, "…", budget);
+        return;
+    }
+    let PreparedOuter::Constructor { identity, fields } = match engine.inspect_retained(handle) {
+        Ok(outer) => outer,
+        Err(_) => {
+            push_bounded(out, "…", budget);
+            return;
+        }
+    };
+    let name = table
+        .get(identity)
+        .map(|dc| dc.name.as_str())
+        .unwrap_or("?")
+        .to_string();
+    // `String`/`[Char]` is the common "text" reply shape this walk can
+    // actually read: unlike `Data.Text` (a packed byte array behind a
+    // Constructor this walk cannot see into), a Haskell string is ordinary
+    // cons cells over boxed `Char`s, so it prints as one quoted string
+    // instead of a wall of nested `(: 'o' (: 'r' ...))`.
+    if name == ":" && fields.len() == 2 {
+        let mut cons_fields = fields.into_iter();
+        let head = cons_fields.next().expect("cons field 0");
+        let tail = cons_fields.next().expect("cons field 1");
+        if is_char_element(engine, table, &head) {
+            render_char_list_string(engine, table, head, tail, budget, out);
+            return;
+        }
+        push_bounded(out, "(", budget);
+        push_bounded(out, &name, budget);
+        push_bounded(out, " ", budget);
+        render_field(engine, table, head, depth + 1, budget, out);
+        push_bounded(out, " ", budget);
+        render_field(engine, table, tail, depth + 1, budget, out);
+        push_bounded(out, ")", budget);
+        return;
+    }
+    if fields.is_empty() {
+        push_bounded(out, &name, budget);
+        return;
+    }
+    // A boxed primitive literal (`I# 3`, `C# 'a'`, `W# 7`) prints as its bare
+    // scalar: these are the common case in an ordinary reply value, and the
+    // wrapper constructor name is noise a reader of the preview never wants.
+    if let [PreparedResult::Scalar(word)] = fields.as_slice() {
+        match name.as_str() {
+            "I#" => {
+                push_bounded(out, &(*word as i64).to_string(), budget);
+                return;
+            }
+            "W#" => {
+                push_bounded(out, &word.to_string(), budget);
+                return;
+            }
+            "C#" => {
+                push_bounded(out, &render_char_literal(*word), budget);
+                return;
+            }
+            _ => {}
+        }
+    }
+    push_bounded(out, "(", budget);
+    push_bounded(out, &name, budget);
+    for field in fields {
+        push_bounded(out, " ", budget);
+        if *budget == 0 {
+            break;
+        }
+        render_field(engine, table, field, depth + 1, budget, out);
+    }
+    push_bounded(out, ")", budget);
+}
+
+/// Render one already-classified field: a scalar prints as its bare word, a
+/// managed field recurses through [`render_retained_layer`] and releases the
+/// fresh handle [`super::prepared::PreparedEngine::inspect_retained`] minted
+/// for it once that recursion returns.
+fn render_field(
+    engine: &mut super::prepared::PreparedEngine,
+    table: &DataConTable,
+    field: PreparedResult,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut String,
+) {
+    match field {
+        PreparedResult::Void => push_bounded(out, "()", budget),
+        PreparedResult::Scalar(word) => push_bounded(out, &word.to_string(), budget),
+        PreparedResult::Managed(field_handle) => {
+            let raw = field_handle.raw();
+            render_retained_layer(engine, table, raw, depth, budget, out);
+            engine.release(field_handle);
+        }
+    }
+}
+
+fn render_char_literal(word: u64) -> String {
+    char::from_u32(word as u32)
+        .map(|c| format!("{c:?}"))
+        .unwrap_or_else(|| word.to_string())
+}
+
+/// Whether `field` is a boxed `Char` (`C#`) -- a single peek at its
+/// constructor, releasing anything that peek minted. Used only to decide
+/// whether a cons cell opens a string; [`render_char_list_string`] repeats
+/// the read for the elements it actually prints.
+fn is_char_element(
+    engine: &mut super::prepared::PreparedEngine,
+    table: &DataConTable,
+    field: &PreparedResult,
+) -> bool {
+    let PreparedResult::Managed(handle) = field else {
+        return false;
+    };
+    match engine.inspect_retained(handle.raw()) {
+        Ok(PreparedOuter::Constructor { identity, fields }) => {
+            let is_char =
+                fields.len() == 1 && table.get(identity).map(|dc| dc.name.as_str()) == Some("C#");
+            for field in fields {
+                if let PreparedResult::Managed(minted) = field {
+                    engine.release(minted);
+                }
+            }
+            is_char
+        }
+        Err(_) => false,
+    }
+}
+
+/// Render a `:`-spine starting at `head`/`tail` (already known, by
+/// [`is_char_element`], to open on a `Char`) as one quoted Haskell string.
+/// Stops -- marking the cut with a trailing `…` inside the quotes -- at the
+/// budget, [`RETAINED_PREVIEW_MAX_LIST_ELEMENTS`], the proper `[]` end, or
+/// the first element that turns out not to be a `Char` after all (a
+/// heterogeneous or partially-forced list this walk does not force to
+/// check). Every handle this walk mints along the spine is released.
+fn render_char_list_string(
+    engine: &mut super::prepared::PreparedEngine,
+    table: &DataConTable,
+    head: PreparedResult,
+    mut tail: PreparedResult,
+    budget: &mut usize,
+    out: &mut String,
+) {
+    push_bounded(out, "\"", budget);
+    let mut next_head = Some(head);
+    let mut count = 0usize;
+    loop {
+        let Some(PreparedResult::Managed(handle)) = next_head.take() else {
+            break;
+        };
+        let stop = match engine.inspect_retained(handle.raw()) {
+            Ok(PreparedOuter::Constructor { identity, fields }) => {
+                let is_char = table.get(identity).map(|dc| dc.name.as_str()) == Some("C#");
+                let mut stop = !is_char;
+                if let [PreparedResult::Scalar(word)] = fields.as_slice() {
+                    if is_char {
+                        match char::from_u32(*word as u32) {
+                            Some('"') => push_bounded(out, "\\\"", budget),
+                            Some('\\') => push_bounded(out, "\\\\", budget),
+                            Some(c) => push_bounded(out, &c.to_string(), budget),
+                            None => stop = true,
+                        }
+                    }
+                } else {
+                    stop = true;
+                }
+                engine.release(handle);
+                stop
+            }
+            Err(_) => {
+                engine.release(handle);
+                true
+            }
+        };
+        count += 1;
+        if stop || *budget == 0 || count >= RETAINED_PREVIEW_MAX_LIST_ELEMENTS {
+            // The element itself is already released either way; `tail`
+            // (still unread on every path here) is released below.
+            if count >= RETAINED_PREVIEW_MAX_LIST_ELEMENTS || *budget == 0 {
+                push_bounded(out, "…", budget);
+            }
+            if let PreparedResult::Managed(tail_handle) = tail {
+                engine.release(tail_handle);
+            }
+            break;
+        }
+        let PreparedResult::Managed(tail_handle) = tail else {
+            break;
+        };
+        match engine.inspect_retained(tail_handle.raw()) {
+            Ok(PreparedOuter::Constructor {
+                identity: tail_identity,
+                fields: tail_fields,
+            }) => {
+                let tail_name = table
+                    .get(tail_identity)
+                    .map(|dc| dc.name.as_str())
+                    .unwrap_or("?");
+                engine.release(tail_handle);
+                if tail_name == ":" && tail_fields.len() == 2 {
+                    let mut it = tail_fields.into_iter();
+                    next_head = it.next();
+                    tail = it.next().expect("cons field 1");
+                } else {
+                    // The proper `[]` end, or anything else: either way the
+                    // spine ends here.
+                    break;
+                }
+            }
+            Err(_) => {
+                engine.release(tail_handle);
+                break;
+            }
+        }
+    }
+    push_bounded(out, "\"", budget);
 }
 
 /// Run `program`'s settled scaffold on the eval thread and finish it there:
@@ -3799,6 +4092,38 @@ where
             run_table,
             Arc::new(provenance),
         )
+    }
+
+    /// A bounded, non-forcing text preview of a retained value's shape:
+    /// constructor names (through this session's own constructor table) and
+    /// literal fields, walked through [`PreparedEngine::inspect_retained`].
+    /// No Haskell compiles and no thunk forces -- a still-unevaluated field
+    /// or a callable (function/PAP) shape prints as `…` rather than being
+    /// entered. `custody` is only borrowed; it remains usable afterward.
+    ///
+    /// `None` when there is no live machine to read from, `custody` belongs
+    /// to a different session, or the root itself cannot be inspected (for
+    /// example a bare function value with no constructor layer at all).
+    #[must_use]
+    pub fn render_retained_preview(
+        &mut self,
+        custody: &RootCustody,
+        char_budget: usize,
+    ) -> Option<String> {
+        if !Arc::ptr_eq(&custody.cleanup, &self.custody_cleanup) {
+            return None;
+        }
+        let handle = custody.handle?;
+        let table = self.state.session_table().clone();
+        let engine = self.state.prepared_mut()?;
+        // The walk itself runs against a generous internal cap (bounded work
+        // regardless of `char_budget`), then the caller's exact budget is
+        // enforced once, at a line boundary, below -- cutting mid-walk would
+        // land wherever a field happened to end, not at a readable line.
+        let mut walk_budget = char_budget.saturating_mul(4).max(4096);
+        let mut out = String::new();
+        render_retained_layer(engine, &table, handle, 0, &mut walk_budget, &mut out);
+        Some(truncate_preview_at_line(out, char_budget))
     }
 
     /// The prepared-route arm of [`Self::run_rooted_entry_borrowed`]: apply

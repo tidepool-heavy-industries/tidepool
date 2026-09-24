@@ -1906,6 +1906,7 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
             transition: exomonad_actor::SettlementTransition::Unavailable(
                 exomonad_actor::ResponseFailure::TargetUnavailable,
             ),
+            reply_preview: None,
             occurred_at_unix_ms: 754_000,
             sequence: exomonad_actor::ActorEventSequence(4),
             watermark: exomonad_actor::ActorEventSequence(4),
@@ -1922,6 +1923,77 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
             .expect("decode legacy actor event"),
         DurableActorEvent::Text("old notice".into())
     );
+
+    // A `Ready` settlement carrying a reply preview puts the reply text
+    // directly in the notice and softens the `pollResponse` guidance to an
+    // optional follow-up, instead of insisting on it unconditionally.
+    let settled_with_preview = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: exomonad_actor::SettlementNotification {
+            owner: exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(1),
+                incarnation: exomonad_actor::Incarnation(1),
+            },
+            request: exomonad_actor::RequestId(12),
+            label: "implementation".into(),
+            transition: exomonad_actor::SettlementTransition::Ready,
+            reply_preview: Some("\"looks correct, ship it\"".into()),
+            occurred_at_unix_ms: 754_000,
+            sequence: exomonad_actor::ActorEventSequence(5),
+            watermark: exomonad_actor::ActorEventSequence(5),
+        },
+    });
+    let rendered = settled_with_preview.render(Some(0));
+    assert!(rendered.contains("request 12 \"implementation\" settled Ready"));
+    assert!(rendered.contains("Reply:\n\"looks correct, ship it\""));
+    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
+    assert!(!rendered.contains("Inspect its retained `Response` with `pollResponse`"));
+
+    // A `Ready` settlement with no preview (observation failed, or the
+    // reply's shape could not be read) keeps today's unconditional guidance.
+    let settled_without_preview = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: exomonad_actor::SettlementNotification {
+            owner: exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(1),
+                incarnation: exomonad_actor::Incarnation(1),
+            },
+            request: exomonad_actor::RequestId(13),
+            label: "implementation".into(),
+            transition: exomonad_actor::SettlementTransition::Ready,
+            reply_preview: None,
+            occurred_at_unix_ms: 754_000,
+            sequence: exomonad_actor::ActorEventSequence(6),
+            watermark: exomonad_actor::ActorEventSequence(6),
+        },
+    });
+    let rendered = settled_without_preview.render(Some(0));
+    assert!(rendered.contains("request 13 \"implementation\" settled Ready"));
+    assert!(rendered.contains("Inspect its retained `Response` with `pollResponse`; settlement is not integration."));
+    assert!(!rendered.contains("Reply:\n"));
+
+    // A preview `tidepool_runtime::ResidentSession::render_retained_preview`
+    // cut for length carries its own truncation note; the notice renders it
+    // exactly as given, alongside the softened `pollResponse` guidance.
+    let long_preview = format!("{}\n[reply preview truncated]", "x".repeat(64));
+    let settled_with_truncated_preview =
+        DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+            notification: exomonad_actor::SettlementNotification {
+                owner: exomonad_actor::ActorRef {
+                    id: exomonad_actor::ActorId(1),
+                    incarnation: exomonad_actor::Incarnation(1),
+                },
+                request: exomonad_actor::RequestId(14),
+                label: "implementation".into(),
+                transition: exomonad_actor::SettlementTransition::Ready,
+                reply_preview: Some(long_preview.clone()),
+                occurred_at_unix_ms: 754_000,
+                sequence: exomonad_actor::ActorEventSequence(7),
+                watermark: exomonad_actor::ActorEventSequence(7),
+            },
+        });
+    let rendered = settled_with_truncated_preview.render(Some(0));
+    assert!(rendered.contains(&format!("Reply:\n{long_preview}")));
+    assert!(rendered.contains("[reply preview truncated]"));
+    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
 }
 
 #[tokio::test]
@@ -3213,6 +3285,23 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+/// A settlement notice's reply preview is read directly off the heap
+/// (`ResidentSession::render_retained_preview`), no Haskell compiled and no
+/// `pollResponse` cell needed. It reads constructor-shaped values -- an
+/// ordinary Haskell `String`/`[Char]` among them -- but not `Data.Text.Text`
+/// (a packed byte array this non-forcing walk cannot see into); this test
+/// exercises the readable case end to end.
+#[tokio::test]
+async fn settlement_notice_carries_a_readable_reply_preview() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        "worker <- startAgent (readonlyAgent \"reply-preview-recipient\")\n\
+         let requestName = [label|reply-preview|]\n\
+         answer <- request @String worker (assignment requestName (\"a readable reply\" :: String))",
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -3230,6 +3319,7 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
                 other => Err(other),
             },
         )
@@ -3275,6 +3365,35 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
+    let reply =
+        dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: String)").await;
+    assert_eq!(reply["status"], "replied", "{reply:?}");
+    let owner_actor = campaign.root_installation.actor.identity();
+    campaign
+        .next_deployment(
+            "owner settlement notification carries the reply text",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SettlementChanged { notification } => {
+                    assert_eq!(notification.owner, owner_actor);
+                    assert_eq!(
+                        notification.transition,
+                        exomonad_actor::SettlementTransition::Ready
+                    );
+                    assert!(
+                        notification
+                            .reply_preview
+                            .as_deref()
+                            .is_some_and(|preview| preview.contains("a readable reply")),
+                        "{:?}",
+                        notification.reply_preview
+                    );
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

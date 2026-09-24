@@ -404,8 +404,8 @@ mod tests {
             )
             .unwrap();
         registry.begin_reply(actor(101), request).unwrap();
-        registry.finish_reply(request);
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
+        registry.finish_reply(request, None);
         drop(sources);
         let closed = receive(&mut events).await;
         let settled = receive(&mut events).await;
@@ -440,7 +440,7 @@ mod tests {
             )
             .unwrap();
         registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request);
+        registry.finish_reply(request, None);
         let queued_progress = receive(&mut events).await;
         let queued_settlement = receive(&mut events).await;
         assert!(matches!(queued_progress.event, SourceEvent::ProgressClosed));
@@ -512,7 +512,7 @@ mod tests {
             )
             .unwrap();
         registry.begin_reply(target, completed).unwrap();
-        registry.finish_reply(completed);
+        registry.finish_reply(completed, None);
         assert!(matches!(
             receive(&mut events).await.event,
             SourceEvent::Settled(Ok(()))
@@ -546,7 +546,7 @@ mod tests {
         ));
         assert_eq!(registry.state.lock().requests[&request].target, target);
         registry.begin_reply(target, request).unwrap();
-        let notices = registry.finish_reply(request);
+        let notices = registry.finish_reply(request, None);
         assert!(notices
             .iter()
             .all(|notice| notice.owner == successor.identity()));
@@ -591,7 +591,7 @@ mod tests {
             .unwrap();
         let settle = |request| {
             registry.begin_reply(actor(101), request).unwrap();
-            registry.finish_reply(request);
+            registry.finish_reply(request, None);
         };
         settle(requests[0]);
         assert_eq!(receive(&mut old_events).await.slot, 0);
@@ -645,7 +645,7 @@ mod tests {
         registry.mark_queued(actor(100), actor(101), own).unwrap();
         registry.present(actor(101), own).unwrap();
         registry.begin_reply(actor(101), own).unwrap();
-        registry.finish_reply(own);
+        registry.finish_reply(own, None);
         let missing = RequestId(u64::MAX);
         assert!(matches!(
             registry.attach_sources(

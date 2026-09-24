@@ -929,6 +929,12 @@ pub struct ResidentKernelBehavior<H, O> {
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
+    /// The bounded reply-value preview `stage_request_reply` obtained for
+    /// `pending_reply`, if any -- carried to the settlement notice minted
+    /// once the resumed continuation settles (`resume`'s `finish_reply`
+    /// call). `None` either because the reply could not be previewed or
+    /// because no reply is pending.
+    pending_reply_preview: Option<String>,
     pending_cancellation: Option<crate::RequestId>,
     suspended_cast: Option<SuspendedCast>,
     /// The request `standing == Interactive` is presenting, tracked
@@ -1074,6 +1080,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             forest_control: false,
             pending_program: None,
             pending_reply: None,
+            pending_reply_preview: None,
             pending_cancellation: None,
             suspended_cast: None,
             outstanding_interactive: None,
@@ -2222,6 +2229,11 @@ where
         }
     }
 
+    /// Upper bound, in characters, on the reply-value preview a settlement
+    /// notice carries -- generous enough for an ordinary reply record, small
+    /// enough that a notice never dwarfs the wake it accompanies.
+    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 2048;
+
     /// Both authored tool replies and route callbacks resume the one active
     /// request continuation, then hand it back to the ordinary actor scheduler.
     async fn stage_request_reply(
@@ -2266,6 +2278,32 @@ where
                     ));
                 }
             };
+            // Best-effort: a settlement notice that carries the reply data
+            // saves the owner a `pollResponse` compile just to read it. The
+            // preview never blocks or fails the reply itself -- an unreadable
+            // shape (a function, an exhausted budget) simply omits it.
+            let (result, reply_preview) = match self
+                .environment
+                .runner
+                .preview_retained(
+                    context.clone(),
+                    result,
+                    Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
+                )
+                .await
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    self.standing = ResidentStanding::Interactive(awaiting);
+                    return Err(error);
+                }
+            };
+            if reply_preview.is_none() {
+                tracing::debug!(
+                    request = request.0,
+                    "reply preview unavailable; settlement notice will fall back to `pollResponse` guidance"
+                );
+            }
             let outcome = match self
                 .environment
                 .runner
@@ -2284,6 +2322,7 @@ where
             self.outstanding_interactive = None;
             self.pending_program = Some(outcome);
             self.pending_reply = Some(request);
+            self.pending_reply_preview = reply_preview;
             Ok(())
         }
         .await;
@@ -7560,7 +7599,11 @@ where
             match step {
                 Ok(step) => {
                     if let Some(request) = self.pending_reply.take() {
-                        let notifications = self.environment.requests.finish_reply(request);
+                        let reply_preview = self.pending_reply_preview.take();
+                        let notifications = self
+                            .environment
+                            .requests
+                            .finish_reply(request, reply_preview);
                         self.publish_watch_notifications(notifications);
                     }
                     if let Some(request) = self.pending_cancellation.take() {
@@ -7575,6 +7618,7 @@ where
                     Ok(step)
                 }
                 Err(error) => {
+                    self.pending_reply_preview = None;
                     if let Some(request) = self.pending_reply.take() {
                         let notifications = self.environment.requests.fail_reply_settlement(
                             request,

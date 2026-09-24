@@ -5998,6 +5998,26 @@ where
             .await
     }
 
+    /// A bounded, non-forcing text preview of `value`'s shape --
+    /// `ResidentSession::render_retained_preview` -- returned alongside
+    /// `value` itself, unconsumed, so the caller can still deliver it
+    /// wherever it was headed (a settlement notice's `Reply:` preview must
+    /// never cost the reply it is describing). `None` when the value cannot
+    /// be read this way rather than failing the call.
+    pub(crate) async fn preview_retained(
+        &self,
+        context: crate::ActorSessionContext,
+        value: RootCustody,
+        char_budget: usize,
+    ) -> Result<(RootCustody, Option<String>), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let preview = session.render_retained_preview(&value, char_budget);
+                Ok((value, preview))
+            })
+            .await
+    }
+
     pub(crate) async fn run_rooted_application(
         &self,
         context: crate::ActorSessionContext,

@@ -1976,6 +1976,22 @@ impl<'code> PreparedMachine<'code> {
         Ok(())
     }
 
+    /// [`Self::inspect_outer`] over a bare [`ValueHandle`] this machine
+    /// already minted (a [`crate::suspension::RootCustody`]'s, for one),
+    /// rather than a [`PreparedHandle`] a caller obtained from an earlier
+    /// inspection or run result. `rep` and the owning `realm` are recovered
+    /// from the handle ledger itself -- never assumed -- since a mint can be
+    /// `UnliftedRef` as well as the ordinary lifted case.
+    pub fn inspect_retained(&mut self, handle: ValueHandle) -> Result<PreparedOuter, ExecutionError> {
+        let entry = self
+            .handles
+            .handle(handle)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let rep = entry.rep;
+        let realm = entry.realm;
+        self.inspect_outer(PreparedHandle { raw: handle, rep }, realm)
+    }
+
     /// Inspect one constructor layer of a retained value without forcing it.
     ///
     /// Every managed field receives its own persistent root before the

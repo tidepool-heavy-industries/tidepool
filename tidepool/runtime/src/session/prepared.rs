@@ -3109,6 +3109,22 @@ impl PreparedEngine {
         self.machine.release(handle)
     }
 
+    /// [`tidepool_codegen::prepared_program::PreparedMachine::inspect_retained`]:
+    /// a non-forcing structural read of one constructor layer of an
+    /// arbitrary retained root by its bare cross-engine [`ValueHandle`] id
+    /// (a `RootCustody`'s, typically) -- no Haskell compiles, no thunk
+    /// forces. Managed fields come back as fresh handles owned by the
+    /// handle's own resource scope; the caller releases every one it does
+    /// not keep.
+    pub fn inspect_retained(
+        &mut self,
+        handle: ValueHandle,
+    ) -> Result<CodegenPreparedOuter, PreparedRuntimeError> {
+        self.machine
+            .inspect_retained(handle)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// [`Self::release`] by the bare cross-engine [`ValueHandle`] id --
     /// `ResidentSession::settle_dropped_custody`'s deferred-cleanup path,
     /// which only ever recovers a dropped [`crate::session::RootCustody`]'s
