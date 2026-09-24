@@ -400,21 +400,37 @@ recoveryIfOmitted :: OutputSnapshot -> [Section] -> [Section] -> Text
 recoveryIfOmitted frozen allSections selected =
   let kept = map sectionId selected
       omitted = [sectionId section' | section' <- allSections, sectionId section' `notElem` kept]
-   in if null omitted
-        then ""
-        else "omitted: " <> ranges omitted <> "\n" <> recoveryFor frozen
+   in case omitted of
+        [] -> ""
+        (sample : _) ->
+          "omitted: " <> ranges omitted <> "\n" <> recoveryFor frozen
+            <> " raw <- Project.Shell.section snap (Project.Shell.SectionId "
+            <> number (sectionValue sample)
+            <> ")."
 
 recovery :: Cmd.PresentedObservation -> Text
 recovery observed = maybe "" recoveryFor (snapshotFromObservation observed)
 
+-- | Substituted with the actual retained-binding name (e.g. @job1@) by the
+-- host once it mints that binding — the same fact it already names in the
+-- "retained as ... :: Cmd.Job" line above this tool's output. The tool body
+-- runs, and this text is built, before the host assigns a binding, so it
+-- cannot be named here directly.
+jobBindingPlaceholder :: Text
+jobBindingPlaceholder = "{{job_binding}}"
+
 recoveryFor :: OutputSnapshot -> Text
 recoveryFor frozen =
-  "Recover without rerunning (use the Cmd.Job binding shown above): let snap = Project.Shell.outputSnapshot jobN"
+  "Recover without rerunning: let snap = Project.Shell.outputSnapshot "
+    <> jobBindingPlaceholder
     <> " "
     <> number (stdoutEndpoint frozen)
     <> " "
     <> number (stderrEndpoint frozen)
-    <> "; raw <- Project.Shell.section snap (Project.Shell.SectionId N)."
+    <> "."
+
+sectionValue :: SectionId -> Int
+sectionValue (SectionId value) = value
 
 unscoredNotice :: [Ranked] -> Text
 unscoredNotice ranked =

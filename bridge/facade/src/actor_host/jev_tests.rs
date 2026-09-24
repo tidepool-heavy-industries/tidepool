@@ -561,16 +561,34 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         output.contains("omitted:"),
         "omission summary missing: {output}"
     );
+    let binding = response["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("bash installs its retained job binding");
     assert!(
-        output.contains("Project.Shell.outputSnapshot jobN"),
-        "recovery missing: {output}"
+        output.contains(&format!("Project.Shell.outputSnapshot {binding}")),
+        "recovery should name the real retained binding {binding}, not a placeholder: {output}"
+    );
+    assert!(
+        !output.contains("jobN") && !output.contains("{{job_binding}}"),
+        "recovery must not leak an unresolved binding placeholder: {output}"
     );
     assert!(
         output.len() <= 2048,
         "selected output exceeded its byte budget"
     );
+    let section_footer_prefix = "Project.Shell.section snap (Project.Shell.SectionId ";
+    let section_footer = output
+        .rsplit_once(section_footer_prefix)
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
     assert!(
-        output.ends_with("Project.Shell.section snap (Project.Shell.SectionId N)."),
+        section_footer
+            .strip_suffix(").")
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())),
+        "recovery footer should name a real omitted section id, not a placeholder: {output}"
+    );
+    assert!(
+        output.ends_with(")."),
         "recovery footer was truncated: {output}"
     );
     assert!(
@@ -601,9 +619,6 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     }
 
     commands.shorten_slice_read(3);
-    let binding = response["items"][0]["installedBindings"][0]
-        .as_str()
-        .expect("bash installs its retained job binding");
     let short_page = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         &format!(

@@ -5706,6 +5706,10 @@ where
                     warnings,
                     installed_bindings,
                 } => {
+                    let output = crate::workbench_display::resolve_job_binding_placeholder(
+                        output,
+                        &installed_bindings,
+                    );
                     let output = if request.tool_call().is_some() {
                         crate::bound_workbench_display(&output, display_remaining)
                     } else {

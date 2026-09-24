@@ -252,10 +252,13 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
 
 -- | Observe once, then let ordinary Haskell prepare what the tool returns
 -- before command output is presented.  The callback receives stream endpoints
--- frozen immediately after the wait.  The small presentation emitted here is
--- intentionally output-free: for a hosted command tool it preserves the
--- retained @Cmd.Job@ binding, while the callback's result is the only command
--- text the tool body returns.  Explicit page reads remain independent.
+-- frozen immediately after the wait.  The small presentation emitted here
+-- carries no text of its own: its only job is to cross the same host-side
+-- boundary that mints and announces the retained @Cmd.Job@ binding ("retained
+-- as ... :: Cmd.Job"), so that fact is said once, by the host, instead of
+-- being duplicated here.  The callback's result — which already opens with
+-- @session_id: ...@ — is the only command text the tool body returns.
+-- Explicit page reads remain independent.
 observeWith ::
   (Member Commands effects) =>
   Observation ->
@@ -269,11 +272,7 @@ observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job 
   -- an explicit, independently bounded page request when it needs more.
   output <- send (CommandOutputWith key (max 0 (min (16 * 1024) (outputBytes options))))
   prepared <- prepare (PresentedObservation retained current output (outputBytes options))
-  send
-    ( CommandPresentWith
-        key
-        (CommandVisible ("session_id: " <> key <> "\noutput prepared from frozen stream endpoints; raw pages remain retained") 512)
-    )
+  send (CommandPresentWith key (CommandVisible "" 512))
   pure (current, prepared)
 
 -- | Suppress routine command output within this computation, without changing

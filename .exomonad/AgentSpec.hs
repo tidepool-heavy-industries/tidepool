@@ -21,11 +21,12 @@ agentSpec = defaultSpec
   , afterTool = Just (Watchdog.watchBy monitorsFor)
   }
 
--- The parent chooses the label when it creates the child. These labels install
--- an escalation or a nudge; other children, including this workspace's root,
--- abstain before asking Jev.
+-- Every child gets the core baseline (repeated failures, destructive
+-- commands) whether or not the parent labelled it, including this
+-- workspace's own root. A label layers more heuristics on top of that
+-- baseline: the parent chooses the label when it creates the child.
 monitorsFor :: Text -> [Watchdog.Heuristic]
 monitorsFor path
-  | "escalate-child" `T.isInfixOf` path = [Watchdog.outOfScope]
-  | "nudge-child" `T.isInfixOf` path = [Watchdog.repeatingItself]
-  | otherwise = []
+  | "escalate-child" `T.isInfixOf` path = Watchdog.coreHeuristics <> [Watchdog.outOfScope]
+  | "nudge-child" `T.isInfixOf` path = Watchdog.coreHeuristics <> [Watchdog.guessingInsteadOfReading]
+  | otherwise = Watchdog.coreHeuristics

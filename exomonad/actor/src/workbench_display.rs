@@ -37,6 +37,27 @@ pub fn bounded_output(text: &str, budget: usize) -> String {
     )
 }
 
+/// The token `Project.Shell.recoveryFor` (bridge/haskell, `.exomonad/workspace/Project/Shell.hs`)
+/// writes in place of the retained `Cmd.Job` binding it cannot name itself:
+/// the host only mints and announces that binding ("retained as ... ::
+/// Cmd.Job") after the tool body has already returned its text. Must match
+/// `jobBindingPlaceholder` there exactly.
+pub(crate) const JOB_BINDING_PLACEHOLDER: &str = "{{job_binding}}";
+
+/// Fill in the real binding name once the host knows it, the same place and
+/// the same fact it already names in the "retained as ... :: Cmd.Job" line.
+/// A no-op when the placeholder is absent (most workbench output never
+/// mentions it), and left unresolved only when no binding was retained for
+/// this step, which should not happen for a command tool's own presenter.
+pub(crate) fn resolve_job_binding_placeholder(output: String, installed_bindings: &[String]) -> String {
+    match installed_bindings.first() {
+        Some(binding) if output.contains(JOB_BINDING_PLACEHOLDER) => {
+            output.replace(JOB_BINDING_PLACEHOLDER, binding)
+        }
+        _ => output,
+    }
+}
+
 /// Command output remains literal text; stream positions explain omissions
 /// without claiming an ordering between stdout and stderr.
 pub(crate) fn command_pages(
