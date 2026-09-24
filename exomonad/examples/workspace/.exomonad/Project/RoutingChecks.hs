@@ -8,7 +8,7 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
-import Project.Checks (script)
+import Project.Checks (script, checkSource)
 
 routing :: Member RecipeCheck effects => Eff effects ()
 routing = do
@@ -120,7 +120,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|]"
   if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
   if failAfterAdmission then do
-    source <- readFile owner ".exomonad/workspace/checks/review-continuation.hs"
+    source <- readFile owner (checkSource "review-continuation")
     let withoutStart = fst (Text.breakOn "reviewBox <-" source)
         definition = "let reviewBoxDefinition" <> snd (Text.breakOn " = coordinationActor" withoutStart)
         faulty = Text.replace "let reviewBoxDefinition" "let failingDefinition"

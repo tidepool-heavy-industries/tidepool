@@ -2932,21 +2932,23 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
-    let repository = recipe_workspace(Some(&["Project.Checks.context"]));
-    let work = repository.path().join(".exomonad/Project/Plan.hs");
+    let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
+    let work = repository
+        .path()
+        .join(".exomonad/checks/project_decision_consumer.hs");
     let original = std::fs::read_to_string(&work).unwrap();
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
-    std::fs::write(
-        &work,
-        original.replace(
-            "Display edges must not fabricate authority or lose actors.",
-            "The architectural rationale was dropped.",
-        ),
-    )
-    .unwrap();
-    // This candidate still compiles; the running selected worker must expose its defect.
+    let broken = original.replacen(
+        "resolveQuestion acceptedDecision changedQuestions == changedQuestions",
+        "resolveQuestion acceptedDecision changedQuestions /= changedQuestions",
+        1,
+    );
+    assert_ne!(broken, original, "fixture no longer matches replaced text");
+    std::fs::write(&work, broken).unwrap();
+    // This candidate fixture is data, not a compiled module; it still compiles,
+    // and the running selected worker must expose its defect.
     crate::exomonad::check(Some(repository.path().to_path_buf()), false)
         .await
         .unwrap();
@@ -2956,7 +2958,7 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     assert!(
         error
             .to_string()
-            .contains("fresh Sol lead receives the engineering rationale"),
+            .contains("an old answer cannot clear a changed question or rewind the task source"),
         "{error}"
     );
     std::fs::write(&work, original).unwrap();
@@ -2972,12 +2974,12 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
 /// compile daemon by hand to see what GHC actually said.
 #[tokio::test(flavor = "multi_thread")]
 async fn recipe_check_compile_failure_reports_the_ghc_diagnostic_text() {
-    let repository = recipe_workspace(Some(&["Project.Checks.context"]));
+    let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
     let work = repository.path().join(".exomonad/Project/Checks.hs");
     let original = std::fs::read_to_string(&work).unwrap();
     let broken = original.replace(
-        "context = void startComponent",
-        "context = void undefinedRecipeIdentifierXyz",
+        "readFile actor (checkSource name) >>= void . turn actor",
+        "readFile actor (checkSource name) >>= void . undefinedRecipeIdentifierXyz",
     );
     assert_ne!(broken, original, "fixture no longer matches replaced text");
     std::fs::write(&work, broken).unwrap();

@@ -187,7 +187,8 @@ impl FrozenWorkspace {
         ))?)
         .to_hex()
         .to_string();
-        let resources = resource_module(&identity, &config.haskell.modules, &prompts);
+        let workspace_root = authored_workspace_root(&config.haskell.source_roots);
+        let resources = resource_module(&identity, &workspace_root, &config.haskell.modules, &prompts);
         let resources_path = PathBuf::from("resources/Exomonad/Workspace.hs");
         if include.iter().any(|root| root.join("Exomonad").is_dir()) {
             return Err(
@@ -266,8 +267,33 @@ impl FrozenWorkspace {
     }
 }
 
+/// The project-relative path of the authored workspace directory: the last
+/// configured `[haskell] source_roots` entry, resolved against `.exomonad`.
+///
+/// A project names its own package directly as `source_roots = ["."]`, or
+/// layers a checked-out workspace after a shared root as
+/// `source_roots = [".", "workspace"]` (the submodule layout `exomonad new`
+/// writes via `add_default_workspace`). Either way the last entry is the
+/// checkout that actually carries `Project/*.hs` and the `checks/` fixtures
+/// recipes read; earlier entries, when present, contribute only shared files
+/// like `AgentSpec.hs`. One resolver, reused by every recipe site that builds
+/// a fixture path instead of each hardcoding where the workspace lives.
+fn authored_workspace_root(source_roots: &[PathBuf]) -> String {
+    let last = source_roots
+        .last()
+        .map(PathBuf::as_path)
+        .unwrap_or_else(|| Path::new("."));
+    let joined: PathBuf = Path::new(".exomonad")
+        .join(last)
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect();
+    joined.to_string_lossy().replace('\\', "/")
+}
+
 fn resource_module(
     identity: &str,
+    workspace_root: &str,
     modules: &[String],
     prompts: &BTreeMap<String, String>,
 ) -> String {
@@ -288,9 +314,10 @@ fn resource_module(
         .collect::<Vec<_>>()
         .join(",\n  ");
     format!(
-        "{}\nworkspaceIdentity = {}\nworkspaceModules = [{}]\nworkspacePrompts = [{}]\n",
+        "{}\nworkspaceIdentity = {}\nworkspaceRoot = {}\nworkspaceModules = [{}]\nworkspacePrompts = [{}]\n",
         include_str!("workspace.hs"),
         literal(identity),
+        literal(workspace_root),
         module_names,
         entries
     )
