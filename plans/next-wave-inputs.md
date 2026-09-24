@@ -109,3 +109,19 @@ already share across sessions. First step: mint a fresh session for
   session equality and mailbox values are native to one machine's heap
   (`resident_actor.rs` request submission, `mailbox.rs`), so that route needs
   a cross-heap transfer primitive first.
+- **Root interview, wave 3 (07:36Z).** Slow at the coordination boundary:
+  waiting on children, then reviewing candidates built against older
+  branches and extracting only owned files. Most useful: explicit file
+  ownership, exact submitted commits, `respond`, watch-before-wait. Least
+  useful: the review recipe assumes `sessionInput :: Task` and a `Candidate`,
+  which a root lacks. Hand-building `Task` records and fork-group paths slowed
+  delegation and blocked one child's micro-fork. Asked for: a Task-from-brief
+  constructor (brief, owned paths, acceptance, `currentCheckout`), a review
+  entry taking an exact commit, a path-scoped integration step that refuses
+  unowned changes, watch notices distinguishable from already-consumed
+  results, bounded hook diagnostics. Project-local shapes for the harness
+  workspace's Project.Work, not engine helpers.
+- **After-tool hook budget.** 107 of 503 after-tool slot invocations failed
+  with `observation budget 100000 exhausted` after delivering a response, and
+  each appended "[after-tool] This result is unannotated ..." to the model's
+  tool result. Lane in flight.
