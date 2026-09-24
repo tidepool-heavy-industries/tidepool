@@ -134,7 +134,7 @@ exomonad-run *args:
 # Run a workspace's configured recipe checks in parallel through one warm
 # compile daemon (`exomonad check --recipes` runs them one after another).
 exomonad-check-recipes workspace parallelism="3":
-    {{ exomonad_nix }} exomonad/scripts/exomonad-check-recipes.sh "$1" "$2"
+    {{ exomonad_nix }} exomonad/scripts/exomonad-check-recipes.sh "{{ workspace }}" "{{ parallelism }}"
 
 # Build Exomonad from this checkout and run it against the independent console
 # repository. Extra arguments are forwarded to `exomonad init`.
