@@ -48,7 +48,8 @@ data Execute = Execute
     stdin :: Maybe Bool,
     yield_time_ms :: Maybe Int,
     max_output_bytes :: Maybe Int,
-    intent :: Maybe Text
+    intent :: Maybe Text,
+    focus :: Maybe Text
   }
   deriving (Generic, FromJSON, JsonSchema)
 
@@ -92,7 +93,7 @@ data ShellTools mode = ShellTools
 -- | A composable policy for one command observation.  The shared shell owns
 -- validation, process/input handling and retained jobs; a workspace may only
 -- replace how a successful observation is prepared for display.
-type ObservationPresenter effects = Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
+type ObservationPresenter effects = Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
 
 tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
 tools = toolsWith defaultPresenter
@@ -102,7 +103,7 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter. focus, when present, filters the output to the sections relevant to that text (example: \"the failing test and its assertion\"); omit for plain bounded output."
           (executeWith presenter),
       writeStdin =
         tool
@@ -148,7 +149,8 @@ executeWith presenter
       stdin = pipe,
       yield_time_ms = wait,
       max_output_bytes = limit,
-      intent = purpose
+      intent = purpose,
+      focus = focus
     } =
     case observation 30000 wait limit of
       Left rejection -> pure rejection
@@ -168,7 +170,7 @@ executeWith presenter
             pure "Rejected · command not started · this actor has no command authority"
           Left issue -> pure $ "Rejected · command not started · " <> T.pack (show issue)
           Right retained -> do
-            presenter (Just script) purpose options retained
+            presenter (Just script) purpose focus options retained
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
 writeInput = writeInputWith defaultPresenter
@@ -206,7 +208,7 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
                 then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
                 -- Empty input is an observation poll and keeps the configured
                 -- presenter behavior.
-                else presenter Nothing Nothing options (Job key)
+                else presenter Nothing Nothing Nothing options (Job key)
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
@@ -261,4 +263,4 @@ utf8Bytes = T.foldl' (\n c -> n + width c) 0
       | otherwise = 4
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
-defaultPresenter _ _ options retained = Cmd.observe options retained >> pure ""
+defaultPresenter _ _ _ options retained = Cmd.observe options retained >> pure ""

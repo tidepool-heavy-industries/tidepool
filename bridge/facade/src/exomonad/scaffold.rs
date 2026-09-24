@@ -36,7 +36,7 @@ maximum_depth = 8
 source_roots = [".", "workspace"]
 modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
-  "Project.Shell", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
+  "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
   "Project.Service", "Project.Repository",
 ]

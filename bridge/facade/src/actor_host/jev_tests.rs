@@ -507,7 +507,7 @@ fn selected_shell_workspace(config: &mut ActorHostConfig) {
         format!(
             "[defaults]\nmodel = 'test-model'\n\n\
              [haskell]\nsource_roots = ['{}']\n\
-             modules = ['Project.Shell']\n\
+             modules = ['Project.Shell', 'Project.Sift']\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
             package.join(".exomonad").display()
@@ -544,8 +544,8 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic; # {}COMMAND-TAIL",
         "x".repeat(9000)
     );
-    let intent = format!(
-        "retain the decisive diagnostic; {}INTENT-TAIL",
+    let focus = format!(
+        "retain the decisive diagnostic; {}FOCUS-TAIL",
         "y".repeat(5000)
     );
     let mut invoked = tokio::spawn(async move {
@@ -561,7 +561,8 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
                 "stdin": null,
                 "yield_time_ms": 30000,
                 "max_output_bytes": 2048,
-                "intent": intent
+                "intent": "retain the decisive diagnostic",
+                "focus": focus
             }),
         )
         .await
@@ -599,20 +600,9 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         output.len() <= 2048,
         "selected output exceeded its byte budget"
     );
-    let section_footer_prefix = "Project.Shell.section snap (Project.Shell.SectionId ";
-    let section_footer = output
-        .rsplit_once(section_footer_prefix)
-        .map(|(_, rest)| rest)
-        .unwrap_or_default();
     assert!(
-        section_footer
-            .strip_suffix(").")
-            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())),
-        "recovery footer should name a real omitted section id, not a placeholder: {output}"
-    );
-    assert!(
-        output.ends_with(")."),
-        "recovery footer was truncated: {output}"
+        output.ends_with('.'),
+        "recovery pointer was truncated: {output}"
     );
     assert!(
         !output.lines().any(|line| line == "background-600"),
@@ -621,23 +611,19 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
 
     {
         let requests = backend.requests.lock();
-        assert!(!requests.is_empty(), "long output must invoke Jev");
+        assert!(!requests.is_empty(), "a focused, over-budget call must invoke Jev");
         assert!(
             requests[0]["state"]
                 .as_str()
-                .is_some_and(|state| state.contains("for i in $(seq 1 900)")),
-            "command absent from Jev state: {}",
+                .is_some_and(|state| state.contains("retain the decisive diagnostic")),
+            "focus absent from Jev state: {}",
             requests[0]["state"]
         );
         assert_eq!(commands.executions(), 1, "selection must not re-execute");
         let state = requests[0]["state"].as_str().expect("Jev state text");
         assert!(
-            !state.contains("COMMAND-TAIL"),
-            "command tail escaped its prompt bound"
-        );
-        assert!(
-            !state.contains("INTENT-TAIL"),
-            "intent tail escaped its prompt bound"
+            !state.contains("FOCUS-TAIL"),
+            "focus tail escaped its prompt bound"
         );
     }
 
@@ -660,10 +646,11 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     campaign.hosted.await.unwrap();
 }
 
-/// Output under the raw-display line threshold and within the presentation
-/// budget is shown as-is, without ever asking Jev to score it.
+/// Without `focus`, output that fits `max_output_bytes` is shown as-is, with
+/// no Jev call and no line-count gate -- output far longer than the old
+/// 15-line raw-display threshold is still shown whole, unsectioned.
 #[tokio::test]
-async fn template_bash_shows_short_output_raw_without_jev() {
+async fn template_bash_shows_any_length_output_raw_without_focus() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
@@ -683,7 +670,7 @@ async fn template_bash_shows_short_output_raw_without_jev() {
             invoked_policy.as_ref(),
             "bash",
             serde_json::json!({
-                "cmd": "printf 'line1\\nline2\\nline3\\n'",
+                "cmd": "seq 1 200",
                 "workdir": null,
                 "environment": null,
                 "memory_mib": null,
@@ -691,12 +678,13 @@ async fn template_bash_shows_short_output_raw_without_jev() {
                 "stdin": null,
                 "yield_time_ms": 30000,
                 "max_output_bytes": null,
-                "intent": "short raw check"
+                "intent": "long raw check"
             }),
         )
         .await
     });
-    let commands = TestCommands::completed_streams("line1\nline2\nline3\n", "");
+    let command_output = (1..=200).map(|line| format!("{line}\n")).collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
         request = backend_request(&mut campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
@@ -705,24 +693,162 @@ async fn template_bash_shows_short_output_raw_without_jev() {
     let response = invoked.await.unwrap();
     assert_eq!(response["status"], "committed", "{response}");
     let output = response["items"][0]["output"].as_str().unwrap();
-    assert!(
-        output.contains("line1") && output.contains("line3"),
-        "{output}"
-    );
+    assert!(output.contains('1') && output.contains("200"), "{output}");
     assert!(
         !output.contains("<s"),
-        "short output should not be sectioned or marked up: {output}"
+        "raw output must not be sectioned or marked up: {output}"
+    );
+    assert!(
+        !output.contains("omitted"),
+        "output that fits the budget must not be truncated: {output}"
     );
     assert!(
         !any_section_scoring_request(&backend),
-        "short output must not invoke Jev to score sections: {output}\nrequests: {:?}",
+        "output without focus must never invoke Jev to score sections, for any length: {output}\nrequests: {:?}",
         backend.requests.lock()
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
-/// Requests carrying a `Project.Shell` section-relevance question, as
+/// Without `focus`, output over `max_output_bytes` is truncated to a head
+/// and a tail with a marker naming the omitted byte range, plus the
+/// existing snapshot recovery pointer -- never scored by Jev.
+#[tokio::test]
+async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "seq 1 5000",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 2048,
+                "intent": "over-budget raw check"
+            }),
+        )
+        .await
+    });
+    let command_output = (1..=5000).map(|line| format!("{line}\n")).collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, "");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains('1'), "head missing: {output}");
+    assert!(output.contains("5000"), "tail missing: {output}");
+    assert!(
+        output.contains("omitted stdout bytes "),
+        "omitted-byte-range marker missing: {output}"
+    );
+    assert!(
+        output.contains("Recover without rerunning: let snap = Project.Shell.outputSnapshot"),
+        "recovery pointer missing: {output}"
+    );
+    assert!(
+        !output.contains("<s"),
+        "the no-focus path must not section or mark up output: {output}"
+    );
+    assert!(
+        output.len() <= 2048 + 512,
+        "truncated output should stay close to its byte budget: {output}"
+    );
+    assert!(
+        !any_section_scoring_request(&backend),
+        "the no-focus path must never invoke Jev to score sections: {:?}",
+        backend.requests.lock()
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// With `focus`, output that already fits a generous `max_output_bytes` is
+/// shown whole, without ever asking Jev -- the friction this change fixes:
+/// a large requested budget must not still be squeezed through a smaller
+/// internal cap.
+#[tokio::test]
+async fn template_bash_focus_with_large_budget_shows_everything() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked_policy = Arc::clone(&policy);
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "seq 1 900",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 32768,
+                "intent": "large budget check",
+                "focus": "the largest number printed"
+            }),
+        )
+        .await
+    });
+    let command_output = (1..=900).map(|line| format!("{line}\n")).collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, "");
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains('1') && output.contains("900"), "{output}");
+    assert!(
+        !output.contains("omitted"),
+        "output that fits a generous budget must not be trimmed, even with focus set: {output}"
+    );
+    assert!(
+        !any_section_scoring_request(&backend),
+        "text that already fits the budget must not be scored, even with focus set: {:?}",
+        backend.requests.lock()
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Requests carrying a `Project.Sift` section-relevance question, as
 /// opposed to the campaign's own unrelated per-call heuristics review (a
 /// destructive-command/repeating-itself check the harness runs regardless
 /// of command output, and which never mentions "sections").

@@ -55,7 +55,16 @@ positions; an unavailable-output error is different and keeps the same job.
 Execution defaults: 256 MiB and a 30-second observation. Expiry leaves the
 command alive.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
-use at most 32 KiB; oversized displays use an 8 KiB preview. Shortened
+use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
+whole. Without `focus`, output over budget is shown as a head and a tail with a
+marker naming the omitted byte range per stream, plus a recovery pointer; no
+Jev call and no sectioning happen on this path. `focus` filters the output to
+the sections relevant to that text (example: "the failing test and its
+assertion"): the output is split into sections, each scored by Jev for
+relevance to the focus and recent conversation, and the highest-relevance
+sections are packed to fit `max_output_bytes`, with an `omitted:` marker
+naming the sections left out. A `focus`ed call still shows everything, without
+scoring, when it already fits the budget. Shortened
 output is recoverable only to the extent the job still retains it; follow the
 reported output position or gap. Do not rerun merely to obtain hidden output.
 
