@@ -55,24 +55,49 @@ whole endpoint, not just a slot, the first time any request's rotation bound
 is reached, which only suits the single short-lived worker that mode was
 designed around.
 
-`--rss-ceiling-mb` keeps its historical meaning, a per-worker RSS ceiling;
-only its *default* changed, from a fixed figure to a shared total budget
-(`daemon::default_memory_budget_mb()`) divided across the daemon's worker
-count — a persistent daemon running more workers does not multiply its
-default total RSS footprint. That total budget is itself the smaller of a
-measured fixed ceiling and memory actually available at daemon start
-(`/proc/meminfo`'s `MemAvailable`, minus a headroom reserve): a quiet box
-still gets the fixed figure, but a daemon that starts next to another
-compiler daemon already holding RSS — this repo's own persistent test
-daemon, or an unrelated caller's — sizes down instead of assuming the whole
-machine budget is free. This is deliberately the only place daemon sizing
-reads machine memory; it does not register anywhere or coordinate with the
-other daemon directly, and adds no second budget registry alongside
-`exomonad-node`'s `command_resources` admission service, which already gates
-actor starts on the same `MemAvailable` figure. See
-`daemon::DEFAULT_WORKER_COUNT`'s and `daemon::default_memory_budget_mb`'s doc
-comments for the exact sizing and the matching `.config/nextest.toml`
-`[test-groups.ghc-heavy] max-threads`.
+`--workers` and `--rss-ceiling-mb` keep their historical meanings (worker
+count and a per-worker RSS ceiling) when given explicitly. Their *defaults*
+are both derived together from a shared total memory budget
+(`daemon::default_memory_budget_mb()`): `daemon::worker_sizing_from_budget`
+picks as many `daemon::WARM_WORKER_MB` (7 GiB, measured) slots as the budget
+supports, capped at `daemon::DEFAULT_WORKER_COUNT`, and sets each slot's
+ceiling to `budget / worker_count`. Worker *count* is derived from the
+budget, not fixed, precisely so a smaller budget produces fewer, still-warm
+workers instead of more, undersized ones that rotate before they finish
+loading — the ceiling a lower-than-`WARM_WORKER_MB` slot would get discards
+the module memo the ceiling exists to protect on almost every request. When
+even a single worker's ceiling (the whole budget) falls short of
+`WARM_WORKER_MB`, the daemon still runs one worker at that ceiling (the
+existing floor behaviour) and logs a WARN that it cannot keep a worker warm;
+an explicit `--workers` that produces the same shortfall gets the same WARN.
+
+That total budget is itself the smaller of a measured fixed ceiling and
+memory actually available at daemon start (`/proc/meminfo`'s
+`MemAvailable`, minus a headroom reserve): a quiet box still gets the fixed
+figure, but a daemon that starts next to another compiler daemon already
+holding RSS — this repo's own persistent test daemon, or an unrelated
+caller's — sizes down instead of assuming the whole machine budget is free.
+This is deliberately the only place daemon sizing reads machine memory; it
+does not register anywhere or coordinate with the other daemon directly, and
+adds no second budget registry alongside `exomonad-node`'s
+`command_resources` admission service, which already gates actor starts on
+the same `MemAvailable` figure. The daemon logs its derived sizing
+(`available_mb`, `headroom_mb`, `budget_mb`, `workers`, `rss_ceiling_mb`,
+`warm_worker_mb`) once at startup, and a worker replaced by RSS rotation
+after serving only a few requests logs as memo loss, not ordinary rotation.
+See `daemon::DEFAULT_WORKER_COUNT`, `daemon::WARM_WORKER_MB`, and
+`daemon::default_memory_budget_mb`'s doc comments for the exact sizing and
+the matching `.config/nextest.toml` `[test-groups.ghc-heavy] max-threads`.
+
+A pooled (`--workers` > 1) slot that has not yet served a real request
+pre-warms itself once it has gone confirmed-idle for a short debounce and
+some other slot's first real request has revealed an include set (source
+root and argv): it runs one compile against that same include set on its
+own worker, so its own first real request need not pay the cold
+`ghc_load` + `lowering` cost the daemon's sizing exists to avoid repeating.
+A failed pre-warm only logs a WARN and respawns that slot's worker; it never
+blocks the slot from serving normally. See `daemon::warm_up_slot` and
+`daemon::should_attempt_warm_up`.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork

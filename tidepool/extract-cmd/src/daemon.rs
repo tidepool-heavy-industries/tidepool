@@ -82,6 +82,19 @@ pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 /// request-count rotation out of the common session length; the RSS ceiling
 /// remains the tighter bound when a worker grows quickly.
 const DEFAULT_ROTATE_AFTER: u64 = 1024;
+/// A worker replaced by RSS rotation after serving fewer than this many
+/// requests never got the chance to pay off its cold-start cost: it logs as
+/// memo loss, not ordinary rotation. Deliberately small — a worker that
+/// serves a handful of requests before growing past the ceiling is the
+/// three-3.2-GiB-slot failure this module's sizing exists to prevent, not
+/// routine turnover.
+const EARLY_REPLACEMENT_SERVED_THRESHOLD: u64 = 8;
+/// How often an idle pooled worker slot (one that has not yet served any
+/// request) checks whether it should run its one-time pre-warm compile,
+/// instead of blocking indefinitely for a real job. Small relative to any
+/// real compile request, so it adds negligible latency to ordinary job
+/// dispatch — see `serve_pooled`'s per-slot loop.
+const WARM_UP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of concurrent GHC worker slots a `--persistent` daemon runs by
 /// default (`--workers`). Each slot is a full `Worker`: its own transaction
 /// pinning, request deadline, peer-disconnect kill, and served/RSS rotation.
@@ -98,11 +111,23 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// sense for the single short-lived worker that mode was designed around
 /// (see `tidepool/extract-cmd/CLAUDE.md`).
 const DEFAULT_WORKER_COUNT: usize = 3;
-/// Total resident-worker RSS budget a `--persistent` daemon divides evenly
-/// across its worker slots for each slot's default rotation ceiling
-/// (`worker_rss_ceiling_mb = default_memory_budget_mb() / worker_count`).
-/// `--rss-ceiling-mb` keeps its old meaning — a per-worker ceiling — and, when
-/// given explicitly, overrides that derived figure instead of the total.
+/// Measured RSS of one warm GHC worker: 6.1-6.5 GiB observed, rounded up to
+/// one named constant so the worker-count derivation below and its doc
+/// comments share the same figure. A per-worker RSS ceiling below this
+/// rotates a worker on almost every request — a cold worker never gets the
+/// chance to become warm — and discards the module memo the ceiling exists
+/// to protect (the production incident this sizing rule fixes: a 21 GiB
+/// budget divided by a fixed `DEFAULT_WORKER_COUNT` of 3, on a box where only
+/// ~20 GiB was actually available, produced three ~3.2 GiB slots and a
+/// worker replaced on almost every request).
+const WARM_WORKER_MB: u64 = 7 * 1024;
+/// Total resident-worker RSS budget a `--persistent` daemon sizes its worker
+/// pool from. The worker *count* is derived from this budget, not fixed:
+/// `worker_count_from_budget` picks as many `WARM_WORKER_MB` slots as the
+/// budget supports, up to `DEFAULT_WORKER_COUNT`, so the ceiling each slot
+/// gets (`budget / worker_count`) never drops below the figure a worker
+/// needs to actually stay warm. `--workers` and `--rss-ceiling-mb` keep their
+/// old meanings and, when given explicitly, override the derived figures.
 ///
 /// This is a CEILING on the default, not a fixed figure: `default_memory_budget_mb`
 /// derives the actual default from memory available at daemon start, so two
@@ -112,14 +137,12 @@ const DEFAULT_WORKER_COUNT: usize = 3;
 /// claim. See that function's doc comment.
 ///
 /// The figure itself comes from measurement on a 31 GiB box that runs
-/// nothing else: at the default `DEFAULT_WORKER_COUNT` (3) this is 7 GiB per
-/// worker. The ceiling comes from measurement, not headroom arithmetic: a
-/// real warm GHC worker's RSS runs 6.1-6.5 GiB, so a lower ceiling (e.g. the
-/// 6 GiB a fourth slot would leave) rotates on almost every request and
-/// discards the module memo the ceiling exists to protect. Three 7 GiB
-/// workers (21 GiB) leaves roughly 10 GiB for the concurrent cargo/nextest
-/// build issuing those `ghc-heavy` requests alongside the pool. A shared box
-/// should pass `--workers 2`.
+/// nothing else: at the default `DEFAULT_WORKER_COUNT` (3) this is
+/// `WARM_WORKER_MB` (7 GiB) per worker, leaving roughly 10 GiB for the
+/// concurrent cargo/nextest build issuing those `ghc-heavy` requests
+/// alongside the pool. A shared box sizes its worker count down on its own
+/// (see `worker_count_from_budget`); passing `--workers 2` remains available
+/// for a caller that wants to pin it.
 const DEFAULT_MEMORY_BUDGET_MB: u64 = 21 * 1024;
 /// Memory reserved out of what's available at daemon start, never claimed by
 /// the default worker budget — for the concurrent cargo/nextest build (or
@@ -164,6 +187,122 @@ fn budget_from_available(available_mb: Option<u64>) -> u64 {
             .min(available.saturating_sub(DEFAULT_MEMORY_HEADROOM_MB))
             .max(MINIMUM_MEMORY_BUDGET_MB),
         None => DEFAULT_MEMORY_BUDGET_MB,
+    }
+}
+
+/// Result of sizing a `--persistent` daemon's worker pool from its memory
+/// budget: how many workers to run, the per-worker RSS ceiling each gets,
+/// and whether that ceiling can actually hold a worker warm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerSizing {
+    workers: usize,
+    rss_ceiling_mb: u64,
+    /// `false` when even a single worker's ceiling (the whole budget) falls
+    /// short of `WARM_WORKER_MB` — the daemon still runs one worker at that
+    /// ceiling (the existing floor behaviour), but a worker will rotate on
+    /// almost every request rather than staying warm.
+    can_stay_warm: bool,
+}
+
+/// Derives worker count and per-worker RSS ceiling from a total memory
+/// budget instead of dividing the budget by a fixed worker count: as many
+/// `WARM_WORKER_MB` slots as the budget supports, capped at
+/// `DEFAULT_WORKER_COUNT`, and never fewer than one. This is what keeps a
+/// smaller budget (a box already running other work) from producing several
+/// slots too small to hold a warm worker, the failure this function exists
+/// to prevent — see `DEFAULT_MEMORY_BUDGET_MB` and `WARM_WORKER_MB`'s doc
+/// comments.
+fn worker_sizing_from_budget(budget_mb: u64) -> WorkerSizing {
+    let workers = (budget_mb / WARM_WORKER_MB).clamp(1, DEFAULT_WORKER_COUNT as u64) as usize;
+    let rss_ceiling_mb = budget_mb / workers as u64;
+    WorkerSizing {
+        workers,
+        rss_ceiling_mb,
+        can_stay_warm: rss_ceiling_mb >= WARM_WORKER_MB,
+    }
+}
+
+/// Consecutive confirmed-empty job polls (each `WARM_UP_POLL_INTERVAL`) an
+/// idle slot must observe before it starts its pre-warm compile. This is a
+/// debounce, not a cost: it exists only so a slot that is about to receive
+/// a real job concurrently dispatched to it (two requests landing on a
+/// freshly started pool at nearly the same instant) does not instead spend
+/// that time on a self-initiated warm-up and make the real request wait
+/// behind it — a genuinely idle slot easily clears this many empty polls
+/// before any real request would reasonably still be inbound.
+const WARM_UP_IDLE_DEBOUNCE: u32 = 4;
+
+/// Pure gate for whether an idle pooled worker slot should attempt its
+/// one-time pre-warm compile right now: only a slot that has not yet served
+/// a real request, has not already attempted (successfully or not) its own
+/// warm-up, has been confirmed idle (no job received) for
+/// `WARM_UP_IDLE_DEBOUNCE` consecutive polls, and only once some request's
+/// include set (workspace/source root and argv) is actually known
+/// daemon-wide.
+fn should_attempt_warm_up(
+    served: u64,
+    warm_up_attempted: bool,
+    idle_polls: u32,
+    include_set_known: bool,
+) -> bool {
+    served == 0 && !warm_up_attempted && idle_polls >= WARM_UP_IDLE_DEBOUNCE && include_set_known
+}
+
+/// Best-effort warm-up compile for a pooled worker slot's freshly spawned
+/// worker, using the include set (`cwd`, `argv`) revealed by the first real
+/// request any slot has served. This is what lets the daemon's *other* idle
+/// slots find a warm module memo on their own first real request, instead
+/// of every slot independently paying the cold `ghc_load` + `lowering` cost
+/// the production incident this module's sizing fix exists for showed
+/// (12s + 20-26s per cold worker, versus ~150ms warm). Never fails the
+/// slot: a failed warm-up logs a WARN and respawns the worker so the slot
+/// still serves normally, just cold on its first real request as before
+/// this change.
+fn warm_up_slot(
+    worker: &mut Worker,
+    prepared: &PreparedWorker,
+    cwd: &Path,
+    argv: &[OsString],
+    run_id: &str,
+    slot: usize,
+) {
+    let started = Instant::now();
+    let result: Result<WorkerResponse, FrontendError> = (|| {
+        worker.begin_transaction()?;
+        let outcome = worker.request(cwd, argv)?;
+        worker.end_transaction()?;
+        Ok(outcome)
+    })();
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                run_id,
+                worker = slot,
+                elapsed_ms,
+                "compiler worker slot pre-warmed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                run_id,
+                worker = slot,
+                elapsed_ms,
+                %error,
+                "compiler worker slot pre-warm failed; replacing worker and continuing"
+            );
+            match Worker::spawn(prepared) {
+                Ok(fresh) => *worker = fresh,
+                Err(spawn_error) => {
+                    tracing::warn!(
+                        run_id,
+                        worker = slot,
+                        %spawn_error,
+                        "failed to respawn compiler worker after a failed pre-warm"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -696,6 +835,7 @@ fn service_transaction(
     transaction: bool,
     served: &mut u64,
     followed_rotation: &mut bool,
+    early_replacements: &mut u64,
     mut next_request: impl FnMut(&mut UnixStream) -> RequestStep,
 ) -> Result<ConnectionOutcome, FrontendError> {
     let mut transaction_failed = worker.begin_transaction().err();
@@ -788,7 +928,8 @@ fn service_transaction(
     }
     drop(connection);
     let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
-    if *served >= rotate_after || worker_rss > rss_ceiling_mb {
+    let rss_replacement = worker_rss > rss_ceiling_mb;
+    if *served >= rotate_after || rss_replacement {
         // Replacing the worker discards its module memo; the next request
         // recompiles every library module.
         tracing::info!(
@@ -800,6 +941,18 @@ fn service_transaction(
             transaction,
             "replacing compiler worker"
         );
+        if rss_replacement && *served < EARLY_REPLACEMENT_SERVED_THRESHOLD {
+            *early_replacements += 1;
+            tracing::warn!(
+                run_id,
+                served = *served,
+                worker_rss_mb = worker_rss,
+                rss_ceiling_mb,
+                worker_slot,
+                early_replacements = *early_replacements,
+                "memo loss: worker replaced for RSS after serving only a few requests"
+            );
+        }
         if config.persistent {
             // Long-lived composition roots keep the protocol endpoint stable
             // while bounding GHC state. The worker executable is boot-pinned
@@ -829,21 +982,34 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         .transpose()
         .map_err(FrontendError::Io)?;
     let rotate_after = config.rotate_after.unwrap_or(DEFAULT_ROTATE_AFTER);
+    let available_mb = available_memory_mb();
+    let budget_mb = default_memory_budget_mb();
+    let sizing = worker_sizing_from_budget(budget_mb);
     // Ordinary (non-`--persistent`) daemon mode always runs a single worker
     // and ignores `--workers` — see `DEFAULT_WORKER_COUNT`'s doc comment for
     // why a worker pool only makes sense for a long-lived persistent
     // endpoint.
     let worker_count = if config.persistent {
-        config.workers.unwrap_or(DEFAULT_WORKER_COUNT).max(1)
+        config.workers.unwrap_or(sizing.workers).max(1)
     } else {
         1
     };
     // `--rss-ceiling-mb` keeps its historical per-worker meaning; only its
-    // *default* changes, from a fixed figure to the shared budget split
-    // across this run's worker count (see `DEFAULT_MEMORY_BUDGET_MB`).
-    let rss_ceiling_mb = config
-        .rss_ceiling_mb
-        .unwrap_or(default_memory_budget_mb() / worker_count as u64);
+    // *default* changes, from a fixed figure divided by worker count to the
+    // ceiling `worker_sizing_from_budget` derives alongside that count (see
+    // `WARM_WORKER_MB`'s doc comment for why the count, not just the
+    // ceiling, is derived from the budget).
+    let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or_else(|| {
+        if worker_count == sizing.workers {
+            sizing.rss_ceiling_mb
+        } else {
+            // An explicit `--workers` (or non-persistent's forced count of
+            // 1) no longer matches the derived count; recompute the ceiling
+            // for the count actually in use.
+            budget_mb / worker_count as u64
+        }
+    });
+    let can_stay_warm = rss_ceiling_mb >= WARM_WORKER_MB;
     let request_deadline = config
         .request_deadline_secs
         .map(Duration::from_secs)
@@ -859,8 +1025,12 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         worker = %prepared.selection().display(),
         producer = %hex(&producer),
         socket = %config.socket.display(),
+        available_mb = available_mb.unwrap_or(0),
+        headroom_mb = DEFAULT_MEMORY_HEADROOM_MB,
+        budget_mb,
         workers = worker_count,
         rss_ceiling_mb,
+        warm_worker_mb = WARM_WORKER_MB,
         detailed_log = %config
             .log_path
             .as_deref()
@@ -868,6 +1038,18 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             .display(),
         "compiler daemon ready"
     );
+    if config.persistent && !can_stay_warm {
+        tracing::warn!(
+            run_id,
+            budget_mb,
+            workers = worker_count,
+            rss_ceiling_mb,
+            warm_worker_mb = WARM_WORKER_MB,
+            explicit_workers = config.workers.is_some(),
+            "worker sizing cannot keep a worker warm: rss_ceiling_mb is below warm_worker_mb, \
+             so a worker rotates before it stays warm"
+        );
+    }
 
     let result = if worker_count <= 1 {
         serve_single(
@@ -935,6 +1117,9 @@ fn serve_single(
         // Set whenever the worker is replaced, and read by the next request's
         // span: that request recompiles every library module from cold.
         let mut followed_rotation = false;
+        // Counts RSS-driven replacements that lost a fresh worker's memo
+        // before it had served `EARLY_REPLACEMENT_SERVED_THRESHOLD` requests.
+        let mut early_replacements = 0u64;
         loop {
             let (mut connection, _) = listener.accept().map_err(FrontendError::Io)?;
             if connection
@@ -1024,6 +1209,7 @@ fn serve_single(
                     true,
                     &mut served,
                     &mut followed_rotation,
+                    &mut early_replacements,
                     |connection| {
                         let mut command = [0u8; 1];
                         if connection.read_exact(&mut command).is_err() {
@@ -1151,6 +1337,7 @@ fn serve_single(
                 false,
                 &mut served,
                 &mut followed_rotation,
+                &mut early_replacements,
                 |_connection| match first_request.take() {
                     Some((cwd, argv)) => RequestStep::Request(cwd, argv),
                     None => RequestStep::End,
@@ -1179,6 +1366,36 @@ fn serve_single(
 enum Job {
     Transaction(UnixStream),
     Request(UnixStream, std::path::PathBuf, Vec<OsString>),
+}
+
+/// Result of one bounded attempt to fetch the next job for a pooled worker
+/// slot: a real job, the accept thread having shut down (`Disconnected`), or
+/// `Idle` — this slot held `job_rx`'s receiver for a full
+/// `WARM_UP_POLL_INTERVAL` and found no job. Acquiring the receiver itself
+/// still blocks (a plain, fair `Mutex::lock`, not a `try_lock` retry loop):
+/// with only a couple of slots sharing one receiver, a thread that releases
+/// and immediately re-acquires a `try_lock` in a sleep/retry cycle can starve
+/// another slot indefinitely, since nothing about `try_lock` guarantees the
+/// two threads' independent poll timers ever land in the brief gap between
+/// release and re-acquire. Blocking on the OS mutex instead lets the kernel
+/// arbitrate fairly between waiters.
+enum PollOutcome {
+    Job(Job),
+    Disconnected,
+    Idle,
+}
+
+/// Fetch the next job with a bounded wait, instead of blocking indefinitely
+/// on `job_rx`, so an idle slot periodically comes back out to check whether
+/// it should run its own pre-warm compile (`should_attempt_warm_up`) between
+/// attempts.
+fn poll_for_job(job_rx: &Mutex<std::sync::mpsc::Receiver<Job>>) -> PollOutcome {
+    let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
+    match receiver.recv_timeout(WARM_UP_POLL_INTERVAL) {
+        Ok(job) => PollOutcome::Job(job),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => PollOutcome::Idle,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => PollOutcome::Disconnected,
+    }
 }
 
 /// The N-worker daemon loop. One accept thread performs every fence check
@@ -1222,28 +1439,70 @@ fn serve_pooled(
 ) -> Result<u8, FrontendError> {
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Job>(0);
     let job_rx = Mutex::new(job_rx);
+    // Populated with the first real request's (cwd, argv) any slot serves,
+    // daemon-wide. The other idle slots (still on their first, `served ==
+    // 0` worker) use it to run a pre-warm compile before their own first
+    // real request arrives — see `warm_up_slot` and `should_attempt_warm_up`.
+    let include_set: std::sync::Arc<std::sync::OnceLock<(std::path::PathBuf, Vec<OsString>)>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
     std::thread::scope(|scope| -> Result<u8, FrontendError> {
         let mut slots = Vec::with_capacity(worker_count);
         for slot in 0..worker_count {
             let job_rx = &job_rx;
+            let include_set = std::sync::Arc::clone(&include_set);
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
                 let mut worker = Worker::spawn(prepared)?;
                 let mut served = 0u64;
                 // The first request this slot ever serves is cold, exactly
                 // like a freshly rotated single-worker daemon.
                 let mut followed_rotation = true;
+                // Counts this slot's RSS-driven replacements that lost a
+                // fresh worker's memo before it warmed up.
+                let mut early_replacements = 0u64;
+                // Set once this slot has attempted its own pre-warm compile
+                // (successfully or not), so it is attempted at most once.
+                let mut warm_up_attempted = false;
+                // Consecutive confirmed-empty polls this slot itself has
+                // observed while holding the shared receiver — see
+                // `WARM_UP_IDLE_DEBOUNCE`. Once `served` leaves 0 the count
+                // no longer matters (`should_attempt_warm_up` excludes it).
+                let mut idle_polls = 0u32;
                 loop {
-                    let job = {
-                        let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
-                        receiver.recv()
+                    // A job pending for this slot always wins over starting
+                    // a pre-warm compile: check for one first, and only
+                    // consider warm-up once a poll comes back confirmed
+                    // idle.
+                    let job = loop {
+                        match poll_for_job(job_rx) {
+                            PollOutcome::Job(job) => break Some(job),
+                            PollOutcome::Disconnected => break None,
+                            PollOutcome::Idle => {
+                                idle_polls = idle_polls.saturating_add(1);
+                            }
+                        }
+                        if should_attempt_warm_up(
+                            served,
+                            warm_up_attempted,
+                            idle_polls,
+                            include_set.get().is_some(),
+                        ) {
+                            if let Some((cwd, argv)) = include_set.get() {
+                                warm_up_slot(&mut worker, prepared, cwd, argv, run_id, slot);
+                            }
+                            warm_up_attempted = true;
+                        }
                     };
-                    let Ok(job) = job else {
+                    let Some(job) = job else {
                         // The accept thread dropped the sender: shutting down.
                         break;
                     };
                     let (connection, transaction, mut first_request) = match job {
                         Job::Transaction(connection) => (connection, true, None),
                         Job::Request(connection, cwd, argv) => {
+                            // Other idle slots pre-warm from whichever
+                            // request (plain or transaction-pinned) reveals
+                            // the include set first.
+                            include_set.get_or_init(|| (cwd.clone(), argv.clone()));
                             (connection, false, Some((cwd, argv)))
                         }
                     };
@@ -1260,6 +1519,7 @@ fn serve_pooled(
                         transaction,
                         &mut served,
                         &mut followed_rotation,
+                        &mut early_replacements,
                         |connection| {
                             if transaction {
                                 let mut command = [0u8; 1];
@@ -1277,7 +1537,15 @@ fn serve_pooled(
                                             }
                                         };
                                         match normalize_worker_argv(argv) {
-                                            Ok(argv) => RequestStep::Request(cwd, argv),
+                                            Ok(argv) => {
+                                                // Other idle slots pre-warm from
+                                                // whichever request (plain or
+                                                // transaction-pinned) reveals the
+                                                // include set first.
+                                                include_set
+                                                    .get_or_init(|| (cwd.clone(), argv.clone()));
+                                                RequestStep::Request(cwd, argv)
+                                            }
                                             Err(error) => {
                                                 tracing::warn!(run_id, %error, "compiler transaction request was invalid");
                                                 RequestStep::Malformed
@@ -2185,6 +2453,95 @@ mod tests {
     #[test]
     fn budget_from_available_falls_back_to_the_fixed_ceiling_when_unknown() {
         assert_eq!(budget_from_available(None), DEFAULT_MEMORY_BUDGET_MB);
+    }
+
+    /// Plentiful memory: the full 3-worker pool at the warm-worker ceiling —
+    /// the common case this module exists to keep working.
+    #[test]
+    fn worker_sizing_uses_three_workers_at_the_warm_ceiling_when_memory_is_plentiful() {
+        let sizing = worker_sizing_from_budget(DEFAULT_MEMORY_BUDGET_MB);
+        assert_eq!(sizing.workers, 3);
+        assert_eq!(sizing.rss_ceiling_mb, WARM_WORKER_MB);
+        assert!(sizing.can_stay_warm);
+    }
+
+    /// The exact incident this change fixes: a budget that supports fewer
+    /// than `DEFAULT_WORKER_COUNT` warm workers must size the *count* down,
+    /// not shrink every slot below `WARM_WORKER_MB`. A 9.8 GiB budget fits
+    /// only one 7 GiB worker (two would leave under 5 GiB each).
+    #[test]
+    fn worker_sizing_drops_to_one_worker_when_the_budget_cannot_fit_two() {
+        let budget_mb = 9 * 1024 + 800;
+        let sizing = worker_sizing_from_budget(budget_mb);
+        assert_eq!(sizing.workers, 1);
+        assert_eq!(sizing.rss_ceiling_mb, budget_mb);
+        assert!(sizing.can_stay_warm);
+    }
+
+    /// A tiny budget: even one worker cannot reach `WARM_WORKER_MB`, so
+    /// sizing still floors at one worker (the existing floor behaviour) but
+    /// flags that a worker cannot stay warm at this ceiling.
+    #[test]
+    fn worker_sizing_flags_cannot_stay_warm_on_a_tiny_budget() {
+        let sizing = worker_sizing_from_budget(MINIMUM_MEMORY_BUDGET_MB);
+        assert_eq!(sizing.workers, 1);
+        assert_eq!(sizing.rss_ceiling_mb, MINIMUM_MEMORY_BUDGET_MB);
+        assert!(!sizing.can_stay_warm);
+    }
+
+    /// Unknown available memory (`/proc/meminfo` unreadable) falls back to
+    /// the historical fixed budget, which still derives the same 3-worker,
+    /// 7 GiB-ceiling sizing as before this change.
+    #[test]
+    fn worker_sizing_from_unknown_available_memory_matches_the_fixed_default() {
+        let sizing = worker_sizing_from_budget(budget_from_available(None));
+        assert_eq!(sizing.workers, DEFAULT_WORKER_COUNT);
+        assert_eq!(sizing.rss_ceiling_mb, WARM_WORKER_MB);
+        assert!(sizing.can_stay_warm);
+    }
+
+    /// An explicit `--workers` that outruns what the budget can hold warm
+    /// must not be silently overridden — `serve` still honors it — but the
+    /// resulting ceiling is what `can_stay_warm` (and `serve`'s startup WARN)
+    /// checks against.
+    #[test]
+    fn explicit_workers_on_a_small_budget_yields_a_ceiling_below_warm() {
+        let budget_mb = 9 * 1024;
+        let explicit_workers = 3u64;
+        let rss_ceiling_mb = budget_mb / explicit_workers;
+        assert!(
+            rss_ceiling_mb < WARM_WORKER_MB,
+            "an explicit --workers 3 on a 9 GiB budget must fall below the warm-worker ceiling, \
+             which is exactly the case `serve` warns on"
+        );
+    }
+
+    /// The pure gate a pooled slot's warm-up decision reduces to: only an
+    /// unserved, not-yet-attempted, confirmed-idle slot with a known
+    /// include set warms up.
+    #[test]
+    fn should_attempt_warm_up_requires_unserved_unattempted_debounced_and_known() {
+        // Nothing known yet: never warm up, no matter how idle.
+        assert!(!should_attempt_warm_up(0, false, 100, false));
+        // Known, but this slot already served (or already has) a request:
+        // it has its own real memo, warming up would be redundant.
+        assert!(!should_attempt_warm_up(1, false, 100, true));
+        // Known and idle long enough, but already attempted once.
+        assert!(!should_attempt_warm_up(0, true, 100, true));
+        // Known but not yet debounced: a job may still be inbound.
+        assert!(!should_attempt_warm_up(
+            0,
+            false,
+            WARM_UP_IDLE_DEBOUNCE - 1,
+            true
+        ));
+        // Every condition satisfied.
+        assert!(should_attempt_warm_up(
+            0,
+            false,
+            WARM_UP_IDLE_DEBOUNCE,
+            true
+        ));
     }
 
     /// `/proc/meminfo` parsing itself, against a real MemAvailable line —
@@ -3340,6 +3697,169 @@ fn main() {{
 
         assert!(request_stop(&socket).is_ok());
         assert_eq!(server.join().unwrap().unwrap(), 0);
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The pre-warm behaviour this section exists for: a `--workers 2` pool
+    /// serves exactly one real client request, so only one slot's worker
+    /// ever sees a real job — but after the idle debounce clears, the
+    /// *other* slot's own worker independently completes one full
+    /// begin/request/end cycle against the same include set on its own,
+    /// with no client involved. A multi-shot fake worker (unlike the other
+    /// fixtures' one-shot fakes) logs its own pid to a shared file on every
+    /// completed cycle, so the assertion is: two distinct worker processes
+    /// each served exactly one transaction, not one process serving two.
+    #[test]
+    fn an_idle_pooled_slot_pre_warms_from_the_first_requests_include_set() {
+        let dir = std::env::temp_dir().join(format!("tp-prewarm-{}", std::process::id()));
+        // best-effort: test cleanup of a temp path.
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let payload_len = encode_request(&dir, &worker_argv).len();
+        let served_log = dir.join("served.log");
+        let source = dir.join("fake_worker.rs");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+use std::io::{{Read, Write}};
+
+fn main() {{
+    let log_path = std::env::var("TP_TEST_PREWARM_SERVED_LOG").unwrap();
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    loop {{
+        let mut one = [0u8; 1];
+        // Daemon shutdown closes stdin; a clean EOF here ends this worker.
+        if stdin.read_exact(&mut one).is_err() {{
+            break;
+        }}
+        stdout.write_all(&[1]).unwrap(); // begin_transaction ack
+        stdout.flush().unwrap();
+
+        stdin.read_exact(&mut one).unwrap(); // request prefix
+        let mut payload = vec![0u8; {payload_len}];
+        stdin.read_exact(&mut payload).unwrap();
+        stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+        stdout.flush().unwrap();
+
+        stdin.read_exact(&mut one).unwrap(); // end_transaction
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        writeln!(file, "{{}}", std::process::id()).unwrap();
+    }}
+}}
+"#,
+                payload_len = payload_len,
+            ),
+        )
+        .unwrap();
+        let worker_bin = dir.join("fake-worker");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+        )]
+        let rustc = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&worker_bin)
+            .status()
+            .unwrap();
+        assert!(rustc.success(), "fake worker failed to compile");
+
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: points the fake worker at its own log file, not production config"
+        )]
+        std::env::set_var("TP_TEST_PREWARM_SERVED_LOG", &served_log);
+
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(2),
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "daemon did not become ready"
+            );
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // Exactly one real client request: only one of the two slots ever
+        // sees a real job.
+        let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        // Give the other, still-idle slot time to clear the debounce
+        // (`WARM_UP_IDLE_DEBOUNCE` confirmed-empty polls) and run its
+        // pre-warm compile, generously bounded.
+        let settle_deadline = Instant::now() + Duration::from_secs(10);
+        let served = loop {
+            let served: Vec<String> = std::fs::read_to_string(&served_log)
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect();
+            if served.len() >= 2 || Instant::now() >= settle_deadline {
+                break served;
+            }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+            )]
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        assert!(request_stop(&socket).is_ok());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+
+        assert_eq!(
+            served.len(),
+            2,
+            "expected the real request plus one pre-warm compile, got: {served:?}"
+        );
+        let distinct_pids: std::collections::HashSet<_> = served.iter().collect();
+        assert_eq!(
+            distinct_pids.len(),
+            2,
+            "the pre-warm must run on the OTHER slot's own idle worker process, \
+             not the one that already served the real request: {served:?}"
+        );
+
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: cleans up its own env var, not production config"
+        )]
+        std::env::remove_var("TP_TEST_PREWARM_SERVED_LOG");
         // best-effort: test cleanup of a temp path.
         std::fs::remove_dir_all(&dir).ok();
     }
