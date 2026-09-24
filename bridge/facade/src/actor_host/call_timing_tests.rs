@@ -136,3 +136,74 @@ async fn bash_call_logs_one_call_timing_summary_line() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+/// A resident session's first cell bootstraps its machine (nothing exists
+/// yet to snapshot against, so `PersistentSession::install_prepared` runs
+/// single-checkout); its second cell has a machine to snapshot, so
+/// `begin_ready_block_split` (`exomonad_actor::resident_workbench`) takes
+/// the off-checkout compile path. Assert the second cell's
+/// `tidepool_runtime::prepared_install` log line reports
+/// `compiled_off_checkout=true`, proving the split -- not just the
+/// single-checkout fallback -- actually ran for an ordinary cell install.
+#[tokio::test]
+async fn second_cell_install_compiles_off_checkout() {
+    // The "prepared install" line is emitted from inside
+    // `ResidentMachineAccess::with_host_machine`'s `spawn_blocking_in_span`
+    // closure -- a genuinely different OS thread from Tokio's blocking
+    // pool, which `tracing::subscriber::set_default`'s thread-local scope
+    // (this file's other tests use it) does not reach. This test needs a
+    // process-wide default instead; set it before `TestCampaign::start()`
+    // so it wins over that helper's own best-effort `try_init()`. Safe
+    // because nextest runs each test in its own process (no other test's
+    // global default to collide with).
+    let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(log.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("first global subscriber in this test process");
+
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+
+    // First cell: bootstraps the session's machine.
+    super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n").await;
+    // Second cell: a machine already exists to snapshot against.
+    super::tests::dispatch_haskell_script(policy.as_ref(), "let y = (2 :: Int)\ny\n").await;
+
+    let log_text = String::from_utf8(
+        log.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .expect("captured log is UTF-8");
+
+    let installs: Vec<serde_json::Value> = log_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| {
+            value.get("target").and_then(|t| t.as_str()) == Some("tidepool_runtime::prepared_install")
+        })
+        .collect();
+    assert!(
+        !installs.is_empty(),
+        "no tidepool_runtime::prepared_install log lines captured: {log_text}"
+    );
+    let off_checkout = installs.iter().any(|line| {
+        line.get("fields")
+            .and_then(|fields| fields.get("compiled_off_checkout"))
+            .and_then(|value| value.as_bool().or_else(|| value.as_str().map(|s| s == "true")))
+            == Some(true)
+    });
+    assert!(
+        off_checkout,
+        "expected at least one prepared install with compiled_off_checkout=true \
+         (the second cell's split install) among: {installs:?}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

@@ -835,6 +835,83 @@ enum PreparedTurnMode<'a> {
     },
 }
 
+/// Owned counterpart of [`PreparedTurnMode`], built from data the caller
+/// already owns (a `TurnResult::Bind`'s `bound`/`generation`), so it can
+/// cross the async gap between [`ResidentSession::snapshot_run_prepared`]'s
+/// checkout and [`ResidentSession::revalidate_and_run_prepared`]'s. `as_mode`
+/// borrows back into a [`PreparedTurnMode`] at the point of use, exactly as
+/// a caller of the single-checkout [`ResidentSession::run_prepared`] would
+/// have constructed one directly.
+pub enum PendingPreparedMode {
+    Value,
+    Binding {
+        binder: BoundBinder,
+        generation: Generation,
+        observation: Option<Vec<tidepool_repr::VarId>>,
+    },
+    Projected {
+        binders: Vec<BoundBinder>,
+        generation: Generation,
+    },
+}
+
+impl PendingPreparedMode {
+    fn as_mode(&self) -> PreparedTurnMode<'_> {
+        match self {
+            PendingPreparedMode::Value => PreparedTurnMode::Value,
+            PendingPreparedMode::Binding {
+                binder,
+                generation,
+                observation,
+            } => PreparedTurnMode::Binding {
+                binder,
+                generation: *generation,
+                observation: observation.clone(),
+            },
+            PendingPreparedMode::Projected { binders, generation } => PreparedTurnMode::Projected {
+                binders,
+                generation: *generation,
+            },
+        }
+    }
+
+    fn generation(&self) -> Option<Generation> {
+        match self {
+            PendingPreparedMode::Value => None,
+            PendingPreparedMode::Binding { generation, .. }
+            | PendingPreparedMode::Projected { generation, .. } => Some(*generation),
+        }
+    }
+}
+
+/// Everything [`ResidentSession::snapshot_run_prepared`] produces under a
+/// machine checkout for an off-checkout Cranelift compile: owned data with
+/// no reference to the machine or its checkout, `Send` so it can cross the
+/// gap to a blocking-pool compile and back. Finish it with
+/// [`Self::compile_off_checkout`] then
+/// [`ResidentSession::revalidate_and_run_prepared`].
+pub struct PendingPreparedInstall {
+    snapshot: super::prepared::InstallSnapshot,
+    mode: PendingPreparedMode,
+    argument: Option<PreparedHandle>,
+    provenance: Arc<ProgramProvenance>,
+    realm: RealmId,
+    lexical_scope: ScopeId,
+    park: ParkPolicy,
+}
+
+impl PendingPreparedInstall {
+    /// Step (b): compile this pending install's linked program off any
+    /// checkout. No machine access; safe to run on a blocking thread while
+    /// other turns hold the checkout this snapshot was taken under.
+    pub fn compile_off_checkout(
+        &mut self,
+    ) -> Result<tidepool_codegen::prepared_program::CompiledProgram, tidepool_codegen::prepared_program::CompileError>
+    {
+        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    }
+}
+
 /// The `Send` projection of one prepared run that crosses the eval thread:
 /// handles are ids, the observed value is an owned tree.
 pub(crate) enum PreparedRun {
@@ -3009,6 +3086,135 @@ where
             engine.unpin(program);
         }
         self.complete_prepared(ran??, mode, program, lexical_scope, provenance, None)
+    }
+
+    /// Whether this session already has a resident machine to snapshot an
+    /// install against. `false` only for a session's first turn, whose
+    /// `install_prepared` bootstraps the machine from that first program --
+    /// nothing exists yet to take an off-checkout compile snapshot from, so
+    /// that turn has no split path and stays on
+    /// [`Self::run_prepared`]/[`Self::run_prepared_with_argument`].
+    #[must_use]
+    pub fn prepared_machine_ready(&self) -> bool {
+        self.state.is_bootstrapped()
+    }
+
+    /// Step (a) of the off-checkout split install for a prepared turn (see
+    /// `tidepool_codegen::prepared_program::PreparedCompileSnapshot` and
+    /// `PreparedEngine::snapshot_install` for what this snapshots and why
+    /// it needs no further machine access to compile): merge `code`'s
+    /// table, claim the turn's value-module generation, and resolve+plan
+    /// the install exactly as [`Self::run_prepared_with_argument`] does,
+    /// stopping short of the Cranelift compile. Run this under a machine
+    /// checkout; the caller compiles the returned [`PendingPreparedInstall`]
+    /// off any checkout ([`PendingPreparedInstall::compile_off_checkout`])
+    /// and finishes the turn through [`Self::revalidate_and_run_prepared`]
+    /// under a fresh checkout.
+    ///
+    /// The caller must check [`Self::prepared_machine_ready`] first: this
+    /// panics if the session has no machine yet, since bootstrap has
+    /// nothing to snapshot (see that method's doc).
+    pub fn snapshot_run_prepared(
+        &mut self,
+        code: TurnCode<'static>,
+        mode: PendingPreparedMode,
+        argument: Option<PreparedHandle>,
+    ) -> Result<PendingPreparedInstall, ResidentError> {
+        let prepared = code.prepared;
+        let provenance = self.provenance_for(&code.sites)?;
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        if let Some(generation) = mode.generation() {
+            // Claim the value-module identity before the turn runs.
+            self.state.set_val_gen(generation);
+        }
+        // The caller is documented to check `prepared_machine_ready` first;
+        // this typed refusal (rather than a panic) is the fallback if that
+        // contract is not honored, since `PreparedRuntimeError` already has
+        // a variant for exactly this precondition.
+        let snapshot = self
+            .state
+            .snapshot_install_prepared(prepared.into_owned())?
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        let realm = self.run_context.resource_scope;
+        let lexical_scope = self.run_context.lexical_scope;
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
+        };
+        Ok(PendingPreparedInstall {
+            snapshot,
+            mode,
+            argument,
+            provenance,
+            realm,
+            lexical_scope,
+            park,
+        })
+    }
+
+    /// Step (c) of the off-checkout split install: revalidate `pending`'s
+    /// imports against this (possibly different) checkout's live bindings
+    /// and, if nothing changed, install `compiled` and run the turn exactly
+    /// as [`Self::run_prepared_with_argument`]'s tail does. `Ok(None)`
+    /// means revalidation found a stale import (see
+    /// `PreparedEngine::revalidate_and_install`): the caller must recompile
+    /// from a fresh [`Self::snapshot_run_prepared`], or fall back to the
+    /// single-checkout [`Self::run_prepared_with_argument`].
+    pub fn revalidate_and_run_prepared(
+        &mut self,
+        pending: PendingPreparedInstall,
+        compiled: tidepool_codegen::prepared_program::CompiledProgram,
+    ) -> Result<Option<ResidentOutcome>, ResidentError> {
+        let PendingPreparedInstall {
+            snapshot,
+            mode,
+            argument,
+            provenance,
+            realm,
+            lexical_scope,
+            park,
+        } = pending;
+        let install_started = std::time::Instant::now();
+        let program = match self.state.revalidate_and_install_prepared(snapshot, compiled)? {
+            Some(program) => program,
+            None => return Ok(None),
+        };
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_INSTALL_PREPARED,
+            install_started.elapsed(),
+            0,
+        );
+        let borrowed_mode = mode.as_mode();
+        let plan = settle_plan_of(&borrowed_mode);
+        let run_exec_started = std::time::Instant::now();
+        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
+            Ok(settle_prepared(
+                engine, program, realm, argument, plan, park, table, handlers, captured,
+            ))
+        });
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_RUN_EXEC,
+            run_exec_started.elapsed(),
+            0,
+        );
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
+        Ok(Some(self.complete_prepared(
+            ran??,
+            mode.as_mode(),
+            program,
+            lexical_scope,
+            provenance,
+            None,
+        )?))
     }
 
     /// Finish one prepared run on the session thread, whichever entry

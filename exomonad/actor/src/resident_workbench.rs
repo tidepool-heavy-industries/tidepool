@@ -35,9 +35,10 @@ use tidepool_runtime::session::{
     run_turn_pinned, validate_declaration_candidate, BoundBinder, CellCheck, CellCheckRequest,
     CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
     DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
-    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    SourceImports, StagedDeclaration, TurnClassification, TurnKind, TurnRequest, TurnResult,
+    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
+    PendingPreparedMode, PreparedRuntimeError, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentResumeError, ResidentSession, RootCustody, SourceImports, StagedDeclaration,
+    TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -3369,8 +3370,12 @@ where
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
-        self.access
-            .with_machine(context, move |session, context, _| {
+        // Only the preamble mutation needs a checkout (it reads
+        // `context.haskell_effects_alias`, not the machine); the actual
+        // install-and-run is off-checkout split below.
+        let turn_source = self
+            .access
+            .with_machine(context.clone(), move |_, context, _| {
                 turn_source.preamble = match (response.as_ref(), request) {
                     (Some(response), Some(request)) => response.request_preamble(
                         &turn_source.preamble,
@@ -3382,21 +3387,19 @@ where
                 }
                 .into();
                 turn_source.preamble = actor_preamble(&turn_source.preamble, context).into();
-                begin_ready_block(
-                    session,
-                    context,
-                    &turn_source,
-                    RequestWorkbenchScope {
-                        response: response.as_ref(),
-                        request,
-                        type_modules: &type_modules,
-                    },
-                    block,
-                    *ready,
-                    display_budget,
-                )
+                Ok(turn_source)
             })
-            .await
+            .await?;
+        begin_ready_block_split(
+            &self.access,
+            context,
+            turn_source,
+            type_modules.to_vec(),
+            block,
+            *ready,
+            display_budget,
+        )
+        .await
     }
 
     /// Install a trusted job reference after stopping a foreground computation.
@@ -4110,10 +4113,6 @@ where
             ..
         } => {
             let warnings = compiled.warnings.warnings.clone();
-            let names = bound
-                .iter()
-                .map(|binder| binder.name.clone())
-                .collect::<Vec<_>>();
             let outcome = match bound.as_slice() {
                 [] => {
                     session.run_with_sites("actor_interactive_discard_bind", compiled.into_code())
@@ -4140,26 +4139,16 @@ where
                     generation,
                 ),
             };
-            let display = if let Some((name, presentation, _)) = observation {
-                WorkbenchDisplay::Observation {
-                    name,
-                    budget: display_budget,
-                    presentation,
-                    source: source.clone(),
-                    type_modules: scope.type_modules.to_vec(),
-                }
-            } else if names.is_empty() {
-                WorkbenchDisplay::Opaque
-            } else {
-                WorkbenchDisplay::Binding(bound)
-            };
-            start_fragment_settlement(
+            finish_bind_step(
                 session,
                 context,
-                block.ordinal,
-                block.source.clone(),
-                display,
+                source,
+                scope.type_modules,
+                &block,
+                bound,
                 warnings,
+                observation,
+                display_budget,
                 outcome,
             )
         }
@@ -4167,6 +4156,300 @@ where
             "workbench expression compiled without its observation binding".into(),
         )),
     }
+}
+
+/// The shared tail of a Bind turn, whichever entry ran it: the
+/// single-checkout match in [`begin_ready_block`] or the off-checkout split
+/// in [`begin_ready_block_split`]. Builds the turn's [`WorkbenchDisplay`]
+/// from `bound`/`observation` and settles the fragment.
+#[allow(clippy::too_many_arguments)]
+fn finish_bind_step<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    block: &ParsedBlock,
+    bound: Vec<BoundBinder>,
+    warnings: Vec<String>,
+    observation: Option<(String, ExpressionPresentation, Option<bool>)>,
+    display_budget: usize,
+    outcome: Result<ResidentOutcome, ResidentError>,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let names = bound
+        .iter()
+        .map(|binder| binder.name.clone())
+        .collect::<Vec<_>>();
+    let display = if let Some((name, presentation, _)) = observation {
+        WorkbenchDisplay::Observation {
+            name,
+            budget: display_budget,
+            presentation,
+            source: source.clone(),
+            type_modules: type_modules.to_vec(),
+        }
+    } else if names.is_empty() {
+        WorkbenchDisplay::Opaque
+    } else {
+        WorkbenchDisplay::Binding(bound)
+    };
+    start_fragment_settlement(
+        session,
+        context,
+        block.ordinal,
+        block.source.clone(),
+        display,
+        warnings,
+        outcome,
+    )
+}
+
+/// [`PendingPreparedMode`] a [`TurnResult::Bind`]'s shape resolves to,
+/// exactly as [`begin_ready_block`]'s own `match bound.as_slice()` chooses
+/// which `run_*_with_sites` to call -- kept in sync with that match by
+/// [`begin_ready_block_split`]'s fallback still calling the originals.
+fn pending_mode_for(
+    bound: &[BoundBinder],
+    generation: tidepool_repr::Generation,
+    observation: &Option<(String, ExpressionPresentation, Option<bool>)>,
+) -> PendingPreparedMode {
+    match bound {
+        [] => PendingPreparedMode::Value,
+        [binder] if observation.is_some() => PendingPreparedMode::Binding {
+            binder: binder.clone(),
+            generation,
+            observation: Some(Vec::new()),
+        },
+        [binder] => PendingPreparedMode::Binding {
+            binder: binder.clone(),
+            generation,
+            observation: None,
+        },
+        binders => PendingPreparedMode::Projected {
+            binders: binders.to_vec(),
+            generation,
+        },
+    }
+}
+
+/// An owned, `'static` [`TurnCode`] cloned from `turn` without consuming it,
+/// so a bounded split-install retry can take a fresh snapshot from the same
+/// compiled turn instead of needing a second GHC compile.
+fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
+    TurnCode {
+        table: std::borrow::Cow::Owned(turn.table.clone()),
+        sites: std::borrow::Cow::Owned(turn.asks.clone()),
+        prepared: std::borrow::Cow::Owned(turn.prepared.clone()),
+    }
+}
+
+/// One split-install attempt's outcome: either the session had no machine
+/// yet to snapshot against (see [`ResidentSession::prepared_machine_ready`]),
+/// in which case the caller has nothing to compile off-checkout and must use
+/// the single-checkout bootstrap install, or a snapshot ready to compile.
+enum PreparedSnapshotAttempt {
+    Bootstrap,
+    Ready(Box<PendingPreparedInstall>),
+}
+
+/// The off-checkout split counterpart of [`begin_ready_block`]: a `Decl`
+/// commits with no compile at all, in one checkout, exactly as before. A
+/// `Bind` turn's JIT install -- [`PreparedEngine::compile_for_install`]'s
+/// Cranelift compile, which the wave-3 finding measured dominating resident
+/// machine checkout hold (median 79ms, up to 14.9s) -- instead runs
+/// off-checkout: snapshot under a short checkout
+/// ([`ResidentSession::snapshot_run_prepared`]), compile with no checkout
+/// held ([`PendingPreparedInstall::compile_off_checkout`], timed into the
+/// call's `compile_ms` bucket rather than `checkout_hold_ms`), then
+/// revalidate and install under a fresh checkout
+/// ([`ResidentSession::revalidate_and_run_prepared`]). An import that
+/// changed between snapshot and revalidation (`Ok(None)`) retries from a
+/// fresh snapshot, bounded by `MAX_SPLIT_ATTEMPTS`; a session with no
+/// machine yet, or split attempts exhausted, falls back to the original
+/// single-checkout install-and-run, unchanged from [`begin_ready_block`].
+async fn begin_ready_block_split<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: crate::ActorSessionContext,
+    turn_source: ActorWorkbenchSource,
+    type_modules: Vec<String>,
+    block: ParsedBlock,
+    compiled: ReadyBlock,
+    display_budget: usize,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    const MAX_SPLIT_ATTEMPTS: u32 = 3;
+    let ReadyBlock {
+        result,
+        generation,
+        declaration_source,
+        declaration_imports,
+        observation,
+    } = compiled;
+    let (bound, compiled_turn) = match result {
+        TurnResult::Decl(receipt) => {
+            let block = block.clone();
+            return access
+                .with_machine(context, move |session, context, _| {
+                    match session.define_scoped_with_imports_in(
+                        context.placement.lexical_scope,
+                        &[&declaration_source],
+                        &declaration_imports,
+                    ) {
+                        Ok(generation) => Ok(ResidentWorkbenchStep::Committed {
+                            output: declaration_receipt(&receipt.binders, false, generation.0),
+                            warnings: Vec::new(),
+                            installed_bindings: receipt.binders.clone(),
+                        }),
+                        Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
+                            Ok(ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
+                                &format!("<cell item {}>", block.ordinal),
+                                &block.source,
+                            )))
+                        }
+                        Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                            Ok(ResidentWorkbenchStep::Rejected(
+                                classify_session(&error).message.into(),
+                            ))
+                        }
+                        Err(error) => Err(ResidentActorWorkbenchError::Resident(
+                            ResidentError::Session(error),
+                        )),
+                    }
+                })
+                .await;
+        }
+        TurnResult::Bind {
+            bound, compiled, ..
+        } => (bound, compiled),
+        TurnResult::Expr { .. } => {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "workbench expression compiled without its observation binding".into(),
+            ));
+        }
+    };
+    let warnings = compiled_turn.warnings.warnings.clone();
+
+    for _ in 0..MAX_SPLIT_ATTEMPTS {
+        let code = cloned_turn_code(&compiled_turn);
+        let mode = pending_mode_for(&bound, generation, &observation);
+        let attempt = access
+            .with_machine(context.clone(), move |session, _, _| {
+                if !session.prepared_machine_ready() {
+                    return Ok(PreparedSnapshotAttempt::Bootstrap);
+                }
+                session
+                    .snapshot_run_prepared(code, mode, None)
+                    .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await?;
+        let pending = match attempt {
+            PreparedSnapshotAttempt::Bootstrap => break,
+            PreparedSnapshotAttempt::Ready(pending) => pending,
+        };
+
+        // No checkout held here: the Cranelift compile runs concurrently
+        // with every other actor's turn against this session.
+        let (pending, compiled_program) =
+            crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                let mut pending = pending;
+                let compiled = pending.compile_off_checkout();
+                (pending, compiled)
+            }))
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)?;
+        let compiled_program = compiled_program.map_err(|error| {
+            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+                PreparedRuntimeError::Compile(error),
+            ))
+        })?;
+
+        let finish_bound = bound.clone();
+        let finish_warnings = warnings.clone();
+        let finish_observation = observation.clone();
+        let finish_type_modules = type_modules.clone();
+        let finish_block = block.clone();
+        let finish_source = turn_source.clone();
+        let step = access
+            .with_machine(context.clone(), move |session, context, _| {
+                match session.revalidate_and_run_prepared(*pending, compiled_program) {
+                    Ok(Some(outcome)) => finish_bind_step(
+                        session,
+                        context,
+                        &finish_source,
+                        &finish_type_modules,
+                        &finish_block,
+                        finish_bound,
+                        finish_warnings,
+                        finish_observation,
+                        display_budget,
+                        Ok(outcome),
+                    )
+                    .map(Some),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                }
+            })
+            .await?;
+        if let Some(step) = step {
+            return Ok(step);
+        }
+        // Revalidation found a stale import: another actor's turn changed
+        // a shared binding between the snapshot and this checkout. Retry
+        // from a fresh snapshot.
+    }
+
+    // Fallback: either this session had no machine yet to snapshot against
+    // (the bootstrap case), or every split attempt hit a stale import.
+    // Single checkout, exactly as `begin_ready_block`'s Bind arm.
+    access
+        .with_machine(context, move |session, context, _| {
+            let outcome = match bound.as_slice() {
+                [] => {
+                    session.run_with_sites("actor_interactive_discard_bind", compiled_turn.into_code())
+                }
+                [binder] if observation.is_some() => session.run_observation_with_sites(
+                    compiled_turn.into_code(),
+                    binder,
+                    generation,
+                    observation
+                        .as_ref()
+                        .and_then(|(_, _, effectful)| *effectful)
+                        .unwrap_or(false),
+                ),
+                [binder] => session.run_bind_with_sites(
+                    "actor_interactive_bind",
+                    compiled_turn.into_code(),
+                    binder,
+                    generation,
+                ),
+                binders => session.run_projected_bind_with_sites(
+                    "actor_interactive_pattern_bind",
+                    compiled_turn.into_code(),
+                    binders,
+                    generation,
+                ),
+            };
+            finish_bind_step(
+                session,
+                context,
+                &turn_source,
+                &type_modules,
+                &block,
+                bound,
+                warnings,
+                observation,
+                display_budget,
+                outcome,
+            )
+        })
+        .await
 }
 
 fn declaration_receipt(binders: &[String], prologue_only: bool, generation: u64) -> String {
