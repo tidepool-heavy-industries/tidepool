@@ -2116,6 +2116,7 @@ where
                 let started = std::time::Instant::now();
                 let answer = backend.ask(request).await;
                 let elapsed_ms = started.elapsed().as_millis();
+                crate::call_timing::add_jev_ms(elapsed_ms);
                 match &answer {
                     Ok(body) => {
                         tracing::debug!(
@@ -2220,9 +2221,12 @@ where
                 continuation,
                 request,
             } => Box::pin(async move {
-                self.resolve_command(kernel, context, continuation, request)
-                    .await
-                    .outcome
+                let started = std::time::Instant::now();
+                let resolution = self
+                    .resolve_command(kernel, context, continuation, request)
+                    .await;
+                crate::call_timing::add_exec_ms(started.elapsed().as_millis());
+                resolution.outcome
             }),
             ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
                 self.environment
@@ -6962,7 +6966,32 @@ where
             }
             self.active_workbench_control = control.clone();
             self.active_fork_boundary = request.fork_boundary().cloned();
-            let result = self.execute_workbench(kernel, &context, request).await;
+            // One INFO line per hosted tool call or cell, breaking down
+            // where its wall time went (checkout wait/hold, compile, Jev,
+            // exec) — see `crate::call_timing`. The scope wraps the whole
+            // call so every nested site it awaits (workbench compiles,
+            // resolved effects) can add to it as a task-local.
+            let call_kind = request
+                .tool_call()
+                .map(|call| call.name.clone())
+                .unwrap_or_else(|| "cell".to_string());
+            let (call_actor, call_incarnation) = actor_address(context.actor);
+            let call_scope =
+                crate::call_timing::CallScope::new(call_kind, call_actor as u64, call_incarnation as u64);
+            let result = call_scope
+                .run(self.execute_workbench(kernel, &context, request))
+                .await;
+            let call_outcome = match &result {
+                Ok(
+                    KernelStep::Continue(response)
+                    | KernelStep::ContinueLater(response)
+                    | KernelStep::Stop {
+                        output: response, ..
+                    },
+                ) => format!("{:?}", response.status),
+                Err(_) => "error".to_string(),
+            };
+            call_scope.finish(&call_outcome);
             self.active_fork_boundary = None;
             self.active_workbench_control = None;
             match &result {

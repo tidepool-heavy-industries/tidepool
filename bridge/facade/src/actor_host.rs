@@ -7,6 +7,8 @@
 #[cfg(test)]
 mod agent_spec_tests;
 #[cfg(test)]
+mod call_timing_tests;
+#[cfg(test)]
 mod cell_compile_cost_tests;
 #[cfg(test)]
 mod command_jobs_tests;

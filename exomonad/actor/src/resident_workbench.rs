@@ -2044,6 +2044,7 @@ where
         tracing::info!(actor = %actor, session = ?session_id,
             waited_ms = admission_started.elapsed().as_millis(),
             "resident machine checkout admitted");
+        crate::call_timing::add_checkout_wait_ms(admission_started.elapsed().as_millis());
         let held_since = std::time::Instant::now();
         let (mut session, receipt) = checkout.into_parts();
         let source = self.source.clone();
@@ -2106,6 +2107,13 @@ where
             }
         })
         .await;
+        // Measured here, not inside the blocking closure above: the closure
+        // runs on a blocking-pool thread, which does not inherit this task's
+        // `call_timing` task-local. All three exit branches inside it (retired,
+        // suspended, panic-then-resume_unwind) log their own `held_ms` before
+        // returning or unwinding, so this elapsed-since-`held_since` read,
+        // taken right after the join, covers every one of them in one place.
+        crate::call_timing::add_checkout_hold_ms(held_since.elapsed().as_millis());
 
         match task {
             Ok(outcome) => outcome,
@@ -2789,7 +2797,7 @@ where
             let check_effects = effects.clone();
             let check_cell_source = cell_source.clone();
             let check_cancellation = cancellation.clone();
-            let (snapshot, checked) = spawn_blocking_in_span(move || {
+            let (snapshot, checked) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(check_cancellation, || {
                     let checked = check_cell_off_checkout(
                         &snapshot,
@@ -2799,7 +2807,7 @@ where
                     );
                     checked.map(|checked| (snapshot, checked))
                 })
-            })
+            }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
 
@@ -2858,7 +2866,7 @@ where
             let compile_context = context.clone();
             let compile_view = c_view.clone();
             let compile_cancellation = cancellation.clone();
-            let (checked, outcome) = spawn_blocking_in_span(move || {
+            let (checked, outcome) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
                     let outcome = compile_cell_items_off_checkout(
                         &compile_context,
@@ -2872,7 +2880,7 @@ where
                     );
                     outcome.map(|outcome| (checked, outcome))
                 })
-            })
+            }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
 
@@ -3356,7 +3364,7 @@ where
         // every other actor's turn against this session.
         let effects = context.haskell_effects_alias.clone();
         let source = self.access.source.clone();
-        let (binder, compiled) = spawn_blocking_in_span(move || {
+        let (binder, compiled) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
             compile_host_binding_off_checkout(
                 &view,
                 &source,
@@ -3369,7 +3377,7 @@ where
                 kind.retain_text_constructor(),
                 &retained,
             )
-        })
+        }))
         .await
         .map_err(ResidentActorWorkbenchError::Join)??;
 
@@ -3495,7 +3503,7 @@ where
             let compile_block_text = block.clone();
             let effects = context.haskell_effects_alias.clone();
             let compile_cancellation = cancellation.clone();
-            let (snapshot, compiled) = spawn_blocking_in_span(move || {
+            let (snapshot, compiled) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
                     let compiled = compile_fragment_off_checkout(
                         &snapshot,
@@ -3505,7 +3513,7 @@ where
                     );
                     compiled.map(|compiled| (snapshot, compiled))
                 })
-            })
+            }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
             let ready = match compiled {
@@ -3691,7 +3699,9 @@ where
                 })
             })
         };
-        let inspected = spawn.await.map_err(ResidentActorWorkbenchError::Join)?;
+        let inspected = crate::call_timing::timed_compile(spawn)
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)?;
 
         self.access
             .with_machine(context, move |session, context, _| {
@@ -10117,6 +10127,7 @@ mod request_tests {
             &[],
             "interloper",
             "interloper text",
+            None,
         )
         .expect("interloping carrier mounts");
 
