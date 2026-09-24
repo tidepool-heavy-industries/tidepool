@@ -224,3 +224,22 @@ the run with session size.
   ran. Either children get `Journal` in their rows or the ledger uses the
   doc's fallback (a file appended by pathspec). Verify with a harness recipe
   that admits a child under the spec, not only the replay test.
+
+## Jev over any text, and Jev-steered pagination of structured values (2026-09-24, idea)
+
+- `Project.Sift.sift :: Text -> Int -> Text -> Eff effects Text` already
+  staples Jev section scoring onto any text under a byte budget, and the
+  `bash` tool's `focus` is built on it. Wave 4 shows `focus` in use (17
+  calls in the first 40 minutes) but no direct `sift` use: advertise it in
+  the command and workbench skills as the way to bound any large value
+  (`sift focus 4000 =<< readFile ...`, a `lookup` result, a diff).
+- Structured pagination: a `Generic`/`ToJSON` value should page itself
+  under Jev steering — render to JSON, split on structure (top-level keys,
+  list elements) rather than lines, score sections against the focus with
+  `each` (Jev.Operators already batches per-item questions), and pack to
+  the budget with a marker naming what was left out. One operator,
+  `siftValue :: ToJSON a => Text -> Int -> a -> Eff effects Text`, over the
+  same scoring as `sift`; the model then reads a `Candidate`, a roster or a
+  settlement value as the two or three pages Jev picked instead of a
+  truncated dump. Pairs with the "text as artifact" card: once command output
+  and previews are Rust-held artifacts, the same pager serves them.
