@@ -248,6 +248,18 @@ fn should_attempt_warm_up(
     served == 0 && !warm_up_attempted && idle_polls >= WARM_UP_IDLE_DEBOUNCE && include_set_known
 }
 
+/// A scratch directory made solely to catch one warm-up compile's redirected
+/// output writes; never a caller-visible artifact, so cleanup is best-effort
+/// and unconditional (every exit path from `warm_up_slot`'s inner closure —
+/// early `?` return included — drops this guard).
+struct WarmUpScratch(std::path::PathBuf);
+
+impl Drop for WarmUpScratch {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 /// Best-effort warm-up compile for a pooled worker slot's freshly spawned
 /// worker, using the include set (`cwd`, `argv`) revealed by the first real
 /// request any slot has served. This is what lets the daemon's *other* idle
@@ -258,6 +270,15 @@ fn should_attempt_warm_up(
 /// slot: a failed warm-up logs a WARN and respawns the worker so the slot
 /// still serves normally, just cold on its first real request as before
 /// this change.
+///
+/// The real request's argv is never replayed verbatim: it names output
+/// paths (`ExtractRequest::redirect_outputs_for_warm_up`'s doc comment lists
+/// exactly which) that the real request's own consumer may still be reading
+/// or that name shared session state, so this decodes the typed request,
+/// rewrites it into a side-effect-free copy — same includes, session root,
+/// target, and files, so the same module graph loads and lowers and the
+/// memo warms, but every output redirected into a scratch directory removed
+/// immediately after — and only replays *that*.
 fn warm_up_slot(
     worker: &mut Worker,
     prepared: &PreparedWorker,
@@ -268,8 +289,21 @@ fn warm_up_slot(
 ) {
     let started = Instant::now();
     let result: Result<WorkerResponse, FrontendError> = (|| {
+        let mut request = ExtractRequest::decode_worker_argv(argv).map_err(|error| {
+            FrontendError::Daemon(format!(
+                "compiler worker pre-warm request could not be decoded: {error}"
+            ))
+        })?;
+        let scratch_dir = std::env::temp_dir().join(format!(
+            "tidepool-warm-up-{}-slot{slot}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&scratch_dir).map_err(FrontendError::Io)?;
+        let _scratch = WarmUpScratch(scratch_dir.clone());
+        request.redirect_outputs_for_warm_up(&scratch_dir);
+        let warm_up_argv = request.worker_argv();
         worker.begin_transaction()?;
-        let outcome = worker.request(cwd, argv)?;
+        let outcome = worker.request(cwd, &warm_up_argv)?;
         worker.end_transaction()?;
         Ok(outcome)
     })();
@@ -3707,9 +3741,15 @@ fn main() {{
     /// *other* slot's own worker independently completes one full
     /// begin/request/end cycle against the same include set on its own,
     /// with no client involved. A multi-shot fake worker (unlike the other
-    /// fixtures' one-shot fakes) logs its own pid to a shared file on every
-    /// completed cycle, so the assertion is: two distinct worker processes
-    /// each served exactly one transaction, not one process serving two.
+    /// fixtures' one-shot fakes) logs its own pid AND the hex request
+    /// payload it received on every completed cycle (parsing the wire's
+    /// length-prefixed frames itself, since the pre-warm's redirected
+    /// request is not the same byte length as the real one), so this test
+    /// asserts on the *decoded* requests: two distinct worker processes each
+    /// served exactly one transaction, and the pre-warm's own request wrote
+    /// its output to a different directory than the real request's —
+    /// verifying `ExtractRequest::redirect_outputs_for_warm_up` actually ran
+    /// rather than the real request's argv being replayed verbatim.
     #[test]
     fn an_idle_pooled_slot_pre_warms_from_the_first_requests_include_set() {
         let dir = std::env::temp_dir().join(format!("tp-prewarm-{}", std::process::id()));
@@ -3719,33 +3759,56 @@ fn main() {{
         let socket = dir.join("daemon.sock");
         let stamp = dir.join("stamp");
         std::fs::write(&stamp, b"boot").unwrap();
-        let argv = vec![OsString::from("Expr.hs")];
-        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
-        let payload_len = encode_request(&dir, &worker_argv).len();
+        // An output-path field (here `--output-dir`) is exactly what a
+        // verbatim replay would get wrong: it names a real, caller-owned
+        // directory the pre-warm compile must never write into.
+        let real_out_dir = dir.join("real-out");
+        let argv = vec![
+            OsString::from("Expr.hs"),
+            OsString::from("--output-dir"),
+            real_out_dir.clone().into_os_string(),
+        ];
         let served_log = dir.join("served.log");
         let source = dir.join("fake_worker.rs");
         std::fs::write(
             &source,
-            format!(
-                r#"
-use std::io::{{Read, Write}};
+            r#"
+use std::io::{Read, Write};
 
-fn main() {{
+fn read_u32(stdin: &mut impl Read) -> u32 {
+    let mut buf = [0u8; 4];
+    stdin.read_exact(&mut buf).unwrap();
+    u32::from_le_bytes(buf)
+}
+
+fn read_frame(stdin: &mut impl Read) -> Vec<u8> {
+    let len = read_u32(stdin) as usize;
+    let mut buf = vec![0u8; len];
+    stdin.read_exact(&mut buf).unwrap();
+    buf
+}
+
+fn main() {
     let log_path = std::env::var("TP_TEST_PREWARM_SERVED_LOG").unwrap();
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    loop {{
+    loop {
         let mut one = [0u8; 1];
         // Daemon shutdown closes stdin; a clean EOF here ends this worker.
-        if stdin.read_exact(&mut one).is_err() {{
+        if stdin.read_exact(&mut one).is_err() {
             break;
-        }}
+        }
         stdout.write_all(&[1]).unwrap(); // begin_transaction ack
         stdout.flush().unwrap();
 
         stdin.read_exact(&mut one).unwrap(); // request prefix
-        let mut payload = vec![0u8; {payload_len}];
-        stdin.read_exact(&mut payload).unwrap();
+        let _cwd = read_frame(&mut stdin); // frame(cwd)
+        let argc = read_u32(&mut stdin);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(String::from_utf8(read_frame(&mut stdin)).unwrap());
+        }
+
         stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
         stdout.flush().unwrap();
 
@@ -3753,17 +3816,17 @@ fn main() {{
         stdout.write_all(&[1]).unwrap();
         stdout.flush().unwrap();
 
+        // args[0] is the worker-request flag, args[1] the hex payload.
+        let payload = args.get(1).cloned().unwrap_or_default();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
             .unwrap();
-        writeln!(file, "{{}}", std::process::id()).unwrap();
-    }}
-}}
+        writeln!(file, "{} {}", std::process::id(), payload).unwrap();
+    }
+}
 "#,
-                payload_len = payload_len,
-            ),
         )
         .unwrap();
         let worker_bin = dir.join("fake-worker");
@@ -3847,12 +3910,54 @@ fn main() {{
             2,
             "expected the real request plus one pre-warm compile, got: {served:?}"
         );
-        let distinct_pids: std::collections::HashSet<_> = served.iter().collect();
+        let pids: Vec<&str> = served
+            .iter()
+            .map(|line| line.split_once(' ').expect("pid and payload").0)
+            .collect();
+        let distinct_pids: std::collections::HashSet<_> = pids.iter().collect();
         assert_eq!(
             distinct_pids.len(),
             2,
             "the pre-warm must run on the OTHER slot's own idle worker process, \
              not the one that already served the real request: {served:?}"
+        );
+
+        // Decode both requests' output directory the same way the daemon
+        // itself does, rather than pattern-matching the hex payload.
+        let output_dirs: Vec<Option<std::path::PathBuf>> = served
+            .iter()
+            .map(|line| {
+                let (_pid, payload) = line.split_once(' ').expect("pid and payload");
+                let argv = vec![
+                    OsString::from(crate::request::WORKER_REQUEST_FLAG),
+                    OsString::from(payload),
+                ];
+                ExtractRequest::decode_worker_argv(&argv)
+                    .expect("both requests were encoded by this crate's own worker_argv")
+                    .output_directory()
+                    .map(std::path::PathBuf::from)
+            })
+            .collect();
+        let matching_real_dir = output_dirs
+            .iter()
+            .filter(|dir| dir.as_deref() == Some(real_out_dir.as_path()))
+            .count();
+        assert_eq!(
+            matching_real_dir,
+            1,
+            "exactly the real client request should write to {}: {output_dirs:?}",
+            real_out_dir.display()
+        );
+        let redirected = output_dirs
+            .iter()
+            .find(|dir| dir.is_some() && dir.as_deref() != Some(real_out_dir.as_path()))
+            .and_then(|dir| dir.as_deref())
+            .expect("the pre-warm compile's own request should carry a redirected output dir");
+        assert!(
+            redirected.starts_with(std::env::temp_dir()),
+            "the pre-warm's redirected output dir should live under a scratch \
+             temp directory, not {}",
+            redirected.display()
         );
 
         #[allow(

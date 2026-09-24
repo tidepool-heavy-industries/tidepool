@@ -550,6 +550,52 @@ impl ExtractRequest {
     pub(crate) fn worker_argv(&self) -> Vec<OsString> {
         vec![WORKER_REQUEST_FLAG.into(), hex(&self.encode()).into()]
     }
+
+    /// Rewrites this request into a side-effect-free copy for a pooled
+    /// daemon slot's pre-warm compile (see `daemon::warm_up_slot`): the same
+    /// module graph loads and lowers against the same includes, session
+    /// root, target, and input files — warming the memo — but nothing is
+    /// written anywhere the real request's own consumer might still read.
+    ///
+    /// Two kinds of write are involved:
+    ///
+    /// - The worker's six output-path fields — `requestOutDir`,
+    ///   `requestTurnOut`, `requestClassifyOut`, `requestCellOut`,
+    ///   `requestInspectOut`, `requestBuildProductsDir` in
+    ///   `Tidepool.ExtractRequest` — each name a file or directory the
+    ///   worker writes its result to. Every one this request set is
+    ///   redirected to a path under `dir`; a field it did not set stays
+    ///   absent (this never adds a write the original request didn't
+    ///   already ask for, only relocates where an existing one lands).
+    /// - A `--turn` request whose template selects a session bind writes a
+    ///   thin session interface directly under `--session-root`
+    ///   (`Tidepool.SessionArtifacts.mkBoundBinders` /
+    ///   `writeSessionIface`), keyed off `--bind-gen` — not through any of
+    ///   the six output-path fields, and not something a redirected path
+    ///   can intercept, since the write target isn't request-controlled.
+    ///   Session root itself is left untouched (it also feeds session-scope
+    ///   *reads* needed for the same module graph to resolve), but the
+    ///   `BindGen` field is dropped so `Main.hs`'s `requireArg "--bind-gen"`
+    ///   fails before that write is ever reached — turning a would-be bind
+    ///   into a harmless diagnostic failure after the load/lowering this
+    ///   warm-up exists for has already happened.
+    pub(crate) fn redirect_outputs_for_warm_up(&mut self, dir: &Path) {
+        self.fields
+            .retain(|field| !matches!(field, Field::BindGen(_)));
+        for field in &mut self.fields {
+            match field {
+                Field::OutputDir(value) => *value = dir.join("output-dir").into_os_string(),
+                Field::TurnOut(value) => *value = dir.join("turn-out").into_os_string(),
+                Field::ClassifyOut(value) => *value = dir.join("classify-out").into_os_string(),
+                Field::CellOut(value) => *value = dir.join("cell-out").into_os_string(),
+                Field::InspectOut(value) => *value = dir.join("inspect-out").into_os_string(),
+                Field::BuildProductsDir(value) => {
+                    *value = dir.join("build-products").into_os_string()
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 struct Decoder<'a> {

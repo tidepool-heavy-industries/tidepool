@@ -95,9 +95,17 @@ some other slot's first real request has revealed an include set (source
 root and argv): it runs one compile against that same include set on its
 own worker, so its own first real request need not pay the cold
 `ghc_load` + `lowering` cost the daemon's sizing exists to avoid repeating.
-A failed pre-warm only logs a WARN and respawns that slot's worker; it never
-blocks the slot from serving normally. See `daemon::warm_up_slot` and
-`daemon::should_attempt_warm_up`.
+The real request's argv is never replayed verbatim — it names output paths
+and can carry a session bind, both of which would touch the real request's
+own files or shared session state. `ExtractRequest::redirect_outputs_for_warm_up`
+derives a side-effect-free copy first: same includes/session root/target/
+files, but every output-path field redirected into a scratch directory
+removed immediately after, and the `--bind-gen` field dropped so a would-be
+session bind fails a diagnostic rather than writing under session root. A
+failed pre-warm only logs a WARN and respawns that slot's worker; it never
+blocks the slot from serving normally. See `daemon::warm_up_slot`,
+`daemon::should_attempt_warm_up`, and
+`ExtractRequest::redirect_outputs_for_warm_up`'s doc comment.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
