@@ -4,21 +4,28 @@ description: Retire Exomonad workers and fork groups deliberately — inspect a 
 ---
 
 Cleanup is a decision, not housekeeping. Keep valuable specialists; retire a
-group when its obligations are settled and you know they are. Inspection and
-execution are separate calls so the plan can be read before anything stops.
+group when its obligations are settled and you know they are. For routine
+retirement, plan and execute in one cell:
+
+```haskell
+cleanupReceipt <- executeCleanup =<< planCleanupFor worker
+cleanupReceiptPlan cleanupReceipt
+```
 
 Given a retained `worker :: Response result`, `planCleanupFor` extracts its fork
 group and returns a refusing plan for a response that was never admitted through
-`unfold`:
+`unfold`.
+
+If you already hold a `ForkGroupHandle` — from `forkGroupHandle` or
+`observeForkGroup` — call `planCleanup` on it directly. To inspect the plan
+before execution, separate planning and execution:
 
 ```haskell
 cleanupPlan <- planCleanupFor worker
 cleanupPlan
 ```
 
-If you already hold a `ForkGroupHandle` — from `forkGroupHandle` or
-`observeForkGroup` — call `planCleanup` on it directly. Inspect the plan, then
-execute it in a separate cell:
+Inspect the plan, then execute it in a separate cell:
 
 ```haskell
 cleanupReceipt <- executeCleanup cleanupPlan
