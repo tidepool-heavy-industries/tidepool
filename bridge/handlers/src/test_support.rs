@@ -30,10 +30,13 @@ pub(crate) fn repo_root() -> std::path::PathBuf {
 }
 
 pub(crate) fn prelude_include() -> std::path::PathBuf {
-    let mut dir = repo_root();
-    dir.push("haskell");
-    dir.push("lib");
-    dir
+    let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
+        bundle: None,
+        build_tree: Some(repo_root().join("bridge").join("haskell").join("lib")),
+    };
+    tidepool_toolchain::toolchain::locate_stdlib(&fallbacks)
+        .expect("resolve the Haskell stdlib root")
+        .dir
 }
 
 pub(crate) fn jit_test_source(code: &[&str]) -> String {
