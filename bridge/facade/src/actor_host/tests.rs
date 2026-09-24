@@ -1849,6 +1849,7 @@ async fn queued_watch_forgotten_before_delivery_is_acknowledged_without_promptin
         root.path(),
         &observation,
         &|owner, watch| owner != actor || watch != notification.watch,
+        &|_, _, _| false,
     )
     .await
     .unwrap();
@@ -1860,6 +1861,146 @@ async fn queued_watch_forgotten_before_delivery_is_acknowledged_without_promptin
     assert!(std::fs::read_to_string(rows)
         .unwrap()
         .contains("watchChanged"));
+}
+
+#[tokio::test]
+async fn queued_watch_notice_already_observed_by_the_owner_is_acknowledged_without_prompting() {
+    use exomonad_agent::BackendThreadId;
+
+    let root = tempfile::tempdir().unwrap();
+    let rows = root.path().join("rows");
+    let cursor = root.path().join("cursor");
+    let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor).unwrap());
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let notification = exomonad_actor::WatchNotification {
+        owner: actor,
+        watch: exomonad_actor::WatchId(19),
+        label: "join".into(),
+        previous: exomonad_actor::WatchStateProjection::Pending,
+        current: exomonad_actor::WatchStateProjection::Ready,
+        transition: exomonad_actor::WatchTransition::Ready,
+        occurred_at_unix_ms: 1_000,
+        sequence: exomonad_actor::ActorEventSequence(1),
+        watermark: exomonad_actor::ActorEventSequence(1),
+    };
+    inbox
+        .publish(DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
+            notification: notification.clone(),
+        }))
+        .unwrap();
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(false),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba2".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+
+    // The owner observed this exact watch settle Ready at 2_000ms, strictly
+    // after the notice queued for the transition at 1_000ms. The notice is
+    // stale by the time it would be delivered: acknowledge it silently.
+    deliver_pending_checked(
+        actor,
+        &inbox,
+        &thread,
+        &backend,
+        &producer,
+        &reconciliations,
+        root.path(),
+        &observation,
+        &|_, _| true,
+        &|owner, watch, occurred_at_unix_ms| {
+            owner == actor && watch == notification.watch && occurred_at_unix_ms <= 2_000
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(backend.messages.lock().unwrap().is_empty());
+    assert_eq!(inbox.cursor(), 1);
+    assert_eq!(inbox.watermark(), 1);
+    assert!(inbox.pending().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn queued_watch_notice_observed_before_the_transition_is_not_suppressed() {
+    use exomonad_agent::BackendThreadId;
+
+    let root = tempfile::tempdir().unwrap();
+    let rows = root.path().join("rows");
+    let cursor = root.path().join("cursor");
+    let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor).unwrap());
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let notification = exomonad_actor::WatchNotification {
+        owner: actor,
+        watch: exomonad_actor::WatchId(19),
+        label: "join".into(),
+        previous: exomonad_actor::WatchStateProjection::Pending,
+        current: exomonad_actor::WatchStateProjection::Ready,
+        transition: exomonad_actor::WatchTransition::Ready,
+        occurred_at_unix_ms: 1_000,
+        sequence: exomonad_actor::ActorEventSequence(1),
+        watermark: exomonad_actor::ActorEventSequence(1),
+    };
+    inbox
+        .publish(DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
+            notification: notification.clone(),
+        }))
+        .unwrap();
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(false),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba3".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+
+    // The owner had observed this watch earlier, at 500ms, still Pending: an
+    // observation made before the notice's transition (at 1_000ms) says
+    // nothing about the state the notice describes and must not suppress
+    // delivery of the notice, which prompts as usual.
+    deliver_pending_checked(
+        actor,
+        &inbox,
+        &thread,
+        &backend,
+        &producer,
+        &reconciliations,
+        root.path(),
+        &observation,
+        &|_, _| true,
+        &|owner, watch, occurred_at_unix_ms| {
+            owner == actor && watch == notification.watch && occurred_at_unix_ms <= 500
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+    assert_eq!(inbox.cursor(), 1);
+    assert_eq!(inbox.watermark(), 1);
 }
 
 impl InteractiveAgentBackend for ScriptedPush {

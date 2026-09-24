@@ -284,6 +284,7 @@ struct RequestRecord {
     progress: Option<ProgressSnapshot>,
     notify_owner: bool,
     settlement_notified: bool,
+    registered_at_unix_ms: u64,
 }
 
 /// Snapshots share ownership, not a consumption cursor. Replacing the latest
@@ -357,6 +358,16 @@ struct WatchRecord {
     group_count: usize,
     state: WatchState,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
+    /// When the owner last observed this watch (via `observe_watch`) already
+    /// settled Ready or Unavailable. Lets delivery acknowledge a queued
+    /// `WatchChanged` notice without prompting when the owner polled the
+    /// same settled state before the notice was delivered.
+    observed_ready_at: Option<u64>,
+    /// When this watch was registered, unix ms.
+    registered_at_unix_ms: u64,
+    /// When this watch last left `Pending`, unix ms. `None` while still
+    /// pending.
+    transitioned_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -407,6 +418,32 @@ pub(crate) struct ActorRequestStatus {
     pub ready_watches: Vec<(WatchId, String)>,
     pub unavailable_watches: Vec<(WatchId, String, ResponseFailure)>,
     pub deadlines: Vec<(RequestId, String)>,
+}
+
+/// One line's worth of native watch state, for the `status` tool's `watches`
+/// view: everything a model is waiting on, without compiling a `pollWatch`
+/// cell just to see whether anything settled.
+pub(crate) struct WatchViewEntry {
+    pub id: WatchId,
+    pub label: String,
+    /// `Debug`-rendered `WatchState` (`Pending`, `Ready`, or
+    /// `Unavailable { .. }`); `WatchState` itself stays private to this
+    /// module.
+    pub state: String,
+    pub registered_at_unix_ms: u64,
+    /// `None` while still `Pending`.
+    pub transitioned_at_unix_ms: Option<u64>,
+}
+
+pub(crate) struct PendingResponseAge {
+    pub id: RequestId,
+    pub label: String,
+    pub registered_at_unix_ms: u64,
+}
+
+pub(crate) struct WatchesOverview {
+    pub watches: Vec<WatchViewEntry>,
+    pub pending_responses: Vec<PendingResponseAge>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -857,6 +894,45 @@ impl RequestRegistry {
         status
     }
 
+    /// Everything `owner` is waiting on: every retained watch (with its
+    /// registration and last-transition times) and every response it has
+    /// not yet observed settle. Backs the `status` tool's `watches` view so
+    /// a model can see what it is waiting on without compiling a
+    /// `pollWatch`/`pollResponse` cell.
+    pub(crate) fn watches_overview(&self, owner: ActorRef) -> WatchesOverview {
+        let state = self.state.lock();
+        let mut watches = state
+            .watches
+            .iter()
+            .filter(|(_, record)| record.owner == owner)
+            .map(|(id, record)| WatchViewEntry {
+                id: *id,
+                label: record.label.clone(),
+                state: format!("{:?}", record.state),
+                registered_at_unix_ms: record.registered_at_unix_ms,
+                transitioned_at_unix_ms: record.transitioned_at_unix_ms,
+            })
+            .collect::<Vec<_>>();
+        watches.sort_unstable_by_key(|entry| entry.id);
+        let mut pending_responses = state
+            .requests
+            .iter()
+            .filter(|(_, record)| {
+                record.owner == owner && matches!(record.owner_state, OwnerState::Observing)
+            })
+            .map(|(id, record)| PendingResponseAge {
+                id: *id,
+                label: record.label.clone(),
+                registered_at_unix_ms: record.registered_at_unix_ms,
+            })
+            .collect::<Vec<_>>();
+        pending_responses.sort_unstable_by_key(|entry| entry.id);
+        WatchesOverview {
+            watches,
+            pending_responses,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn reserve(&self, owner: ActorRef, target: ActorRef) -> RequestId {
         self.reserve_labeled(owner, target, "request".into())
@@ -912,6 +988,7 @@ impl RequestRegistry {
                 progress: None,
                 notify_owner,
                 settlement_notified: false,
+                registered_at_unix_ms: unix_time_ms(),
             },
         );
         id
@@ -1500,6 +1577,9 @@ impl RequestRegistry {
                 group_count,
                 state: WatchState::Pending,
                 progress: HashMap::new(),
+                observed_ready_at: None,
+                registered_at_unix_ms: unix_time_ms(),
+                transitioned_at_unix_ms: None,
             },
         );
         let notifications = reevaluate_watches(&mut state);
@@ -1537,9 +1617,9 @@ impl RequestRegistry {
         _owner: ActorRef,
         watch: WatchId,
     ) -> Result<WatchObservation, ReplyError> {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        Ok(match &record.state {
+        let observation = match &record.state {
             WatchState::Pending => WatchObservation::Pending(PendingProgress {
                 actor_terminal: None,
                 provider_turn: None,
@@ -1574,6 +1654,40 @@ impl RequestRegistry {
                 request: *request,
                 failure: failure.clone(),
             },
+        };
+        // A watch observed Ready or Unavailable has already delivered its
+        // settled state to the owner through this call's return value.
+        // Record when, so a queued `WatchChanged` notice describing a
+        // transition the owner already observed can be acknowledged without
+        // prompting instead of re-announcing state the owner already has.
+        if matches!(
+            observation,
+            WatchObservation::Ready(_) | WatchObservation::Unavailable { .. }
+        ) {
+            if let Some(record) = state.watches.get_mut(&watch) {
+                record.observed_ready_at = Some(unix_time_ms());
+            }
+        }
+        Ok(observation)
+    }
+
+    /// Whether `owner` has observed `watch` (via `observe_watch`) already
+    /// settled Ready or Unavailable at or after `occurred_at_unix_ms`. A
+    /// queued `WatchChanged` notice whose `occurred_at_unix_ms` predates that
+    /// observation describes a transition the owner has already picked up
+    /// through `pollWatch`/`ObserveWatchWith`, and can be acknowledged
+    /// without prompting.
+    pub(crate) fn watch_observed_since(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+        occurred_at_unix_ms: u64,
+    ) -> bool {
+        self.state.lock().watches.get(&watch).is_some_and(|record| {
+            record.owner == owner
+                && record
+                    .observed_ready_at
+                    .is_some_and(|observed_at| observed_at >= occurred_at_unix_ms)
         })
     }
 
@@ -2011,6 +2125,8 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             }
         };
         watch.state = next_state;
+        let occurred_at_unix_ms = unix_time_ms();
+        watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;
@@ -2018,7 +2134,6 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         let label = watch.label.clone();
         let owner = watch.owner;
         let watch = *watch_id;
-        let occurred_at_unix_ms = unix_time_ms();
         notifications.push(WatchNotification {
             owner,
             watch,

@@ -278,6 +278,77 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
     format!("watch registration was rejected: {detail}")
 }
 
+/// Phrase a unix-ms timestamp relative to this actor's own session start,
+/// the same "+Xm Ys into your session" idiom the facade uses for queued
+/// watch/settlement notices, so a model reads one consistent clock.
+fn elapsed_into_session(launched_at_unix_ms: Option<i64>, occurred_at_unix_ms: u64) -> String {
+    match launched_at_unix_ms
+        .and_then(|start| i64::try_from(occurred_at_unix_ms).ok()?.checked_sub(start))
+        .filter(|elapsed| *elapsed >= 0)
+    {
+        Some(ms) => format!(
+            "+{}m{:02}s into your session",
+            ms / 60_000,
+            (ms / 1000) % 60
+        ),
+        None => "elapsed time unavailable".to_owned(),
+    }
+}
+
+/// Pure rendering for the `status` tool's `watches` view: one line per
+/// retained watch (id, label, state, registration/transition times) plus
+/// every response still pending (id, label, registration time), so a model
+/// can see everything it is waiting on without compiling a `pollWatch`
+/// cell. Kept as a free function over an already-fetched
+/// [`crate::request::WatchesOverview`] so it is testable without a full
+/// actor/kernel fixture, the same way this module tests other rendering and
+/// channel mechanics by reducing them to what a production call site
+/// already does.
+fn render_watches_view(
+    launched_at_unix_ms: Option<i64>,
+    overview: &crate::request::WatchesOverview,
+) -> String {
+    let mut lines = vec![format!("watches ({} total):", overview.watches.len())];
+    if overview.watches.is_empty() {
+        lines.push("  (none registered)".to_owned());
+    }
+    for watch in &overview.watches {
+        let transitioned = watch.transitioned_at_unix_ms.map_or_else(
+            || "not yet transitioned".to_owned(),
+            |transitioned_at| elapsed_into_session(launched_at_unix_ms, transitioned_at),
+        );
+        lines.push(format!(
+            "  - watch {} {:?}: {} registered {} transitioned {}",
+            watch.id.0,
+            watch.label,
+            watch.state,
+            elapsed_into_session(launched_at_unix_ms, watch.registered_at_unix_ms),
+            transitioned,
+        ));
+    }
+    lines.push(format!(
+        "pending responses ({} total):",
+        overview.pending_responses.len()
+    ));
+    if overview.pending_responses.is_empty() {
+        lines.push("  (none pending)".to_owned());
+    }
+    for response in &overview.pending_responses {
+        lines.push(format!(
+            "  - request {} {:?}: registered {}",
+            response.id.0,
+            response.label,
+            elapsed_into_session(launched_at_unix_ms, response.registered_at_unix_ms),
+        ));
+    }
+    lines.push(
+        "Reading a settled VALUE still needs pollWatch (watches) or pollResponse \
+         (plain requests); this view only reports status, not values."
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
 fn actor_can_control(
     owner: ActorRef,
     candidate: ActorRef,
@@ -1139,6 +1210,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn status_text(&self, kernel: &KernelContext, actor: ActorRef, view: StatusView) -> String {
+        if view == StatusView::Watches {
+            return self.watches_status_text(actor);
+        }
         let (standing, current_request) = match &self.standing {
             ResidentStanding::Workbench => ("operator-workbench", None),
             ResidentStanding::Boot => ("booting", None),
@@ -1436,6 +1510,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
+    /// The `status` tool's `watches` view: one line per retained watch (id,
+    /// label, state, and when it registered/last transitioned, phrased
+    /// relative to this actor's own session start) followed by every
+    /// response still pending, so a model can see everything it is waiting
+    /// on without compiling a `pollWatch` cell. Settled *values* still
+    /// require `pollWatch`/`pollResponse`; this view only reports status.
+    fn watches_status_text(&self, actor: ActorRef) -> String {
+        let launched_at = self.runtime_observation.snapshot().launched_at_unix_ms;
+        let overview = self.environment.requests.watches_overview(actor);
+        render_watches_view(launched_at, &overview)
+    }
+
     /// The what-is-live status view: collectors and the command jobs they
     /// watch (finished or not), and persistent bindings with the session
     /// generation that defines them, the exact source of their defining
@@ -1587,6 +1673,7 @@ enum StatusView {
     Expanded,
     Lineage,
     Trace,
+    Watches,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -5526,6 +5613,9 @@ where
                 crate::status_tool::StatusView::Trace => {
                     self.status_text(kernel, context.actor, StatusView::Trace)
                 }
+                crate::status_tool::StatusView::Watches => {
+                    self.status_text(kernel, context.actor, StatusView::Watches)
+                }
                 crate::status_tool::StatusView::Recovery => workbench
                     .status_discovery(
                         context.clone(),
@@ -7768,6 +7858,27 @@ where
         self.environment.requests.retains_watch(owner, watch)
     }
 
+    /// Read whether `owner` has already observed `watch` (via `ObserveWatch`
+    /// or `pollWatch`) settled Ready or Unavailable at or after
+    /// `occurred_at_unix_ms`.
+    ///
+    /// The facade uses this nonblocking registry observation immediately
+    /// before presenting a queued watch-transition notice: a notice queued
+    /// while the owner was mid-turn can describe a transition the owner
+    /// already picked up by polling the same watch in the meantime, and
+    /// should be acknowledged without prompting rather than re-announced.
+    #[must_use]
+    pub fn watch_observed_since(
+        &self,
+        owner: ActorRef,
+        watch: crate::WatchId,
+        occurred_at_unix_ms: u64,
+    ) -> bool {
+        self.environment
+            .requests
+            .watch_observed_since(owner, watch, occurred_at_unix_ms)
+    }
+
     /// Install the host's reader for an actor's own conversation. Without one,
     /// `reflect` reports every context unbound rather than reading anything.
     #[must_use]
@@ -8486,6 +8597,74 @@ mod tests {
         WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
         WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRunStatus,
     };
+
+    /// The `watches` status view names the settled state, when the watch
+    /// registered and last transitioned (relative to the actor's own
+    /// session, "+Xm Ys into your session"), every pending response's age,
+    /// and says plainly that a settled VALUE still needs `pollWatch` or
+    /// `pollResponse` — this view only reports status.
+    #[test]
+    fn watches_view_renders_registration_transition_and_pending_ages_with_pollwatch_reminder() {
+        let launched_at_unix_ms = Some(1_000_000);
+        let overview = crate::request::WatchesOverview {
+            watches: vec![
+                crate::request::WatchViewEntry {
+                    id: crate::WatchId(3),
+                    label: "child-a".into(),
+                    state: "Ready".into(),
+                    registered_at_unix_ms: 1_005_000,
+                    transitioned_at_unix_ms: Some(1_012_340),
+                },
+                crate::request::WatchViewEntry {
+                    id: crate::WatchId(4),
+                    label: "child-b".into(),
+                    state: "Pending".into(),
+                    registered_at_unix_ms: 1_002_000,
+                    transitioned_at_unix_ms: None,
+                },
+            ],
+            pending_responses: vec![crate::request::PendingResponseAge {
+                id: crate::RequestId(7),
+                label: "compile".into(),
+                registered_at_unix_ms: 1_030_000,
+            }],
+        };
+
+        let rendered = super::render_watches_view(launched_at_unix_ms, &overview);
+
+        assert!(rendered.contains("watches (2 total):"));
+        assert!(rendered.contains(
+            r#"watch 3 "child-a": Ready registered +0m05s into your session transitioned +0m12s into your session"#
+        ));
+        assert!(rendered.contains(
+            r#"watch 4 "child-b": Pending registered +0m02s into your session transitioned not yet transitioned"#
+        ));
+        assert!(rendered.contains("pending responses (1 total):"));
+        assert!(rendered.contains(r#"request 7 "compile": registered +0m30s into your session"#));
+        assert!(rendered.contains("pollWatch"));
+        assert!(rendered.contains("pollResponse"));
+        assert!(rendered.contains("still needs"));
+
+        // No launch time: neither timestamp can be phrased relative to the
+        // session, so both fall back plainly instead of a bogus figure.
+        let unavailable = super::render_watches_view(None, &overview);
+        assert!(
+            unavailable.contains("watch 3 \"child-a\": Ready registered elapsed time unavailable")
+        );
+
+        // Nothing retained and nothing pending still renders the reminder,
+        // never an empty or missing section.
+        let empty = super::render_watches_view(
+            launched_at_unix_ms,
+            &crate::request::WatchesOverview {
+                watches: Vec::new(),
+                pending_responses: Vec::new(),
+            },
+        );
+        assert!(empty.contains("(none registered)"));
+        assert!(empty.contains("(none pending)"));
+        assert!(empty.contains("pollWatch"));
+    }
 
     #[derive(Clone, Default)]
     struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

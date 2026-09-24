@@ -1216,6 +1216,11 @@ struct OwnerNotification {
 
 type ActorInbox = DurableInbox<DurableActorEvent, DeliveryProvenance>;
 type WatchRetentionCheck = Arc<dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync>;
+/// Whether the owner has already observed a watch (via `ObserveWatchWith` or
+/// `pollWatch`) settled at or after the given `occurred_at_unix_ms`. Backed
+/// by `ResidentForest::watch_observed_since`.
+type WatchObservationCheck =
+    Arc<dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -1931,6 +1936,7 @@ struct InteractiveFleet {
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
     watch_retention: WatchRetentionCheck,
+    watch_observation: WatchObservationCheck,
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
@@ -2212,6 +2218,10 @@ pub(crate) async fn run(
     let watch_forest = Arc::clone(&forest);
     let watch_retention: WatchRetentionCheck =
         Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
+    let watch_observation_forest = Arc::clone(&forest);
+    let watch_observation: WatchObservationCheck = Arc::new(move |owner, watch, occurred_at| {
+        watch_observation_forest.watch_observed_since(owner, watch, occurred_at)
+    });
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2226,6 +2236,7 @@ pub(crate) async fn run(
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
             watch_retention,
+            watch_observation,
             source_layers,
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
@@ -3160,6 +3171,7 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
         watch_retention,
+        watch_observation,
         source_layers,
         actor_recovery,
         recovered_threads,
@@ -3906,6 +3918,7 @@ async fn run_interactive_applications(
                             deployment.workspace.clone(),
                             deployment.runtime_observation.clone(),
                             Arc::clone(&watch_retention),
+                            Arc::clone(&watch_observation),
                             source_layers.clone(),
                             worktrees.clone(),
                             stop_delivery,
@@ -5388,6 +5401,7 @@ async fn deliver_pending(
         workspace,
         runtime_observation,
         &|_, _| true,
+        &|_, _, _| false,
     )
     .await
 }
@@ -5403,6 +5417,7 @@ async fn deliver_pending_checked(
     workspace: &Path,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
     watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
+    watch_observed_since: &(dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync),
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
@@ -5425,6 +5440,7 @@ async fn deliver_pending_checked(
     };
     let inbox_sequence = last.sequence;
     let mut suppressed_watches = Vec::new();
+    let mut stale_watches = Vec::new();
     let pending = pending
         .into_iter()
         .filter(|message| {
@@ -5433,12 +5449,23 @@ async fn deliver_pending_checked(
             else {
                 return true;
             };
-            if watch_retained(notification.owner, notification.watch) {
-                true
-            } else {
+            if !watch_retained(notification.owner, notification.watch) {
                 suppressed_watches.push((message.sequence, notification.owner, notification.watch));
-                false
+                return false;
             }
+            // Queued while the owner was mid-turn, this notice can describe a
+            // transition the owner already picked up by polling the same
+            // watch in the meantime (`ObserveWatchWith`/`pollWatch`).
+            // Re-announcing it would prompt over state the owner already has.
+            if watch_observed_since(
+                notification.owner,
+                notification.watch,
+                notification.occurred_at_unix_ms,
+            ) {
+                stale_watches.push((message.sequence, notification.owner, notification.watch));
+                return false;
+            }
+            true
         })
         .collect::<Vec<_>>();
     if pending.is_empty() {
@@ -5453,6 +5480,14 @@ async fn deliver_pending_checked(
             suppressed_watches = ?suppressed_watches,
             "suppressed queued watch notices whose handles were forgotten"
         );
+        if !stale_watches.is_empty() {
+            tracing::info!(
+                actor = ?actor,
+                inbox_sequence,
+                stale_watches = ?stale_watches,
+                "acknowledged queued watch notices the owner had already observed settled"
+            );
+        }
         return Ok(());
     }
     let inbox_watermark = inbox.watermark();
@@ -5511,6 +5546,14 @@ async fn deliver_pending_checked(
             inbox_sequence,
             suppressed_watches = ?suppressed_watches,
             "suppressed queued watch notices whose handles were forgotten"
+        );
+    }
+    if !stale_watches.is_empty() {
+        tracing::info!(
+            actor = ?actor,
+            inbox_sequence,
+            stale_watches = ?stale_watches,
+            "acknowledged queued watch notices the owner had already observed settled"
         );
     }
     Ok(())
@@ -5759,6 +5802,7 @@ async fn run_delivery_pump(
     workspace: PathBuf,
     runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
     watch_retained: WatchRetentionCheck,
+    watch_observed_since: WatchObservationCheck,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: WorktreeManager,
     mut shutdown: oneshot::Receiver<()>,
@@ -5780,6 +5824,7 @@ async fn run_delivery_pump(
                     &workspace,
                     &runtime_observation,
                     watch_retained.as_ref(),
+                    watch_observed_since.as_ref(),
                 ).await;
                 match result {
                     Ok(()) => {
