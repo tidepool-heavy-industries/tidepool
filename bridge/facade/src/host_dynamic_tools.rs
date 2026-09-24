@@ -964,6 +964,35 @@ fn serialize(value: serde_json::Value) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| "{\"status\":\"rejected\"}".into())
 }
 
+/// What a processed unit did that a reader stopped at a later failure would
+/// otherwise have no way to know: it handed off the turn's terminal
+/// transfer, or it installed bindings into the persistent environment.
+/// `None` when the unit did neither (an ordinary committed expression, or a
+/// unit not yet run).
+fn unit_effect_description(item: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(transfer) = item.get("terminalTransfer").and_then(|v| v.as_str()) {
+        let phrase = match transfer {
+            "replyAccepted" => Some("submitted the reply"),
+            "commandBackgrounded" => Some("backgrounded the command"),
+            "cancellationAcknowledged" => Some("acknowledged the cancellation"),
+            _ => None,
+        };
+        parts.extend(phrase.map(str::to_string));
+    }
+    if let Some(bindings) = item.get("installedBindings").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = bindings.iter().filter_map(|v| v.as_str()).collect();
+        if !names.is_empty() {
+            parts.push(format!("bound {}", names.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" and "))
+    }
+}
+
 fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     let response = value.as_object()?;
     let status = response.get("status")?.as_str()?;
@@ -971,19 +1000,23 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     let total = response.get("total")?.as_u64()?;
     let items = response.get("items")?.as_array()?;
     let mut transcript = String::new();
+    let mut unit_effects: Vec<(u64, String)> = Vec::new();
     for item in items {
         let item = item.as_object()?;
-        item.get("index")?.as_u64()?;
+        let index = item.get("index")?.as_u64()?;
         item.get("status")?.as_str()?;
         let output = item.get("output")?.as_str()?;
         if !transcript.is_empty() && !transcript.ends_with('\n') && !output.is_empty() {
             transcript.push('\n');
         }
         transcript.push_str(output);
+        if let Some(effect) = unit_effect_description(item) {
+            unit_effects.push((index, effect));
+        }
     }
     let processed = match status {
         "completed" => next_index,
-        "rejected" | "backgrounded" => next_index.saturating_add(1).min(total),
+        "rejected" | "backgrounded" | "replied" => next_index.saturating_add(1).min(total),
         _ => total,
     };
     let not_run = total.saturating_sub(processed);
@@ -991,8 +1024,13 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
         if !transcript.is_empty() && !transcript.ends_with('\n') {
             transcript.push('\n');
         }
+        for (index, effect) in &unit_effects {
+            if *index < processed {
+                transcript.push_str(&format!("unit {} {effect}\n", index + 1));
+            }
+        }
         match status {
-            "rejected" | "backgrounded" => transcript.push_str(&format!(
+            "rejected" | "backgrounded" | "replied" => transcript.push_str(&format!(
                 "[stopped after GHCi input unit {processed} of {total}; {not_run} not run]"
             )),
             "completed" => transcript.push_str(&format!(
@@ -2285,6 +2323,63 @@ pub(crate) mod tests {
         assert_eq!(
             text,
             "Not in scope: `missing`\n[stopped after GHCi input unit 1 of 3; 2 not run]"
+        );
+    }
+
+    /// The regression from run 8a782b2b: unit 1's `respond` submitted the
+    /// reply, but unit 2 then failed at check. A reader who sees only the
+    /// failing unit's error, plus a bare "K not run", cannot tell whether
+    /// the reply already went out and would retry into "respond not in
+    /// scope". The transcript must say so before the stopped-suffix line,
+    /// and a `replied`-status run that still leaves later units un-run must
+    /// carry the same suffix the `rejected`/`backgrounded` statuses already
+    /// get.
+    #[test]
+    fn custom_workbench_receipt_reports_a_processed_units_reply_before_a_later_rejection() {
+        let response = CallResponse::workbench(serde_json::json!({
+            "items": [{
+                "index": 0,
+                "output": "Reply submitted.",
+                "status": "committed",
+                "terminalTransfer": "replyAccepted"
+            }, {
+                "index": 1,
+                "output": "Not in scope: `respond`",
+                "status": "rejected"
+            }],
+            "nextIndex": 1,
+            "status": "rejected",
+            "total": 3
+        }));
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "Reply submitted.\nNot in scope: `respond`\nunit 1 submitted the reply\n\
+             [stopped after GHCi input unit 2 of 3; 1 not run]"
+        );
+    }
+
+    /// A `replied` run status previously fell into the catch-all `_ =>
+    /// total` branch, which reported every unit as processed even when
+    /// later units never ran. A retried actor would see no suffix at all.
+    #[test]
+    fn custom_workbench_receipt_marks_unrun_suffix_for_a_replied_run() {
+        let response = CallResponse::workbench(serde_json::json!({
+            "items": [{
+                "index": 0,
+                "output": "Reply submitted.",
+                "status": "committed",
+                "terminalTransfer": "replyAccepted"
+            }],
+            "nextIndex": 0,
+            "status": "replied",
+            "total": 2
+        }));
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "Reply submitted.\nunit 1 submitted the reply\n\
+             [stopped after GHCi input unit 1 of 2; 1 not run]"
         );
     }
 
