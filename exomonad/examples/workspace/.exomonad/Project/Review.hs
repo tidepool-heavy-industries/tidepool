@@ -152,7 +152,7 @@ data ReviewState = ReviewState
   , reviewMerged :: Maybe GitOid
   , reviewCheck :: Maybe CheckResult
   , reviewHistory :: [HistoryEntry]
-  , reviewNotices :: [Notice]
+  , reviewNotices :: [ReviewNotice]
   , reviewReceipts :: [Either NotificationError NotificationReceipt]
   }
 
@@ -242,7 +242,7 @@ notify'
   -> Handler ReviewState ReviewEffects ()
 notify' kind candidate condition source index suggested = do
   state <- R.get
-  let notice = Notice
+  let notice = ReviewNotice
         { noticeKind = kind
         , noticeTask = contractTask (reviewContract state)
         , noticeCandidate = candidate

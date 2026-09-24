@@ -23,7 +23,7 @@ module Project.Evidence
   , Evidence (..)
   , HistoryEntry (..)
   , NoticeKind (..)
-  , Notice (..)
+  , ReviewNotice (..)
   , renderNotice
   , shortOid
     -- The checks, in code
@@ -113,7 +113,7 @@ data NoticeKind = Alert | Info
 -- Actionable in one read: the task, the candidate, what already passed, the
 -- condition with its source, the history row to open, and the suggested
 -- move.
-data Notice = Notice
+data ReviewNotice = ReviewNotice
   { noticeKind :: NoticeKind
   , noticeTask :: Text
   , noticeCandidate :: Maybe GitOid
@@ -124,7 +124,7 @@ data Notice = Notice
   , noticeSuggested :: Text
   } deriving (Show, Eq)
 
-renderNotice :: Notice -> Text
+renderNotice :: ReviewNotice -> Text
 renderNotice notice = case noticeKind notice of
   Info -> "merged " <> noticeTask notice <> " " <> candidate
     <> " checks=[" <> Text.intercalate "," (noticeChecksPassed notice) <> "]"
