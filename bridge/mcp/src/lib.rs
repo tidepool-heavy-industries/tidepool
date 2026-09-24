@@ -966,6 +966,12 @@ data Console a where
         let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("import Tidepool.Prelude hiding (error)"));
         assert!(preamble.contains("import qualified Tidepool.Data.Text as T"));
+        // `Text` is named right at the `T` alias's own import line — not
+        // relied on solely via Tidepool.Prelude's re-export — so a
+        // fresh-context child's preamble text says the alias exists even
+        // without session history showing it (plans/next-wave-inputs.md,
+        // wave-3 "Fresh-context children do not know the cell environment").
+        assert!(preamble.contains("import Data.Text (Text)"));
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
         assert!(preamble.contains("import qualified Tidepool.Aeson.KeyMap as KM"));
     }

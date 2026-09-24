@@ -1271,36 +1271,88 @@ fn with_stdlib_hint(
     let Some(hint) = stdlib_advice(diagnostics) else {
         return output;
     };
-    if !output.contains(hint) {
+    if !output.contains(hint.as_ref()) {
         if !output.is_empty() {
             output.push_str("\n\n");
         }
-        output.push_str(hint);
+        output.push_str(hint.as_ref());
     }
     output
 }
 
-/// Two harness-specific compile errors, chosen from dogfooding transcript
+/// Three harness-specific compile errors, chosen from dogfooding transcript
 /// counts, that name the next valid operation. Matched narrowly against the
 /// structured diagnostics GHC actually reported — never against arbitrary
 /// rendered text, and never a general interpretation of GHC's output.
 ///
-/// Deliberately does not attempt every GHC diagnostic shape: only the two
-/// forms observed twice each across two dogfood runs.
-fn stdlib_advice(diagnostics: &[crate::diag::StructuredDiagnostic]) -> Option<&'static str> {
+/// Deliberately does not attempt every GHC diagnostic shape: only the forms
+/// observed repeatedly across dogfood/wave runs.
+fn stdlib_advice(
+    diagnostics: &[crate::diag::StructuredDiagnostic],
+) -> Option<std::borrow::Cow<'static, str>> {
     diagnostics
         .iter()
         .find_map(|diagnostic| single_stdlib_advice(&diagnostic.message))
 }
 
-fn single_stdlib_advice(message: &str) -> Option<&'static str> {
+fn single_stdlib_advice(message: &str) -> Option<std::borrow::Cow<'static, str>> {
     if is_command_result_stream_mismatch(message) {
-        return Some(COMMAND_RESULT_STREAM_ADVICE);
+        return Some(std::borrow::Cow::Borrowed(COMMAND_RESULT_STREAM_ADVICE));
     }
     if is_string_text_mismatch(message) {
-        return Some(STRING_TEXT_ADVICE);
+        return Some(std::borrow::Cow::Borrowed(STRING_TEXT_ADVICE));
+    }
+    if let Some(name) = text_alias_not_in_scope_name(message) {
+        return Some(std::borrow::Cow::Owned(text_alias_advice(name)));
     }
     None
+}
+
+/// `Data.Text` vocabulary a cell can write bare — `Tidepool.Prelude`
+/// re-exports each of these unqualified, so the ONLY reason GHC would call
+/// one not in scope is a cell reaching for the wrong qualifier. Sibling
+/// authored project modules (`.exomonad/Project/*.hs`) commonly write
+/// `import qualified Data.Text as Text`, so a fresh-context child with no
+/// session history to show it otherwise guesses the same qualifier
+/// (`Text.pack`) against a cell preamble whose actual qualified alias is
+/// `T` — the "21 of 124 cell rejections in run 8a782b2b involved Text"
+/// evidence (`plans/next-wave-inputs.md`, wave-3 section).
+const TEXT_VOCAB_NAMES: &[&str] = &[
+    "Text",
+    "pack",
+    "unpack",
+    "unlines",
+    "lines",
+    "strip",
+    "intercalate",
+    "isInfixOf",
+];
+
+/// Whether `message` is a GHC not-in-scope diagnostic (`Variable not in
+/// scope: X` for a value, `Not in scope: type constructor or class 'X'` for
+/// the `Text` type) naming one of [`TEXT_VOCAB_NAMES`], returning the exact
+/// name matched. Tokenized on non-alphanumerics (so a qualified reference
+/// like `Text.pack` — GHC's shape for an unimported `Text` qualifier — is
+/// found via its `Text` token) and matched as a whole token, so e.g.
+/// `unpackSomething` does not false-fire.
+fn text_alias_not_in_scope_name(message: &str) -> Option<&'static str> {
+    let not_in_scope = message.contains("Variable not in scope")
+        || message.contains("Not in scope: type constructor or class");
+    if !not_in_scope {
+        return None;
+    }
+    message
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|token| {
+            TEXT_VOCAB_NAMES
+                .iter()
+                .find(|name| **name == token)
+                .copied()
+        })
+}
+
+fn text_alias_advice(name: &str) -> String {
+    format!("note: Data.Text is imported qualified as T; use T.{name} (Text is imported by name)")
 }
 
 const COMMAND_RESULT_STREAM_ADVICE: &str = "`Cmd.stdout`/`Cmd.stderr` read a retained \
@@ -3624,6 +3676,60 @@ mod ambiguity_advice_tests {
         assert!(
             rendered.contains("Text-first"),
             "the recognized-error hint must be added beside GHC's text: {rendered}"
+        );
+    }
+
+    /// `Text.pack` — a fresh-context child guessing the qualified alias
+    /// sibling project code uses (`import qualified Data.Text as Text`)
+    /// instead of the cell preamble's actual `T` — is GHC's ordinary
+    /// not-in-scope shape for an unimported qualifier: the whole qualified
+    /// name is reported missing, and the `Text` token is found inside it.
+    #[test]
+    fn qualified_text_alias_guess_adds_the_alias_hint() {
+        let message = "Variable not in scope: Text.pack";
+        let rendered = render_cell_compile_error(&cell_error(message), "Text.pack \"hi\"");
+        assert!(
+            rendered.contains("Text.pack"),
+            "GHC's own text must survive: {rendered}"
+        );
+        assert!(
+            rendered.contains("Data.Text is imported qualified as T"),
+            "the recognized-error hint must be added beside GHC's text: {rendered}"
+        );
+        assert!(
+            rendered.contains("use T.Text"),
+            "the hint names the exact matched identifier: {rendered}"
+        );
+    }
+
+    /// A bare `unlines`/`unpack`/… guess against the `T`-only preamble
+    /// reports as an ordinary `Variable not in scope` diagnostic, not a
+    /// qualified-name one — the same hint must still fire.
+    #[test]
+    fn bare_text_vocab_guess_adds_the_alias_hint() {
+        let message = "Variable not in scope: unpack";
+        let rendered = render_cell_compile_error(&cell_error(message), "unpack t");
+        assert!(rendered.contains("use T.unpack"), "{rendered}");
+    }
+
+    /// The `Text` TYPE not in scope reports through GHC's type-constructor
+    /// shape, not the value shape — still recognized.
+    #[test]
+    fn text_type_not_in_scope_adds_the_alias_hint() {
+        let message = "Not in scope: type constructor or class \u{2018}Text\u{2019}";
+        let rendered = render_cell_compile_error(&cell_error(message), "f :: Text -> Text");
+        assert!(rendered.contains("use T.Text"), "{rendered}");
+    }
+
+    /// `unpackSomething` is not `unpack` — token matching must not false-fire
+    /// on a name that merely contains a vocabulary word.
+    #[test]
+    fn a_name_merely_containing_a_text_vocab_word_adds_no_hint() {
+        let message = "Variable not in scope: unpackSomething";
+        let rendered = render_cell_compile_error(&cell_error(message), "unpackSomething t");
+        assert!(
+            !rendered.contains("Data.Text is imported qualified as T"),
+            "{rendered}"
         );
     }
 
