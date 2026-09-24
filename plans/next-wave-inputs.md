@@ -297,3 +297,21 @@ the run with session size.
 - Not the cause: Jev (157 hook calls, ~20 s total), the daemon (0 ms queue,
   no rejections), model latency (separate: the root's turns show ~7 min
   between tool calls late in the run, worth its own look).
+
+## One bash call is four checkout entries (2026-09-24, wave 4, traced)
+
+- A 124 s `git status` call decomposed: ~88 s in 13 machine-checkout
+  waits, 34 s in one compile (the quasiquote memo miss), <2 s everything
+  else. One bash call issues four `Commands` effects (`tryStart`, await,
+  output, present — `Tidepool/Command/Tools.hs` ~126-163, `Command.hs`
+  `observeWith`), and each effect boundary re-enters the shared checkout
+  (`resident_workbench.rs` `with_host_machine` ~2106; the comment at ~4398
+  calls the per-effect cost known). With ten actors on one session and
+  compiles of 3-34 s holding the machine for installs, every boundary queues.
+  Fixes, in order of leverage: per-child sessions (parcel 3) so nothing
+  queues run-wide; the quasiquote memo fix so holds are short; and a cell
+  should take the checkout once per execution and keep it across
+  consecutive effects, releasing only at a real yield (a command wait, a
+  request), not per effect. The daemon pool is not the bottleneck (slot 2
+  never served). Missing spans: the command service's process launch, and
+  one per-cell sum of checkout waits.
