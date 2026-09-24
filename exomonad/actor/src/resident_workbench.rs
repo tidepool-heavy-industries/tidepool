@@ -34,9 +34,10 @@ use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
     run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
     CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
-    HostBindingAuthority, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, SourceImports, TurnClassification, TurnKind, TurnRequest, TurnResult,
+    HostBindingAuthority, HostBindingType, HostCarrier, HostPayload, InspectionQuery,
+    InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -530,6 +531,82 @@ impl ResidentMachineMeasurement {
     }
 }
 
+/// Which built-in host carrier shape a mount fills. Each kind names one
+/// fixed nominal type; a carrier built for a kind mounts any number of
+/// values of that type with no further GHC call (see [`HostCarrier`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum HostCarrierKind {
+    Job,
+    Json,
+    Text,
+}
+
+impl HostCarrierKind {
+    fn host_binding_type(self) -> HostBindingType {
+        match self {
+            HostCarrierKind::Job => HostBindingType::COMMAND_JOB,
+            HostCarrierKind::Json => HostBindingType::JSON_VALUE,
+            HostCarrierKind::Text => HostBindingType::TEXT,
+        }
+    }
+
+    fn type_name(self) -> &'static str {
+        match self {
+            HostCarrierKind::Job => COMMAND_JOB_TYPE_NAME,
+            HostCarrierKind::Json => JSON_INPUT_TYPE_NAME,
+            HostCarrierKind::Text => TEXT_BINDING_TYPE_NAME,
+        }
+    }
+
+    fn anchor(self) -> &'static str {
+        match self {
+            HostCarrierKind::Job => COMMAND_JOB_ANCHOR,
+            HostCarrierKind::Json => JSON_INPUT_ANCHOR,
+            HostCarrierKind::Text => TEXT_BINDING_ANCHOR,
+        }
+    }
+
+    fn imports(self) -> SourceImports {
+        match self {
+            HostCarrierKind::Job => command_job_carrier_imports(),
+            HostCarrierKind::Json => json_input_carrier_imports(),
+            HostCarrierKind::Text => text_binding_carrier_imports(),
+        }
+    }
+
+    fn retain_text_constructor(self) -> bool {
+        match self {
+            HostCarrierKind::Job | HostCarrierKind::Text => true,
+            HostCarrierKind::Json => false,
+        }
+    }
+
+    /// The throwaway binding name the one compile that builds this kind's
+    /// carrier uses. Discarded immediately: [`HostCarrier::from_compiled`]
+    /// keeps only the compiled turn's table/program and the binder's shape,
+    /// never this name or its generation.
+    fn carrier_binding_name(self) -> &'static str {
+        match self {
+            HostCarrierKind::Job => "__tidepoolJobCarrier",
+            HostCarrierKind::Json => "__tidepoolJsonCarrier",
+            HostCarrierKind::Text => "__tidepoolTextCarrier",
+        }
+    }
+}
+
+/// A carrier this workbench already built, and the source-layer revision it
+/// was built against.
+struct CachedHostCarrier {
+    revision: Option<String>,
+    carrier: Arc<HostCarrier>,
+}
+
+/// Carriers this workbench has built, by kind, shared for as long as the
+/// owning [`ResidentActorRunner`]/[`ResidentActorWorkbench`] lineage lives —
+/// see [`ResidentMachineAccess::sharing`].
+type HostCarrierCache =
+    Arc<std::sync::Mutex<std::collections::BTreeMap<HostCarrierKind, CachedHostCarrier>>>;
+
 /// Shared checkout boundary for every actor machine entry path. Fenced
 /// fragments and installed actor programs differ above this layer, but use
 /// exactly the same admission and settlement mechanism. Every checkout
@@ -545,6 +622,13 @@ struct ResidentMachineAccess<H, O> {
     // them once, and again whenever they actually change.
     logged_include_roots:
         std::sync::Mutex<std::collections::HashMap<tidepool_repr::SessionId, String>>,
+    /// Compiled host carriers, by kind, built off checkout on first use and
+    /// reused by every later mount of that kind — see
+    /// [`ResidentActorWorkbench::carrier_for`]. Invalidated the same way
+    /// `prepare_tools` invalidates its compiled record: by the actor's own
+    /// source-layer revision, so an edited layer is never served through a
+    /// carrier compiled against its stale imports.
+    carriers: HostCarrierCache,
 }
 
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
@@ -563,6 +647,22 @@ impl<H, O> ResidentMachineAccess<H, O> {
             machines,
             source,
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
+            carriers: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+        }
+    }
+
+    /// Another entry point into the same machine registry, source, and
+    /// carrier cache as `self` — used wherever the runner mints another
+    /// workbench or runner for the same actor rather than an independent
+    /// one, so a carrier built for one turn serves every later turn instead
+    /// of being rebuilt each time a fresh `ResidentActorWorkbench` is
+    /// constructed per call.
+    fn sharing(&self) -> Self {
+        Self {
+            machines: Arc::clone(&self.machines),
+            source: self.source.clone(),
+            logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
+            carriers: Arc::clone(&self.carriers),
         }
     }
 }
@@ -825,10 +925,7 @@ pub struct ResidentActorRunner<H, O> {
 impl<H, O> Clone for ResidentActorRunner<H, O> {
     fn clone(&self) -> Self {
         Self {
-            access: ResidentMachineAccess::new(
-                Arc::clone(&self.access.machines),
-                self.access.source.clone(),
-            ),
+            access: self.access.sharing(),
         }
     }
 }
@@ -1599,9 +1696,8 @@ impl<H, O> ResidentActorRunner<H, O> {
         request: crate::RequestId,
         type_modules: Vec<String>,
     ) -> ResidentActorWorkbench<H, O> {
-        ResidentActorWorkbench::new(
-            Arc::clone(&self.access.machines),
-            self.access.source.clone(),
+        ResidentActorWorkbench::from_access(
+            self.access.sharing(),
             Some(response),
             Some(request),
             type_modules,
@@ -1609,13 +1705,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     }
 
     pub(crate) fn application_workbench(&self) -> ResidentActorWorkbench<H, O> {
-        ResidentActorWorkbench::new(
-            Arc::clone(&self.access.machines),
-            self.access.source.clone(),
-            None,
-            None,
-            Vec::new(),
-        )
+        ResidentActorWorkbench::from_access(self.access.sharing(), None, None, Vec::new())
     }
 }
 
@@ -1628,8 +1718,22 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         request: Option<crate::RequestId>,
         type_modules: Vec<String>,
     ) -> Self {
+        Self::from_access(
+            ResidentMachineAccess::new(machines, source),
+            response,
+            request,
+            type_modules,
+        )
+    }
+
+    fn from_access(
+        access: ResidentMachineAccess<H, O>,
+        response: Option<ResponseExpectation>,
+        request: Option<crate::RequestId>,
+        type_modules: Vec<String>,
+    ) -> Self {
         Self {
-            access: ResidentMachineAccess::new(machines, source),
+            access,
             response,
             request,
             type_modules: type_modules.into(),
@@ -2358,15 +2462,23 @@ where
         binding: String,
         result: String,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        let carrier = self.carrier_for(&context, HostCarrierKind::Text).await?;
         self.access
             .with_machine(context, move |session, context, source| {
-                mount_text_binding(session, context, source, &[], &binding, &result).map_err(
-                    |error| {
-                        ResidentActorWorkbenchError::InputMount(format!(
-                            "the whole result could not be bound as {binding}: {error}"
-                        ))
-                    },
+                mount_text_binding(
+                    session,
+                    context,
+                    source,
+                    &[],
+                    &binding,
+                    &result,
+                    Some(&carrier),
                 )
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::InputMount(format!(
+                        "the whole result could not be bound as {binding}: {error}"
+                    ))
+                })
             })
             .await
     }
@@ -2522,6 +2634,7 @@ where
         // cancellation).
         let mut leased_input = match &self.json_input {
             Some(input) => {
+                let carrier = self.carrier_for(&context, HostCarrierKind::Json).await?;
                 let mount_context = context.clone();
                 let mount_source = self.access.source.clone();
                 let mount_type_modules = Arc::clone(&type_modules);
@@ -2535,6 +2648,7 @@ where
                             &mount_source,
                             &mount_type_modules,
                             &mount_input,
+                            Some(&carrier),
                         )?;
                         let lease =
                             session.lease_bindings(&[tidepool_repr::VarId(mounted.binder.var_id)]);
@@ -2749,7 +2863,9 @@ where
             .with_machine(context, move |session, context, _| {
                 let mounted_input = json_input
                     .as_ref()
-                    .map(|input| mount_json_input(session, context, &source, &type_modules, input))
+                    .map(|input| {
+                        mount_json_input(session, context, &source, &type_modules, input, None)
+                    })
                     .transpose()?;
                 if let Some(input) = &mounted_input {
                     source
@@ -3073,138 +3189,140 @@ where
         })
     }
 
-    /// Bind a Job carrier for `job`, compiling with the resident machine
-    /// checked out only for the two short snapshot/install steps and
-    /// released for the GHC compile in between (Problem 1 of the
-    /// compile-path design note). A stale snapshot — something else wrote to
-    /// a scope this compile actually read from, between release and
-    /// re-checkout — is detected by [`crate::ActorCompileView::
-    /// compile_relevant_eq`] and recompiled against a fresh snapshot, up to
-    /// `MAX_SPLIT_ATTEMPTS` times; beyond that this falls back to the
-    /// original single-checkout path, which cannot itself go stale.
+    /// The carrier this workbench built for `kind`, from the cache if one is
+    /// already there and still current for the actor's own source-layer
+    /// revision, otherwise built once, off checkout, and cached for every
+    /// later call of any kind for the life of this workbench's lineage (see
+    /// [`ResidentMachineAccess::sharing`]).
+    ///
+    /// Building takes one short checkout — to reserve a generation for the
+    /// throwaway compile below, exactly [`bind_command_job`]'s old snapshot
+    /// step — releases it, then compiles off checkout
+    /// ([`compile_host_binding_off_checkout`]) with no re-checkout: the
+    /// compiled `(BoundBinder, CompiledTurn)` is generation-independent (see
+    /// [`HostCarrier::from_compiled`]), so there is nothing left to install
+    /// or revalidate against a later view.
+    async fn carrier_for(
+        &self,
+        context: &crate::ActorSessionContext,
+        kind: HostCarrierKind,
+    ) -> Result<Arc<HostCarrier>, ResidentActorWorkbenchError> {
+        let revision = crate::agent_spec::layer_revision(&context.source_layer);
+        if let Some(cached) = self
+            .access
+            .carriers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&kind)
+        {
+            if cached.revision == revision {
+                return Ok(Arc::clone(&cached.carrier));
+            }
+        }
+
+        let (view, generation, retained) = self
+            .access
+            .with_machine(context.clone(), move |session, context, source| {
+                let view = actor_compile_view(session, context, source, &[])?;
+                let generation = view.next_value_generation();
+                // Reserve the generation now, under this checkout, so no
+                // concurrent compile can ever mint the same one — the
+                // throwaway compile below discards this generation's own
+                // name and module, but a collision with a real mount would
+                // still corrupt that mount's source stub.
+                session.reserve_value_generations_through(generation);
+                let retained = session.prepared_retained();
+                Ok((view, generation, retained))
+            })
+            .await?;
+
+        // No checkout held here: the GHC compile runs concurrently with
+        // every other actor's turn against this session.
+        let effects = context.haskell_effects_alias.clone();
+        let source = self.access.source.clone();
+        let (binder, compiled) = spawn_blocking_in_span(move || {
+            compile_host_binding_off_checkout(
+                &view,
+                &source,
+                &effects,
+                generation,
+                kind.carrier_binding_name(),
+                kind.type_name(),
+                kind.anchor(),
+                kind.imports(),
+                kind.retain_text_constructor(),
+                &retained,
+            )
+        })
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)??;
+
+        let carrier = Arc::new(HostCarrier::from_compiled(
+            &binder,
+            compiled.into_code(),
+            kind.host_binding_type(),
+        ));
+        self.access
+            .carriers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                kind,
+                CachedHostCarrier {
+                    revision,
+                    carrier: Arc::clone(&carrier),
+                },
+            );
+        Ok(carrier)
+    }
+
+    /// Bind a Job carrier for `job`. The first call for this workbench's
+    /// lineage builds the Job carrier ([`Self::carrier_for`], one short
+    /// checkout plus an off-checkout compile); every call after that —
+    /// including this one, once the carrier is cached — mounts through it
+    /// ([`tidepool_runtime::session::ResidentSession::mount_carrier_in`])
+    /// under a single short checkout: already-bound check, fresh name and
+    /// reserved generation, mount, then the tag/retire-on-error sequence
+    /// [`install_command_job_binder`] also uses for its own single-checkout
+    /// compile-and-install.
     pub(crate) async fn bind_command_job(
         &self,
         context: crate::ActorSessionContext,
         job: String,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        const MAX_SPLIT_ATTEMPTS: u32 = 3;
-        for _ in 0..MAX_SPLIT_ATTEMPTS {
-            let snapshot_job = job.clone();
-            let snapshot = self
-                .access
-                .with_machine(context.clone(), move |session, context, source| {
-                    let scope = context.placement.lexical_scope;
-                    if let Some(binding) = session.host_text_binding_in(scope, &snapshot_job) {
-                        return Ok(BindJobSnapshot::AlreadyBound(binding));
-                    }
-                    let binding = fresh_job_binding_name(session, scope);
-                    let view = actor_compile_view(session, context, source, &[])?;
-                    let generation = view.next_value_generation();
-                    // Reserve the generation now, under this checkout, so no
-                    // concurrent compile can ever mint the same one — this
-                    // makes generation collision impossible without holding
-                    // the checkout across the GHC call.
-                    session.reserve_value_generations_through(generation);
-                    let retained = session.prepared_retained();
-                    Ok(BindJobSnapshot::Prepare(Box::new(BindJobPrepare {
-                        view,
-                        generation,
-                        retained,
-                        binding,
-                    })))
-                })
-                .await?;
-
-            let (view, generation, retained, binding) = match snapshot {
-                BindJobSnapshot::AlreadyBound(binding) => return Ok(binding),
-                BindJobSnapshot::Prepare(prepare) => {
-                    let BindJobPrepare {
-                        view,
-                        generation,
-                        retained,
-                        binding,
-                    } = *prepare;
-                    (view, generation, retained, binding)
-                }
-            };
-
-            // No checkout held here: the GHC compile runs concurrently with
-            // every other actor's turn against this session.
-            let effects = context.haskell_effects_alias.clone();
-            let source = self.access.source.clone();
-            let compile_binding = binding.clone();
-            let compiled = spawn_blocking_in_span(move || {
-                compile_host_binding_off_checkout(
-                    &view,
-                    &source,
-                    &effects,
-                    generation,
-                    &compile_binding,
-                    COMMAND_JOB_TYPE_NAME,
-                    COMMAND_JOB_ANCHOR,
-                    command_job_carrier_imports(),
-                    true,
-                    &retained,
-                )
-                .map(|(binder, compiled)| (view, binder, compiled))
-            })
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
-            let (view, binder, compiled) = compiled;
-
-            let install_job = job.clone();
-            let install_binding = binding.clone();
-            let outcome = self
-                .access
-                .with_machine(context.clone(), move |session, context, source| {
-                    let scope = context.placement.lexical_scope;
-                    if let Some(binding) = session.host_text_binding_in(scope, &install_job) {
-                        return Ok(BindJobInstall::AlreadyBound(binding));
-                    }
-                    let fresh_view = actor_compile_view(session, context, source, &[])?;
-                    if !fresh_view.compile_relevant_eq(&view) {
-                        return Ok(BindJobInstall::Stale);
-                    }
-                    install_command_job_binder(
-                        session,
-                        context,
-                        binder,
-                        compiled,
-                        generation,
-                        &install_job,
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::InputMount(format!(
-                            "command {install_job} remains owned, but its automatic binding \
-                             failed: {error}"
-                        ))
-                    })?;
-                    Ok(BindJobInstall::Installed(install_binding))
-                })
-                .await?;
-            match outcome {
-                BindJobInstall::Installed(binding) | BindJobInstall::AlreadyBound(binding) => {
-                    return Ok(binding)
-                }
-                BindJobInstall::Stale => continue,
-            }
-        }
-
-        // Contention exhausted the bounded split-compile retries — fall back
-        // to the original single-checkout path, whose one exclusive borrow
-        // cannot itself observe a stale view.
+        let carrier = self.carrier_for(&context, HostCarrierKind::Job).await?;
         self.access
-            .with_machine(context, move |session, context, source| {
+            .with_machine(context, move |session, context, _source| {
                 let scope = context.placement.lexical_scope;
                 if let Some(binding) = session.host_text_binding_in(scope, &job) {
                     return Ok(binding);
                 }
                 let binding = fresh_job_binding_name(session, scope);
-                mount_command_job(session, context, source, &binding, &job).map_err(|error| {
-                    ResidentActorWorkbenchError::InputMount(format!(
-                        "command {job} remains owned, but its automatic binding failed: {error}"
-                    ))
-                })?;
+                let session_root = carrier_mount_session_root(session, scope)?;
+                let generation = session.val_gen().next();
+                session.reserve_value_generations_through(generation);
+                let payload = HostCommandJob::Job(job.clone());
+                let bound_binder = session
+                    .mount_carrier_in(
+                        &session_root,
+                        scope,
+                        &binding,
+                        generation,
+                        &carrier,
+                        HostPayload::Job(&payload),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::InputMount(format!(
+                            "command {job} remains owned, but its automatic binding failed: \
+                             {error}"
+                        ))
+                    })?;
+                if let Err(error) =
+                    session.tag_host_text_binding_in(scope, &bound_binder, job.clone())
+                {
+                    session.retire_host_binding_owner(&bound_binder);
+                    return Err(ResidentActorWorkbenchError::Resident(error));
+                }
                 Ok(binding)
             })
             .await
@@ -3485,33 +3603,6 @@ where
             })
             .await
     }
-}
-
-/// A short-checkout snapshot for `bind_command_job`'s split compile: either
-/// the job is already bound (no compile needed), or a fresh binding name and
-/// reserved generation to compile off-checkout against `view`.
-enum BindJobSnapshot {
-    AlreadyBound(String),
-    Prepare(Box<BindJobPrepare>),
-}
-
-/// The `Prepare` payload of [`BindJobSnapshot`], boxed so the much smaller
-/// `AlreadyBound` case doesn't pay for its size.
-struct BindJobPrepare {
-    view: crate::ActorCompileView,
-    generation: tidepool_repr::Generation,
-    retained: Vec<(SymbolIdentity, u64)>,
-    binding: String,
-}
-
-/// The outcome of `bind_command_job`'s re-checkout install step.
-enum BindJobInstall {
-    Installed(String),
-    /// Another checkout bound this exact job while we were compiling.
-    AlreadyBound(String),
-    /// The re-derived view no longer matches the one this compile ran
-    /// against; the caller must recompile against a fresh snapshot.
-    Stale,
 }
 
 /// A binding name for a fresh Job carrier, not already used by a workbench
@@ -7149,42 +7240,77 @@ struct MountedHostInput {
     name: String,
 }
 
+/// Session root for a synchronous carrier mount, cheaply re-derived under
+/// the checkout already in hand — no compile, so nothing here needs the full
+/// [`actor_compile_view`] snapshot, only the source-side facts a
+/// [`HostCarrier`] mount actually reads.
+fn carrier_mount_session_root<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+) -> Result<PathBuf, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    session
+        .compile_view_in(scope)
+        .map(|view| view.session_root().to_path_buf())
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(scope),
+            ))
+        })
+}
+
+/// Mount a request's JSON input. With `carrier` cached, this is one
+/// `mount_carrier_in` call and no GHC compile; with none yet built for this
+/// workbench, it falls back to [`compile_host_binding`]'s per-mount compile.
 fn mount_json_input<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     type_modules: &[String],
     input: &serde_json::Value,
+    carrier: Option<&HostCarrier>,
 ) -> Result<MountedHostInput, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let binding = fresh_host_binding_name(session, context.placement.lexical_scope, "Input");
-    let (binder, compiled, generation) = compile_host_binding(
-        session,
-        context,
-        source,
-        type_modules,
-        &binding,
-        "TidepoolHostJson.Value",
-        "object [\"anchor\" .= toJSON [TidepoolHostJson.String \"\", TidepoolHostJson.Number (TidepoolHostJson.scientific 0 0), TidepoolHostJson.Bool True, TidepoolHostJson.Null]]",
-        SourceImports::from_specs([
-            "qualified Tidepool.Aeson as TidepoolHostJson",
-            "Tidepool.Aeson (object, (.=), toJSON)",
-        ]),
-        false,
-    )?;
-    session
-        .mount_json_binding_in(
-            context.placement.lexical_scope,
-            &binder,
-            generation,
-            compiled.into_code(),
-            input,
-        )
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-    if let Err(error) = session.hide_host_binding_in(context.placement.lexical_scope, &binder) {
+    let scope = context.placement.lexical_scope;
+    let binding = fresh_host_binding_name(session, scope, "Input");
+    let binder = if let Some(carrier) = carrier {
+        let session_root = carrier_mount_session_root(session, scope)?;
+        let generation = session.val_gen().next();
+        session.reserve_value_generations_through(generation);
+        session
+            .mount_carrier_in(
+                &session_root,
+                scope,
+                &binding,
+                generation,
+                carrier,
+                HostPayload::Json(input),
+            )
+            .map_err(ResidentActorWorkbenchError::Resident)?
+    } else {
+        let (binder, compiled, generation) = compile_host_binding(
+            session,
+            context,
+            source,
+            type_modules,
+            &binding,
+            JSON_INPUT_TYPE_NAME,
+            JSON_INPUT_ANCHOR,
+            json_input_carrier_imports(),
+            false,
+        )?;
+        session
+            .mount_json_binding_in(scope, &binder, generation, compiled.into_code(), input)
+            .map_err(ResidentActorWorkbenchError::Resident)?;
+        binder
+    };
+    if let Err(error) = session.hide_host_binding_in(scope, &binder) {
         session.retire_host_binding_owner(&binder);
         return Err(ResidentActorWorkbenchError::Resident(error));
     }
@@ -7195,6 +7321,9 @@ where
     })
 }
 
+/// Mount one plain text binding. With `carrier` cached, this is one
+/// `mount_carrier_in` call and no GHC compile; with none yet built for this
+/// workbench, it falls back to [`compile_host_binding`]'s per-mount compile.
 fn mount_text_binding<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -7202,35 +7331,42 @@ fn mount_text_binding<H, O>(
     type_modules: &[String],
     binding: &str,
     text: &str,
+    carrier: Option<&HostCarrier>,
 ) -> Result<(), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    let scope = context.placement.lexical_scope;
+    if let Some(carrier) = carrier {
+        let session_root = carrier_mount_session_root(session, scope)?;
+        let generation = session.val_gen().next();
+        session.reserve_value_generations_through(generation);
+        session
+            .mount_carrier_in(
+                &session_root,
+                scope,
+                binding,
+                generation,
+                carrier,
+                HostPayload::Text(text),
+            )
+            .map_err(ResidentActorWorkbenchError::Resident)?;
+        return Ok(());
+    }
     let (binder, compiled, generation) = compile_host_binding(
         session,
         context,
         source,
         type_modules,
         binding,
-        "TidepoolHostText.Text",
-        "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length",
-        SourceImports::from_specs([
-            "qualified Data.Text as TidepoolHostText",
-            "qualified Data.Text.Internal as TidepoolHostTextInternal",
-            "qualified GHC.Exts as TidepoolHostExts",
-            "qualified Tidepool.Aeson as TidepoolHostJson",
-        ]),
+        TEXT_BINDING_TYPE_NAME,
+        TEXT_BINDING_ANCHOR,
+        text_binding_carrier_imports(),
         true,
     )?;
     session
-        .mount_text_binding_in(
-            context.placement.lexical_scope,
-            &binder,
-            generation,
-            compiled.into_code(),
-            text,
-        )
+        .mount_text_binding_in(scope, &binder, generation, compiled.into_code(), text)
         .map_err(ResidentActorWorkbenchError::Resident)
 }
 
@@ -7267,8 +7403,8 @@ where
 }
 
 /// The Job carrier's own import set and type/anchor pair, shared by
-/// [`mount_command_job`]'s single-checkout path and `bind_command_job`'s
-/// split compile-then-install path so the two can never drift.
+/// [`mount_command_job`]'s single-checkout compile path and
+/// [`HostCarrierKind::Job`]'s carrier build so the two can never drift.
 fn command_job_carrier_imports() -> SourceImports {
     SourceImports::from_specs([
         "qualified Tidepool.Command.Types as TidepoolHostJob",
@@ -7282,6 +7418,41 @@ fn command_job_carrier_imports() -> SourceImports {
 const COMMAND_JOB_TYPE_NAME: &str = "TidepoolHostJob.Job";
 const COMMAND_JOB_ANCHOR: &str = "TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length)";
 
+/// [`mount_json_input`]'s own import set and type/anchor pair, shared by its
+/// per-mount compile path and [`HostCarrierKind::Json`]'s carrier build so
+/// the two can never drift.
+fn json_input_carrier_imports() -> SourceImports {
+    SourceImports::from_specs([
+        "qualified Tidepool.Aeson as TidepoolHostJson",
+        "Tidepool.Aeson (object, (.=), toJSON)",
+    ])
+}
+
+const JSON_INPUT_TYPE_NAME: &str = "TidepoolHostJson.Value";
+const JSON_INPUT_ANCHOR: &str = "object [\"anchor\" .= toJSON [TidepoolHostJson.String \"\", TidepoolHostJson.Number (TidepoolHostJson.scientific 0 0), TidepoolHostJson.Bool True, TidepoolHostJson.Null]]";
+
+/// [`mount_text_binding`]'s own import set and type/anchor pair, shared by
+/// its per-mount compile path and [`HostCarrierKind::Text`]'s carrier build
+/// so the two can never drift.
+fn text_binding_carrier_imports() -> SourceImports {
+    SourceImports::from_specs([
+        "qualified Data.Text as TidepoolHostText",
+        "qualified Data.Text.Internal as TidepoolHostTextInternal",
+        "qualified GHC.Exts as TidepoolHostExts",
+        "qualified Tidepool.Aeson as TidepoolHostJson",
+    ])
+}
+
+const TEXT_BINDING_TYPE_NAME: &str = "TidepoolHostText.Text";
+const TEXT_BINDING_ANCHOR: &str = "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length";
+
+/// The single-checkout Job carrier compile-and-install path: one GHC compile
+/// per mount, no cache. `bind_command_job` no longer calls this in
+/// production (it mounts through the cached [`HostCarrier`] instead — see
+/// [`ResidentActorWorkbench::carrier_for`]); it remains as the reference
+/// implementation `command_job_split_compile_then_install_binds_the_same_as_mount_command_job`
+/// and other tests check the carrier path's compiled artifact against.
+#[cfg(test)]
 fn mount_command_job<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -7308,9 +7479,11 @@ where
 }
 
 /// Install an already-compiled Job carrier. Split out of
-/// [`mount_command_job`] so a split compile-then-install path (see
-/// `bind_command_job`) can share the exact install/tag/retire-on-error
-/// sequence used by the direct single-checkout path, with no GHC call here.
+/// [`mount_command_job`] so its test-only single-checkout path and the
+/// `command_job_split_compile_then_install_binds_the_same_as_mount_command_job`
+/// test's manual split path share the exact install/tag/retire-on-error
+/// sequence, with no GHC call here.
+#[cfg(test)]
 fn install_command_job_binder<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -7959,6 +8132,7 @@ mod request_tests {
             &serde_json::json!({
                 "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
             }),
+            None,
         )
         .expect("nested JSON carrier mounts");
         assert!(session
@@ -8020,6 +8194,7 @@ mod request_tests {
             &[],
             "tool_result",
             "tool output",
+            None,
         )
         .expect("Text carrier mounts after the JSON request executes");
         mount_command_job(
@@ -8168,6 +8343,7 @@ mod request_tests {
             &[],
             "interloper",
             "interloper text",
+            None,
         )
         .expect("interloping carrier mounts");
 
@@ -8185,8 +8361,9 @@ mod request_tests {
             .all(|binding| binding.name != "job_binding"));
         drop((binder, compiled, generation));
 
-        // A fresh snapshot recompiles and installs cleanly — the
-        // bounded-retry fallback `bind_command_job` relies on.
+        // A fresh snapshot recompiles and installs cleanly — the same
+        // staleness recovery `begin_fragment_split` and `prepare_cell`'s own
+        // split paths rely on.
         let retry_view = actor_compile_view(&session, &context, &source, &[]).expect("retry view");
         let retry_generation = retry_view.next_value_generation();
         session.reserve_value_generations_through(retry_generation);
@@ -8217,6 +8394,43 @@ mod request_tests {
             session.host_text_binding_in(scope, "retry command job"),
             Some("job_binding2".into())
         );
+    }
+
+    /// The first `bind_command_job` call for a fresh workbench builds the
+    /// Job carrier ([`ResidentActorWorkbench::carrier_for`]), which is the
+    /// only extractor invocation `bind_command_job` itself makes. A second
+    /// call, for a different job, mounts through the now-cached carrier and
+    /// makes none: [`tidepool_extract_cmd::extract_spawn_count`] — the same
+    /// counter the cell-cost and documentation tests already read from —
+    /// must not move between the two.
+    #[tokio::test]
+    async fn two_bind_command_job_calls_on_one_workbench_compile_the_job_carrier_once() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+
+        let before_first = tidepool_extract_cmd::extract_spawn_count();
+        let first = workbench
+            .bind_command_job(context.clone(), "job one".into())
+            .await
+            .expect("the first job binds, building the Job carrier");
+        let after_first = tidepool_extract_cmd::extract_spawn_count();
+        assert!(
+            after_first > before_first,
+            "the first bind_command_job call must compile the Job carrier: \
+             before={before_first} after={after_first}"
+        );
+
+        let second = workbench
+            .bind_command_job(context.clone(), "job two".into())
+            .await
+            .expect("the second job binds through the cached carrier");
+        let after_second = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            after_second, after_first,
+            "the second bind_command_job call must mount through the cached carrier with no \
+             further extractor call: first={first} second={second}"
+        );
+        assert_ne!(first, second);
     }
 
     /// The same split shape as `command_job_split_compile_then_install_
@@ -8375,6 +8589,7 @@ mod request_tests {
             &[],
             "interloper",
             "interloper text",
+            None,
         )
         .expect("interloping carrier mounts");
 
@@ -9339,6 +9554,7 @@ mod request_tests {
             &[],
             "interloper",
             "interloper text",
+            None,
         )
         .expect("interloping carrier mounts");
 

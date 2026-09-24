@@ -1106,6 +1106,7 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
+ "tidepool-extract-cmd",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",
