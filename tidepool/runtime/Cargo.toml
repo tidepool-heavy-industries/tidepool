@@ -14,6 +14,7 @@ readme = "../../README.md"
 tidepool-atomic-write.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 tidepool-repr.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-toolchain.workspace = true

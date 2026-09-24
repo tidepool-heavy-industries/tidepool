@@ -5062,6 +5062,7 @@ where
                         crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
                             label,
                             _,
+                            unbound_label,
                             role,
                             profile,
                             worktrees,
@@ -5075,6 +5076,7 @@ where
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
                             lifetime: crate::start::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
                             session_id: context.placement.session, parent_actor: context.actor,
+                            unbound_label,
                         },
                     )
                     .map(ResidentActorBoundary::Start)
@@ -5082,6 +5084,7 @@ where
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksStartWith(
                         label,
                         _,
+                        unbound_label,
                         group,
                         role,
                         profile,
@@ -5110,6 +5113,7 @@ where
                                 }),
                                 effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, lifetime,
                                 session_id: context.placement.session, parent_actor: context.actor,
+                                unbound_label,
                             },
                         )
                         .map(ResidentActorBoundary::Start)

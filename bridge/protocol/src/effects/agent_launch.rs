@@ -59,6 +59,20 @@ pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
             ),
             rust: RustBinding::HaskellValue,
         },
+        // What this launch is, as data, alongside the opaque `entry` above.
+        // `Just label` means the entry is exactly the stdlib's
+        // `agentDefinitionUnbound label` (see `startForkedAgent` /
+        // `Tidepool.Actors.Internal.Agent`) with no other captured runtime
+        // binding beyond this text label; `Nothing` covers every other
+        // launch shape (a bespoke `ActorDefinition`, an inline model-authored
+        // body, ...), whose `entry` may close over arbitrary live state and
+        // must keep running on the launching session. Rust decides per-child
+        // session eligibility from this field, not by inspecting `entry`.
+        Arg {
+            name: "unboundLabel",
+            ty: HsType::maybe(HsType::Text),
+            rust: RustBinding::Derived,
+        },
     ];
     if forked {
         args.push(Arg {

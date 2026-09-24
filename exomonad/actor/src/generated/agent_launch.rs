@@ -23,6 +23,7 @@ pub enum AgentLaunchReq {
     AgentLaunchWith(
         String,
         tidepool_bridge::HaskellValue,
+        Option<String>,
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
         Vec<String>,

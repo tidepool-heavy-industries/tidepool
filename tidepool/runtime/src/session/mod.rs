@@ -57,7 +57,8 @@ pub use prepared::{
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
 
 pub use registry::{
-    Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot, SlotKind,
+    fresh_session_id, Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot,
+    SlotKind,
 };
 
 /// The console-output buffer an effect handler writes into and a turn driver

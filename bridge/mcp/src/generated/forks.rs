@@ -9,7 +9,7 @@ pub fn forks_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "ForksBeginWith :: Bool -> Text -> [Text] -> Forks (Either Text (Int, Text, [Text]))",
-            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Maybe (Int, Int) -> Maybe Model -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
+            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Maybe Text -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Maybe (Int, Int) -> Maybe Model -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
             "ForksPreviewWith :: ActorLaunchRole -> [ActorEffectKey] -> Maybe (Int, Int) -> Maybe Model -> Maybe ForkEffort -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Text, Int, Maybe Int), Maybe WorkerLaunchPreview))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",

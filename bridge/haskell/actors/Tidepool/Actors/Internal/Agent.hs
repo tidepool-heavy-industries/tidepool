@@ -316,6 +316,7 @@ startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effect
     context
     instructions
     lifetime
+    (Just actorLabel)
   pure $ case launched of
     Left failure -> Left failure
     Right (actor, allocatedPath, tree) ->
@@ -540,6 +541,12 @@ launchFreshActor definition@Actor.ActorDefinition
     (AgentLaunchWith
       actorLabel
       entry
+      -- Every `ActorDefinition` reaching this function is caller-supplied
+      -- (`startAgent`'s `agentDefinition spec`), so `entry` may close over
+      -- arbitrary live state beyond `actorLabel`. Only the stdlib's own
+      -- `agentDefinitionUnbound` launch (`launchForkedActor`, below) is
+      -- reconstructible from data alone.
+      Nothing
       ActorInheritedRole
       (profileCode profile)
       (ActorInternal.actorLaunchWorktrees definition))
@@ -561,6 +568,13 @@ launchForkedActor
   -> ForkContext
   -> Maybe Text
   -> WorkerLifetime
+  -- | 'Just' exactly when 'definition' is 'agentDefinitionUnbound' applied to
+  -- this same label and 'startup' is '()' — i.e. this call is
+  -- 'startForkedAgent''s. That is the only shape whose 'entry' the engine can
+  -- rebuild from data (the label) alone; every other caller of this function
+  -- must pass 'Nothing' so its captured 'entry' keeps running on the
+  -- launching session.
+  -> Maybe Text
   -> Eff effs (Either Text (Actor.ActorRef api exit, Text, WorktreeHandle))
 launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   { Actor.label = actorLabel
@@ -568,7 +582,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   , Actor.initialization = startupAction
   , Actor.behavior = install
   , Actor.onShutdown = shutdownAction
-  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime = do
+  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime unboundLabel = do
   let cell = newExitCell startup
       shutdownEntry reasonCode =
         raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
@@ -584,6 +598,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
     (ForksStartWith
       actorLabel
       entry
+      unboundLabel
       forkGroup
       (roleCode launchRole)
       (profileCode profile)

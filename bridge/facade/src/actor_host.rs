@@ -99,7 +99,6 @@ use tidepool_handlers::{
     ActorWorktreeRegistryHandler, EventConfig, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_mcp::CapturedOutput;
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession,
     ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
@@ -2807,7 +2806,7 @@ fn compile_root(
     )?;
     let declarations = exomonad_effect_declarations();
     let session_root = run_root.join("haskell-session");
-    let session = fresh_session_id();
+    let session = tidepool_runtime::session::fresh_session_id();
     let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
         &declarations,
         false,
@@ -6620,13 +6619,6 @@ fn writable_repository_roots(
         writable.push(git_common_dir.to_path_buf());
     }
     writable
-}
-
-fn fresh_session_id() -> SessionId {
-    let id = uuid::Uuid::new_v4();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&id.as_bytes()[..8]);
-    SessionId(u64::from_le_bytes(bytes))
 }
 
 fn join_error(error: tokio::task::JoinError) -> Box<dyn std::error::Error> {

@@ -24,6 +24,7 @@ pub enum ForksReq {
     ForksStartWith(
         String,
         tidepool_bridge::HaskellValue,
+        Option<String>,
         i64,
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,

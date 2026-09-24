@@ -8,7 +8,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
         description: "Private fresh-agent launch substrate used by the Exomonad facade.",
         prompt_card: None,
         constructors: &[
-            "AgentLaunchWith :: Text -> (Int -> Eff childEffs ()) -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> AgentLaunch (Int, Int, Text)",
+            "AgentLaunchWith :: Text -> (Int -> Eff childEffs ()) -> Maybe Text -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> AgentLaunch (Int, Int, Text)",
         ],
         type_defs: &[],
         extra_imports: &[],

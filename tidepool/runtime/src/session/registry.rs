@@ -21,6 +21,18 @@ use parking_lot::Mutex;
 use tidepool_repr::SessionId;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
+/// Mint a fresh, process-random [`SessionId`]. The one place a `SessionId` is
+/// minted from nothing: every session this registry ever holds — the run's
+/// root and any later per-child machine — gets its identity from here, never
+/// from a caller-local counter or UUID call of its own.
+#[must_use]
+pub fn fresh_session_id() -> SessionId {
+    let id = uuid::Uuid::new_v4();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&id.as_bytes()[..8]);
+    SessionId(u64::from_le_bytes(bytes))
+}
+
 /// Why a machine checkout was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckoutError<H> {
@@ -892,6 +904,12 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_session_id_does_not_repeat_across_a_small_batch() {
+        let ids: std::collections::HashSet<_> = (0..64).map(|_| fresh_session_id()).collect();
+        assert_eq!(ids.len(), 64);
+    }
 
     /// A trivial stand-in for the machine handle `M` — the registry is pure
     /// lifecycle bookkeeping, so a counter is enough to exercise the

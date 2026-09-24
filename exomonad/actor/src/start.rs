@@ -86,6 +86,11 @@ pub(crate) struct ActorStartRequest {
     pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
     pub parent_actor: crate::ActorRef,
+    /// `Just label` on the wire exactly when this launch is the stdlib's
+    /// `agentDefinitionUnbound label` (`startForkedAgent`/`AgentLaunchWith`'s
+    /// bare `startAgent`), the only launch shape whose captured `entry` is
+    /// data-reconstructible. See `child_session_eligibility`.
+    pub unbound_label: Option<String>,
 }
 
 impl ActorStartRequest {
@@ -303,6 +308,10 @@ impl ResidentActorStart {
                 fork_budget: None,
                 session_id,
                 parent_actor,
+                // `Tidepool.Actor`'s own `start`/`fork` (this entry point's
+                // caller) always carries a caller-authored `ActorDefinition`,
+                // never the stdlib's `agentDefinitionUnbound` — never eligible.
+                unbound_label: None,
             },
         )
     }
@@ -332,12 +341,27 @@ impl ResidentActorStart {
             fork_budget,
             session_id,
             parent_actor,
+            unbound_label,
         } = request;
         if model.as_ref().is_some_and(|model| {
             model.value().is_empty() || model.value().chars().any(char::is_whitespace)
         }) {
             return Err(ActorStartCaptureError::InvalidModel);
         }
+        let eligibility = child_session_eligibility(context, unbound_label.as_deref());
+        tracing::info!(
+            actor_label = %label,
+            parent = ?parent_actor,
+            context = ?context,
+            eligible = eligibility.eligible,
+            reason = eligibility.reason,
+            "selected-context child session eligibility decided"
+        );
+        // The fresh-machine factory (a shared "spawn child session" primitive
+        // extracted from `bridge/facade`'s root bootstrap) does not exist yet
+        // — see plans/wave3/dives/per-child-sessions-design.md parcels 2-3.
+        // Every launch, eligible or not, still gets the launching session's
+        // id until that factory lands; this call site is the seam.
         let (profile, effect_keys) = profile.resolve(effect_keys)?;
         let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
@@ -393,6 +417,44 @@ impl ResidentActorStart {
                 fork_workspace,
             },
         })
+    }
+}
+
+/// Whether a launch's `entry` closure is reconstructible on a fresh session,
+/// decided from data the wire request already carries — never by inspecting
+/// the captured `entry` value itself (closures/thunks never cross the bridge;
+/// see `tidepool_bridge::HaskellValue`'s doc comment).
+struct ChildSessionEligibility {
+    eligible: bool,
+    reason: &'static str,
+}
+
+/// A launch is eligible for its own machine session only when BOTH: the
+/// model asked for a selected (not inherited) context, AND the entry is the
+/// stdlib's `agentDefinitionUnbound <label>` — the one shape whose captured
+/// `entry` closes over nothing but that label (see
+/// `bridge/haskell/actors/Tidepool/Actors/Internal/Agent.hs`'s
+/// `agentDefinitionUnbound`/`startForkedAgent`). Every other launch (a
+/// caller-authored `ActorDefinition`, or any `InheritedContext` fork) keeps
+/// running on the launching session, unchanged.
+fn child_session_eligibility(
+    context: ForkContext,
+    unbound_label: Option<&str>,
+) -> ChildSessionEligibility {
+    match (context, unbound_label) {
+        (ForkContext::SelectedContext, Some(_)) => ChildSessionEligibility {
+            eligible: true,
+            reason: "selected context, unbound agent launch",
+        },
+        (ForkContext::SelectedContext, None) => ChildSessionEligibility {
+            eligible: false,
+            reason: "selected context, but entry is a caller-authored ActorDefinition \
+                     (may close over live state beyond the label)",
+        },
+        (ForkContext::InheritedContext, _) => ChildSessionEligibility {
+            eligible: false,
+            reason: "inherited context shares the parent's scope chain and generations",
+        },
     }
 }
 
@@ -538,6 +600,29 @@ mod tests {
         ));
         let (_, empty) = Profile::ActorSelectedProfile(vec![]).resolve(None).unwrap();
         assert!(empty.unwrap().is_empty());
+    }
+
+    #[test]
+    fn unbound_launch_in_selected_context_is_eligible() {
+        use super::{child_session_eligibility, ForkContext};
+        let decision =
+            child_session_eligibility(ForkContext::SelectedContext, Some("luna/implement"));
+        assert!(decision.eligible);
+    }
+
+    #[test]
+    fn selected_context_without_unbound_label_is_ineligible() {
+        use super::{child_session_eligibility, ForkContext};
+        let decision = child_session_eligibility(ForkContext::SelectedContext, None);
+        assert!(!decision.eligible);
+    }
+
+    #[test]
+    fn inherited_context_is_ineligible_even_with_unbound_label() {
+        use super::{child_session_eligibility, ForkContext};
+        let decision =
+            child_session_eligibility(ForkContext::InheritedContext, Some("luna/implement"));
+        assert!(!decision.eligible);
     }
 
     #[test]
