@@ -1317,6 +1317,11 @@ impl DurableActorEvent {
             ),
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
             Self::Text(message) => message.clone(),
+            // A watch names no single child: `register_watch_groups` can
+            // fold several requests' targets under one watch, and a `Ready`
+            // transition carries no request (or target) at all, so there is
+            // no child identity to render here even when a settlement on
+            // the same request would have one.
             Self::Typed(TypedActorEvent::WatchChanged { notification })
                 if matches!(notification.transition, exomonad_actor::WatchTransition::RouteFailed { .. }) => format!(
                 "route {} failed: {:?} ({}). Recover owned handles with `listRoutes`, then inspect with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
@@ -1333,16 +1338,17 @@ impl DurableActorEvent {
                 elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::SettlementChanged { notification }) => {
+                let identity = settlement_identity_line(notification);
                 match &notification.reply_preview {
                     Some(preview) => format!(
-                        "request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nRead the full value with `pollResponse` only if you need more than this preview; settlement is not integration.",
+                        "{identity}request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nRead the full value with `pollResponse` only if you need more than this preview; settlement is not integration.",
                         notification.request.0,
                         notification.label,
                         notification.transition,
                         elapsed(notification.occurred_at_unix_ms),
                     ),
                     None => format!(
-                        "request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
+                        "{identity}request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
                         notification.request.0,
                         notification.label,
                         notification.transition,
@@ -1361,6 +1367,24 @@ impl DurableActorEvent {
             Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
         }
+    }
+}
+
+/// The settled child's identity, as a first line ahead of the settlement
+/// body: its full `exomonad/<path>` actor path (the same string the tmux
+/// window shows), and the exact commit it was seeded from when it was
+/// launched from a fork workspace. Either half may be absent (an unforked
+/// target has no path; a target not launched from a fork workspace has no
+/// recorded revision), and the line is empty when there is nothing to say.
+///
+/// The engine has no notion of a re-fork attempt of the same label — a
+/// relaunch under the same path is a distinct actor identity, not a
+/// numbered retry of this one — so no attempt number is rendered here.
+fn settlement_identity_line(notification: &exomonad_actor::SettlementNotification) -> String {
+    match (&notification.target_path, &notification.target_revision) {
+        (Some(path), Some(revision)) => format!("{path} (seeded from {revision})\n"),
+        (Some(path), None) => format!("{path}\n"),
+        (None, _) => String::new(),
     }
 }
 

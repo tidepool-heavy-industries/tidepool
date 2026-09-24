@@ -7715,6 +7715,17 @@ where
                 Ok(step) => {
                     if let Some(request) = self.pending_reply.take() {
                         let reply_preview = self.pending_reply_preview.take();
+                        // Only this actor can read its own descriptor and
+                        // prepared workspace, so its path and seed revision
+                        // are attached here, ahead of settlement, rather
+                        // than looked up later from the bare request.
+                        self.environment.requests.record_target_identity(
+                            request,
+                            self.descriptor.actor_path().map(ToString::to_string),
+                            self.prepared_workspace.as_ref().map(|workspace| {
+                                workspace.handle().handle_receipt.source_head.raw.clone()
+                            }),
+                        );
                         let notifications = self
                             .environment
                             .requests

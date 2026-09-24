@@ -241,6 +241,12 @@ pub struct SettlementNotification {
     /// could not be read this way -- either way the owner falls back to
     /// `pollResponse` for the full value.
     pub reply_preview: Option<String>,
+    /// The target's own `exomonad/<path>` actor-lineage path, when it has
+    /// one (an unforked target has none).
+    pub target_path: Option<String>,
+    /// The exact commit the target was seeded from, when it was launched
+    /// from a fork workspace.
+    pub target_revision: Option<String>,
     pub occurred_at_unix_ms: u64,
     pub sequence: ActorEventSequence,
     pub watermark: ActorEventSequence,
@@ -297,6 +303,15 @@ struct RequestRecord {
     /// [`reevaluate_watches`] mints this request's `Ready` settlement
     /// notice. Never set for an `Unavailable` settlement.
     reply_preview: Option<String>,
+    /// The target's own `exomonad/<path>` actor-lineage path, attached by
+    /// [`RequestRegistry::record_target_identity`]. Only the target can read
+    /// its own descriptor, so this rides in ahead of [`finish_reply`] rather
+    /// than being looked up later from the request alone.
+    target_path: Option<String>,
+    /// The exact commit the target's checkout was seeded from, when it was
+    /// launched from a fork workspace. `None` for a target with no fork
+    /// workspace (an unforked `startActor`/`startAgent`, or the root actor).
+    target_revision: Option<String>,
 }
 
 /// Snapshots share ownership, not a consumption cursor. Replacing the latest
@@ -1002,6 +1017,8 @@ impl RequestRegistry {
                 settlement_notified: false,
                 registered_at_unix_ms: unix_time_ms(),
                 reply_preview: None,
+                target_path: None,
+                target_revision: None,
             },
         );
         id
@@ -1154,6 +1171,23 @@ impl RequestRegistry {
             TargetState::Reserved | TargetState::Queued | TargetState::Settling => {
                 Err(ReplyError::Stale)
             }
+        }
+    }
+
+    /// The target's own actor path and seeded source revision, attached by
+    /// the target about itself ahead of [`Self::finish_reply`] — only it can
+    /// read its own descriptor and prepared workspace. Rides along only as
+    /// far as this request's settlement notice, same as `reply_preview`.
+    pub(crate) fn record_target_identity(
+        &self,
+        request: RequestId,
+        target_path: Option<String>,
+        target_revision: Option<String>,
+    ) {
+        let mut state = self.state.lock();
+        if let Some(record) = state.requests.get_mut(&request) {
+            record.target_path = target_path;
+            record.target_revision = target_revision;
         }
     }
 
@@ -2037,11 +2071,15 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                     record.label.clone(),
                     transition,
                     reply_preview,
+                    record.target_path.clone(),
+                    record.target_revision.clone(),
                 ));
             }
         }
     }
-    for (owner, request, label, transition, reply_preview) in settlements {
+    for (owner, request, label, transition, reply_preview, target_path, target_revision) in
+        settlements
+    {
         let sequence = next_event_sequence(state, owner);
         state.settlement_notifications.push(SettlementNotification {
             owner,
@@ -2049,6 +2087,8 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             label,
             transition,
             reply_preview,
+            target_path,
+            target_revision,
             occurred_at_unix_ms: unix_time_ms(),
             sequence,
             watermark: sequence,

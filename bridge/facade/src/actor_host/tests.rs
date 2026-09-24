@@ -1907,6 +1907,8 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
                 exomonad_actor::ResponseFailure::TargetUnavailable,
             ),
             reply_preview: None,
+            target_path: None,
+            target_revision: None,
             occurred_at_unix_ms: 754_000,
             sequence: exomonad_actor::ActorEventSequence(4),
             watermark: exomonad_actor::ActorEventSequence(4),
@@ -1937,6 +1939,8 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
             label: "implementation".into(),
             transition: exomonad_actor::SettlementTransition::Ready,
             reply_preview: Some("\"looks correct, ship it\"".into()),
+            target_path: None,
+            target_revision: None,
             occurred_at_unix_ms: 754_000,
             sequence: exomonad_actor::ActorEventSequence(5),
             watermark: exomonad_actor::ActorEventSequence(5),
@@ -1962,6 +1966,8 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
             label: "implementation".into(),
             transition: exomonad_actor::SettlementTransition::Ready,
             reply_preview: None,
+            target_path: None,
+            target_revision: None,
             occurred_at_unix_ms: 754_000,
             sequence: exomonad_actor::ActorEventSequence(6),
             watermark: exomonad_actor::ActorEventSequence(6),
@@ -1989,6 +1995,8 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
                 label: "implementation".into(),
                 transition: exomonad_actor::SettlementTransition::Ready,
                 reply_preview: Some(long_preview.clone()),
+                target_path: None,
+                target_revision: None,
                 occurred_at_unix_ms: 754_000,
                 sequence: exomonad_actor::ActorEventSequence(7),
                 watermark: exomonad_actor::ActorEventSequence(7),
@@ -2000,6 +2008,74 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     assert!(rendered.contains(
         "Read the full value with `pollResponse` only if you need more than this preview"
     ));
+}
+
+/// A settlement notice for a child launched from a fork workspace names that
+/// child on its own first line, ahead of the settlement body: its full
+/// `exomonad/<path>` actor path, and the exact commit its checkout was
+/// seeded from. A target with a path but no recorded seed revision (an
+/// unforked launch, or a fork workspace admitted from a branch rather than a
+/// captured OID) still gets the path line, just without a revision. A
+/// target with no path at all (an unforked `startActor`/`startAgent`) keeps
+/// today's rendering verbatim, with no leading identity line.
+#[test]
+fn settlement_notice_names_the_settled_child_on_its_first_line() {
+    let owner = exomonad_actor::ActorRef {
+        id: exomonad_actor::ActorId(1),
+        incarnation: exomonad_actor::Incarnation(1),
+    };
+    let base = exomonad_actor::SettlementNotification {
+        owner,
+        request: exomonad_actor::RequestId(21),
+        label: "correction".into(),
+        transition: exomonad_actor::SettlementTransition::Ready,
+        reply_preview: None,
+        target_path: None,
+        target_revision: None,
+        occurred_at_unix_ms: 754_000,
+        sequence: exomonad_actor::ActorEventSequence(8),
+        watermark: exomonad_actor::ActorEventSequence(8),
+    };
+
+    let with_path_and_revision = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: exomonad_actor::SettlementNotification {
+            target_path: Some("correction-20260924/core-execution/core-correction".into()),
+            target_revision: Some("a1b2c3d4e5f6".into()),
+            ..base.clone()
+        },
+    });
+    let rendered = with_path_and_revision.render(Some(0));
+    let first_line = rendered
+        .lines()
+        .next()
+        .expect("rendered notice has a first line");
+    assert_eq!(
+        first_line,
+        "correction-20260924/core-execution/core-correction (seeded from a1b2c3d4e5f6)"
+    );
+    assert!(rendered.contains("request 21 \"correction\" settled Ready"));
+
+    let with_path_only = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: exomonad_actor::SettlementNotification {
+            target_path: Some("correction-20260924/core-execution/core-correction".into()),
+            target_revision: None,
+            ..base.clone()
+        },
+    });
+    let rendered = with_path_only.render(Some(0));
+    let first_line = rendered
+        .lines()
+        .next()
+        .expect("rendered notice has a first line");
+    assert_eq!(
+        first_line,
+        "correction-20260924/core-execution/core-correction"
+    );
+
+    let without_identity =
+        DurableActorEvent::Typed(TypedActorEvent::SettlementChanged { notification: base });
+    let rendered = without_identity.render(Some(0));
+    assert!(rendered.starts_with("request 21 \"correction\" settled Ready"));
 }
 
 #[tokio::test]
@@ -2106,6 +2182,8 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
         label: "child-20".into(),
         transition: exomonad_actor::SettlementTransition::Ready,
         reply_preview: Some("\"done\"".into()),
+        target_path: None,
+        target_revision: None,
         occurred_at_unix_ms: 0,
         sequence: exomonad_actor::ActorEventSequence(2),
         watermark: exomonad_actor::ActorEventSequence(2),
