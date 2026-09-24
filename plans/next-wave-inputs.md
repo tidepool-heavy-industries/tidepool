@@ -368,3 +368,20 @@ Deferred, one card each:
   delegation preflight's first slice is the spec-preflight lane. The next
   wave brief may pick one; the harness `NEXT.md` carries prompt-level
   trials of the rest.
+
+## Wave 4 host died of OOM and could not restart (2026-09-24 21:54Z)
+
+- The host was OOM-killed (2.5 GB RSS, 3.9 GB swap peak; box at 24 of 31 GB)
+  while a side lane ran a diagnostic compile daemon with two 7 GB GHC
+  workers next to the run's own daemon and three cargo test builds. Rule for
+  lanes during a live swarm: no daemon above one worker, and the box's
+  compile load is budgeted from what `free` shows, not assumed.
+- systemd restarted the host five times and each start failed with "frozen
+  workspace library differs from this build". The run was launched from a
+  dev build (`target/debug/exomonad`, 12:34), whose library identity hashes
+  the checkout's `bridge/haskell/{lib,actors}` at startup; commit 379da60e6
+  (labels) changed `lib/` at 20:29Z, so the identity moved under a running
+  swarm. Structural fix: a run materializes its library trees the way it
+  freezes the workspace (`FrozenWorkspace`), so every process of the run
+  reads the frozen copy and a checkout edit cannot invalidate a restart;
+  until then, launch dogfood runs from the deployed embedding build only.
