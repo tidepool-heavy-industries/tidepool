@@ -48,7 +48,7 @@ collaboration = do
   attention <- turn owner "observedQuestions <- pollProgress reviewQuestions\ninspectFull observedQuestions"
   check "coalesced attention retains both unresolved questions" ("semantics" `Text.isInfixOf` output attention && "product-gate" `Text.isInfixOf` output attention)
   -- A separate component progresses while this review awaits its owning decision.
-  void $ turn owner ("let otherLabel = [label|unrelated|]\nother <- unfold (taskGroup task) (child @Text (solTaskFrom otherLabel projectHead (task { taskSource = " <> gitOidLiteral source <> ", obligation = \"Inspect an independent consumer\" })))")
+  void $ turn owner ("let otherLabel = [label|unrelated|]\nother <- unfold (taskGroup task) (child @Text (solTaskFrom otherLabel Medium projectHead (task { taskSource = " <> gitOidLiteral source <> ", obligation = \"Inspect an independent consumer\" })))")
   other <- activation
   void $ turn (checkActor other) "respond (\"independent work finished\" :: Text)"
   independent <- turn owner "independent <- pollResponse other\ninspectFull independent"

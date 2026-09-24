@@ -22,10 +22,10 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".exomonad/workspace/skills/exomonad-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
+  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet work = Task (batch campaign group) \".exomonad/workspace/skills/exomonad-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
   void $ example owner "exomonad-fork" 0
   worker <- activation
-  check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
+  check "skill launches a fresh Luna Medium worker" (checkModel worker == Just "gpt-6-luna" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
   early <- turn owner "let Just group = forkGroupHandle worker\ncleanup <- releaseGroup group\ninspectFull cleanup"
   check "scoped release retains the pending worker instead of cancelling its request" ("CleanupBlocked" `Text.isInfixOf` lastOutput early)
   void $ example owner "exomonad-define-actors" 0

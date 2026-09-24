@@ -10,19 +10,22 @@
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
-  , lunaTask, lunaTaskFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
+  , lunaTask, lunaTaskFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, reviewAgain, repair
   , candidateAtSubmission
   , requestIncorporation, consultDesign
   , settledValue
+  , unownedPaths
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
-import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
+import Tidepool.Effects.Core (AgentInspection, Commands, Forks, GitRef (..))
 import Tidepool.Worktree (renderGitOid, renderWorktreeError)
+import qualified Tidepool.Command as Cmd
 import Project.Types
+import Project.Evidence (numstatFiles)
 import Exomonad.Workspace (workspacePrompt)
 
 -- Keys are the workspace's authored resource names; selecting prose grants no
@@ -87,31 +90,54 @@ updateDecision response = updateRequest response . decisionContext
 -- child starts from fresh context selected from its Task, since a different
 -- model cannot reuse this conversation. The "executor" alias (Sol) inherits
 -- context and is for children that own design judgment or an integration
--- loop of their own.
-lunaTask :: Label -> Task -> Branch CodingEffects Task result
-lunaTask label = lunaTaskFrom label currentCheckout
+-- loop of their own. Effort is always the caller's explicit choice -- there
+-- is no default tier (the user's wave-3 decision).
+lunaTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
+lunaTask label effort = lunaTaskFrom label effort currentCheckout
 
-solTask :: Label -> Task -> Branch CodingEffects Task result
-solTask label = solTaskFrom label currentCheckout
+solTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
+solTask label effort = solTaskFrom label effort currentCheckout
 
 -- Source and context are independent choices. currentCheckout selects the
 -- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
-lunaTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
-lunaTaskFrom label source task = withInstructions (projectPrompt "task") $
-  withContext (selected taskContext) $ withModel "luna" $ withEffort Medium $
-  coding source ((assignment label task) { report = Silent })
+--
+-- Reporting defaults to the Assignment default (NotifyOwner): the requester
+-- gets the ordinary settlement notice. A record-actor router that consumes
+-- settlement itself (Project.Routing's followWork, or a purpose-built
+-- collector like checks/review-continuation.hs's ReviewFlow) builds its own
+-- assignment directly with `{ report = Silent }` rather than going through
+-- this sugar -- see Project.Review's startReviewer and
+-- checks/review-continuation.hs for that shape.
+lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+lunaTaskFrom label effort source task = withInstructions (projectPrompt "task") $
+  withContext (selected taskContext) $ withModel "luna" $ withEffort effort $
+  coding source (assignment label task)
 
-solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
-solTaskFrom label source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "executor" $ withEffort Medium $
-  coding source ((assignment label task) { report = Silent })
+solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+solTaskFrom label effort source task = withInstructions (projectPrompt "task") $
+  withContext inherited $ withModel "executor" $ withEffort effort $
+  coding source (assignment label task)
 
+-- implement exposes no effort parameter of its own; Medium is chosen here
+-- because a caller with a bounded, ordinary implementation obligation has
+-- nowhere else to pass one through this entry point. A caller that needs a
+-- different tier forks directly with lunaTask/lunaTaskFrom instead of going
+-- through implement.
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] Medium task)
+
+-- What a reviewer needs to know about who repairs a rejected candidate.
+-- Shared by reviewContext (a full Task's review) and commitReviewContext
+-- (an exact-commit review with no Task).
+repairOwnerContext :: RepairOwner -> Text
+repairOwnerContext owner = case owner of
+  OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
+  RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
+    <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
@@ -119,12 +145,14 @@ reviewContext task = Text.unlines
   , "Candidate: " <> renderGitOid (candidateCommit (reviewInput task))
   , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput task))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
-  , case repairOwner task of
-      OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
-      RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
-        <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
+  , repairOwnerContext (repairOwner task)
   ]
 
+-- Both admission branches of a review fork at Medium: the reviewer's job is
+-- to read a bounded diff and judge it, not to carry a design loop, so there
+-- is no caller-facing effort parameter here (unlike lunaTask/lunaTaskFrom,
+-- where the caller always chooses). Reporting is the Assignment default
+-- (NotifyOwner), same reasoning as lunaTaskFrom/solTaskFrom above.
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
@@ -132,7 +160,31 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
-    ((assignment [label|review|] (ReviewTask task candidate owner)) { report = Silent })
+    (assignment [label|review|] (ReviewTask task candidate owner))
+
+commitReviewContext :: CommitReview -> Text
+commitReviewContext review = Text.unlines
+  [ "Candidate: " <> renderGitOid (commitReviewCommit review)
+  , "Owned source: " <> Text.intercalate ", " (commitReviewOwnedPaths review)
+  , "Acceptance: " <> commitReviewAcceptance review
+  , repairOwnerContext (commitReviewOwner review)
+  ]
+
+-- A root review of one exact commit, with no owning Task: useful when the
+-- root itself produced or selected the commit (an incorporation, a direct
+-- edit) and only needs a judgment against a stated acceptance, not the full
+-- fork-group/plan/rationale bookkeeping a Task carries. Same admission shape
+-- as reviewCandidate (fixed Medium, same effect constraints); if the
+-- reviewer accepts, it builds its own Task for the ReviewedCandidate it
+-- returns -- the `task` defaults constructor makes that a one-liner.
+reviewCommit
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
+  => GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewCommit commit accept owned owner = unfold (subgroup "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
+  withInstructions (projectPrompt "review") $ withContext (selected commitReviewContext) $
+  withModel "luna" $ withEffort Medium $
+  coding (atRef (GitRef (renderGitOid commit)))
+    (assignment [label|review|] (CommitReview commit accept owned owner))
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.
@@ -145,15 +197,36 @@ candidateAtSubmission candidate evidence = case evidence of
   NoBoundWorktree -> Left "candidate has no bound-source evidence"
   WorktreeObservationFailed failure -> Left (renderWorktreeError failure)
 
--- A completed review attempt leaves its actor available for the revised candidate.
+-- Ownership gate: which paths a candidate range actually touched outside its
+-- declared ownership. Same numstat parsing as Project.Evidence's pure
+-- ownershipCheck, but this runs the diff itself and returns the exact stray
+-- paths, for a caller that wants to act on the list rather than read a
+-- CheckResult's rendered detail string. A git failure here is a defect in
+-- the evidence, the same stance Project.Review's own gitText takes -- never
+-- read as an empty, passing diff.
+unownedPaths
+  :: Member Commands effects
+  => GitOid -> GitOid -> [Text] -> Eff effects [Text]
+unownedPaths base candidate owned = do
+  let range = renderGitOid base <> ".." <> renderGitOid candidate
+  result <- Cmd.run (Cmd.argv ["git", "diff", "--numstat", range])
+  case Cmd.stdout result of
+    Right stat -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
+    Left issue -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show issue)
+
+-- A completed review attempt leaves its actor available for the revised
+-- candidate. Reporting is the Assignment default (NotifyOwner); see
+-- lunaTaskFrom's note above.
 reviewAgain
   :: Member Replies effects
   => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
-  (assignment label task) { guidance = Just (projectPrompt "review"), report = Silent }
+  (assignment label task) { guidance = Just (projectPrompt "review") }
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
 -- separate request to an available implementer. No queue is created for Left.
+-- Reporting is the Assignment default (NotifyOwner); see lunaTaskFrom's note
+-- above.
 repair
   :: Member Replies effects
   => Label -> ReviewTask -> Candidate -> [Text]
@@ -162,14 +235,16 @@ repair label task candidate findings = case repairOwner task of
   OwnerRepairs -> pure (Left (Repair candidate findings))
   RetainedImplementer actor -> Right <$> requestWith actor
     ((assignment label (RepairTask (reviewAssignment task) candidate findings))
-      { guidance = Just (projectPrompt "repair"), report = Silent })
+      { guidance = Just (projectPrompt "repair") })
 
+-- Reporting is the Assignment default (NotifyOwner); see lunaTaskFrom's note
+-- above.
 requestIncorporation
   :: Member Replies effects
   => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
 requestIncorporation recipient label task amendment = requestWith recipient $
   (assignment label (IncorporationTask task amendment))
-    { guidance = Just (projectPrompt "incorporate"), report = Silent }
+    { guidance = Just (projectPrompt "incorporate") }
 
 -- Build a complete packet from evidence already bound in the workbench. Record
 -- updates add alternatives or narrow the unblocked obligation when needed.

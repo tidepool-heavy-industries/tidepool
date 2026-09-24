@@ -11,28 +11,50 @@ come from its own assignment, not the parent's history.
 
 Every `unfold`/`child` needs a `ForkGroupPath`. `ForkGroupPath` is a type, not a
 term: it has no exported constructor, so `ForkGroupPath "..."` does not
-type-check. Reuse `taskGroup task` (or `specialistGroup slot`) when the group
+type-check. Reuse `taskGroup work` (or `specialistGroup slot`) when the group
 already exists on your `Task`; build a new one with `batch campaign group` (a
 fresh two-segment path) or `subgroup group` (nested under the enclosing fork's
 own path) — both take plain string literals, e.g. `batch "review" "lane-a"`.
 
-`lunaTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
+`lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
 builds a branch value on the `luna` alias: the cheap, fast tier, and the default
-for bounded implementation and review children, so fork many of them in one
-frontier. It selects fresh context from the Task (a Luna cannot reuse a Sol
-conversation), so the assignment must carry every fact the child needs.
+for bounded implementation and review children. Effort (`Low`, `Medium`, `High`)
+is chosen at every fork. It selects fresh context from the Task (a Luna cannot
+reuse a Sol conversation), so the assignment must carry every fact the child
+needs, including the contract at each seam it shares with a sibling.
 `solTaskFrom` has the same shape on the `executor` (Sol) alias with inherited
 context; use it only for a child that owns design judgment or its own
-integration loop. `Task` is a record, not a module; use `taskSource`,
-`planPath`, `obligation`, and `acceptedDecisions` directly.
+integration loop. The child's settlement notice wakes you with its reply; no
+watch is needed per child.
 
-Given your authored `task :: Task` and `source :: WorktreeSeed`, this launches a
-fresh Luna Medium implementer returning `Outcome Candidate`, with a progress stream:
+Given your authored `work :: Task` and `source :: WorktreeSeed`, this launches
+one fresh Luna implementer returning `Outcome Candidate`, with a progress stream:
 
 ```haskell
-let workerLabel = [label|implementation|]
-let branch = lunaTaskFrom workerLabel source task
-(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
+let branch = lunaTaskFrom [label|implementation|] Medium source work
+(worker, progress) <- unfold (taskGroup work) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
+```
+
+`task label objective ownedPaths acceptance source` builds a `Task` with the
+group, plan path and empty decisions defaulted; update any field with record
+syntax. Fork a wave from `base :: GitOid`: every disjoint obligation plus an
+independent review or test child, admitted in one `unfold`:
+
+```haskell
+let parserTask = task [label|parser|] "Parse the wire format into Item values" ["src/parse.rs"] "Round-trip tests for every item kind pass" base
+let storeTask = task [label|store|] "Persist Items with atomic append" ["src/store.rs"] "Append and replay tests pass" base
+let testTask = task [label|contract-tests|] "Write failing tests for the parse/store seam" ["tests/seam.rs"] "Tests compile and name the seam contract" base
+((parser, parserProgress), (store, storeProgress), (tests, testsProgress)) <- unfold (batch "feature" "wave-1") $ (,,)
+  <$> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|parser|] Medium currentCheckout parserTask)
+  <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|store|] Medium currentCheckout storeTask)
+  <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|contract-tests|] Low currentCheckout testTask)
+```
+
+End the turn after admission; each child's notice wakes you. Before merging a
+candidate, refuse paths it does not own:
+
+```haskell
+strays <- unownedPaths base (candidateCommit candidate) ["src/parse.rs"]
 ```
 
 Choose `source = currentCheckout` for the executing actor's checkout (root
@@ -41,10 +63,12 @@ explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Use
 `solTaskFrom` when a related Sol child should inherit your completed reasoning. Fresh context is useful after bulky reconciliation or for
 independent review; descendants within a focused subtree can inherit.
 
-Compose independent children with `((,) <$> child a <*> child b)` inside one
-`unfold`. Keep shared-contract and integration work with their parent. Use
+Admission costs one cell per `unfold`, not per child, so admit the whole wave
+at once. Keep shared-contract and integration work with the parent. Use
 `child` when only a final reply is needed; it does not install `reportProgress`.
-Retain returned handles. Follow progress/results with the exomonad-coordinate skill.
+Retain returned handles. A record-actor router (`followWork`, see
+exomonad-coordinate) consumes settlement itself; wrap those branches in
+`withReport Silent`.
 
 Messages are for another model: cite the shared plan and send only the assignment
 or changed facts it cannot recover. Do not reconstruct the full plan in every Task.

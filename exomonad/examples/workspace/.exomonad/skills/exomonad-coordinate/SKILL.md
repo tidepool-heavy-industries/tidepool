@@ -71,7 +71,7 @@ once. An ordinary local selector can make short, disjoint assignments without
 a new workspace workstream registry. This cell assumes `baseline :: GitOid` is bound
 to the source being split. Both branches deliberately inherit the current
 reasoning and use the live root source; `lunaTaskFrom` selects the cheap `luna` alias
-and Medium effort (`solTaskFrom` is the Sol-tier variant for design-owning children). The current branch is checkpointed before capture.
+with the effort you pass (`solTaskFrom` is the Sol-tier variant for design-owning children). The current branch is checkpointed before capture.
 
 ```haskell
 data WorkSlice = InterfaceSlice | ConsumerSlice deriving (Show, Eq)
@@ -80,26 +80,25 @@ sliceName :: WorkSlice -> Text
 sliceName InterfaceSlice = "interface"
 sliceName ConsumerSlice = "consumer"
 
+sliceLabel :: WorkSlice -> Label
+sliceLabel InterfaceSlice = [label|interface|]
+sliceLabel ConsumerSlice = [label|consumer|]
+
 slicePaths :: WorkSlice -> [Text]
 slicePaths InterfaceSlice = ["src/interface.rs", "tests/interface.rs"]
 slicePaths ConsumerSlice = ["src/consumer.rs", "tests/consumer.rs"]
 
 let group = batch "corpus" "fanout"
-let shared = Task
+let shared = (task [label|feature|] "Deliver the feature through its real consumer" [] "Integrated behavior and focused checks" baseline)
       { taskGroup = group
       , planPath = "plans/feature.md"
-      , taskSource = baseline
-      , obligation = "Deliver the feature through its real consumer"
       , rationale = "The interface and consumer share one accepted contract"
-      , ownedPaths = []
-      , acceptance = "Integrated behavior and focused checks"
-      , acceptedDecisions = []
       }
 let sliceTask slice = shared
       { obligation = sliceName slice <> ": implement and check the assigned slice"
       , ownedPaths = slicePaths slice
       }
-let sliceBranch slice = lunaTaskFrom (sliceName slice) projectHead (sliceTask slice)
+let sliceBranch slice = withReport Silent (lunaTaskFrom (sliceLabel slice) Medium projectHead (sliceTask slice))
 ((interface, interfaceProgress), (consumer, consumerProgress)) <- unfold group $
   (,) <$> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch InterfaceSlice)
       <*> childWithProgress @WorkProgress @(Outcome Candidate) (sliceBranch ConsumerSlice)
@@ -117,8 +116,8 @@ state <- readWork router
 inspectFull (workSnapshotSummary candidateSummary state)
 ```
 
-`lunaTaskFrom` sets `report = Silent` because the record actor owns settlement
-delivery. Routine progress stays in `state`; a question, unavailable result,
+`withReport Silent` hands settlement delivery to the record actor; without it
+every child would also wake you directly. Routine progress stays in `state`; a question, unavailable result,
 terminal result, or candidate checkpoint wakes the owner. On wake, inspect the
 relevant candidate and source receipt before incorporating it. Mark handled
 evidence with `incorporatedWork`, drain the router after the wave, and release

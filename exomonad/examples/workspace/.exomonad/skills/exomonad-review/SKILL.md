@@ -4,21 +4,33 @@ description: Commission independent review and repair of exact Exomonad candidat
 ---
 
 Use review when independent judgment helps the owning integration decision.
-Given the current `sessionInput :: Task` and your committed `candidate :: Candidate`:
+The reviewer is seeded at the exact candidate commit, so it can run the
+candidate's own tests. From any actor, root included, with a commit, its
+acceptance and its owned paths:
+
+```haskell
+(reviewer, reviewProgress) <- reviewCommit commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
+```
+
+Inside a request whose `sessionInput :: Task` describes the work, with your
+committed `candidate :: Candidate`:
 
 ```haskell
 (reviewer, reviewProgress) <- reviewCandidate sessionInput OwnerRepairs candidate
 let reviewerRef = responseActor reviewer
 ```
 
-This returns a retained reviewer plus progress. `OwnerRepairs` means you repair
-findings; it avoids queuing a repair behind your own pending delivery. Follow the
-reviewer with the ordinary routing skill, using `reviewSummary` for its result.
+Both return a retained reviewer plus progress; its settlement notice wakes you.
+`OwnerRepairs` means you repair findings; it avoids queuing a repair behind
+your own pending delivery.
 
 Inside the reviewer, the assignment is `sessionInput :: ReviewTask`. Its candidate
-accessor is `reviewInput`, not `candidate`. After executing the relevant review,
-with `checks :: [Text]` naming the actual checks and `scope :: Text` describing what
-those checks establish:
+accessor is `reviewInput`, not `candidate`. Read for structure before bugs: does the change add a second way to do
+something that exists? Confirm `git rev-parse HEAD` is the
+candidate commit before running checks; a test filter that matched zero tests is
+"not run", never "passed". After executing the relevant review, with
+`checks :: [Text]` naming the checks that actually ran (with matched counts) and
+`scope :: Text` describing what those checks establish:
 
 ```haskell
 let reviewed = ReviewedCandidate

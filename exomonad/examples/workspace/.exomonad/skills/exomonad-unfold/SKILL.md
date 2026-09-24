@@ -30,11 +30,6 @@ Both children see `sharedAfterUnfold` although it is bound after the `unfold`.
 Never await a child inside the cell that admits it: a queued child cannot start
 until the cell returns. End that cell promptly.
 
-To check whether a lead's children (or their own children) have started, read
-`Tidepool.Actors.Observe`'s `creationTree` (self identity from `actorContext`) over
-`snapshot`, the same registry `observeAgent` reads, filtered to `RosterRunning` for
-just the live ones.
-
 `spawnWatched` admits and watches exactly one child, so it cannot take the pair
 above. Admit with `unfold`, then join the settlements in one watch:
 
@@ -162,6 +157,11 @@ parentAgent >>= \case
   Nothing -> pure ()
   Just parent -> void (sendMessage parent "starting the migration; will check back before merging")
 ```
+
+To check whether a lead's children (or their own children) have started, read
+`Tidepool.Actors.Observe`'s `creationTree` (self identity from `actorContext`) over
+`snapshot`, the same registry `observeAgent` reads, filtered to `RosterRunning` for
+just the live ones.
 
 Assignment values and explicit worktree seeds keep ordinary Haskell value
 semantics and are not reevaluated at startup. A later failure in the cell stops

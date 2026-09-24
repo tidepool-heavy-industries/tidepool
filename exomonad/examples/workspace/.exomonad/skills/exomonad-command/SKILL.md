@@ -14,6 +14,14 @@ Call `bash` with:
 {"cmd":"git status --short"}
 ```
 
+For a build, test run, log or diff that may be large or failing, say what you
+are looking for with `focus`; the result keeps the relevant sections and names
+what it omitted, so there is no need to rerun with `sed` ranges:
+
+```json
+{"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"focus":"the failing test, its assertion and panic message"}
+```
+
 For an expected long check, start once with an explicit memory limit and a short
 initial observation (choose the limit for the actual check):
 

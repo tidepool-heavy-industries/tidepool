@@ -88,6 +88,15 @@ let dynamic = labelFromText ("work-" <> T.pack (show (2 :: Int)))
 (laneLabel, dynamic)
 ```
 
+## A cell splits into units
+
+A cell splits at column-1 lines into units that run in order. When a later unit
+fails, the receipt names what the earlier units did ("unit 1 submitted the
+reply", "unit 2 bound x"); read it before resubmitting. Keep `respond value` on
+one line with nothing after it: a trailing `.`, `$` or backquoted operator is
+rejected as a dangling operator, and a stray `) :: Text` on the next line is a
+separate unit that fails to parse.
+
 ## Every bound value is observed
 
 Each binding in a cell is displayed, and the cell shares one bounded display

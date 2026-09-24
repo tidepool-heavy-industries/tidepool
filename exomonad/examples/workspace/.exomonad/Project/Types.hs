@@ -1,7 +1,12 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Exomonad (AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel)
+import Tidepool.Actors.Exomonad
+  ( AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel
+  , CampaignLabel, campaignLabel, batch
+  )
+import Tidepool.Agent.Assignment (labelText)
 import Tidepool.Worktree (renderGitOid)
 
 -- A task is the understanding handed to a fresh context, not a workflow stage.
@@ -15,6 +20,37 @@ data Task = Task
   , acceptance :: Text
   , acceptedDecisions :: [AcceptedDecision]
   } deriving (Show, Eq)
+
+-- Turn an already-validated fork Label into a group path's campaign segment.
+-- Label and CampaignLabel share the same kebab-case, <=48-char validator
+-- (Tidepool.Agent.Assignment.Internal / Tidepool.Actors.Unfold), so a Label's
+-- own text always satisfies campaignLabel; the Left branch is unreachable in
+-- practice, not a real runtime possibility this constructor has to reject.
+labelCampaign :: Label -> CampaignLabel
+labelCampaign label = either (error . show) id (campaignLabel (labelText label))
+
+-- A defaults constructor for the harness's number-one missing primitive (the
+-- wave-3 root interview): a fork that only needs "objective, owned paths,
+-- acceptance". Derives a fork group from the label (batch <label> "work",
+-- the least surprising reading of ForkGroupPath's batch/subgroup shapes: a
+-- fresh two-segment path named after who is doing the work), points at the
+-- workspace's shared vocabulary plan, and leaves no rationale or accepted
+-- decisions yet -- ordinary record fields any caller can still override with
+-- a record update. The source revision has no sensible default: a
+-- WorktreeSeed (Project.Work's lunaTaskFrom/solTaskFrom) does not carry a
+-- resolvable GitOid purely, so it is unavoidable to require one here,
+-- explicitly, last.
+task :: Label -> Text -> [Text] -> Text -> GitOid -> Task
+task label objective owned accept source = Task
+  { taskGroup = batch (labelCampaign label) "work"
+  , planPath = ".exomonad/plans/language.md"
+  , taskSource = source
+  , obligation = objective
+  , rationale = ""
+  , ownedPaths = owned
+  , acceptance = accept
+  , acceptedDecisions = []
+  }
 
 -- The owner records its supported choice at the incorporated source revision.
 -- This is evidence-bearing task data; the record grants no runtime authority.
@@ -39,6 +75,18 @@ data ReviewTask = ReviewTask
   { reviewAssignment :: Task
   , reviewInput :: Candidate
   , repairOwner :: RepairOwner
+  }
+
+-- What a root review of one exact commit needs, with no owning Task: the
+-- commit itself, the acceptance it is judged against, the paths it may
+-- touch, and who repairs it. reviewCommit (Project.Work) forks a reviewer
+-- from this without building a Task first; the reviewer builds its own Task
+-- (with the `task` defaults constructor) only if it accepts.
+data CommitReview = CommitReview
+  { commitReviewCommit :: GitOid
+  , commitReviewAcceptance :: Text
+  , commitReviewOwnedPaths :: [Text]
+  , commitReviewOwner :: RepairOwner
   }
 
 data ReviewedCandidate = ReviewedCandidate
