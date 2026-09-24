@@ -132,18 +132,3 @@ skills = do
   check "branch and ref identities round-trip through their constructors"
     ("integration/tags" `Text.isInfixOf` output identities
       && "exomonad/integration" `Text.isInfixOf` output identities)
-
-  -- The orchestrate skill is a pattern, not a library: its record and handlers
-  -- close over live children, so only the three cells a root can paste on
-  -- their own run here.
-  covered <- example owner "exomonad-orchestrate" 2
-  check "the orchestration pattern settles coverage and ownership in code"
-    ("True" `Text.isInfixOf` output covered)
-  orchestrated <- example owner "exomonad-orchestrate" 3
-  check "the orchestration gate offers an insufficient-evidence exit"
-    (any (`Text.isInfixOf` output orchestrated)
-      ["jev unavailable", "hold", "all_present", "item_missing", "conflicting", "insufficient_evidence"])
-  waked <- example owner "exomonad-orchestrate" 4
-  check "recorded decisions render one line each"
-    ("evidence_incomplete" `Text.isInfixOf` output waked
-      && "merged" `Text.isInfixOf` output waked)

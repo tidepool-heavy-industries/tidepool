@@ -51,3 +51,20 @@ After repair, reuse the retained specialist with `reviewAgain` at the revised
 candidate; consult its signature only when needed. Integrate the reviewed source,
 then verify the changed integration boundary. A review decision covers its stated
 scope and does not turn partial work into product completion.
+
+## Owner map and repair policy from exact commits
+
+Check ownership in code, not with Jev: an outside-owned-path change is a
+`git diff` fact. Route the verdict with a `J.choice`, naming the base and
+candidate commits it ran at; `insufficient_evidence` means the state was
+incomplete, not that the candidate is a defect — name the missing field
+instead of merging or repairing on a guess:
+
+```haskell
+let outside = [p | p <- changed, p `notElem` owned]
+let gate = J.choice "Which statement describes the candidate?"
+      (J.alt #all_present "Every changed file is inside the owned paths and the required tests pass" ("merge" :: Text)
+        J..| J.alt #item_missing "A changed file is outside the owned paths, or a required test is missing or failing" "repair"
+        J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs" "ask again")
+answer <- J.ask1 (J.state (#owned_paths := owned :& #base := ("abc1230" :: Text) :& #candidate := ("def4560" :: Text) :& #outside := outside)) gate
+```

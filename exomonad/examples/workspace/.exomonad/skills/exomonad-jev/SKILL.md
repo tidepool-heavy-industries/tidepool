@@ -307,7 +307,8 @@ confidence, `J.resolvedModel`, and the action taken — and give the record one
 `Call` the owner reads the state through. A judgment nobody can inspect
 afterwards is the one failure mode that costs more than the turn it saved: the
 whole point of routing in Haskell is that the root can read what was decided
-without re-deriving it. `exomonad-orchestrate` is that pattern written out.
+without re-deriving it. `exomonad-review`'s owner-map and repair-policy
+example is that pattern written out.
 
 Not executable on its own: it needs a live child to observe.
 

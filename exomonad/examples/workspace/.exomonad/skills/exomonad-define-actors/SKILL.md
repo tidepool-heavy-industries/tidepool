@@ -169,5 +169,6 @@ re-exported by the workbench surface — a cell naming them needs
 `import Tidepool.Effects.Core (Jev, Commands)` before the row. The row is still
 checked against the launching actor's ceiling, so asking for more than the
 creator holds is refused at start, not silently granted. When the loop this
-record carries is implement → review → repair → merge, load `exomonad-orchestrate`
-for the whole shape.
+record carries is implement → review → repair → merge, load `exomonad-review`
+for the owner-map and repair-policy shape and `Project.Merge` for the
+integrator actor.

@@ -63,6 +63,10 @@ Do not turn it into a stop/retry loop.
 For custom typed joins or automatic request continuations, load
 `exomonad-define-actors`. Routine routing stays in Haskell; wake the owning Sol only
 for engineering decisions, actionable failures or integration work.
+`Project.RebaseRouter`'s `rebaseRouter` actor watches an integration worktree and
+each child's own commits and nudges a child with `sendMessage` when the child is
+behind and the advance overlaps its committed paths, so routine rebase prompting
+does not need a parent turn either.
 
 ## Split one shared Task
 
