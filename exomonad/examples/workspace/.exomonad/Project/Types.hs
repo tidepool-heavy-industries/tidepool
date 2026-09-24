@@ -70,12 +70,13 @@ data Candidate = Candidate
 -- Queuing a repair to the owner of a pending delivery would deadlock it.
 -- A separate implementer is available for repair after returning its candidate.
 data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef
+  deriving (Show)
 
 data ReviewTask = ReviewTask
   { reviewAssignment :: Task
   , reviewInput :: Candidate
   , repairOwner :: RepairOwner
-  }
+  } deriving (Show)
 
 -- What a root review of one exact commit needs, with no owning Task: the
 -- commit itself, the acceptance it is judged against, the paths it may
@@ -87,7 +88,7 @@ data CommitReview = CommitReview
   , commitReviewAcceptance :: Text
   , commitReviewOwnedPaths :: [Text]
   , commitReviewOwner :: RepairOwner
-  }
+  } deriving (Show)
 
 data ReviewedCandidate = ReviewedCandidate
   { acceptedAssignment :: Task
