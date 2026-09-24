@@ -2254,6 +2254,19 @@ pub(crate) async fn run(
                                 root: root_actor.identity(),
                                 error: terminal.summary.clone(),
                             }).ok();
+                            if root_never_bound(&config.root_binding_path) {
+                                // The root never reached a queue-ready binding in
+                                // this run, so there is no live conversation this
+                                // host could be retained to preserve. Staying up
+                                // only holds the incarnation lease and every
+                                // worktree binding lock a fresh run of this
+                                // workspace needs — exit instead of lingering.
+                                tracing::error!(%error, failure = %terminal.summary, "root coordination stopped before its conversation was ever bound; exiting instead of retaining an unbindable session");
+                                break Err(runtime_error(format!(
+                                    "Exomonad root failed before its conversation was ever bound and native execution is unconfirmed ({error}): {}",
+                                    terminal.summary
+                                )));
+                            }
                             tracing::error!(%error, failure = %terminal.summary, "root coordination stopped; native execution unconfirmed, retaining session without automatic conversation resume");
                             root_active = false;
                             continue;
@@ -2277,6 +2290,14 @@ pub(crate) async fn run(
                                 root: root_actor.identity(),
                                 error: error.to_string(),
                             }).ok();
+                            if root_never_bound(&config.root_binding_path) {
+                                // Same reasoning as the unconfirmed-native-exit
+                                // case above: nothing was ever bound in this run,
+                                // so there is nothing worth staying up for. Exit
+                                // and release every lock a fresh run needs.
+                                tracing::error!(%error, "model root recovery unavailable and no conversation was ever bound; exiting instead of retaining an unbindable session");
+                                break Err(error);
+                            }
                             tracing::error!(%error, "model root recovery unavailable; operator forest remains attached");
                             root_active = false;
                             continue;
@@ -2304,6 +2325,16 @@ pub(crate) async fn run(
         Ok(())
     };
     handoff_application_owners(application_owners, applications_task, cleanup, result)
+}
+
+/// True when this run's root has never reached a queue-ready binding —
+/// `root_binding_path` is written the moment the interactive application's
+/// session callback certifies queue readiness, so its absence is proof, not
+/// inference. A root that fails before that point has no live conversation a
+/// lingering host could be retained to preserve, so a coordination failure at
+/// that point must end the host rather than hold its locks indefinitely.
+fn root_never_bound(root_binding_path: &Path) -> bool {
+    !root_binding_path.exists()
 }
 
 async fn confirm_native_exit(tmux: &TmuxSession, pane: Option<&TmuxPaneId>) -> Result<(), String> {

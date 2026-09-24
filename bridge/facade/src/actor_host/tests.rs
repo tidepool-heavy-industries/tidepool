@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn root_never_bound_is_true_exactly_when_the_binding_file_is_absent() {
+    // Regression: a root coordination failure before this run's root ever
+    // reached a queue-ready binding used to leave the host running,
+    // holding the host incarnation lease and every worktree binding lock a
+    // fresh run of the same workspace needs, sometimes for minutes.
+    let root = tempfile::tempdir().unwrap();
+    let binding_path = root.path().join("root-binding.json");
+    assert!(root_never_bound(&binding_path));
+
+    std::fs::write(
+        &binding_path,
+        "not even a real binding, just proof of writing",
+    )
+    .unwrap();
+    assert!(!root_never_bound(&binding_path));
+}
+
+#[test]
 fn operator_role_has_journal_without_widening_child_roles() {
     let operator = operator_effective_role(exomonad_actor::ResearchPolicy::default());
     assert!(operator

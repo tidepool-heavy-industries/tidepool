@@ -611,7 +611,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         // Validate continuity before stopping a currently healthy session.
         // The host repeats this check at launch so a later disappearance also
         // fails closed.
-        resolve_root_launch_mode(true, &root_binding_path).await?;
+        validate_recreate_continuity(&root_binding_path).await?;
         let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
             runtime_error(format!(
                 "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
@@ -1144,17 +1144,13 @@ async fn run_host(
     }
 
     let recovered_binding = options.run_root.join("root-binding.json");
-    let root_launch_mode = if host_generation > 1 {
-        resolve_root_launch_mode(true, &recovered_binding)
-            .await
-            .map_err(|error| {
-                runtime_error(format!(
-                    "host generation {host_generation} cannot prove a resumable root; actor remains unavailable: {error}"
-                ))
-            })?
-    } else {
-        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?
-    };
+    let root_launch_mode = root_launch_mode_for_generation(
+        host_generation,
+        options.resume_root,
+        &options.root_binding_path,
+        &recovered_binding,
+    )
+    .await?;
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
     let accepted_source = source::SourceLayer::new(&options.run_root)
@@ -1452,6 +1448,62 @@ fn ensure_private_run_root(path: &Path) -> std::io::Result<()> {
 
     std::fs::create_dir_all(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Choose how this host generation launches its root, given whether an
+/// earlier generation of the SAME run ever got a root as far as a queue-ready
+/// binding.
+///
+/// Generation 1 follows the caller's explicit `resume_root` request against
+/// the session-level binding, exactly as before. A later generation (one
+/// systemd restarted after generation `N-1` failed) only has a conversation
+/// worth resuming when `recovered_binding` — this run's own internal
+/// root-binding file, written the moment a root ever reaches queue-readiness
+/// — actually exists. When it does not, no generation of this run ever had a
+/// root to lose, so forcing a resume attempt would manufacture a permanent
+/// "cannot prove a resumable root" failure out of thin air; this starts fresh
+/// instead, same as generation 1 would with no `--resume-root` requested.
+async fn root_launch_mode_for_generation(
+    host_generation: u64,
+    resume_root: bool,
+    root_binding_path: &Path,
+    recovered_binding: &Path,
+) -> Result<InteractiveLaunchMode, Box<dyn std::error::Error>> {
+    if host_generation <= 1 {
+        return resolve_root_launch_mode(resume_root, root_binding_path).await;
+    }
+    if !recovered_binding.exists() {
+        tracing::warn!(
+            host_generation,
+            "no generation of this run ever bound a root conversation; starting fresh instead of forcing an unresumable recovery"
+        );
+        return Ok(InteractiveLaunchMode::Fresh);
+    }
+    resolve_root_launch_mode(true, recovered_binding)
+        .await
+        .map_err(|error| {
+            runtime_error(format!(
+                "host generation {host_generation} cannot prove a resumable root; actor remains unavailable: {error}"
+            ))
+        })
+}
+
+/// A `--recreate` request validates that the session it is about to replace
+/// can actually be resumed before it stops that (currently healthy) session.
+/// A session whose first launch failed before its root ever bound has no
+/// `root-binding.json` at all — there is nothing to resume and nothing to
+/// validate, so that case shares the plain fresh-start path (no error, no
+/// `--resume-root` passed to the host) instead of failing closed as an
+/// unreadable binding.
+async fn validate_recreate_continuity(
+    root_binding_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !root_binding_path.exists() {
+        return Ok(());
+    }
+    resolve_root_launch_mode(true, root_binding_path)
+        .await
+        .map(|_| ())
 }
 
 async fn resolve_root_launch_mode(
@@ -3179,6 +3231,93 @@ mod tests {
         clear_fresh_root_binding(&binding).unwrap();
         assert!(!binding.exists());
         clear_fresh_root_binding(&binding).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_later_generation_with_no_recovered_binding_starts_fresh_instead_of_looping() {
+        // Regression for the observed failure: generation 1 fails before its
+        // root ever reaches queue-readiness, systemd restarts it, and every
+        // later generation used to force a resume against a file that was
+        // never written — a permanent "cannot prove a resumable root" loop.
+        let root = tempfile::tempdir().unwrap();
+        let root_binding_path = root.path().join("session-binding.json");
+        let recovered_binding = root.path().join("run-binding.json");
+        assert!(!recovered_binding.exists());
+
+        let mode = root_launch_mode_for_generation(
+            2,
+            /* resume_root (from the original launch args) */ true,
+            &root_binding_path,
+            &recovered_binding,
+        )
+        .await
+        .expect("a generation with nothing recorded to resume must not fail");
+        assert_eq!(mode, InteractiveLaunchMode::Fresh);
+    }
+
+    #[tokio::test]
+    async fn a_later_generation_resumes_the_recovered_binding_when_one_was_written() {
+        let root = tempfile::tempdir().unwrap();
+        let root_binding_path = root.path().join("session-binding.json");
+        let recovered_binding = root.path().join("run-binding.json");
+        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
+        exomonad_agent::accept_interactive_session_binding(
+            &recovered_binding,
+            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            thread.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mode =
+            root_launch_mode_for_generation(3, false, &root_binding_path, &recovered_binding)
+                .await
+                .unwrap();
+        assert_eq!(mode, InteractiveLaunchMode::Resume(thread));
+    }
+
+    #[tokio::test]
+    async fn the_first_generation_ignores_the_recovered_binding_and_follows_resume_root() {
+        let root = tempfile::tempdir().unwrap();
+        let root_binding_path = root.path().join("session-binding.json");
+        let recovered_binding = root.path().join("run-binding.json");
+
+        let mode =
+            root_launch_mode_for_generation(1, false, &root_binding_path, &recovered_binding)
+                .await
+                .unwrap();
+        assert_eq!(mode, InteractiveLaunchMode::Fresh);
+    }
+
+    #[tokio::test]
+    async fn recreate_on_a_session_that_never_bound_a_root_starts_fresh_instead_of_failing() {
+        // Regression: `exomonad init --recreate` on a session whose first
+        // launch failed before the root ever bound used to unconditionally
+        // validate a resume against a binding file that was never written,
+        // failing with "cannot resume the requested root conversation ...
+        // No such file or directory" instead of starting clean.
+        let root = tempfile::tempdir().unwrap();
+        let root_binding_path = root.path().join("root-binding.json");
+        assert!(!root_binding_path.exists());
+
+        validate_recreate_continuity(&root_binding_path)
+            .await
+            .expect("a session with nothing ever bound must not fail closed");
+    }
+
+    #[tokio::test]
+    async fn recreate_on_a_session_with_an_unreadable_binding_still_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_binding_path = root.path().join("root-binding.json");
+        std::fs::write(&root_binding_path, "not a valid binding").unwrap();
+
+        let error = validate_recreate_continuity(&root_binding_path)
+            .await
+            .expect_err("a present but corrupt binding must still fail closed");
+        assert!(error
+            .to_string()
+            .contains("cannot resume the requested root conversation"));
     }
 
     #[cfg(unix)]
