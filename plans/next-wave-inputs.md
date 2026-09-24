@@ -42,3 +42,32 @@ How the run was observed, for the next one: tmux holds no scrollback for Codex
 panes (alternate screen); each agent's Codex rollout in `~/.codex/sessions`
 is the complete record, and forks carry `parent_thread_id`. Prompt caching
 across forks held at about 99% from a child's first request.
+
+## From wave 2 (2026-09-24)
+
+A GPT-6 Sol root and one Sol child delivered the Responses transport slice in
+`~/dev/exomonad-harness` (697727d). Two thirds of the root's wall time was its
+seven Haskell cells at 90 to 150 s each; the daemon was replacing workers on
+an RSS ceiling below a warm worker's footprint, so nearly every request ran
+cold (fix in flight). Once workers stay warm, the remaining cell cost is:
+
+- **Library lowering on every cold worker.** Request fa36fa4dfe3673f6 in the
+  run's compiler log lowered 116 home modules, 81 of them `Tidepool.*`, for
+  26.9 s of 37.4 s of module work. The worker's `GutsMemo` is process-lifetime
+  only; `build_products_dir` persists GHC interfaces but not the prepared STG
+  output, so a fresh worker redoes the lowering even when the interface is
+  reusable. First bounded step: serialize the memo entry for stdlib modules
+  only, keyed by the stdlib fingerprint and dflags, write once after a cold
+  compile, load at worker start (touches `GhcPipeline.hs` and
+  `PreparedStg.hs`; the prepared-module record has no serialization today).
+  Installing the stdlib as a GHC package is the larger alternative: it changes
+  when interfaces become visible, which the session `Val.G<g>` injection order
+  depends on, and needs the fat-interface recovery path for every library call.
+- **Three daemon round trips per cell.** `check_cell` and the pinned bind both
+  parse and typecheck the same cell text in separate GHC processes; the check
+  keeps only verdicts and binder pins. Folding them into one `PreparationKind`
+  that continues past typecheck is possible, but it touches the generalization
+  guarantee the pinned pass protects (`turn.rs` `run_turn_pinned`). About 3 s
+  per warm cell; measure after the daemon fix before deciding.
+- **A child's only cell is its `respond`.** The transport child paid one full
+  cell (153 s cold) to deliver a value it had already computed.
