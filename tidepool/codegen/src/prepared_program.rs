@@ -390,9 +390,10 @@ pub struct CompiledProgram {
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
     /// exact allocations whose addresses the emitter used.
     pub(crate) bytes: Arc<static_bytes::PinnedBytes>,
-    /// The machine-shared external wrapper descriptors this program compiled
-    /// against (also in `descriptors`); the installing machine adopts the
-    /// first program's and refuses any later program carrying others.
+    /// The process-wide external wrapper descriptors this program compiled
+    /// against (also in `descriptors`); every program in the process mints
+    /// the same three from `ExternalDescriptors::shared`, so any installing
+    /// machine's cache already agrees with what it carries.
     pub(crate) externals: ExternalDescriptors,
     pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.

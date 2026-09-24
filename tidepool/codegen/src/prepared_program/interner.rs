@@ -11,7 +11,7 @@
 //! program against it, and absorbs each installed program's own entries.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::{
@@ -36,17 +36,16 @@ pub(super) enum AbsorbConflict {
         identity: Box<SymbolIdentity>,
         existing: Box<SymbolIdentity>,
     },
-    /// The program's external wrapper descriptors are not this machine's:
-    /// it was compiled against another interner.
-    Externals,
 }
 
-/// The machine's one set of external wrapper descriptors. A `ByteArray#`,
-/// boxed array or `MutVar#` is authenticated by header identity against the
-/// descriptor the *reading* code was compiled with, so every program on a
-/// machine must share these three exactly as it shares constructor
-/// descriptors; a value one program built is then readable by every later
-/// one (a `Text` bound in one turn and used in the next, a host-built answer).
+/// The one set of external wrapper descriptors for the whole process. A
+/// `ByteArray#`, boxed array or `MutVar#` is authenticated by header
+/// identity against the descriptor the *reading* code was compiled with, so
+/// every program compiled in this process -- on any machine -- must share
+/// these three exactly, the same way every machine shares constructor
+/// descriptors for a given identity; a value one program built is then
+/// readable by every later one on any machine (a `Text` bound in one turn
+/// and used in the next, a host-built answer, a machine-to-machine handoff).
 #[derive(Clone)]
 pub(crate) struct ExternalDescriptors {
     pub(crate) boxed_array: Arc<ObjectDescriptor>,
@@ -55,6 +54,12 @@ pub(crate) struct ExternalDescriptors {
     pub(crate) mut_var: Arc<ObjectDescriptor>,
     pub(crate) bytes_array: Arc<ObjectDescriptor>,
 }
+
+/// The process-wide singleton, keyed by the target it was minted for. Every
+/// `TargetDescriptor` this process compiles against is the same ABI, so this
+/// mints once and every later caller gets clones of the same three `Arc`s
+/// regardless of which interner or machine asked.
+static PROCESS_EXTERNALS: OnceLock<(TargetDescriptor, ExternalDescriptors)> = OnceLock::new();
 
 impl ExternalDescriptors {
     fn mint(target: &TargetDescriptor) -> Result<Self, CompileError> {
@@ -73,6 +78,32 @@ impl ExternalDescriptors {
                 target,
             )?),
         })
+    }
+
+    /// The process's external wrapper descriptors, minted once for the
+    /// process and shared by every later caller. A concurrent first call
+    /// from two threads may mint twice; [`OnceLock::set`] lets exactly one
+    /// win, and both callers return clones of that winner, so no caller ever
+    /// sees a second, divergent set.
+    fn shared(target: &TargetDescriptor) -> Result<Self, CompileError> {
+        if let Some((existing_target, externals)) = PROCESS_EXTERNALS.get() {
+            debug_assert_eq!(
+                existing_target, target,
+                "process external descriptors were minted for a different target"
+            );
+            return Ok(externals.clone());
+        }
+        let minted = Self::mint(target)?;
+        Ok(
+            match PROCESS_EXTERNALS.set((target.clone(), minted.clone())) {
+                Ok(()) => minted,
+                // Another thread won the race; use its winning value instead.
+                Err(_) => PROCESS_EXTERNALS
+                    .get()
+                    .map(|(_, externals)| externals.clone())
+                    .unwrap_or(minted),
+            },
+        )
     }
 
     fn same_as(&self, other: &Self) -> bool {
@@ -147,7 +178,10 @@ impl DescriptorInterner {
         );
     }
 
-    /// The machine's external wrapper descriptors, minted on first use.
+    /// This interner's cached clone of the process-wide external wrapper
+    /// descriptors ([`ExternalDescriptors::shared`]), fetched on first use.
+    /// Every interner in the process converges on the same three `Arc`s, so
+    /// this cache exists only to avoid the `OnceLock` read on every compile.
     pub(super) fn externals(
         &mut self,
         target: &TargetDescriptor,
@@ -155,9 +189,9 @@ impl DescriptorInterner {
         if let Some(externals) = &self.externals {
             return Ok(externals.clone());
         }
-        let minted = ExternalDescriptors::mint(target)?;
-        self.externals = Some(minted.clone());
-        Ok(minted)
+        let shared = ExternalDescriptors::shared(target)?;
+        self.externals = Some(shared.clone());
+        Ok(shared)
     }
 
     /// The external descriptors every installed program shares; `None`
@@ -166,26 +200,19 @@ impl DescriptorInterner {
         self.externals.as_ref()
     }
 
-    /// Whether a program's external descriptors may be adopted: the first
-    /// program's become the machine's; every later program must carry
-    /// exactly those. Validation only; see [`Self::commit_externals`].
-    pub(super) fn check_externals(
-        &self,
-        incoming: &ExternalDescriptors,
-    ) -> Result<(), AbsorbConflict> {
-        match &self.externals {
-            None => Ok(()),
-            Some(existing) if existing.same_as(incoming) => Ok(()),
-            Some(_) => Err(AbsorbConflict::Externals),
-        }
-    }
-
-    /// Adopt external descriptors already accepted by
-    /// [`Self::check_externals`].
+    /// Cache a program's external descriptors on this interner. Every
+    /// program in the process mints its externals from the same
+    /// [`ExternalDescriptors::shared`] singleton, so an incoming program's
+    /// externals can never disagree with what this interner already cached;
+    /// the assertion proves that invariant rather than guarding against a
+    /// conflict that can no longer arise.
     pub(super) fn commit_externals(&mut self, incoming: &ExternalDescriptors) {
-        debug_assert!(self.check_externals(incoming).is_ok());
-        if self.externals.is_none() {
-            self.externals = Some(incoming.clone());
+        match &self.externals {
+            Some(existing) => debug_assert!(
+                existing.same_as(incoming),
+                "external descriptors diverged despite process-wide sharing"
+            ),
+            None => self.externals = Some(incoming.clone()),
         }
     }
 
@@ -341,6 +368,54 @@ mod tests {
             abi: "sysv".into(),
             features: vec![],
         }
+    }
+
+    #[test]
+    fn independent_interners_share_the_same_external_descriptors() {
+        // Two interners that never overlay or absorb from one another --
+        // standing in for two separately compiled programs, possibly on two
+        // separate machines -- must still mint identical external wrapper
+        // descriptors: they come from the process-wide singleton, not from
+        // either interner's own state.
+        let mut a = DescriptorInterner::default();
+        let mut b = DescriptorInterner::default();
+        let externals_a = a.externals(&target()).unwrap();
+        let externals_b = b.externals(&target()).unwrap();
+        assert!(externals_a.same_as(&externals_b));
+        assert!(Arc::ptr_eq(
+            &externals_a.boxed_array,
+            &externals_b.boxed_array
+        ));
+        assert!(Arc::ptr_eq(&externals_a.mut_var, &externals_b.mut_var));
+        assert!(Arc::ptr_eq(
+            &externals_a.bytes_array,
+            &externals_b.bytes_array
+        ));
+        assert_eq!(externals_a.headers(), externals_b.headers());
+    }
+
+    #[test]
+    fn commit_externals_caches_the_shared_singleton_without_conflict() {
+        // `commit_externals` used to refuse a second program's externals
+        // unless they were `Arc`-identical to whatever the machine had
+        // already adopted. With one process-wide singleton there is nothing
+        // left to refuse: every program's externals are already the same
+        // value, so commit is just a cache fill that the debug assertion
+        // inside proves rather than guards.
+        let mut interner = DescriptorInterner::default();
+        assert!(interner.shared_externals().is_none());
+        let first = ExternalDescriptors::shared(&target()).unwrap();
+        interner.commit_externals(&first);
+        let cached = interner
+            .shared_externals()
+            .expect("commit_externals caches on first call");
+        assert!(cached.same_as(&first));
+
+        // A later, independently-minted set (e.g. another program's) is the
+        // same singleton and commits again without changing anything.
+        let second = ExternalDescriptors::shared(&target()).unwrap();
+        interner.commit_externals(&second);
+        assert!(interner.shared_externals().unwrap().same_as(&second));
     }
 
     #[test]
