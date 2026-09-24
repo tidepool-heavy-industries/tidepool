@@ -604,6 +604,13 @@ struct CachedHostCarrier {
 /// Carriers this workbench has built, by kind, shared for as long as the
 /// owning [`ResidentActorRunner`]/[`ResidentActorWorkbench`] lineage lives —
 /// see [`ResidentMachineAccess::sharing`].
+///
+/// The key is the kind alone, not the session, because a carrier carries no
+/// session state: each kind compiles a fixed anchor against fixed imports
+/// (never the actor's own view), and its constructor ids are content hashes
+/// of their qualified names (`tidepool_repr::datacon_table`), so the same
+/// carrier installs into any session or restart; a genuine id collision is
+/// a loud `merge_table` error, never a silent overwrite.
 type HostCarrierCache =
     Arc<std::sync::Mutex<std::collections::BTreeMap<HostCarrierKind, CachedHostCarrier>>>;
 
