@@ -3,6 +3,7 @@
 pub mod watchdog;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
@@ -13,7 +14,7 @@ use tidepool_repr::execution_schema::{
 };
 use tidepool_repr::DataConTable;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Expectation {
     /// The reference program has no finite observation. Keep compiler-stage
@@ -38,6 +39,110 @@ pub enum Expectation {
     EitherLeft(Box<Expectation>),
     EitherRight(Box<Expectation>),
     Error(ExpectedFailure),
+}
+
+/// Hand-written rather than `#[derive(Deserialize)]` with the same
+/// internally-tagged `kind` attribute used for `Serialize` above.
+///
+/// `serde`'s internally-tagged representation reads an object ahead of time
+/// into its own generic `Content` buffer so it can inspect the `kind` field
+/// before picking a variant. This workspace enables `serde_json`'s
+/// `arbitrary_precision` feature (needed elsewhere, e.g. `tidepool-mcp`, for
+/// exact numeric round-tripping) — Cargo unifies that feature across every
+/// workspace member built together, so it is active here too even though
+/// this crate never asked for it. Under `arbitrary_precision`, a JSON number
+/// decodes as a private one-key map rather than a plain number, and the
+/// generic `Content` buffer (from the `serde` crate, not `serde_json`) does
+/// not know how to unwrap that marker — so any internally-tagged enum with a
+/// numeric field fails with "invalid type: map, expected f64", even on
+/// perfectly ordinary input. Parsing into a `serde_json::Value` first and
+/// dispatching by hand sidesteps `Content` entirely: `Value`'s own decoder is
+/// the one place that DOES understand `arbitrary_precision`'s marker, so the
+/// resulting `Value::Number` is a normal number and `from_value` on each
+/// concrete variant struct deserializes it as such.
+impl<'de> Deserialize<'de> for Expectation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Float64ApproxPayload {
+            expected: f64,
+            absolute_tolerance: f64,
+        }
+
+        let value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        match kind.as_deref() {
+            Some("no_finite_observation") => Ok(Expectation::NoFiniteObservation),
+            Some("cyclic_observation") => Ok(Expectation::CyclicObservation),
+            Some("int") => serde_json::from_value::<i64>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Int)
+            .map_err(serde::de::Error::custom),
+            Some("bool") => serde_json::from_value::<bool>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Bool)
+            .map_err(serde::de::Error::custom),
+            Some("char") => serde_json::from_value::<char>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Char)
+            .map_err(serde::de::Error::custom),
+            Some("text") => serde_json::from_value::<String>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Text)
+            .map_err(serde::de::Error::custom),
+            Some("float64_approx") => serde_json::from_value::<Float64ApproxPayload>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(|payload| Expectation::Float64Approx {
+                expected: payload.expected,
+                absolute_tolerance: payload.absolute_tolerance,
+            })
+            .map_err(serde::de::Error::custom),
+            Some("list") => serde_json::from_value::<Vec<Expectation>>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::List)
+            .map_err(serde::de::Error::custom),
+            Some("tuple") => serde_json::from_value::<Vec<Expectation>>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Tuple)
+            .map_err(serde::de::Error::custom),
+            Some("maybe") => serde_json::from_value::<Option<Box<Expectation>>>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Maybe)
+            .map_err(serde::de::Error::custom),
+            Some("either_left") => serde_json::from_value::<Box<Expectation>>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::EitherLeft)
+            .map_err(serde::de::Error::custom),
+            Some("either_right") => serde_json::from_value::<Box<Expectation>>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::EitherRight)
+            .map_err(serde::de::Error::custom),
+            Some("error") => serde_json::from_value::<ExpectedFailure>(
+                value.get("value").cloned().unwrap_or(Value::Null),
+            )
+            .map(Expectation::Error)
+            .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown or missing Expectation \"kind\": {other:?}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1470,5 +1575,69 @@ mod tests {
             serde_json::from_value(serde_json::json!({"source_revision": "x", "expectations": {}}))
                 .unwrap();
         assert!(older_format.source_tops.is_none());
+    }
+
+    #[test]
+    fn float64_approx_deserializes_under_arbitrary_precision() {
+        // Direct float64_approx expectation
+        let json_str = r#"{"kind":"float64_approx","value":{"expected":1.0,"absolute_tolerance":0.0}}"#;
+        let deserialized: Expectation = serde_json::from_str(json_str)
+            .expect("failed to deserialize float64_approx from JSON");
+        match deserialized {
+            Expectation::Float64Approx {
+                expected,
+                absolute_tolerance,
+            } => {
+                assert_eq!(expected, 1.0);
+                assert_eq!(absolute_tolerance, 0.0);
+            }
+            other => panic!("expected Float64Approx, got {:?}", other),
+        }
+
+        // Verify round-trip
+        let serialized = serde_json::to_value(&deserialized).unwrap();
+        let round_tripped: Expectation =
+            serde_json::from_value(serialized).expect("failed to round-trip");
+        assert!(matches!(
+            round_tripped,
+            Expectation::Float64Approx {
+                expected: 1.0,
+                absolute_tolerance: 0.0
+            }
+        ));
+    }
+
+    #[test]
+    fn float64_approx_nested_in_list_deserializes_under_arbitrary_precision() {
+        // float64_approx nested inside a List
+        let json_str = r#"{"kind":"list","value":[{"kind":"float64_approx","value":{"expected":2.5,"absolute_tolerance":0.1}},{"kind":"int","value":42}]}"#;
+        let deserialized: Expectation = serde_json::from_str(json_str)
+            .expect("failed to deserialize list with float64_approx from JSON");
+        match &deserialized {
+            Expectation::List(items) => {
+                assert_eq!(items.len(), 2);
+                match &items[0] {
+                    Expectation::Float64Approx {
+                        expected,
+                        absolute_tolerance,
+                    } => {
+                        assert_eq!(*expected, 2.5);
+                        assert_eq!(*absolute_tolerance, 0.1);
+                    }
+                    other => panic!("expected Float64Approx in list, got {:?}", other),
+                }
+                match &items[1] {
+                    Expectation::Int(n) => assert_eq!(*n, 42),
+                    other => panic!("expected Int in list, got {:?}", other),
+                }
+            }
+            other => panic!("expected List, got {:?}", other),
+        }
+
+        // Verify round-trip
+        let serialized = serde_json::to_value(&deserialized).unwrap();
+        let round_tripped: Expectation =
+            serde_json::from_value(serialized).expect("failed to round-trip");
+        assert!(matches!(round_tripped, Expectation::List(items) if items.len() == 2));
     }
 }
