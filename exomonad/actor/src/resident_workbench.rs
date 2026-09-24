@@ -2598,7 +2598,13 @@ where
         input: RootCustody,
         reply_type: String,
         reply_declaration: Option<String>,
+        reply_declaration_modules: Vec<String>,
     ) -> Result<(String, String), ResidentActorWorkbenchError> {
+        let reply_declaration = reply_declaration.filter(|_| {
+            reply_declaration_modules
+                .iter()
+                .any(|module| declaration_worth_showing(module, &self.access.source.workspace_modules))
+        });
         let mut source = self.access.source.clone();
         if let (Some(response), Some(request)) = (&self.response, self.request) {
             source.preamble = response
@@ -2695,9 +2701,16 @@ where
             ),
             Err(_) => "<input rendering unavailable; use lookup for sessionInput, then select or apply the value>".into(),
         };
-        let reply = reply_declaration.unwrap_or_else(|| {
-            format!("{reply_type} (no declaration captured at the request site)")
-        });
+        let reply = match reply_declaration {
+            Some(declaration) => declaration,
+            None if reply_declaration_modules.is_empty() => {
+                format!("{reply_type} (no declaration captured at the request site)")
+            }
+            // A library/stdlib reply type: "reply type X" above already
+            // names it, and its internal representation would not help a
+            // model construct one.
+            None => String::new(),
+        };
         Ok((
             input,
             bounded_activation_text(reply, 4 * 1024, false, &format!("lookup {reply_type}")),
@@ -4395,7 +4408,35 @@ where
 
 #[cfg(test)]
 mod activation_preview_tests {
-    use super::bounded_activation_text;
+    use super::{bounded_activation_text, declaration_worth_showing};
+
+    #[test]
+    fn library_reply_type_declaration_is_not_worth_showing() {
+        // Text's own module (data.text) is neither a configured workspace
+        // module nor a session-declared one: the model already knows the
+        // type from "reply type Text" and gains nothing from its internal
+        // Array/Int representation.
+        assert!(!declaration_worth_showing(
+            "Data.Text",
+            &["Project.Shell".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn workspace_reply_type_declaration_is_worth_showing() {
+        assert!(declaration_worth_showing(
+            "Project.Shell",
+            &["Project.Shell".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn session_declared_reply_type_declaration_is_worth_showing() {
+        // Every session declaration lives under generation-versioned
+        // `Tidepool.Session.Lib.G<n>`/`Tidepool.Session.Val.G<n>` modules,
+        // never listed in `workspace_modules`.
+        assert!(declaration_worth_showing("Tidepool.Session.Lib.G3", &[]));
+    }
 
     #[test]
     fn preview_bounds_preserve_unicode_and_mark_omission() {
@@ -4416,6 +4457,15 @@ mod activation_preview_tests {
             "data\n<additional detail omitted; expand with `lookup R`>"
         );
     }
+}
+
+/// A reply type's declaration is worth showing to the model only when it is
+/// defined by the workspace or the current session: a library, stdlib, or
+/// `Tidepool.*` boot-package type is already named by "reply type X", and its
+/// declaration would add representation detail with no construction value.
+fn declaration_worth_showing(module: &str, workspace_modules: &[String]) -> bool {
+    module.starts_with("Tidepool.Session.")
+        || workspace_modules.iter().any(|known| known == module)
 }
 
 // Bound the demanded character prefix as well as the rendered UTF-8 bytes.

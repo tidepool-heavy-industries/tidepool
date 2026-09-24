@@ -340,11 +340,24 @@ renderType = renderWithContext stableContext . ppr
   where
     stableContext = defaultSDocContext { sdocSuppressUniques = True }
 
+-- | The declaration text for a reply type's 'TyCon', for a model constructing
+-- that reply value. Stripped of 'GHC.Iface.Type' representation pragmas
+-- (@{-# UNPACK #-}@ and the strictness bang it always wraps): those describe
+-- runtime layout, not the surface syntax a model would write. Whether this
+-- text is worth showing at all (a workspace/session type) versus a library
+-- type already named by "reply type X" is decided by the caller, which knows
+-- the compiled workspace's own modules; this stays a pure rendering of the
+-- 'TyCon' alone.
 replyDeclaration :: Type -> Maybe T.Text
 replyDeclaration ty = case splitTyConApp_maybe ty of
   Nothing -> Nothing
-  Just (constructor, _) -> Just (T.pack (renderWithContext defaultSDocContext
-    (pprTyThingInContext (ShowSub ShowIface ShowForAllWhen) (ATyCon constructor))))
+  Just (constructor, _) -> Just (stripRepresentationPragmas (T.pack (renderWithContext defaultSDocContext
+    (pprTyThingInContext (ShowSub ShowIface ShowForAllWhen) (ATyCon constructor)))))
+
+stripRepresentationPragmas :: T.Text -> T.Text
+stripRepresentationPragmas =
+  T.replace "{-# UNPACK #-} !" "" . T.replace "{-# UNPACK #-}!" "" .
+  T.replace "{-# UNPACK #-} " "" . T.replace "{-# UNPACK #-}" ""
 
 buildYieldSite :: VerbSpec -> T.Text -> Word64 -> Type -> [Type] -> YieldSite
 buildYieldSite spec origin ordinal answer inputs =

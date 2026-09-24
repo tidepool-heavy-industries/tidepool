@@ -7,6 +7,11 @@ use tidepool_runtime::YieldSite;
 pub struct ResponseExpectation {
     expected_type: String,
     pub(crate) declaration: Option<String>,
+    /// Modules the reply type's own head 'TyCon' is defined in (not the
+    /// progress type's), used to decide whether `declaration` is worth
+    /// showing: a workspace- or session-declared type, versus a library or
+    /// stdlib type the model already knows by name.
+    pub(crate) declaration_modules: Vec<String>,
     pub(crate) progress_type: Option<String>,
 }
 
@@ -24,6 +29,7 @@ impl ResponseExpectation {
             expected_type: expected_type.into(),
             progress_type: None,
             declaration: None,
+            declaration_modules: Vec::new(),
         }
     }
 
@@ -72,6 +78,7 @@ pub(crate) fn decode_typed_request_site(
     };
     let mut response = ResponseExpectation::new(metadata.ty.clone());
     response.declaration = metadata.reply_declaration.clone();
+    response.declaration_modules = metadata.modules.clone();
     let mut output_modules = metadata.modules.clone();
     if let Some(progress) = metadata.inputs.get(1) {
         response.progress_type = Some(progress.ty.clone());

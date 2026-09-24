@@ -3811,6 +3811,7 @@ where
                 input,
                 request.response.expected_type().to_owned(),
                 request.response.declaration.clone(),
+                request.response.declaration_modules.clone(),
             )
             .await?;
         let contract = crate::interactive_session::ActivationContract {
