@@ -2127,6 +2127,45 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// check, once per cell. The other is `run_turn`'s per-input-unit compile.
 #[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
 pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
+    check_cell_impl(req, None).map(|(checked, _folded)| checked)
+}
+
+/// The single-item fold materials for [`check_cell_with_fold`]: the SAME
+/// per-item install templates `compile_block_off_checkout` would otherwise
+/// send in its OWN, separate request, attached to the whole-cell check
+/// instead. The worker attempts this item's `PreparedStg` compile in the
+/// SAME invocation, immediately after the check, only when the check
+/// resolves to exactly one item and that item is a bind (`x <- e` /
+/// `let x = e`) — never a declaration or a bare expression; see
+/// `bridge/haskell/app/Main.hs`'s `attemptCellFoldTurn` for why an
+/// expression item still falls back to a separate request. When the shape
+/// doesn't match, or the item fails to compile, no folded result comes
+/// back and the caller runs its own per-item compile exactly as it does
+/// today — this is pure opportunistic reuse of the check's own compile,
+/// never a second way to install a cell item.
+pub struct CellFoldTurn<'a> {
+    pub templates: &'a [TurnTemplate],
+    pub gen: u64,
+    pub retained_imports: &'a [(SymbolIdentity, u64)],
+}
+
+/// Like [`check_cell`], but also attempts [`CellFoldTurn`]'s single-item
+/// compile in the SAME worker request. Returns the folded [`TurnResult`]
+/// alongside the check exactly when the worker produced one; `None` is the
+/// documented "fall back to the ordinary per-item compile" signal, not an
+/// error — a rejected or ineligible fold never fails this call.
+#[tracing::instrument(name = "cell_check_fold", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
+pub fn check_cell_with_fold(
+    req: CellCheckRequest<'_>,
+    fold: CellFoldTurn<'_>,
+) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+    check_cell_impl(req, Some(fold))
+}
+
+fn check_cell_impl(
+    req: CellCheckRequest<'_>,
+    fold: Option<CellFoldTurn<'_>>,
+) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -2145,6 +2184,18 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailu
         .inject_vals(req.inject_modules);
     if let Some(session_id) = req.session_id {
         cmd.session_incarnation(session_id.0.to_string());
+    }
+    let turn_out_path = temp.path().join("turn.cbor");
+    if let Some(fold) = &fold {
+        cmd.cell_fold_turn().turn_out(&turn_out_path).bind_gen(fold.gen);
+        for (i, tmpl) in fold.templates.iter().enumerate() {
+            let path = temp.path().join(format!("fold-template-{i}.hs"));
+            std::fs::write(&path, &tmpl.source)?;
+            cmd.turn_template(tmpl.kind.wire_name(), &path);
+        }
+        for (identity, generation) in fold.retained_imports {
+            cmd.retained_generation(extract_identity(identity), *generation);
+        }
     }
     let endpoint = cmd.bind().map_err(map_notfound)?;
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
@@ -2169,13 +2220,23 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailu
         return Err(CellCheckFailure { error, items });
     }
     let bytes = std::fs::read(&out_path)?;
-    decode_cell_out(
+    let checked = decode_cell_out(
         &bytes,
         req.cell_text,
         req.compile_generation,
         req.compile_view_evidence,
-    )
-    .map_err(Into::into)
+    )?;
+    // The worker writes `turn.cbor` only when it attempted AND succeeded at
+    // the fold (`attemptCellFoldTurn` swallows its own failures and simply
+    // leaves the file absent) — a malformed file here is a real protocol
+    // bug, not a fold rejection, so it is a hard decode error rather than a
+    // silent fall back.
+    let folded = if fold.is_some() && turn_out_path.exists() {
+        Some(decode_turn_output_dir(temp.path())?)
+    } else {
+        None
+    };
+    Ok((checked, folded))
 }
 
 /// The one entry point for a session-eval turn. Writes the turn text and

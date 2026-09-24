@@ -521,6 +521,19 @@ impl ExtractCmd {
         self
     }
 
+    /// `--cell-fold-turn` — ask a `--cell` request to also attempt one
+    /// item's `--turn`-shaped compile in the same worker invocation, using
+    /// whichever `--turn-template`/`--turn-out`/`--bind-gen`/
+    /// `--retained-generation` fields accompany it, when the whole-cell
+    /// check resolves to exactly one non-declaration item. No `--turn-out`
+    /// is written when the shape doesn't match or the item fails to
+    /// compile; the caller then falls back to its own separate `--turn`
+    /// request.
+    pub fn cell_fold_turn(&mut self) -> &mut Self {
+        self.request.cell_fold_turn();
+        self
+    }
+
     /// `--build-products-dir <dir>` — a persistent, shared `-fwrite-interface`
     /// output dir the extract points `hiDir`/`objectDir` at, so a LATER spawn's
     /// `load'` can skip an unchanged home module via GHC's own `checkOldIface`

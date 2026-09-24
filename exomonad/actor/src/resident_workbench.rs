@@ -2844,7 +2844,7 @@ where
             let check_effects = effects.clone();
             let check_cell_source = cell_source.clone();
             let check_cancellation = cancellation.clone();
-            let (snapshot, checked) =
+            let (snapshot, checked, folded) =
                 crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                     tidepool_runtime::with_compiler_transaction_cancellable(
                         check_cancellation,
@@ -2855,7 +2855,7 @@ where
                                 &check_effects,
                                 &check_cell_source,
                             );
-                            checked.map(|checked| (snapshot, checked))
+                            checked.map(|(checked, folded)| (snapshot, checked, folded))
                         },
                     )
                 }))
@@ -2866,6 +2866,18 @@ where
                 .items
                 .iter()
                 .position(|item| item.verdict.kind == TurnKind::Decl);
+            // Trust the speculative fold only when the check's OWN
+            // classification confirms the shape it was built for: exactly
+            // one item, and it's a bind (never a declaration — which stages
+            // through a private candidate this fold never touched — and
+            // never a bare expression, whose install goes through an
+            // observation wrapper this fold does not build; see
+            // `check_cell_off_checkout`'s doc comment).
+            let folded = folded.filter(|_| {
+                declaration_index.is_none()
+                    && checked.items.len() == 1
+                    && checked.items[0].verdict.kind == TurnKind::Bind
+            });
             let declaration_receipt = declaration_index.map(|index| {
                 let item = &checked.items[index];
                 DeclarationReceipt {
@@ -2920,13 +2932,41 @@ where
             // candidate directory nobody else's compile has on its include
             // path (`validate_declaration_candidate`), never the shared
             // session root.
+            let (checked, outcome, staged) = match folded {
+                // The whole-cell check already produced this item's compiled
+                // artifact (`check_cell_off_checkout`'s fold): no further
+                // GHC round trip for this attempt. Still validate its
+                // module against THIS reservation's generation — the fold
+                // compiled against the pre-check snapshot's generation,
+                // which only still matches when nothing else wrote to this
+                // scope between the check and `reserve_cell_generations`
+                // above; a mismatch here means the two disagree despite
+                // `compile_relevant_eq` passing (should not happen, but is
+                // cheap to guard) and this attempt falls back to an
+                // ordinary compile rather than installing a wrong binder.
+                Some(folded) if fold_result_matches_generation(&folded, c_view.next_value_generation()) => {
+                    let ready = ReadyBlock {
+                        result: folded,
+                        generation: c_view.next_value_generation(),
+                        declaration_source: checked.items[0].source.clone(),
+                        declaration_imports: c_view.workbench_imports(),
+                        observation: None,
+                    };
+                    (
+                        checked,
+                        CellItemsOutcome::Ready(vec![PreparedCellItem {
+                            ready: PreparedCellStep::Executable(Box::new(ready)),
+                        }]),
+                        None,
+                    )
+                }
+                _ => {
             let compile_source = source.clone();
             let compile_effects = effects.clone();
             let compile_cell_source = cell_source.clone();
             let compile_context = context.clone();
             let compile_view = c_view.clone();
             let compile_cancellation = cancellation.clone();
-            let (checked, outcome, staged) =
                 crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                     tidepool_runtime::with_compiler_transaction_cancellable(
                         compile_cancellation,
@@ -2993,7 +3033,9 @@ where
                     )
                 }))
                 .await
-                .map_err(ResidentActorWorkbenchError::Join)??;
+                .map_err(ResidentActorWorkbenchError::Join)??
+                }
+            };
 
             let items = match outcome {
                 CellItemsOutcome::Rejected { index, diagnostic } => {
@@ -7157,6 +7199,17 @@ enum CompiledBlock {
 struct CellSplitSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
+    /// Captured under this SAME checkout, for the single-item fold
+    /// (`check_cell_off_checkout`'s [`tidepool_runtime::session::CellFoldTurn`]):
+    /// on the prepared route, the fold's speculative compile needs exactly
+    /// the retained-imports snapshot an ordinary item compile would take
+    /// under `reserve_cell_generations`'s later, fresher checkout. Reusing
+    /// this earlier one is safe only because the fold's result is later
+    /// installed through the SAME `compile_relevant_eq` staleness check
+    /// every other off-checkout compile in this split already goes through;
+    /// a stale value here just makes the fold's compile itself fail or the
+    /// later re-checkout discard its result, never a wrong install.
+    retained: Vec<(SymbolIdentity, u64)>,
 }
 
 /// Take the checkout-scoped snapshot a split cell preparation needs, then
@@ -7211,11 +7264,13 @@ where
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
     let view = actor_compile_view(session, context, &source, type_modules)?;
+    let retained = session.prepared_retained();
     Ok((
         source,
         CellSplitSnapshot {
             view,
             candidate_module,
+            retained,
         },
     ))
 }
@@ -7225,12 +7280,25 @@ where
 /// they are already in hand, including the same-cell redeclaration-collision
 /// retry `prepare_cell_single_checkout` runs. No session or checkout touched
 /// here.
+///
+/// Speculatively attaches [`tidepool_runtime::session::CellFoldTurn`]
+/// materials to the check request — the SAME generic bind/binddiscard
+/// install templates `compile_block_off_checkout` would otherwise send in
+/// its own, later request — so a cell that turns out to be a single bind
+/// item compiles in this ONE round trip instead of two. Building them costs
+/// nothing when the worker doesn't use them (an N-item, expression-only, or
+/// declaration cell): no extra GHC work, only a few more small template
+/// files on an already-open request. The returned `Option<TurnResult>` is
+/// the documented "used it" signal; the caller decides whether `checked`'s
+/// OWN classification actually matches that shape before trusting it (never
+/// on the redeclaration-collision retry below, which keeps today's path).
 fn check_cell_off_checkout(
     snapshot: &CellSplitSnapshot,
     source: &ActorWorkbenchSource,
     effects: &str,
     cell_source: &str,
-) -> Result<CellCheck, ResidentActorWorkbenchError> {
+) -> Result<(CellCheck, Option<tidepool_runtime::session::TurnResult>), ResidentActorWorkbenchError>
+{
     let compile_view = &snapshot.view;
     let prepared = source.prepare(compile_view);
     let check_preamble =
@@ -7252,13 +7320,22 @@ fn check_cell_off_checkout(
         compile_generation: compile_view.next_value_generation().0,
         compile_view_evidence: &compile_view_evidence,
     };
-    match check_cell(cell_check_request()) {
-        Ok(checked) => Ok(checked),
+    let fold_templates =
+        resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
+    let fold = tidepool_runtime::session::CellFoldTurn {
+        templates: &fold_templates,
+        gen: compile_view.next_value_generation().0,
+        retained_imports: &snapshot.retained,
+    };
+    match tidepool_runtime::session::check_cell_with_fold(cell_check_request(), fold) {
+        Ok((checked, folded)) => Ok((checked, folded)),
         Err(failure) => {
             // See `prepare_cell_single_checkout`'s same-cell-shape comment:
             // a cell that both re-declares and uses a name in the same
             // statement needs the current generation's collision hidden
-            // before one retry.
+            // before one retry. The retry never attempts the fold — a
+            // collision retry is rare, and its patched imports are not the
+            // ones `fold_templates` above was built against.
             let mut patched_imports = None;
             if classify_compile(&failure.error).class == FailureClass::UserHaskell {
                 if let Some(previous_module) = compile_view.library() {
@@ -7287,13 +7364,33 @@ fn check_cell_off_checkout(
                         compile_view_evidence: &retried_evidence,
                         ..cell_check_request()
                     }) {
-                        Ok(checked) => Ok(checked),
+                        Ok(checked) => Ok((checked, None)),
                         Err(failure) => Err(cell_check_error(failure, cell_source)),
                     }
                 }
                 None => Err(cell_check_error(failure, cell_source)),
             }
         }
+    }
+}
+
+/// Whether a folded [`tidepool_runtime::session::TurnResult`] (compiled
+/// against the pre-check snapshot's generation, inside
+/// `check_cell_off_checkout`'s speculative fold) still targets exactly the
+/// value generation `reserve_cell_generations` just reserved for this
+/// attempt. A named bind's every bound binder must live in that exact
+/// generation's `Session.Val.G<g>` module; a discarding bind has none to
+/// check and always matches.
+fn fold_result_matches_generation(
+    result: &tidepool_runtime::session::TurnResult,
+    generation: tidepool_repr::Generation,
+) -> bool {
+    match result {
+        tidepool_runtime::session::TurnResult::Bind { bound, .. } => {
+            let expected = tidepool_repr::SessionModule::val(generation).module_name();
+            bound.iter().all(|binder| binder.module == expected)
+        }
+        _ => false,
     }
 }
 
@@ -10122,7 +10219,7 @@ mod request_tests {
             None,
         )
         .expect("split snapshot");
-        let checked = check_cell_off_checkout(
+        let (checked, _folded) = check_cell_off_checkout(
             &snapshot,
             &source,
             &split_context.haskell_effects_alias,
@@ -10277,7 +10374,7 @@ mod request_tests {
             None,
         )
         .expect("snapshot");
-        let checked =
+        let (checked, _folded) =
             check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
                 .expect("whole-cell check");
         let reservation = reserve_cell_generations(
@@ -10352,7 +10449,7 @@ mod request_tests {
         let (source, retry_snapshot) =
             snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
                 .expect("retry snapshot");
-        let retry_checked = check_cell_off_checkout(
+        let (retry_checked, _retry_folded) = check_cell_off_checkout(
             &retry_snapshot,
             &source,
             &context.haskell_effects_alias,
@@ -10674,6 +10771,108 @@ mod request_tests {
         );
     }
 
+    /// A single bind item (`x <- e`, no declaration) is the fold's target
+    /// shape: `check_cell_off_checkout` speculatively compiles it inside the
+    /// SAME worker request as the whole-cell check, so `prepare_cell` never
+    /// issues a second `timed_compile` round trip for it. This is the
+    /// counter test the fold's whole point rests on.
+    #[tokio::test]
+    async fn single_bind_item_cell_folds_into_one_daemon_round_trip() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let actor_id = context.actor.id.0;
+        let actor_incarnation = context.actor.incarnation.0;
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "answer <- pure (1 :: Int)".to_string();
+
+        let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
+        let (checked, prepared) = scope
+            .run(workbench.prepare_cell(context, cell))
+            .await
+            .expect("a single bind item cell prepares through the split");
+        assert_eq!(checked.items.len(), 1, "{checked:?}");
+        assert_eq!(checked.items[0].verdict.kind, TurnKind::Bind, "{checked:?}");
+        let PreparedCell::Ready { items, .. } = prepared else {
+            panic!("a single bind item cell should prepare as Ready");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(items[0].ready, PreparedCellStep::Executable(_)),
+            "the folded item still installs through the executable plane"
+        );
+        assert_eq!(
+            scope.compile_count(),
+            1,
+            "a single-bind-item, no-declaration cell must fold the whole-cell \
+             check and its item's compile into ONE daemon round trip"
+        );
+    }
+
+    /// A cell with more than one item cannot fold — a later item's compile
+    /// must import the earlier item's freshly generated `Session.Val.G<n>`
+    /// interface, a real module boundary the whole-cell check's own compile
+    /// does not produce. `prepare_cell` must keep paying the ordinary two
+    /// round trips: the whole-cell check, then the item loop.
+    #[tokio::test]
+    async fn two_item_bind_cell_keeps_two_daemon_round_trips() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let actor_id = context.actor.id.0;
+        let actor_incarnation = context.actor.incarnation.0;
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "cellA <- pure (1 :: Int)\ncellB <- pure (cellA + 1)".to_string();
+
+        let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
+        let (checked, prepared) = scope
+            .run(workbench.prepare_cell(context, cell))
+            .await
+            .expect("a two-item bind cell prepares through the split");
+        assert_eq!(checked.items.len(), 2, "{checked:?}");
+        let PreparedCell::Ready { items, .. } = prepared else {
+            panic!("a two-item bind cell should prepare as Ready");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            scope.compile_count(),
+            2,
+            "an N-item cell is unaffected by the fold: the whole-cell check \
+             and the item loop remain two round trips"
+        );
+    }
+
+    /// A declaration cell never folds — its item stages through a private
+    /// candidate directory (`validate_declaration_candidate`), a GHC-compile
+    /// shape the fold does not build. `prepare_cell` must keep paying its
+    /// existing two round trips (the whole-cell check, then the combined
+    /// declaration-validation-and-item-loop compile).
+    #[tokio::test]
+    async fn declaration_cell_keeps_two_daemon_round_trips() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let actor_id = context.actor.id.0;
+        let actor_incarnation = context.actor.incarnation.0;
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "declaredFn args = length (args :: [Int])".to_string();
+
+        let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
+        let (checked, prepared) = scope
+            .run(workbench.prepare_cell(context, cell))
+            .await
+            .expect("a declaration cell prepares through the split");
+        assert!(
+            checked
+                .items
+                .iter()
+                .any(|item| item.verdict.kind == TurnKind::Decl),
+            "{checked:?}"
+        );
+        let PreparedCell::Ready { .. } = prepared else {
+            panic!("a declaration cell should prepare as Ready");
+        };
+        assert_eq!(
+            scope.compile_count(),
+            2,
+            "a declaration cell is unaffected by the fold"
+        );
+    }
+
     /// A minimal [`tracing_subscriber::fmt::MakeWriter`] capturing JSON log
     /// lines into a shared buffer, so a test can read back structured field
     /// values (here, `with_host_machine`'s "resident machine checkout
@@ -10922,7 +11121,7 @@ mod request_tests {
             None,
         )
         .expect("snapshot");
-        let checked =
+        let (checked, _folded) =
             check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
                 .expect("whole-cell check");
         let reservation = reserve_cell_generations(
@@ -10990,7 +11189,7 @@ mod request_tests {
         let (source, retry_snapshot) =
             snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
                 .expect("retry snapshot");
-        let retry_checked = check_cell_off_checkout(
+        let (retry_checked, _retry_folded) = check_cell_off_checkout(
             &retry_snapshot,
             &source,
             &context.haskell_effects_alias,

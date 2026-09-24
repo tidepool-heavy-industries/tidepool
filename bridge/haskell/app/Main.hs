@@ -9,13 +9,13 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
+  ( evaluate, try, catch, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
-import Control.Monad (foldM, forM, forM_)
+import Control.Monad (foldM, forM, forM_, when)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
@@ -36,11 +36,12 @@ import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
   , analyzeCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
-  , CellSourcePlan(..), installCellDisplayDeclarations
+  , CellSourcePlan(..), CellAnalysisItem(..), installCellDisplayDeclarations
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
-  , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson )
+  , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
+  , CheckedBinderPin(..) )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
@@ -221,7 +222,7 @@ dispatch compiler caches timing args =
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestActivationPreview args && (not (requestTurn args) || not (isJust (requestTurnVerdict args)))
                                                   -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
-        | requestCell args                        -> runCellMode compiler args file
+        | requestCell args                        -> runCellMode compiler caches args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
         -- A turn may also carry session fields, so it precedes session dispatch.
@@ -624,6 +625,69 @@ runTurnMode compiler caches args path = do
         bindersStr = fromMaybe
           (intercalate ", " (sbBinders sb))
           (requestTurnPin args)
+    if requestActivationPreview args && (sbKind sb /= KBind || length (sbBinders sb) /= 1)
+      then fail "activation requires exactly one generated input binder"
+      else pure ()
+    turnOut <- case sbKind sb of
+      KDecl -> do
+        tmplFile <- case lookup (templateSelectorWireName SDecl) templates of
+          Just f  -> return f
+          Nothing -> error "--turn: no --turn-template for kind decl"
+        tmplSrc <- readFile tmplFile
+        declarationSource <- declarationSourceWithTemplate tmplSrc turnSrc
+          >>= either throwCellSplitError pure
+        spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
+        (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
+        items <- timePhase timing "declaration_binders" $ extractBindersNamed modulePath (requestIncludes args) modName
+        let binders = if null (sbBinders sb)
+                        then map (T.pack . exportItemName) items
+                        else map T.pack (sbBinders sb)
+        return (TDecl binders items declarationSource)
+      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt
+    outFile <- requireArg "--turn-out" (requestTurnOut args)
+    let cbor = encodeTurnOut turnOut
+    BS.writeFile outFile cbor
+    hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
+  case res of
+    Left _ -> do
+      attempted <- readIORef lastAttempt
+      forM_ attempted $ \(output, source) -> do
+        _ <- try (writeFile output source) :: IO (Either IOException ())
+        pure ()
+    Right _ -> pure ()
+  reportDiags res
+
+-- | Write @spliced@ (a fully-rendered module source) to a scratch file under
+-- 'outDir', named for its own @module X where@ header, and retain it in
+-- 'lastAttempt' for on-failure diagnostics. Shared by 'runTurnMode' (the
+-- @decl@ verdict, directly) and 'compileClassifiedTurn' (every other
+-- verdict, via its own @spliceInto@).
+writeSplicedModule
+  :: FilePath -> IORef (Maybe (FilePath, String)) -> String
+  -> IO (String, String, FilePath)
+writeSplicedModule outDir lastAttempt spliced = do
+  let modName = fromMaybe "Input" (extractModuleName spliced)
+  createDirectoryIfMissing True outDir
+  let modulePath = outDir </> modName ++ ".hs"
+  writeFile modulePath spliced
+  -- Retain the exact attempted source, but write the diagnostic copy
+  -- only on failure. Successful TurnOut already contains this source.
+  writeIORef lastAttempt (Just (outDir </> "turn-attempt.hs", spliced))
+  return (spliced, modName, modulePath)
+
+-- | Compile one already-classified, non-@decl@ turn statement (bind,
+-- bind-discard, or expr) through the resident prepared-STG path and return
+-- its 'TurnOut'. This is the compile half of 'runTurnMode' for every verdict
+-- but @decl@, factored out so 'runCellMode''s single-item fold can drive the
+-- SAME compile from a verdict and pin it already has from the whole-cell
+-- check — in the same worker invocation, with no separate classify/compile
+-- spawn.
+compileClassifiedTurn
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  -> String -> StmtBinders -> String -> IORef (Maybe (FilePath, String))
+  -> IO TurnOut
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt = do
+    let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
         -- module name derived from its own @module X where@ header. The
@@ -640,108 +704,68 @@ runTurnMode compiler caches args path = do
             then do
               let replace body = T.unpack (T.replace (T.pack "{{ACTIVATION_PREVIEW}}") (T.pack body) (T.pack spliced))
                   opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
-              (_, _, checkPath) <- writeSpliced (replace opaque)
+              (_, _, checkPath) <- writeSplicedModule outDir lastAttempt (replace opaque)
               checked <- compiler CheckedEnvironment Set.empty GeneralCompile
                 (Just (scopeFromWorkerRequest args)) checkPath (requestIncludes args) (requestBuildProductsDir args)
               inputType <- maybe (fail "activation is missing its checked input type") (pure . stripMonadHead) (crResultType checked)
               rendered <- satisfiesCapturedConstraint (crHscEnv checked) (crTargetTcGblEnv checked)
                 "__tidepoolActivationConstraint" inputType
-              writeSpliced (replace (if rendered
+              writeSplicedModule outDir lastAttempt (replace (if rendered
                 then "TidepoolInspection.workbenchActivationDisplay __activationBudget __activationInput"
                 else opaque))
-            else writeSpliced spliced
-        writeSpliced spliced = do
-          let modName = fromMaybe "Input" (extractModuleName spliced)
-          createDirectoryIfMissing True outDir
-          let modulePath = outDir </> modName ++ ".hs"
-          writeFile modulePath spliced
-          -- Retain the exact attempted source, but write the diagnostic copy
-          -- only on failure. Successful TurnOut already contains this source.
-          writeIORef lastAttempt (Just (outDir </> "turn-attempt.hs", spliced))
-          return (spliced, modName, modulePath)
-    if requestActivationPreview args && (sbKind sb /= KBind || length (sbBinders sb) /= 1)
-      then fail "activation requires exactly one generated input binder"
+            else writeSplicedModule outDir lastAttempt spliced
+    -- Four-shape selection (protocol note, "the verdict space has four
+    -- shapes, not three"): a bind that binds no name selects its own
+    -- template kind and skips the session-bind artifacts entirely —
+    -- 'templateSelectorForVerdict' mirrors Rust's
+    -- 'TemplateSelector::for_verdict' exactly.
+    let selector = templateSelectorForVerdict (sbKind sb) (sbBinders sb)
+    let scope = scopeFromWorkerRequest args
+        matching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
+        -- A prepared turn uses one compiler pass for the checked metadata
+        -- and the prepared modules.
+        compileTurn modulePath = do
+          prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
+          return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
+        compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
+        compileVariants index (tmplFile:rest) = do
+          (spliced, _modName, modulePath) <- spliceInto tmplFile
+          attempted <- try (compileTurn modulePath)
+          case attempted of
+            Right (result, preparedModules, dependencies) ->
+              return (index, spliced, modulePath, result, preparedModules, dependencies)
+            Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
+              (Just _, _ : _) -> compileVariants (index + 1) rest
+              _               -> throwIO err
+    if requestActivationPreview args
+        && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
+      then fail "activation requires one prepared bind template"
       else pure ()
-    turnOut <- case sbKind sb of
-      KDecl -> do
-        tmplFile <- case lookup (templateSelectorWireName SDecl) templates of
-          Just f  -> return f
-          Nothing -> error "--turn: no --turn-template for kind decl"
-        tmplSrc <- readFile tmplFile
-        declarationSource <- declarationSourceWithTemplate tmplSrc turnSrc
-          >>= either throwCellSplitError pure
-        spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
-        (_spliced, modName, modulePath) <- writeSpliced spliced
-        items <- timePhase timing "declaration_binders" $ extractBindersNamed modulePath (requestIncludes args) modName
-        let binders = if null (sbBinders sb)
-                        then map (T.pack . exportItemName) items
-                        else map T.pack (sbBinders sb)
-        return (TDecl binders items declarationSource)
-      kind -> do
-        -- Four-shape selection (protocol note, "the verdict space has four
-        -- shapes, not three"): a bind that binds no name selects its own
-        -- template kind and skips the session-bind artifacts entirely —
-        -- 'templateSelectorForVerdict' mirrors Rust's
-        -- 'TemplateSelector::for_verdict' exactly.
-        let selector = templateSelectorForVerdict kind (sbBinders sb)
-        let scope = scopeFromWorkerRequest args
-            matching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
-            -- A prepared turn uses one compiler pass for the checked metadata
-            -- and the prepared modules.
-            compileTurn modulePath = do
-              prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-              return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
-            compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
-            compileVariants index (tmplFile:rest) = do
-              (spliced, _modName, modulePath) <- spliceInto tmplFile
-              attempted <- try (compileTurn modulePath)
-              case attempted of
-                Right (result, preparedModules, dependencies) ->
-                  return (index, spliced, modulePath, result, preparedModules, dependencies)
-                Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
-                  (Just _, _ : _) -> compileVariants (index + 1) rest
-                  _               -> throwIO err
-        if requestActivationPreview args
-            && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
-          then fail "activation requires one prepared bind template"
-          else pure ()
-        (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
-        let binds       = prBinds result
-            hscEnv      = prHscEnv result
-            mCapturedTy = fmap T.pack (prCapturedType result)
-            warnTexts   = map T.pack (prWarnings result)
-        -- Projection remains outside compileVariants. Its entry is the settled
-        -- scaffold, and its constructors join the shared metadata before write.
-        preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
-          [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
-        let asksSites = concatMap paYieldSites preparedArtifacts
-        timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
-        timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-        -- Mutable turns never enter the artifact cache, but publication must
-        -- still reject source changes observed during this compilation.
-        validateDependencyEvidence dependencies
-        let wrapped = T.pack spliced
-        case selector of
-          SBind -> do
-            g    <- requireArg "--bind-gen"     (requestBindGen args)
-            root <- requireArg "--session-root" (requestSessionRoot args)
-            bbs  <- mkBoundBinders (sbBinders sb) g root result
-            return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
-          SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
-          SExpr -> return (TExpr variant asksSites wrapped)
-          SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
-    outFile <- requireArg "--turn-out" (requestTurnOut args)
-    let cbor = encodeTurnOut turnOut
-    BS.writeFile outFile cbor
-    hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
-  case res of
-    Left _ -> do
-      attempted <- readIORef lastAttempt
-      forM_ attempted $ \(output, source) -> do
-        _ <- try (writeFile output source) :: IO (Either IOException ())
-        pure ()
-    Right _ -> pure ()
-  reportDiags res
+    (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
+    let binds       = prBinds result
+        hscEnv      = prHscEnv result
+        mCapturedTy = fmap T.pack (prCapturedType result)
+        warnTexts   = map T.pack (prWarnings result)
+    -- Projection remains outside compileVariants. Its entry is the settled
+    -- scaffold, and its constructors join the shared metadata before write.
+    preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
+      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+    let asksSites = concatMap paYieldSites preparedArtifacts
+    timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
+    timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    -- Mutable turns never enter the artifact cache, but publication must
+    -- still reject source changes observed during this compilation.
+    validateDependencyEvidence dependencies
+    let wrapped = T.pack spliced
+    case selector of
+      SBind -> do
+        g    <- requireArg "--bind-gen"     (requestBindGen args)
+        root <- requireArg "--session-root" (requestSessionRoot args)
+        bbs  <- mkBoundBinders (sbBinders sb) g root result
+        return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
+      SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
+      SExpr -> return (TExpr variant asksSites wrapped)
+      SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
 
 -- | Block classify mode (@--classify@):
 -- classify EVERY positional file in 'requestFiles' with ONE GHC session boot
@@ -769,8 +793,9 @@ runClassifyMode timing args =
 -- | Split, classify, and typecheck one notebook cell in a single worker
 -- request. Rust authors the module template (scope/import/effect-row policy);
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
-runCellMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-runCellMode compiler args cellPath = do
+runCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runCellMode compiler caches args cellPath = do
+  timing <- readTimingEnabled
   provisionalOutput <- newIORef Nothing
   res <- try $ do
     cellSource <- readFile cellPath
@@ -815,6 +840,14 @@ runCellMode compiler args cellPath = do
     expressionPlans <- cellExpressionPlans compiled
     BS.writeFile out
       (encodeCellOut finalPlan (crCheckedBinderPins compiled) expressionPlans finalSource)
+    -- Best-effort, and entirely inside this SAME 'try': a fold failure (an
+    -- ineligible cell shape, a missing template, a real compile rejection)
+    -- must never turn a SUCCESSFUL whole-cell check into a reported failure.
+    -- 'attemptCellFoldTurn' catches its own exceptions and simply leaves
+    -- '--turn-out' unwritten, which is the caller's documented signal to
+    -- fall back to its own separate '--turn' request.
+    when (requestCellFoldTurn args) $
+      attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled
   case res of
     Left _ -> do
       provisional <- readIORef provisionalOutput
@@ -823,6 +856,87 @@ runCellMode compiler args cellPath = do
         pure ()
     Right _ -> pure ()
   reportDiags res
+
+-- | After a successful whole-cell check, attempt ONE further compile in the
+-- SAME worker invocation — no separate spawn — when the cell resolved to
+-- exactly one item, that item is a bind (@x \<- e@ / @let x = e@, never a
+-- bare expression or a declaration), and the caller asked for the fold
+-- ('requestCellFoldTurn'). The bind's binder types are already known from
+-- this SAME check ('crCheckedBinderPins'): reusing them as an explicit
+-- signature (mirroring the Rust runtime's 'run_turn_pinned') is what makes
+-- this safe with only ONE typecheck of the statement ever happening, so
+-- there is nothing for two independent generalizations to disagree about.
+--
+-- Deliberately narrower than every fold-eligible shape: an expression item
+-- compiles through a Rust-built observation wrapper
+-- (`compile_block_off_checkout`'s `assemble_observation_module`) whose
+-- generated binder name must avoid every name already visible in scope —
+-- resolving that collision-free name is Rust-side session state this
+-- worker invocation does not have before the check runs, so an eligible
+-- expression-only cell still falls back to the ordinary two-request path.
+--
+-- Any failure here (no matching template, a real compile rejection) is
+-- caught by the caller and simply leaves '--turn-out' unwritten; this never
+-- touches '--cell-out', which the whole-cell check already wrote.
+attemptCellFoldTurn
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  -> CellSourcePlan -> CheckedEnvironmentResult -> IO ()
+attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled =
+  attempt `catch` \(_ :: SomeException) -> pure ()
+  where
+    attempt = case soleBindItem finalPlan of
+      Nothing -> pure ()
+      Just item -> do
+        outFile <- requireArg "--turn-out" (requestTurnOut args)
+        let sb = cellAnalysisVerdict item
+            turnSrc = cellAnalysisSource item
+            pins = itemBinderPins 0 (sbBinders sb) (crCheckedBinderPins compiled)
+        bindersStr <- either fail pure (renderPinnedBinders (sbBinders sb) pins)
+        lastAttempt <- newIORef Nothing
+        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt
+        BS.writeFile outFile (encodeTurnOut turnOut)
+
+-- | The cell's sole item, when the whole-cell check resolved to exactly one
+-- item total (so index 0 both in 'cellPlanItems' and in every pin key
+-- 'renderCellCheckSource' generated for it) and that item is a bind. A
+-- declaration always stages through its own candidate-module path
+-- (Rust's @finalize_cell_install@); an expression needs the Rust-built
+-- observation wrapper this worker invocation does not have (see
+-- 'attemptCellFoldTurn'). Neither is attempted here.
+soleBindItem :: CellSourcePlan -> Maybe CellAnalysisItem
+soleBindItem plan = case cellPlanItems plan of
+  [item] | sbKind (cellAnalysisVerdict item) == KBind -> Just item
+  _ -> Nothing
+
+-- | Resolve one item's binder pins by exact key, mirroring the Rust
+-- runtime's own @CellCheck::pins_for_item@: each binder's post-zonk type,
+-- keyed @__tidepool_cell_pin_\<item\>_\<binder\>@ (see
+-- 'Tidepool.Binders.renderCellCheckSource'), in the SAME order as
+-- @binders@.
+itemBinderPins :: Int -> [String] -> [CheckedBinderPin] -> [Maybe CheckedBinderPin]
+itemBinderPins index binders pins =
+  [ lookupPin (pinKey binder) | binder <- binders ]
+  where
+    pinKey binder = "__tidepool_cell_pin_" ++ show index ++ "_" ++ binder
+    lookupPin key = case filter ((== key) . checkedPinKey) pins of
+      [pin] -> Just pin
+      _ -> Nothing
+
+-- | Render the same @{{BINDERS}}@ substitution the Rust runtime's
+-- @run_turn_pinned@ builds: @binder :: Type@ for one binder, @(b1, b2) ::
+-- (T1, T2)@ for several — spliced into @pure ({{BINDERS}})@, an ordinary
+-- Haskell type annotation that pins the compiled bind's generalization to
+-- EXACTLY the type the whole-cell check already inferred. A bind with no
+-- binders (a discarding bind, @_ \<- e@) has nothing to pin.
+renderPinnedBinders :: [String] -> [Maybe CheckedBinderPin] -> Either String String
+renderPinnedBinders [] _ = Right ""
+renderPinnedBinders binders pins
+  | any (== Nothing) pins =
+      Left "cell fold: whole-cell check returned no type for a binder"
+  | [binder] <- binders, [Just pin] <- pins = Right (binder ++ " :: " ++ checkedPinType pin)
+  | otherwise = Right
+      ( "(" ++ intercalate ", " binders ++ ") :: ("
+      ++ intercalate ", " [ checkedPinType pin | Just pin <- pins ] ++ ")" )
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of

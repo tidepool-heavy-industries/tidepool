@@ -99,6 +99,14 @@ enum Field {
     /// Inspection source failures reject the whole request with structured
     /// diagnostics instead of becoming per-query `Rejected` results.
     InspectionStrict,
+    /// Ask a `--cell` request to also attempt one item's `--turn`-shaped
+    /// compile (whichever `--turn-template`s and turn-only fields
+    /// accompany it) inside the same worker invocation, when the whole-cell
+    /// check resolves to exactly one non-declaration item. See
+    /// `bridge/haskell/app/Main.hs`'s `runCellMode`. Absent, or when the
+    /// check does not resolve to that shape, no `--turn-out` is written and
+    /// the caller falls back to its own separate `--turn` request.
+    CellFoldTurn,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -147,6 +155,7 @@ impl ExtractRequest {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
                 Some("--cell-out") => request.cell_out(value(&mut args, "--cell-out")?),
+                Some("--cell-fold-turn") => request.cell_fold_turn(),
                 Some("--turn-pin") => request.turn_pin(text_value(&mut args, "--turn-pin")?),
                 Some("--build-products-dir") => {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
@@ -264,6 +273,7 @@ impl ExtractRequest {
                 40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
                 41 => Field::ActivationPreview,
                 42 => Field::InspectionStrict,
+                45 => Field::CellFoldTurn,
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -394,6 +404,10 @@ impl ExtractRequest {
 
     pub(crate) fn turn_pin(&mut self, value: &str) {
         self.fields.push(Field::TurnPin(value.to_owned()));
+    }
+
+    pub(crate) fn cell_fold_turn(&mut self) {
+        self.fields.push(Field::CellFoldTurn);
     }
 
     pub(crate) fn build_products_dir(&mut self, value: impl AsRef<OsStr>) {
@@ -549,6 +563,7 @@ impl ExtractRequest {
                 ),
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
+                Field::CellFoldTurn => flags.push("--cell-fold-turn".into()),
             }
         }
         inputs.extend(flags);
@@ -859,6 +874,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         }
         Field::ActivationPreview => out.push(41),
         Field::InspectionStrict => out.push(42),
+        Field::CellFoldTurn => out.push(45),
     }
 }
 

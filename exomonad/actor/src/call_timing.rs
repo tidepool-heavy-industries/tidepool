@@ -120,6 +120,16 @@ impl CallScope {
         CURRENT.scope(Arc::clone(&self.totals), body).await
     }
 
+    /// The open scope's compile-round-trip count so far — one `timed_compile`
+    /// call each, regardless of how many `tidepool-extract` processes any
+    /// one of them spawned internally (a folded whole-cell check that also
+    /// compiled its sole item is still one round trip). Exposed for tests
+    /// that assert on it directly rather than parsing `finish`'s log line.
+    #[cfg(test)]
+    pub(crate) fn compile_count(&self) -> u64 {
+        self.totals.compile_count.load(Ordering::Relaxed)
+    }
+
     /// Emit the one summary INFO line for this call and consume the scope.
     pub fn finish(self, outcome: &str) {
         tracing::info!(
