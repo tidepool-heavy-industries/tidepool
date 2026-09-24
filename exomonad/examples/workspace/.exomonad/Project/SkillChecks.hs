@@ -8,13 +8,14 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Exomonad.Workspace (workspaceRoot)
 import Tidepool.Check
 import Tidepool.Aeson (Value)
 
 -- Execute the skill's actual code blocks, not separately maintained copies.
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
 example actor skill index = do
-  body <- readFile actor (".exomonad/workspace/skills/" <> skill <> "/SKILL.md")
+  body <- readFile actor (Text.pack workspaceRoot <> "/skills/" <> skill <> "/SKILL.md")
   let blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" body))
   turn actor (blocks !! index)
 

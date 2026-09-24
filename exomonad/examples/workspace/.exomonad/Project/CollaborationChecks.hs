@@ -9,7 +9,7 @@ import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
 
-import Project.Checks (script, checkImprovementSelection)
+import Project.Checks (script, checkSource, checkImprovementSelection)
 
 collaboration :: Member RecipeCheck effects => Eff effects ()
 collaboration = do
@@ -62,7 +62,7 @@ collaboration = do
   message <- present
   check "the owning return carries the exact question and incorporated source" (amendment `Text.isInfixOf` message && "semantics @" `Text.isInfixOf` message)
   void $ git (checkActor reviewer) ["merge", "--ff-only", amendment]
-  propagation <- readFile (checkActor reviewer) ".exomonad/workspace/checks/project_decision_consumer.hs" >>= turn (checkActor reviewer)
+  propagation <- readFile (checkActor reviewer) (checkSource "project_decision_consumer") >>= turn (checkActor reviewer)
   check "an old answer cannot clear a changed question or rewind the task source" ("(True,True,True,True)" `Text.isInfixOf` output propagation)
   consumer <- activation
   check "the fresh consumer receives the accepted decision and rationale" (amendment `Text.isInfixOf` checkContext consumer && "Preparation retains the boundary" `Text.isInfixOf` checkContext consumer && "Why:" `Text.isInfixOf` checkContext consumer)

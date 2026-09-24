@@ -8,6 +8,7 @@ import Control.Monad.Freer (Eff, Member)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Tidepool.Check
+import Project.Checks (checkSource)
 import Project.RebaseRouter
 
 facts :: Member RecipeCheck effects => Eff effects ()
@@ -28,7 +29,7 @@ facts = do
 agentRef :: Member RecipeCheck effects => Eff effects ()
 agentRef = do
   owner <- root
-  source <- readFile owner ".exomonad/checks/rebase-router-agentref.hs"
+  source <- readFile owner (checkSource "rebase-router-agentref")
   result <- turn owner source
   check "an admission receipt resolves to a usable child AgentRef"
     ("Right ()" `Text.isInfixOf` output result)
