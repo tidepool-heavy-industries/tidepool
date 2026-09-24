@@ -2404,6 +2404,12 @@ where
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
         const MAX_SPLIT_ATTEMPTS: u32 = 3;
+        // The split retires a mounted request input before its compiles
+        // read the input's module; until the input stays leased across the
+        // released checkouts, such cells take the single-checkout path.
+        if self.json_input.is_some() {
+            return self.prepare_cell_single_checkout(context, cell_source).await;
+        }
         let json_input = self.json_input.clone();
         let response = self.response.clone();
         let request = self.request;
