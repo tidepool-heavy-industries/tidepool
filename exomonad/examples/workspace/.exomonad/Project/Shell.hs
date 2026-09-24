@@ -21,6 +21,7 @@ module Project.Shell
     sectionPage,
     estimatedTokens,
     splitSections,
+    rawLineThreshold,
   )
 where
 

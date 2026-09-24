@@ -1648,3 +1648,84 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+/// `Project.Watchdog.trivialCall`: a short, successful, plainly non-destructive
+/// bash call is abstained on before 'Watchdog.watchBy' ever asks Jev — even
+/// though the shipped template's own `monitorsFor` gives every actor,
+/// including a root with no label, `Watchdog.coreHeuristics` (which is exactly
+/// `[repeatingItself, destructiveCommand]`). A command whose text carries a
+/// destructive token still reaches the battery, exit code 0 notwithstanding.
+#[tokio::test]
+async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks() {
+    let backend = Arc::new(ScriptedNoulJev {
+        requests: Mutex::new(Vec::new()),
+        likelihood: 0.0,
+    });
+    let mut campaign = campaign_with(Arc::clone(&backend)).await;
+    let policy = campaign.root_installation.policy.clone();
+
+    async fn run_bash(
+        campaign: &mut TestCampaign,
+        policy: &Arc<dyn exomonad_actor::ResidentToolEndpoint>,
+        cmd: &str,
+        stdout: &str,
+    ) -> serde_json::Value {
+        let invoked_policy = Arc::clone(policy);
+        let cmd = cmd.to_string();
+        let mut invoked = tokio::spawn(async move {
+            dispatch_structured_tool(
+                invoked_policy.as_ref(),
+                "bash",
+                serde_json::json!({
+                    "cmd": cmd,
+                    "workdir": null,
+                    "environment": null,
+                    "memory_mib": null,
+                    "tty": null,
+                    "stdin": null,
+                    "yield_time_ms": 30000,
+                    "max_output_bytes": 2048,
+                    "intent": null
+                }),
+            )
+            .await
+        });
+        let commands = TestCommands::completed(stdout);
+        let request = tokio::select! {
+            request = backend_request(campaign) => request,
+            result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+        };
+        request.supply(Ok(commands));
+        let response = invoked.await.unwrap();
+        assert_eq!(response["status"], "committed", "{response}");
+        response
+    }
+
+    run_bash(&mut campaign, &policy, "ls", "file-a\nfile-b\n").await;
+    assert!(
+        backend.requests.lock().is_empty(),
+        "a short, successful, non-destructive bash call must never ask Jev: {:?}",
+        backend.requests.lock()
+    );
+
+    run_bash(
+        &mut campaign,
+        &policy,
+        "rm -rf ./trivial-call-test-nonexistent",
+        "",
+    )
+    .await;
+    let requests = backend.requests.lock();
+    assert!(
+        !requests.is_empty(),
+        "a command whose text reads as destructive must still reach the heuristics battery"
+    );
+    assert!(
+        requests.iter().any(|r| r.to_string().contains("destructive_command")),
+        "expected a destructive_command heuristic question among the requests: {requests:?}"
+    );
+    drop(requests);
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
