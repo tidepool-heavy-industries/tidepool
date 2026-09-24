@@ -193,3 +193,14 @@ the run with session size.
   brief paste (tmux load-buffer, settle, Enter, re-Enter) and interview pane
   scraping both become one RPC with a typed answer. Wave-3 interviews and
   the wave-4 launch still went through tmux.
+
+## Compile cache and library identity (2026-09-24)
+
+- The compile cache under `~/.cache/tidepool` is not keyed on the Haskell
+  library's source identity. Changing `bridge/haskell/lib` under a live
+  session (the `AttemptReplyWith` arity change landing while a recipe check
+  ran) let cached prepared artifacts meet the new source in one session and
+  fail as a `DataConTable` collision. `scripts/redeploy.sh` clears the cache
+  so deployed runs are safe; dev checks are not. Key the cache (or the
+  session's memo namespace) on `haskell_sources::source_identity()`, which
+  `FrozenWorkspace` already computes.
