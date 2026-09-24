@@ -3217,6 +3217,37 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
         .unwrap();
 }
 
+/// A recipe module that fails to COMPILE (not merely fails an assertion) must
+/// still surface GHC's own diagnostic text — file:line:col, severity, and
+/// message — not just `CompileError`'s one-line "N diagnostic(s)" summary.
+/// Regression for the dev-friction bug where a lane had to reconnect to the
+/// compile daemon by hand to see what GHC actually said.
+#[tokio::test(flavor = "multi_thread")]
+async fn recipe_check_compile_failure_reports_the_ghc_diagnostic_text() {
+    let repository = recipe_workspace(Some(&["Project.Checks.context"]));
+    let work = repository.path().join(".exomonad/Project/Checks.hs");
+    let original = std::fs::read_to_string(&work).unwrap();
+    let broken = original.replace(
+        "context = void startComponent",
+        "context = void undefinedRecipeIdentifierXyz",
+    );
+    assert_ne!(broken, original, "fixture no longer matches replaced text");
+    std::fs::write(&work, broken).unwrap();
+    super::test_campaign::commit_workspace(repository.path());
+    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("Haskell compilation failed") || message.contains("compilation failed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("undefinedRecipeIdentifierXyz") && message.contains("not in scope"),
+        "{message}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_routing_recipes_exercise_failure_and_attention() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.routing"]));
