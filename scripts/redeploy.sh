@@ -111,7 +111,13 @@ if [ "$NO_SERVERS" -eq 0 ]; then
   # arrayref 0.3.x) and would silently deploy different dep versions than the
   # tree that passed the test suite.
   step "Step 3: cargo install tidepool (Exomonad + embedded Haskell)"
-  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --path tidepool
+  # Resolve the `tidepool` package's directory from the workspace metadata
+  # so a crate move cannot leave this pointing at a directory that is gone.
+  tidepool_dir="$(cargo metadata --no-deps --format-version 1 \
+    | python3 -c 'import json,os,sys; print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] if p["name"] == "tidepool"))')" \
+    || { echo "error: no package named tidepool in the workspace" >&2; exit 1; }
+  echo "  tidepool package: $tidepool_dir"
+  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --path "$tidepool_dir"
 else
   echo; echo "(skipped: --no-servers)"
 fi
@@ -168,7 +174,7 @@ else
   echo "  \$ $stamp_bin --write-toolchain-stamp"
   if [ "$DRY" -eq 0 ]; then
     if [ ! -x "$stamp_bin" ]; then
-      echo "error: $stamp_bin missing — expected Step 3 (cargo install --path tidepool) to have installed it" >&2
+      echo "error: $stamp_bin missing — expected Step 3 (cargo install of the tidepool package) to have installed it" >&2
       exit 1
     fi
     if ! "$stamp_bin" --write-toolchain-stamp; then
