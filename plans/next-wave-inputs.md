@@ -131,3 +131,55 @@ already share across sessions. First step: mint a fresh session for
   `T` and nothing in a fresh context says so. Either expose `Text` as an
   alias next to `T` in the cell preamble, or make a not-in-scope error for a
   `Data.Text` name state the alias that exists.
+
+## Wave-3 interviews and log dives (2026-09-24)
+
+All 25 live actors were interviewed (root three rounds, 24 children two
+rounds) and thirteen log dives were spot-checked; digests and analysis are
+retained under the session scratchpad (`wave3/interviews/ANALYSIS.md`,
+`DIVES-ANALYSIS.md`). Only 8 of 32 actors forked. The actors' own reasons,
+in order: follow-ups arrived by mailbox to the existing owner ("I let
+continuity become a default"); one owned file read as one indivisible task;
+delegation cost three to four root turns and 32-184 s of admission cell per
+fork; cells waited 30-60 s on the checkout; nothing in the prompt demanded a
+fork. Admission cost is per cell, not per child, and compile grew 1.75x over
+the run with session size.
+
+- **Engine defects (fix wave, 2026-09-24).** `respond` unmounted while a
+  native mailbox delivery to the actor was pending (Receiving standing
+  selects the request-less workbench); `lookup` never sees activation
+  bindings (Lookup boundary hardcodes `application_workbench`); a two-unit
+  cell failure hides that unit 1 submitted the reply; a trailing operator
+  becomes a valid section and a type error; stale watch notices after the
+  owner polled Ready; reviewers forked from master could not run the
+  candidate's tests (`reviewCandidate` seeds at the commit; the root built
+  review Tasks by hand because the recipe assumes `sessionInput`); four
+  operator questions queued with no delivery (decided: prompt-only, ask
+  your parent, the root's parent is the operator).
+- **Turn waste.** Root: 43 percent of active time in watch/poll cells (each
+  a full compile), 32 of 46 workspace checks re-run with no change, 17
+  turns with no decision; swarm-wide 19 of 165 turns made no tool call
+  (stale wakes and standing owners answering informational relays).
+  Fix: native `status watches` view, wave-sized `unfold`, prompt rule to
+  fork review/test children before implementing.
+- **Unused capabilities.** `focus` 0 of 1,102 bash calls (137 truncations,
+  77 unrecovered); `read_output` once; `write_stdin` 118 times as a wait
+  call; Sift, `Cmd.run` in cells, Project.Investigate/Merge/Review/Search,
+  `followWork`, `consultDesign` never; skills command, coordinate,
+  orchestrate, jev never loaded. Fix: descriptions that say when to use
+  them; root-facing recipes.
+- **Cell rejections.** 124: 48 type mismatches (21 Text), 30 parse, 26
+  not-in-scope (`respond` 7). Fix: `Text` by name in the preamble,
+  alias hints on not-in-scope, dangling-operator diagnostic, per-unit
+  receipts.
+- **Hand-off gaps.** Three of four seam guesses were right but incomplete
+  and extended later without a rejection; two children forked into the
+  same file blind; the manifest block cost 13 minutes and the child had
+  `sendMessage` but responded "Blocked". Fix: sibling roster at activation,
+  task prompt tells children to state seam assumptions and to request
+  owner changes; Task constructor with defaults and explicit effort.
+- **Deferred.** New Rust modules cannot be compiled without a `mod` line in
+  an unowned parent file (three false "tests passed"; two children did 8
+  and 21 backup-and-restore cycles on main.rs); watch delivery redesign
+  (the new harness's async tool calls replace polling);
+  `request_user_input` surfacing to the operator.

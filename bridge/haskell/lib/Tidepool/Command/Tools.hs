@@ -103,11 +103,11 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768; any positive value is accepted). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter. focus, when present, filters the output to the sections relevant to that text (example: \"the failing test and its assertion\"); omit for plain bounded output."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Use focus whenever output may be large or is a failing build/test run: focus is what you are looking for (\"the failing test and its assertion\", \"functions touching mailbox ordering\") and the result keeps only the relevant sections, names what was omitted, and points at the retained job. Raw head/tail truncation is the fallback when focus is omitted; read_output pages any retained output by byte range without rerunning. Observation expiry leaves execution alive: write_stdin with no input waits and observes it. intent supplies the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
-          "Observe an existing session_id; optional chars sends input first. Empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..300000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes (any positive value is accepted)."
+          "Wait on and observe an existing session_id (the way to wait for a running job); optional chars sends input first, empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..300000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes; focus filters as for bash."
           (writeInputWith presenter),
       readOutput =
         tool

@@ -17,9 +17,20 @@ let task = "Remove the stale path and report the focused check." :: Text
 ready
 ```
 
-`spawnWatched` composes `unfold` and `watch (awaitSettled response)`. Use `<$>` and
-`<*>` for independent children in one `unfold`; use a later cell for dependent
-work. After wake:
+`spawnWatched` composes `unfold` and `watch (awaitSettled response)`. A wave is
+one `unfold` with `<$>` and `<*>` over every independent child; dependent work
+waits for a later cell:
+
+```haskell
+(parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
+  <$> child @Text (coding currentCheckout (assignment [label|parser|] parserTask))
+  <*> child @Text (coding currentCheckout (assignment [label|consumer|] consumerTask))
+  <*> child @Text (researching currentCheckout (assignment [label|contract-review|] reviewTask))
+settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
+```
+
+After a wake, `status` (view `watches`) shows which watches are Ready without
+a cell; read the value with:
 
 ```haskell
 state <- pollWatch ready
@@ -45,10 +56,13 @@ selects an explicit model (`luna`: cheap tier; `executor`: Sol tier). `withEffor
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
 
-The activation supplies typed `sessionInput` and its reply declaration; use
-`inspectFull sessionInput` only for omitted detail. Roots outside an assignment
-have no reply binding. `request @Report (responseActor worker) (assignment [label|revision|] input)`
-assigns follow-up work. `pollRequestUpdate` inspects an accepted update handle.
+The activation supplies typed `sessionInput`, its reply declaration, and the
+roster of siblings admitted with you; use `inspectFull sessionInput` only for
+omitted detail. `respond`, `sessionReply` and `sessionInput` exist only while
+a request is pending; `lookup` shows them then. A root has none of them: use
+the project's task and review constructors instead of recipes written for a
+child. `request @Report (responseActor worker) (assignment [label|revision|] input)`
+assigns follow-up work to a retained child. `pollRequestUpdate` inspects an accepted update handle.
 Requests notify their owner unless a watch/route takes over; record actor
 settlement sources require `report = Silent`.
 
@@ -61,8 +75,10 @@ publish, release, write stdin, or mutate its worktree.
 A reply identifies a candidate, not an integrated result. Recover its exact
 commit through `responseWorktree`; inspect it from your repository view with
 `git show`/`git diff`, not the child's live working directory. Commission review
-at that revision; give the reviewer the contract and implementer reference for
-repairs. Reviewers running checks need coding authority. Integrate the accepted
+seeded at that revision (`atRef`); give the reviewer the contract, the owned
+paths and the implementer reference for repairs. Refuse a candidate whose
+diff touches paths outside its ownership before merging. Reviewers running
+checks need coding authority. Integrate the accepted
 revision with `tryMerge` for a managed target or ordinary Git in your checkout;
 verify that resulting revision before delivery. Load `exomonad-review` for the
 compiled project review/repair recipe and `exomonad-unfold` for submission evidence.
@@ -91,30 +107,11 @@ pollResponse :: Member Replies effects => Response result -> Eff effects (Respon
 
 ## Compose commands and judgment
 
-This task-local helper batches two semantic questions over successful complete
-command output. Exit failure is handled in code; Jev unavailability stays explicit.
-
-```haskell
-import Tidepool.Effects.Core (Jev, Commands)
-judgeChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
-judgeChanges task = do
-  result <- Cmd.run (Cmd.argv ["git", "diff", "--stat"])
-  case Cmd.stdout result of
-    Left issue -> pure ("Cannot read changes: " <> T.pack (show issue))
-    Right changes -> do
-      answer <- J.ask (J.rawState (object ["task" .= task, "changes" .= changes]))
-        (#relevant := J.noul "Do these changed paths plausibly relate to the task?"
-          :& #enough := J.noul "Does this diff stat suffice to establish task completion?")
-      pure (either (\err -> "Jev unavailable: " <> T.pack (show err))
-        (\a -> T.pack (show (a.relevant.yes, a.enough.yes))) answer)
-```
-
-`Cmd.stdout` returns complete successful stdout or an explicit issue; for failed
-commands, inspect outcome and stderr. Bound command results show a job, exit
-status and stream-byte summary; the full observation remains available through
-the binding, and `Cmd.quiet` suppresses routine display for unbound commands.
-`me` is lexically captured; `parentAgent` is the spawning actor or `Nothing`
-for a root.
+In a cell, `Cmd.run` returns a retained result: `Cmd.stdout` is complete
+successful stdout or an explicit issue; for failed commands inspect outcome and
+stderr. `J.ask` batches semantic questions over supplied evidence; load
+`exomonad-jev` for the worked composition. `me` is lexically captured;
+`parentAgent` is the spawning actor or `Nothing` for a root.
 
 ## Discover missing information
 
@@ -123,8 +120,9 @@ Start from this guide and the assignment; no startup inventory ritual.
 It may attach up to four Jev-selected related declarations or alternatives;
 original failures remain failures. `polymorphic` is usable with call-site constraints; `unknown` needs more type
 information. Use `doc topics` for guides and workspace modules; inspect their
-exports/source where needed. `status` offers `summary`, `detailed`, `recovery`,
-`lineage`, `trace`, and `bindings` for runtime uncertainty.
+exports/source where needed. `status` offers `summary`, `detailed`, `watches`,
+`recovery`, `lineage`, `trace`, and `bindings` for runtime uncertainty without
+compiling a cell.
 
 Before hand-building a review, merge, or triage loop, `lookup`/`doc` installed
 modules and skills: an existing actor is often four calls away, reimplementing

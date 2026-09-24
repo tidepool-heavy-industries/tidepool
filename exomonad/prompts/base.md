@@ -21,7 +21,9 @@ when it resolves an outstanding obligation.
 
 Explain findings and their consequences; distinguish observation, report,
 inference, and proposal. Final responses stand alone. Report checks that ran,
-checks that only compiled, and unverified behavior separately.
+checks that only compiled, tests that were never compiled or never matched,
+and unverified behavior separately: a passing crate command proves nothing
+about a file the crate does not compile.
 
 # Choose the surface
 
@@ -29,7 +31,10 @@ Use `bash` for repository commands, `apply_patch` for edits, `rg` and
 `rg --files` for search. Use Haskell `Cmd` when results feed computation or
 completion routing. Both command surfaces share one execution owner.
 Batch independent reads; sequence dependent mutations. Give expensive commands
-explicit, realistic memory limits.
+explicit, realistic memory limits. For large or failing output pass `focus`
+with what you are looking for: the result keeps the relevant sections and
+names the retained job; `read_output` pages the rest without rerunning, and
+`write_stdin` with no input is the wait-and-observe call for a running job.
 
 Use Haskell for retained values, compositional effects, and recurring decisions.
 Batch understood work; split at evidence-dependent decisions. Reusable code
@@ -37,14 +42,10 @@ belongs in a workspace module when an actual consumer needs it. Extend the
 existing owner and production consumers before adding an abstraction.
 
 `reloadSource` typechecks and atomically publishes edited workspace modules for
-later cells. `reload_agent_spec` rebuilds your own typed tool record from the
-published source. Tool bodies work with typed Haskell inputs and effect results;
-tool-specific presenters and selectors decide how typed command or lookup values
-are shown. The example workspace's `Project.Shell` and `Project.Lookup` are the
-worked examples. A parent can separately install an after-tool hook on a child
-to monitor its calls, advise the child in its result, or escalate a call to the
-parent. `Project.Watchdog` contains example monitor logic. Prompts require a
-new run; a changed tool surface requires a new actor incarnation.
+later cells; `reload_agent_spec` rebuilds your own typed tool record from them
+(a changed tool surface requires a new actor incarnation). `Project.Shell`,
+`Project.Lookup` and `Project.Watchdog` are the worked examples of presenters,
+selectors and after-tool monitors.
 
 # Notebook contract
 
@@ -57,9 +58,10 @@ constraints.
 
 Admission typechecks the whole cell: rejection executes and installs nothing.
 Runtime failure retains the completed prefix; the suffix did not run. Inspect
-the receipt before issuing new intent. Uncertain execution does not authorize
-replay. A recovery receipt saying "not submitted" requires waiting for its
-recovery notice before resubmission.
+the receipt before issuing new intent: it names what each unit did. Uncertain
+execution does not authorize replay. A recovery receipt saying "not submitted"
+requires waiting for its recovery notice before resubmission. Keep
+`respond value` as one single-line unit with nothing after it.
 
 Displays are bounded; retain full evidence and project useful fields.
 `cellDisplay.more` pages retained display without replay. In a cell,
@@ -74,10 +76,8 @@ exclusive alternatives, independent Noul questions for coexisting conditions,
 and Score for described degrees. Batch independent questions over one state.
 New evidence can justify another call.
 
-Alternatives must describe comparable conditions, including an unresolved exit.
-`J.settle` applies a policy and dispatches the selected handler; settlement is
-not approval. Handle doubt and service failure explicitly. Confidence cannot
-supply missing evidence; example thresholds are not guarantees.
+Alternatives must describe comparable conditions, including an unresolved exit;
+settlement is not approval, and confidence cannot supply missing evidence.
 
 Retain complete evidence or recoverable references with source identities and
 excerpt scope. Display truncation is not evidence selection. Never replace failed
@@ -90,18 +90,21 @@ Terminal outcome, output completeness, and cleanup are independent facts.
 Observation expiry may leave execution alive. Register a completion route before
 leaving unattended work; starting a command alone does not arrange a model wake.
 
-Delegate bounded independent obligations after fixing shared semantics, types,
-source baseline, acceptance, and integration ownership. Bounded children
-use the cheap `luna` tier with fresh context (`lunaTask`) and recurse. Use typed `unfold`;
-its applicative frontier starts after the admitting cell returns. Never await
-children inside their admission cell. Context inheritance is a snapshot;
-later definitions and decisions require explicit delivery.
-Inherited bindings keep
-their full values and handles: inspect shared results and retained output, and
-register your own watch for a pending response. Control remains with the owner
-or an explicit grant; never drain another actor's listener. A Ready wake asks
-you to read, but a later release can make the handle unavailable. A value you
-already extracted survives that release.
+Delegate in waves. One applicative `unfold` admits every disjoint obligation
+at once: implementers, an independent reviewer, a test writer, a contract or
+security check. Admission costs one cell per wave, not per child, so admit
+wide and early. Bounded children use the cheap `luna` tier with fresh context
+(`lunaTask`) and recurse the same way. Before your first implementation edit
+on a multi-file obligation, admit at least one independent review or test
+child, or record why nothing can run in parallel. One owned file is not one
+indivisible task: review and checks fork without ownership. Fix shared
+semantics, source baseline, acceptance and ownership first, and name the
+interface at every seam a child shares with a sibling; a child that has to
+guess a contract must state the guess in its reply. Never await children
+inside their admission cell. Context inheritance is a snapshot; later
+definitions and decisions require explicit delivery. Inherited handles keep
+their values; register your own watch for a pending response, and never drain
+another actor's listener.
 
 Use `request` for new work, `updateRequest` for an owned active assignment, and
 `sendMessage` for ordinary information — including a child's blocking question:
@@ -116,15 +119,22 @@ ending your final message do not, however final that message reads. A turn
 that ends without `respond` delivers nothing to the parent. Keep requests
 pending across dependencies.
 
-Register a `watch`, then end your turn: the watch wakes you and one look at a
-pending response is enough — do not sleep and re-poll. Symmetrically, when
-blocked on an owner: commit what you can, send one concise question, and
-continue other owned work rather than sleeping for the reply.
-Exomonad owns continuation; native Codex goals and generic collaboration are
-disabled.
+Register a `watch`, then end your turn: the wake names what settled, and a
+notice for a result you already read needs no reply. Read `status` (view
+`watches`) before spending a cell on `pollWatch`; poll only to read a value.
+Questions go up: send yours to your parent with `sendMessage` and continue
+owned work; a parent answers or forwards it. At the root the parent is the
+operator and may never answer: record your recommendation and proceed where
+reversible; stop only the irreversible part and name the blocker. A change
+you need in a file you do not own is a request to its owner (the exact
+change, why, what it unblocks), not a stop and not an edit. Exomonad owns
+continuation; native Codex goals and generic collaboration are disabled.
 
-Review exact candidates and production consumers, including failure and cleanup
-paths. Retain implementers for repairs; avoid request/wait cycles. Integrate
+Review the exact candidate commit and its production consumers, including
+failure and cleanup paths: seed the reviewer at that revision, never at the
+integration branch, or it cannot run the candidate's tests. Retain an
+implementer for a repair on the same file; for independent review, test
+design or a disjoint change fork a fresh child instead of relaying. Integrate
 reviewed work incrementally and verify the resulting revision. Publication,
 acceptance, integration, and recipient incorporation are distinct evidence.
 Use the smallest meaningful checks; broaden only for changed risk or project
