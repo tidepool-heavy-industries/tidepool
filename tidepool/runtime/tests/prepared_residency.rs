@@ -626,10 +626,17 @@ fn rust_session_var_id_matches_extract_minted_bound_binder_var_id() {
     );
 }
 
+
 #[test]
-fn host_carrier_mounts_two_json_payloads_from_one_compile() {
+fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
+
+    #[derive(tidepool_bridge_derive::ToHaskell)]
+    enum TestCommandJob {
+        #[haskell(module = "Tidepool.Command.Types", name = "Job")]
+        Job(String),
+    }
 
     let mut notebook = Notebook::new();
     // Host-carrier stub modules are hand-written source, found by GHC's
@@ -637,26 +644,109 @@ fn host_carrier_mounts_two_json_payloads_from_one_compile() {
     // (injected explicitly), the root itself must be on the include path.
     notebook.include.push(notebook.root.path().to_path_buf());
 
-    // Compile ONE anchor bind turn to obtain a real (BoundBinder, CompiledTurn)
-    // pair -- this is the only GHC compile this test performs.
+    // Extra qualified imports the Text/Job anchors and their read-back
+    // turns need, beyond the default preamble.
+    let extra_imports = "qualified Data.Text as TidepoolHostText\n\
+                          qualified Data.Text.Internal as TidepoolHostTextInternal\n\
+                          qualified GHC.Exts as TidepoolHostExts\n\
+                          qualified Tidepool.Command.Types as TidepoolHostJob\n";
+
+    // Compile against the session's current value view PLUS the extra
+    // imports above -- the same shape as `Notebook::compile_in_current_value_view`,
+    // duplicated here because that helper has no hook for extra imports.
+    let compile_extra = |notebook: &mut Notebook, text: &str| -> TurnResult {
+        notebook.generation += 1;
+        let mut imports = notebook
+            .session
+            .current_val_modules()
+            .into_iter()
+            .map(|module| format!("{module}\n"))
+            .collect::<String>();
+        imports.push_str(extra_imports);
+        let templates =
+            resident_workbench_templates(&notebook.preamble, &notebook.effect_stack, &imports);
+        let include: Vec<&Path> = notebook.include.iter().map(PathBuf::as_path).collect();
+        let injected = notebook.session.inject_val_modules();
+        let retained = notebook.session.prepared_retained();
+        run_turn(TurnRequest {
+            turn_text: text,
+            templates: &templates,
+            include: &include,
+            session_root: notebook.root.path(),
+            inject_modules: &injected,
+            gen: notebook.generation,
+            verdict: None,
+            target: None,
+            retained_imports: &retained,
+        })
+        .unwrap_or_else(|failure| {
+            panic!(
+                "{text:?} failed to compile: {}\n{}",
+                tidepool_runtime::classify_compile(&failure.error).message,
+                failure
+                    .attempted_source
+                    .as_deref()
+                    .unwrap_or("<no attempted source>")
+            )
+        })
+    };
+
+    // --- one anchor compile per host-binding kind ---------------------
+
     let TurnResult::Bind {
         bound, compiled, ..
     } = notebook.compile_in_current_value_view(
         "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]])",
     ) else {
-        panic!("carrier anchor must compile as a bind");
+        panic!("json anchor must compile as a bind");
     };
-    let [anchor_binder] = bound.as_slice() else {
-        panic!("carrier anchor must produce exactly one binder");
+    let [json_anchor_binder] = bound.as_slice() else {
+        panic!("json anchor must produce exactly one binder");
     };
-    let carrier = HostCarrier::from_compiled(
-        anchor_binder,
+    let json_carrier = HostCarrier::from_compiled(
+        json_anchor_binder,
         compiled.code(),
         HostBindingType::JSON_VALUE,
     );
 
-    // Mount TWO payloads through the carrier, each under a fresh name/gen,
-    // with no further GHC compile.
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = compile_extra(
+        &mut notebook,
+        "textAnchor <- pure (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of \
+         TidepoolHostTextInternal.Text bytes offset length -> \
+         TidepoolHostTextInternal.Text bytes offset length)",
+    ) else {
+        panic!("text anchor must compile as a bind");
+    };
+    let [text_anchor_binder] = bound.as_slice() else {
+        panic!("text anchor must produce exactly one binder");
+    };
+    let text_carrier =
+        HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT);
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = compile_extra(
+        &mut notebook,
+        "jobAnchor <- pure (TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of \
+         TidepoolHostTextInternal.Text bytes offset length -> \
+         TidepoolHostTextInternal.Text bytes offset length))",
+    ) else {
+        panic!("job anchor must compile as a bind");
+    };
+    let [job_anchor_binder] = bound.as_slice() else {
+        panic!("job anchor must produce exactly one binder");
+    };
+    let job_carrier = HostCarrier::from_compiled(
+        job_anchor_binder,
+        compiled.code(),
+        HostBindingType::COMMAND_JOB,
+    );
+
+    // --- mount TWO json payloads through the SAME carrier, plus one text
+    // and one job payload, all with NO further GHC compile -------------
+
     let gen_a = tidepool_repr::Generation(notebook.generation);
     let binder_a = notebook
         .session
@@ -665,7 +755,7 @@ fn host_carrier_mounts_two_json_payloads_from_one_compile() {
             ScopeId::ROOT,
             "carriedA",
             gen_a,
-            &carrier,
+            &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "A"})),
         )
         .expect("mount first carrier payload");
@@ -680,68 +770,81 @@ fn host_carrier_mounts_two_json_payloads_from_one_compile() {
             ScopeId::ROOT,
             "carriedB",
             gen_b,
-            &carrier,
+            &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "B"})),
         )
         .expect("mount second carrier payload");
     notebook.injected.push(binder_b.module.clone());
 
-    // Both stub generations must never be offered as --inject-val (no .hi
-    // exists for either) -- the whole point of a stub mount.
+    notebook.generation += 1;
+    let gen_text = tidepool_repr::Generation(notebook.generation);
+    let binder_text = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "carriedText",
+            gen_text,
+            &text_carrier,
+            HostPayload::Text("hello-carrier-text"),
+        )
+        .expect("mount text carrier payload");
+    notebook.injected.push(binder_text.module.clone());
+
+    notebook.generation += 1;
+    let gen_job = tidepool_repr::Generation(notebook.generation);
+    let binder_job = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "carriedJob",
+            gen_job,
+            &job_carrier,
+            HostPayload::Job(&TestCommandJob::Job("job-command".to_string())),
+        )
+        .expect("mount job carrier payload");
+    notebook.injected.push(binder_job.module.clone());
+
+    // Every stub generation must never be offered as --inject-val (no .hi
+    // exists for any of them) -- the whole point of a stub mount.
     let injected = notebook.session.inject_val_modules();
     assert!(!injected.contains(&binder_a.module));
     assert!(!injected.contains(&binder_b.module));
+    assert!(!injected.contains(&binder_text.module));
+    assert!(!injected.contains(&binder_job.module));
 
-    // A later turn resolves BOTH mounted names through their hand-written
-    // stub modules with no GHC error -- the retained-generation symbol
-    // lookup this design depends on (see `session_var_id` and the
-    // `mount_carrier_in` doc comment) links successfully for both.
-    //
-    // NOTE: reading the carried `Aeson.Value`s back with a `case` pattern
-    // match on their constructor (`Aeson.Object fields -> ...`) reliably
-    // produces a JIT `CaseMiss` here. Root-caused to this precise scope by a
-    // set of control experiments (see the task report for the full trail):
-    //   - the retained-generation LINK itself is correct: the consumer
-    //     turn's own `GlobalDecl` for the mounted name has the exact
-    //     identity (unit, module, occurrence) and `required_generation`
-    //     `bind_prepared` stored, and the `Object` constructor's `host_id`
-    //     the carrier used to BUILD the value is byte-identical to the one
-    //     the consumer's own compile declares for its `case`;
-    //   - reusing the SAME cloned carrier `table`/`prepared` through
-    //     `mount_json_binding_in` directly, with the REAL extract-minted
-    //     binder (module injected normally via `--inject-val`), reads back
-    //     correctly -- ruling out `HostCarrier`'s clone-and-reinstall of
-    //     `table`/`prepared` as the cause;
-    //   - going through `mount_carrier_in` with a binder whose name and
-    //     `var_id` exactly match the anchor's own (so the ONLY change from
-    //     the working case is that the mount excludes the generation from
-    //     `--inject-val` and relies on the hand-written `Val.G<gen>.hs`
-    //     stub on the include path) still `CaseMiss`es identically.
-    // So the break is specific to a retained-generation value whose
-    // defining module is compiled as an EXTRA home module alongside the
-    // reference turn (the hand-written stub), as opposed to injected via
-    // `--inject-val`: something about that path causes the constructor
-    // descriptor the value was built with and the one the reference turn's
-    // `case` dispatch compares against to diverge at the machine level,
-    // despite agreeing on `host_id`. This needs either a fix on the GHC
-    // extractor side (`ExecutionProjection.hs`'s per-home-module
-    // constructor-descriptor emission) or deeper investigation of
-    // `tidepool-codegen`'s descriptor interner
-    // (`prepared_program/interner.rs`, `machine.rs::install_staged`) by
-    // someone with more context there. Until it is fixed, do not read a
-    // `HostCarrier`-mounted `Aeson.Value` back with a constructor `case` in
-    // production code.
-    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view(
-        "(carriedA, carriedB) `seq` T.pack \"read both carried values\"",
+    // A later turn reads all four mounted values back through their
+    // hand-written stub modules, with NO further GHC compile for any of
+    // the four mounts above -- and, crucially, by PATTERN MATCHING their
+    // constructors (the `GHC.Magic.lazy`-wrapped stub body must not earn a
+    // bottoming strictness signature that would collapse these cases; see
+    // `HostCarrier::stub_source`'s doc comment for the failure this guards
+    // against).
+    let TurnResult::Expr { compiled, .. } = compile_extra(
+        &mut notebook,
+        "case (carriedA, carriedB, carriedText, carriedJob) of \
+         { (Aeson.Object a, Aeson.Object b, TidepoolHostTextInternal.Text _ _ _, TidepoolHostJob.Job jobText) -> \
+         (Map.lookup \"tag\" a, Map.lookup \"tag\" b, \
+          carriedText == TidepoolHostText.pack \"hello-carrier-text\", \
+          jobText == TidepoolHostText.pack \"job-command\") }",
     ) else {
-        panic!("reading both carried values must compile as an expression");
+        panic!("reading all four carried values must compile as an expression");
     };
     let outcome = notebook
         .session
-        .run_with_sites("read_both_carried", compiled.into_code())
-        .expect("read both carried values");
-    assert!(
-        matches!(outcome, ResidentOutcome::Completed { .. }),
-        "{outcome:?}"
+        .run_with_sites("read_all_carried", compiled.into_code())
+        .expect("read all carried values");
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("reading carried values did not complete: {outcome:?}");
+    };
+    assert_eq!(
+        result.to_json(),
+        serde_json::json!([
+            ["A", "B", true, true],
+            "(Just (String \"A\"),Just (String \"B\"),True,True)"
+        ]),
+        "expected all four carrier-mounted payloads to read back correctly \
+         through their stub modules, including constructor pattern matches"
     );
 }

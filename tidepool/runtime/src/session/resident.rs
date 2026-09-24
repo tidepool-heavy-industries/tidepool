@@ -214,13 +214,35 @@ impl HostCarrier {
     /// `NOINLINE` body is never evaluated: only the binder's `Name` (and
     /// through it, its `stableVarId`) is real; the persistent binding store
     /// supplies the actual value at link time.
+    ///
+    /// The `GHC.Magic.lazy` wrapper is load-bearing, not cosmetic. The
+    /// session pipeline compiles every home module (this stub included) at
+    /// `OptimizeEveryModule`, and a bare self-reference `x = x` at that tier
+    /// gets a bottoming strictness signature from GHC's demand analysis (it
+    /// provably loops if forced). A reference turn compiled in the same
+    /// multi-module session sees that signature -- no cross-module
+    /// unfolding needed for it, a signature alone drives case-of-bottom --
+    /// and simplifies a later `case binder_name of { Con ... }` down to
+    /// just `binder_name`, dropping every alternative; at runtime
+    /// `binder_name` resolves to the real, non-bottoming retained value and
+    /// the dropped case has nothing to dispatch to (a JIT `CaseMiss`).
+    /// `OPTIONS_GHC -fomit-interface-pragmas` on the stub does NOT fix this:
+    /// `canonicalizeDFlags`'s unconditional `updOptLevel 2` (re-applied per
+    /// module, `GhcPipeline.hs`) resets `Opt_OmitInterfacePragmas` back to
+    /// its `-O2` default regardless of a per-module pragma requesting
+    /// otherwise. `GHC.Magic.lazy` instead defeats the *inference itself*:
+    /// it is a standard, safe (no `unsafeCoerce`) library primitive whose
+    /// specific purpose is to make demand analysis not see through an
+    /// expression, so `x = lazy x` never earns a bottoming signature to
+    /// begin with, regardless of optimization tier.
     fn stub_source(&self, module_name: &str, binder_name: &str) -> String {
         format!(
             "module {module_name} ({binder_name}) where\n\
              import qualified {ty_module} as TidepoolCarrierType\n\
+             import qualified GHC.Magic as TidepoolCarrierMagic\n\
              {{-# NOINLINE {binder_name} #-}}\n\
              {binder_name} :: TidepoolCarrierType.{ty_name}\n\
-             {binder_name} = {binder_name}\n",
+             {binder_name} = TidepoolCarrierMagic.lazy {binder_name}\n",
             ty_module = self.host_type.module,
             ty_name = self.host_type.name,
         )
