@@ -280,6 +280,13 @@
               version = "0.1.0";
               src = ./tidepool/extract-cmd;
               cargoLock.lockFile = ./tidepool/extract-cmd/Cargo.lock;
+              # The frontend builds outside the Cargo workspace; its manifest
+              # inherits the workspace lint table, which has no root here.
+              # Lints shape clippy and rustc diagnostics, not the artifact,
+              # and `just lint` runs them in-workspace, so drop the table.
+              postPatch = ''
+                sed -i '/^\[lints\]/,/^$/d' Cargo.toml
+              '';
               # The daemon integration test needs the separately packaged GHC
               # worker; the final wrapper is exercised by the repository battery.
               cargoTestFlags = [ "--lib" ];
