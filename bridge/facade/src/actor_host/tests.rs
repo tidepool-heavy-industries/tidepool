@@ -2064,6 +2064,136 @@ async fn queued_watch_forgotten_before_delivery_is_acknowledged_without_promptin
         .contains("watchChanged"));
 }
 
+/// A settlement notice queued behind a stuck native delivery must not wait on
+/// it. `legacy_pending_prefix` only sees the contiguous untracked prefix, and
+/// `deliver_tracked_message` only ever advances the one stuck sequence at the
+/// front — so before this fix, a `SettlementChanged` row appended after a
+/// tracked row stuck in `Unconfirmed`/`Submitted` was invisible to both and
+/// never reached the model (matches actor 20 in run 535e56ca, inbox message 4
+/// stuck `Submitted`). `deliver_out_of_order_notices` now surfaces it
+/// directly, and does not re-render it once the barrier ahead clears.
+#[tokio::test]
+async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delivered() {
+    use exomonad_agent::BackendThreadId;
+
+    let root = tempfile::tempdir().unwrap();
+    let rows = root.path().join("rows");
+    let cursor = root.path().join("cursor");
+    let inbox = Arc::new(ActorInbox::open(rows, cursor).unwrap());
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let sender = ActorRef::first(exomonad_actor::ActorId(8));
+
+    // Sequence 1: a tracked native input row that will stay stuck.
+    inbox
+        .publish_tracked(
+            DurableActorEvent::Text("stuck native input".into()),
+            DeliveryProvenance::Notification {
+                sender,
+                target: actor,
+            },
+        )
+        .unwrap();
+    // Sequence 2: an untracked settlement notice queued behind it.
+    let notification = exomonad_actor::SettlementNotification {
+        owner: actor,
+        request: exomonad_actor::RequestId(20),
+        label: "child-20".into(),
+        transition: exomonad_actor::SettlementTransition::Ready,
+        reply_preview: Some("\"done\"".into()),
+        occurred_at_unix_ms: 0,
+        sequence: exomonad_actor::ActorEventSequence(2),
+        watermark: exomonad_actor::ActorEventSequence(2),
+    };
+    inbox
+        .publish(DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+            notification: notification.clone(),
+        }))
+        .unwrap();
+
+    let backend = LostAckThenLate {
+        late: exomonad_agent::InputAdmission::Unknown,
+        submissions: std::sync::Mutex::new(Vec::new()),
+        queries: std::sync::Mutex::new(Vec::new()),
+        pushes: std::sync::Mutex::new(Vec::new()),
+    };
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba3".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+
+    // First tick: the front tracked row (Accepted) is submitted and comes
+    // back `Unconfirmed`; delivery for it reports `Err`. The settlement
+    // notice behind it must already have reached the backend this same
+    // tick regardless.
+    assert!(deliver_pending(
+        actor,
+        &inbox,
+        &thread,
+        &backend,
+        &producer,
+        &reconciliations,
+        root.path(),
+        &observation,
+    )
+    .await
+    .is_err());
+    {
+        let messages = backend.submissions.lock().unwrap();
+        assert_eq!(messages.len(), 1, "the stuck row was attempted exactly once");
+    }
+    let pushed_after_first_tick = backend
+        .queries
+        .lock()
+        .unwrap()
+        .clone();
+    assert!(pushed_after_first_tick.is_empty(), "not queried until Unconfirmed");
+    // The barrier still holds: nothing is acknowledged yet.
+    assert_eq!(inbox.cursor(), 0);
+
+    // Second tick: the front row is now `Unconfirmed`, queried and stays
+    // stuck (`Unknown`). The already-surfaced settlement notice must not be
+    // pushed to the backend a second time.
+    assert!(deliver_pending(
+        actor,
+        &inbox,
+        &thread,
+        &backend,
+        &producer,
+        &reconciliations,
+        root.path(),
+        &observation,
+    )
+    .await
+    .is_err());
+    assert_eq!(backend.queries.lock().unwrap().len(), 1);
+    assert_eq!(inbox.cursor(), 0, "the stuck row still fences acknowledgement");
+
+    // The rendered settlement text reached the backend out of order, even
+    // though the stuck native row ahead of it never resolved — and exactly
+    // once, not once per stuck tick.
+    let rendered = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: notification.clone(),
+    })
+    .render(None);
+    let pushes = backend.pushes.lock().unwrap();
+    assert_eq!(
+        pushes.iter().filter(|message| message.contains("request 20")).count(),
+        1,
+        "settlement notice for request 20 must reach the backend exactly once despite the stuck row ahead of it: {pushes:?}"
+    );
+    assert!(pushes.iter().any(|message| *message == rendered));
+}
+
 #[tokio::test]
 async fn queued_watch_notice_already_observed_by_the_owner_is_acknowledged_without_prompting() {
     use exomonad_agent::BackendThreadId;
@@ -2315,6 +2445,7 @@ struct LostAckThenLate {
     late: exomonad_agent::InputAdmission,
     submissions: std::sync::Mutex<Vec<String>>,
     queries: std::sync::Mutex<Vec<String>>,
+    pushes: std::sync::Mutex<Vec<String>>,
 }
 
 impl InteractiveAgentBackend for LostAckThenLate {
@@ -2339,9 +2470,12 @@ impl InteractiveAgentBackend for LostAckThenLate {
         &'a self,
         _cwd: &'a str,
         _thread: &'a QueueReadyThread,
-        _message: &'a str,
+        message: &'a str,
     ) -> InteractiveFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            self.pushes.lock().unwrap().push(message.into());
+            Ok(())
+        })
     }
 
     fn archive<'a>(
@@ -2512,6 +2646,7 @@ async fn restart_queries_exact_lost_ack_and_late_compacted_permanently_fences_su
         late: exomonad_agent::InputAdmission::Compacted,
         submissions: std::sync::Mutex::new(Vec::new()),
         queries: std::sync::Mutex::new(Vec::new()),
+        pushes: std::sync::Mutex::new(Vec::new()),
     };
     let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
     let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
