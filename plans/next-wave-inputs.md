@@ -71,3 +71,15 @@ cold (fix in flight). Once workers stay warm, the remaining cell cost is:
   per warm cell; measure after the daemon fix before deciding.
 - **A child's only cell is its `respond`.** The transport child paid one full
   cell (153 s cold) to deliver a value it had already computed.
+- **One session module per carrier mount.** 45 bash calls left 46
+  `Tidepool.Session.Val.G<n>` stub modules; every session request lists and
+  compiles the live ones (16 in request fa36fa4dfe3673f6, growing with call
+  count). Pooling several occurrences in one stub module is not an option:
+  under the pipeline's forced `-O2` GHC merges the identical
+  `x = GHC.Magic.lazy x` bindings, so a second carrier reads back the first
+  carrier's value (caught by
+  `host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each`;
+  `-fno-cse` is discarded like every per-module pragma). Remaining options:
+  keep stub modules out of the downsweep when nothing in the request imports
+  them, or retire superseded tool-call bindings at the workbench instead of
+  keeping every one live.
