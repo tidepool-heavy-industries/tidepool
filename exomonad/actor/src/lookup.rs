@@ -298,14 +298,11 @@ pub(crate) fn execute(
     let requests = queries(&prepared, imports);
     let mut inspected = match inspect(&requests) {
         Ok(results) if results.len() == requests.len() => results,
-        Ok(_) => {
-            batch.issue = Some("lookup compiler returned an incomplete batch".into());
-            return batch;
-        }
-        Err(error) => {
-            batch.issue = Some(error);
-            return batch;
-        }
+        // A compiler-worker failure or a malformed batch is attributed to
+        // the whole combined request, but one bad query must never take its
+        // neighbors down with it: retry each query on its own so a failure
+        // isolates to the query that actually caused it.
+        Ok(_) | Err(_) => isolate(&prepared, imports, &inspect),
     };
     // Public exports are valid read-only lookup targets even without a source import.
     for index in 0..requests.len().saturating_sub(1) {
@@ -757,6 +754,58 @@ pub(crate) fn execute(
     batch
 }
 
+/// Bound a diagnostic to a display-worthy length. A worker-failure message
+/// can carry stderr straight through (see `CompileError::WorkerFailure`);
+/// nothing here re-truncates cleanly at a char boundary, and no lookup
+/// diagnostic should grow unbounded inside a per-query result.
+fn bound_diagnostic(diagnostic: &str, limit: usize) -> String {
+    if diagnostic.chars().count() <= limit {
+        diagnostic.to_owned()
+    } else {
+        let truncated: String = diagnostic.chars().take(limit).collect();
+        format!("{truncated}… (truncated)")
+    }
+}
+
+/// One combined compiler-worker request answers a whole query batch: every
+/// query's generated module is compiled in the same invocation, so one
+/// query's own compile failure (a malformed generated `Expr.hs`, most often
+/// a type search whose signature doesn't parse or typecheck) turns
+/// `inspect` into a single batch-wide `Err`, discarding every other query's
+/// perfectly good answer along with it. Retrying each prepared query on its
+/// own isolates that failure to the query that actually caused it — a
+/// neighbor that compiles alone gets its real result; a query that fails
+/// alone too keeps its own diagnostic instead of the whole batch's.
+const DIAGNOSTIC_BOUND: usize = 2_000;
+
+fn isolate(
+    prepared: &[lookup_tool::PreparedLookup],
+    imports: &str,
+    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, String>,
+) -> Vec<InspectionResult> {
+    let mut results = Vec::new();
+    for query in prepared {
+        let own = queries(std::slice::from_ref(query), imports);
+        if own.is_empty() {
+            // Doc and already-Rejected queries never reach the compiler.
+            continue;
+        }
+        match inspect(&own) {
+            Ok(values) if values.len() == own.len() => results.extend(values),
+            Ok(_) => results.extend(own.iter().map(|_| InspectionResult::Rejected {
+                diagnostic: bound_diagnostic(
+                    "lookup compiler returned a mismatched result for this query",
+                    DIAGNOSTIC_BOUND,
+                ),
+            })),
+            Err(error) => results.extend(own.iter().map(|_| InspectionResult::Rejected {
+                diagnostic: bound_diagnostic(&error, DIAGNOSTIC_BOUND),
+            })),
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,6 +1013,67 @@ mod tests {
         );
         assert!(result.candidates.is_empty());
         assert_eq!(calls.get(), 1);
+    }
+    /// The batch a live root actually hit: a valid name, an unknown name,
+    /// and a type-signature query, sent together. The combined compile
+    /// fails (the shape of a real compiler-worker failure), but every query
+    /// still resolves on its own — the good name is `Found`, the unknown
+    /// name is `Missing`, and only the signature query, which alone fails
+    /// again, is `Rejected` with its own diagnostic. No neighbor is taken
+    /// down by another query's failure.
+    #[test]
+    fn mixed_batch_isolates_one_failing_query_from_its_neighbors() {
+        let calls = Cell::new(0);
+        let result = execute(
+            request(&["validName", "unknownName", ":: Int -> Bool"], false),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |queries| {
+                calls.set(calls.get() + 1);
+                if queries.len() != 1 {
+                    // The whole-batch attempt: a real compiler-worker
+                    // failure discards every query in the same invocation.
+                    return Err("compiler worker failed (2 diagnostic(s))".into());
+                }
+                match &queries[0] {
+                    InspectionQuery::Info(name) if name == "validName" => {
+                        Ok(vec![InspectionResult::Info {
+                            query: name.clone(),
+                            entries: vec![entry("validName")],
+                        }])
+                    }
+                    InspectionQuery::Info(name) if name == "unknownName" => {
+                        Ok(vec![InspectionResult::NotFound {
+                            query: name.clone(),
+                        }])
+                    }
+                    InspectionQuery::TypeSearch(_) => {
+                        Err("Not in scope: type constructor or class `Bool'".into())
+                    }
+                    other => panic!("unexpected retried query: {other:?}"),
+                }
+            },
+        );
+        // One combined attempt, then one retry per query.
+        assert_eq!(calls.get(), 4);
+        assert_eq!(result.results.len(), 3);
+        assert!(matches!(
+            result.results[0].outcome,
+            LookupOutcome::Found(_, false)
+        ));
+        assert!(matches!(
+            result.results[1].outcome,
+            LookupOutcome::Missing(_, _)
+        ));
+        match &result.results[2].outcome {
+            LookupOutcome::Rejected(diagnostic) => {
+                assert!(diagnostic.contains("Not in scope"), "{diagnostic}");
+            }
+            _ => panic!("expected the signature query to be rejected"),
+        }
     }
 }
 
