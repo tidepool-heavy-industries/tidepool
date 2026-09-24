@@ -204,3 +204,12 @@ the run with session size.
   so deployed runs are safe; dev checks are not. Key the cache (or the
   session's memo namespace) on `haskell_sources::source_identity()`, which
   `FrozenWorkspace` already computes.
+
+## Cleanup refusal order (2026-09-24)
+
+- `executeCleanup` on a stale plan refuses with "actor N has no confirmed
+  idle provider turn" before it reports `CleanupStalePlan`. The facade test
+  `typed_reply_settles_response_and_wakes_registered_watch` (now ignored
+  with this reason, after its cells were brought up to `forkGroupHandle ::
+  Maybe` and a typed `[label|..|]`) expects staleness first. Decide which
+  refusal a stale plan should surface, then re-enable the test.

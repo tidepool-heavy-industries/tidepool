@@ -7,5 +7,5 @@ let capturedTransform = \value -> value + sharedDelta
 let sharedDelta = 10 :: Int
 type RevisionReport = LateReport
 let interfaceWorker = first3 workers
-let revisionLabel = [label|revision|]
+let revisionLabel = [label|revision|] :: Label
 let revisionPlan = LateRefinement 99 capturedTransform
