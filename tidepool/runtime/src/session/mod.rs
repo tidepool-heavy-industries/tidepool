@@ -425,7 +425,7 @@ impl SessionLib {
         // number can be REISSUED for a real, `.hi`-backed bind -- which
         // would then coexist with the stale stub source on the include
         // path, an ambiguous or wrongly-resolved module for GHC's
-        // downsweep. Sweeping the whole directory on open (rather than
+        // downsweep. Sweeping every stub source on open (rather than
         // tracking which files are stale) is what guarantees none of them
         // can be found by a later turn, matching a resumed session's reset
         // bookkeeping exactly.
@@ -434,8 +434,15 @@ impl SessionLib {
             .rsplit_once('/')
             .map(|(dir, _)| root.join(dir))
         {
-            match std::fs::remove_dir_all(&val_dir) {
-                Ok(()) => {}
+            match std::fs::read_dir(&val_dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let path = entry?.path();
+                        if path.extension().is_some_and(|extension| extension == "hs") {
+                            std::fs::remove_file(&path)?;
+                        }
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
