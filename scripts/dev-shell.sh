@@ -80,7 +80,8 @@ cleanup_dev_shell_tmp() {
     pid=${pid#/proc/}
     [[ $pid == "$$" ]] && continue
     [[ -r /proc/$pid/environ ]] || continue
-    if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qxF "TMPDIR=$dir"; then
+    # nix develop points TMPDIR at a directory inside $dir, so match both.
+    if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -q -e "^TMPDIR=$dir\$" -e "^TMPDIR=$dir/"; then
       return 0
     fi
   done
