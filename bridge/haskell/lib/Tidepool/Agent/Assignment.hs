@@ -32,8 +32,13 @@ data Assignment input = Assignment
   , guidance :: Maybe Text
   , deadline :: Maybe Duration
   , report :: SettlementReporting
+  -- | Other branches admitted in the same 'Tidepool.Actors.Unfold.unfold'
+  -- call, as (label, allocated path, truncated preview) triples. Set by
+  -- 'Tidepool.Actors.Unfold.requestBranch' immediately before the request is
+  -- sent; empty for every other caller of 'assignment'.
+  , assignmentSiblings :: [(Text, Text, Text)]
   }
   deriving (Show, Eq, Functor)
 
 assignment :: Label -> input -> Assignment input
-assignment name value = Assignment name value Nothing Nothing NotifyOwner
+assignment name value = Assignment name value Nothing Nothing NotifyOwner []

@@ -30,7 +30,8 @@ requestSessionSited
   => Int
   -> Int
   -> Maybe Text
+  -> [(Text, Text, Text)]
   -> input
   -> Eff effs output
-requestSessionSited site requestId initialUser input =
-  send (AgentSessionWith site input requestId initialUser)
+requestSessionSited site requestId initialUser siblings input =
+  send (AgentSessionWith site input requestId initialUser siblings)

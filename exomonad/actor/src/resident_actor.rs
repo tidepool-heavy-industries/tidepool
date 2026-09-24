@@ -3906,6 +3906,7 @@ where
             response: request.response.clone(),
             input_preview,
             reply_preview,
+            siblings: request.siblings.clone(),
         };
         let request_message =
             contract.message(request.request, request.initial_user_message.as_deref());

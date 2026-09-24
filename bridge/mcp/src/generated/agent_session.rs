@@ -8,7 +8,7 @@ pub fn agent_session_decl() -> crate::EffectDecl {
         description: "Present one typed request to this actor's attached application. The external application reaches the persistent Haskell workbench through its actor-local transport.",
         prompt_card: Some("A request activation mounts typed `sessionInput`, `sessionReply`, and `respond` in the attached application."),
         constructors: &[
-            "AgentSessionWith :: Int -> input -> Int -> Maybe Text -> AgentSession output",
+            "AgentSessionWith :: Int -> input -> Int -> Maybe Text -> [(Text, Text, Text)] -> AgentSession output",
             "AgentAttachWith :: Maybe Text -> AgentSession ()",
         ],
         type_defs: &[],

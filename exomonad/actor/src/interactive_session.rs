@@ -27,6 +27,26 @@ impl ActivationId {
     }
 }
 
+/// One other branch admitted in the same `unfold` call as this activation's
+/// target, as reported by `Tidepool.Actors.Unfold.requestBranch` before this
+/// request was sent. Empty for any request outside `unfold`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingPreview {
+    pub label: String,
+    pub path: String,
+    pub preview: String,
+}
+
+impl From<(String, String, String)> for SiblingPreview {
+    fn from((label, path, preview): (String, String, String)) -> Self {
+        Self {
+            label,
+            path,
+            preview,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentActivation {
     pub id: ActivationId,
@@ -58,6 +78,7 @@ pub(crate) struct ActivationContract {
     pub response: ResponseExpectation,
     pub input_preview: String,
     pub reply_preview: String,
+    pub siblings: Vec<SiblingPreview>,
 }
 
 impl ActivationContract {
@@ -70,15 +91,38 @@ impl ActivationContract {
                 format!("\nProgress updates for this request: `reportProgress` accepts {ty}.")
             });
         let reply_type = self.response.expected_type();
+        let siblings = self.siblings_block();
         format!(
-            "Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {reply_type}). It takes exactly one argument, the reply value itself: `respond (… :: {reply_type})`.\n{}{}",
+            "Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}{}\n\nReturn with `respond` (reply type {reply_type}). It takes exactly one argument, the reply value itself: `respond (… :: {reply_type})`.\n{}{}",
             request.0,
             guidance.map(|text| format!(": {text}")).unwrap_or_default(),
             self.input_type,
             self.input_preview,
+            siblings,
             self.reply_preview,
             progress
         )
+    }
+
+    /// "Siblings admitted with you (n):" plus one line per sibling, or empty
+    /// when this activation admitted none. Placed right after the assignment
+    /// so a child sees who else arrived in the same `unfold` before it reads
+    /// its own reply obligation.
+    fn siblings_block(&self) -> String {
+        if self.siblings.is_empty() {
+            return String::new();
+        }
+        let mut block = format!(
+            "\n\nSiblings admitted with you ({}):",
+            self.siblings.len()
+        );
+        for sibling in &self.siblings {
+            block.push_str(&format!(
+                "\n- {} ({}): {}",
+                sibling.label, sibling.path, sibling.preview
+            ));
+        }
+        block
     }
 }
 
@@ -90,6 +134,7 @@ pub struct InteractiveSessionRequest {
     pub input_modules: Vec<String>,
     pub response: ResponseExpectation,
     pub output_modules: Vec<String>,
+    pub siblings: Vec<SiblingPreview>,
 }
 
 impl InteractiveSessionRequest {
@@ -149,14 +194,20 @@ impl ResidentInteractiveSession {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let (site, request_id, initial_user_message) =
+        let (site, request_id, initial_user_message, siblings) =
             match crate::generated::agent_session::AgentSessionReq::from_value(request, table)? {
                 crate::generated::agent_session::AgentSessionReq::AgentSessionWith(
                     site,
                     _input,
                     request_id,
                     initial_user_message,
-                ) => (site, request_id, initial_user_message),
+                    siblings,
+                ) => (
+                    site,
+                    request_id,
+                    initial_user_message,
+                    siblings.into_iter().map(SiblingPreview::from).collect(),
+                ),
                 crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..) => {
                     unreachable!("agent attachment is classified before session capture")
                 }
@@ -177,6 +228,7 @@ impl ResidentInteractiveSession {
                 input_modules: signature.input_modules,
                 response: signature.response,
                 output_modules: signature.output_modules,
+                siblings,
             },
             hole,
             input,
@@ -204,12 +256,24 @@ mod tests {
                 response: ResponseExpectation::new("Review"),
                 input_preview: "candidate".into(),
                 reply_preview: "data Review = Accepted | Rejected".into(),
+                siblings: vec![
+                    SiblingPreview {
+                        label: "worker-a".into(),
+                        path: "exomonad/wave/worker-a".into(),
+                        preview: "CodingTask { ownedPaths = [\"src/a.rs\"], obligation = \"add a\" }".into(),
+                    },
+                    SiblingPreview {
+                        label: "worker-b".into(),
+                        path: "exomonad/wave/worker-b".into(),
+                        preview: "CodingTask { ownedPaths = [\"src/b.rs\"], obligation = \"add b\" }".into(),
+                    },
+                ],
             },
             Some("Review this candidate."),
         );
         assert_eq!(
             activation.message,
-            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review). It takes exactly one argument, the reply value itself: `respond (… :: Review)`.\ndata Review = Accepted | Rejected\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply."
+            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nSiblings admitted with you (2):\n- worker-a (exomonad/wave/worker-a): CodingTask { ownedPaths = [\"src/a.rs\"], obligation = \"add a\" }\n- worker-b (exomonad/wave/worker-b): CodingTask { ownedPaths = [\"src/b.rs\"], obligation = \"add b\" }\n\nReturn with `respond` (reply type Review). It takes exactly one argument, the reply value itself: `respond (… :: Review)`.\ndata Review = Accepted | Rejected\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }

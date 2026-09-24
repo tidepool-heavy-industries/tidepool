@@ -85,7 +85,7 @@ pub use fork_workspace::{
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
     ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
-    ResidentInteractiveSession,
+    ResidentInteractiveSession, SiblingPreview,
 };
 pub use kernel::{
     CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,

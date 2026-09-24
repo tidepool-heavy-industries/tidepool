@@ -451,7 +451,8 @@ requestConfiguredSited site target targetWorktree options retain = do
         Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
-          site requestId (Just (activationGuidance (labelText (assignmentLabel options)) (guidance options))) (input options)
+          site requestId (Just (activationGuidance (labelText (assignmentLabel options)) (guidance options)))
+          (assignmentSiblings options) (input options)
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do

@@ -57,6 +57,19 @@ pub fn agent_session() -> Effect {
                         ty: HsType::maybe(HsType::Text),
                         rust: RustBinding::Derived,
                     },
+                    Arg {
+                        // Other branches admitted in the same `unfold` as
+                        // this request's target, if any: (label, allocated
+                        // path, truncated preview) triples. Empty outside
+                        // `Tidepool.Actors.Unfold.requestBranch`.
+                        name: "siblings",
+                        ty: HsType::list(HsType::Tuple(vec![
+                            HsType::Text,
+                            HsType::Text,
+                            HsType::Text,
+                        ])),
+                        rust: RustBinding::Path("Vec<(String, String, String)>"),
+                    },
                 ],
                 ret: HsType::Var("output"),
                 errors: None,

@@ -226,7 +226,8 @@ snapshotDirty (CurrentCheckoutSeed _) = CurrentCheckoutSeed AllowDirtySnapshot
 
 data Branch (childEffects :: [Type -> Type]) input result where
   Branch
-    :: ForkRole
+    :: WorkbenchDisplay input
+    => ForkRole
     -> WorktreeSeed
     -> Effects childEffects
     -> BranchOptions
@@ -383,7 +384,8 @@ codingPolicy = RolePolicy CodingFork
 
 narrowed
   :: forall child result input
-   . Effects child
+   . WorkbenchDisplay input
+  => Effects child
   -> RolePolicy child
   -> Assignment input
   -> Branch child input result
@@ -392,7 +394,8 @@ narrowed effects (RolePolicy role seed) assigned =
 
 researching
   :: forall result input
-   . WorktreeSeed
+   . WorkbenchDisplay input
+  => WorktreeSeed
   -> Assignment input
   -> Branch ResearchEffects input result
 researching seed assigned = Branch ResearchFork seed knownEffects defaultBranchOptions assigned
@@ -400,21 +403,24 @@ researching seed assigned = Branch ResearchFork seed knownEffects defaultBranchO
 -- | Inspection-only leaf, regardless of the host research recursion allowance.
 researchingLeaf
   :: forall result input
-   . WorktreeSeed
+   . WorkbenchDisplay input
+  => WorktreeSeed
   -> Assignment input
   -> Branch ResearchLeafEffects input result
 researchingLeaf seed assigned = Branch ResearchFork seed knownEffects defaultBranchOptions assigned
 
 coding
   :: forall result input
-   . WorktreeSeed
+   . WorkbenchDisplay input
+  => WorktreeSeed
   -> Assignment input
   -> Branch CodingEffects input result
 coding seed assigned = Branch CodingFork seed knownEffects defaultBranchOptions assigned
 
 scaffolding
   :: forall result input
-   . WorktreeSeed
+   . WorkbenchDisplay input
+  => WorktreeSeed
   -> Assignment input
   -> Branch CodingEffects input result
 scaffolding seed assigned =
@@ -422,7 +428,8 @@ scaffolding seed assigned =
 
 integrating
   :: forall result input
-   . WorktreeSeed
+   . WorkbenchDisplay input
+  => WorktreeSeed
   -> Assignment input
   -> Branch IntegrationEffects input result
 integrating seed assigned =
@@ -594,7 +601,7 @@ attemptUnfold (ForkGroupPath relative groupName) plan = do
           _ <- send (ForksAbortWith groupId)
           pure (Left failure)
         Right (tree, []) -> do
-          result <- activate tree
+          result <- activate (siblingRoster tree) tree
           committed <- send (ForksCommitWith groupId)
           pure $ case committed of
             Left failure -> Left (UnfoldCommitRejected failure)
@@ -629,12 +636,28 @@ attemptUnfold (ForkGroupPath relative groupName) plan = do
             Right (argumentsTree, remaining) ->
               Right (StartedAp functionsTree argumentsTree, remaining)
 
-    activate :: Started parent a -> Eff parent a
-    activate (StartedPure value) = pure value
-    activate (StartedBranch site groupId path branchPlan actor allocated tree) =
-      requestBranch site groupId path branchPlan actor allocated tree
-    activate (StartedAp functions arguments) =
-      activate functions <*> activate arguments
+    -- Every sibling admitted in this same 'unfold', computed once from the
+    -- whole started tree before any request is sent, then narrowed to "every
+    -- OTHER branch" per site by allocated path.
+    activate :: [(Text, Text, Text)] -> Started parent a -> Eff parent a
+    activate _ (StartedPure value) = pure value
+    activate roster (StartedBranch site groupId path branchPlan actor allocated tree) =
+      let others = filter (\(_, siblingPath, _) -> siblingPath /= allocated) roster
+      in requestBranch site groupId path branchPlan actor allocated tree others
+    activate roster (StartedAp functions arguments) =
+      activate roster functions <*> activate roster arguments
+
+    -- (label, allocated path, truncated preview) for every branch in the
+    -- started tree, computed with the SAME 'workbenchActivationDisplay' the
+    -- engine uses to render a child's own `sessionInput` preview at
+    -- activation (`ActivationContract::message`), so a custom instance's
+    -- owned-paths/obligation fields appear identically in both places.
+    siblingRoster :: Started parent a -> [(Text, Text, Text)]
+    siblingRoster (StartedPure _) = []
+    siblingRoster (StartedBranch _ _ _ (Branch _ _ _ _ assigned) _ allocated _) =
+      [(labelText (assignmentLabel assigned), allocated, siblingPreviewText (input assigned))]
+    siblingRoster (StartedAp functions arguments) =
+      siblingRoster functions <> siblingRoster arguments
 
     branchNames :: Unfold parent a -> [Text]
     branchNames (PureU _) = []
@@ -765,6 +788,26 @@ launchRoleFor CodingFork = Actor.CodingRole
 launchRoleFor ScaffoldingFork = Actor.ScaffoldingRole
 launchRoleFor IntegrationFork = Actor.IntegrationRole
 
+-- | The character budget for one sibling's roster preview line. Small on
+-- purpose: the roster names who else arrived, not what they carry — a child
+-- reads its own `sessionInput` (bounded far more generously) for detail.
+siblingPreviewBudget :: Int
+siblingPreviewBudget = 240
+
+-- | Render one sibling's assignment input the same way the engine renders a
+-- child's own activation preview (`workbenchActivationDisplay`, the method
+-- backing `ActivationContract::message`'s `input_preview`), so a task type's
+-- custom 'WorkbenchDisplay' instance — owned paths, obligation, whatever it
+-- chooses to summarize — appears identically in both places. Hard-truncated
+-- to 'siblingPreviewBudget' regardless of whether the instance itself honors
+-- the passed budget.
+siblingPreviewText :: WorkbenchDisplay input => input -> Text
+siblingPreviewText value =
+  let (rendered, _omitted) = workbenchActivationDisplay siblingPreviewBudget value
+   in if Text.length rendered > siblingPreviewBudget
+        then Text.take siblingPreviewBudget rendered
+        else rendered
+
 requestBranch
   :: forall effects child input result
    . (Member Replies effects, Member AgentInspection effects)
@@ -775,12 +818,14 @@ requestBranch
   -> AgentRef
   -> Text
   -> WorktreeHandle
+  -> [(Text, Text, Text)]
   -> Eff effects (Response result)
-requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assigned) actor allocated tree = do
+requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assigned) actor allocated tree siblings = do
   let leaf = labelText (assignmentLabel assigned)
   let requested = group <> "/" <> leaf
       (actorId, incarnation) = agentIdentity actor
-  response <- requestWithSited @result @input site actor assigned
+      assignedWithSiblings = assigned { assignmentSiblings = siblings }
+  response <- requestWithSited @result @input site actor assignedWithSiblings
   observed <- lookupAgent actor
   let pair maybeId maybeInc = (,) <$> maybeId <*> maybeInc
   pure (withResponseAdmission

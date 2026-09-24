@@ -151,6 +151,13 @@ fn exomonad_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     .expect("coding actors can scaffold, fork, observe, and integrate their children");
 
     compile_haskell(
+        include_str!("exomonad_action_surface/coding_children_admit_as_siblings.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect("two children in one unfold compile with the sibling roster plumbed through requestBranch");
+
+    compile_haskell(
         include_str!("exomonad_action_surface/research_can_unfold.hs"),
         "result",
         &include_refs,
