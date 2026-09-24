@@ -2382,7 +2382,177 @@ where
         ))
     }
 
+    /// Prepare one resident cell, splitting `check_cell` (GHC) and every
+    /// per-item compile off the machine checkout when the cell has no
+    /// `Decl` item — mirroring [`Self::begin_fragment_split`]/
+    /// [`Self::bind_command_job`] (Problem 1 of the compile-path design
+    /// note): snapshot under a short checkout
+    /// ([`snapshot_cell_split`]), check and compile off-checkout
+    /// ([`check_cell_off_checkout`], [`compile_cell_items_off_checkout`]),
+    /// re-checkout only to reserve generations
+    /// ([`reserve_cell_generations`]) and to revalidate and install
+    /// ([`finalize_cell_install`]), each re-checkout detecting a stale
+    /// snapshot via [`crate::ActorCompileView::compile_relevant_eq`] and an
+    /// unchanged `next_declaration_module()`, up to `MAX_SPLIT_ATTEMPTS`
+    /// times. A cell with a `Decl` item, or one that exhausts its retries,
+    /// falls back to [`Self::prepare_cell_single_checkout`]: declaration
+    /// staging writes and validates the next Lib module in the shared
+    /// session root and stays fully serialized.
     pub(crate) async fn prepare_cell(
+        &self,
+        context: crate::ActorSessionContext,
+        cell_source: String,
+    ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
+        const MAX_SPLIT_ATTEMPTS: u32 = 3;
+        let json_input = self.json_input.clone();
+        let response = self.response.clone();
+        let request = self.request;
+        let type_modules = Arc::clone(&self.type_modules);
+        let effects = context.haskell_effects_alias.clone();
+
+        for _ in 0..MAX_SPLIT_ATTEMPTS {
+            let snapshot_source = self.access.source.clone();
+            let snapshot_type_modules = Arc::clone(&type_modules);
+            let snapshot_response = response.clone();
+            let snapshot_json_input = json_input.clone();
+            let (source, snapshot) = self
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    snapshot_cell_split(
+                        session,
+                        context,
+                        snapshot_source,
+                        &snapshot_type_modules,
+                        snapshot_response.as_ref(),
+                        request,
+                        snapshot_json_input.as_ref(),
+                    )
+                })
+                .await?;
+
+            // No checkout held here: the GHC whole-cell check runs
+            // concurrently with every other actor's turn against this
+            // session.
+            let check_source = source.clone();
+            let check_effects = effects.clone();
+            let check_cell_source = cell_source.clone();
+            let (snapshot, checked) = spawn_blocking_in_span(move || {
+                let checked =
+                    check_cell_off_checkout(&snapshot, &check_source, &check_effects, &check_cell_source);
+                checked.map(|checked| (snapshot, checked))
+            })
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+
+            let has_declaration = checked
+                .items
+                .iter()
+                .any(|item| item.verdict.kind == TurnKind::Decl);
+            if has_declaration {
+                // Declaration staging writes and validates the next Lib
+                // module in the shared session root: that must stay fully
+                // serialized, so abandon the split and run the original
+                // single-checkout path (which repeats the whole-cell check
+                // under its own checkout).
+                return self.prepare_cell_single_checkout(context, cell_source).await;
+            }
+
+            let reserve_source = source.clone();
+            let reserve_type_modules = Arc::clone(&type_modules);
+            let item_count = checked.items.len();
+            let (snapshot, reservation) = self
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    reserve_cell_generations(
+                        session,
+                        context,
+                        &reserve_source,
+                        &reserve_type_modules,
+                        &snapshot,
+                        item_count,
+                    )
+                    .map(|reservation| (snapshot, reservation))
+                })
+                .await?;
+            let (c_view, retained, visible_names) = match reservation {
+                CellReservation::Stale => continue,
+                CellReservation::Ready(ready) => {
+                    let CellReservationReady {
+                        view,
+                        retained,
+                        visible_names,
+                    } = *ready;
+                    (view, retained, visible_names)
+                }
+            };
+
+            // No checkout held here either: every item's GHC compile also
+            // runs with the machine released.
+            let compile_source = source.clone();
+            let compile_effects = effects.clone();
+            let compile_cell_source = cell_source.clone();
+            let compile_context = context.clone();
+            let compile_view = c_view.clone();
+            let (checked, outcome) = spawn_blocking_in_span(move || {
+                let outcome = compile_cell_items_off_checkout(
+                    &compile_context,
+                    &compile_source,
+                    &compile_effects,
+                    &checked,
+                    &compile_cell_source,
+                    compile_view,
+                    &retained,
+                    &visible_names,
+                );
+                outcome.map(|outcome| (checked, outcome))
+            })
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+
+            let items = match outcome {
+                CellItemsOutcome::Rejected { index, diagnostic } => {
+                    return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
+                }
+                CellItemsOutcome::Ready(items) => items,
+            };
+
+            let install_source = source.clone();
+            let install_type_modules = Arc::clone(&type_modules);
+            let candidate_module = snapshot.candidate_module;
+            let install_view = c_view;
+            let install = self
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    finalize_cell_install(
+                        session,
+                        context,
+                        &install_source,
+                        &install_type_modules,
+                        candidate_module,
+                        &install_view,
+                        items,
+                    )
+                })
+                .await?;
+            match install {
+                CellInstall::Ready(prepared) => return Ok((checked, prepared)),
+                CellInstall::Stale => continue,
+            }
+        }
+
+        // Contention exhausted the bounded split-compile retries — fall
+        // back to the original single-checkout path, whose one exclusive
+        // borrow cannot itself observe a stale view.
+        self.prepare_cell_single_checkout(context, cell_source).await
+    }
+
+    /// The original, unsplit whole-cell preparation: one exclusive machine
+    /// checkout for the whole-cell check and every item's compile. Cells
+    /// with a `Decl` item always run this path — declaration staging writes
+    /// and validates the next Lib module in the shared session root, which
+    /// must stay serialized. [`Self::prepare_cell`]'s bounded split-compile
+    /// retries also fall back here when they run out.
+    async fn prepare_cell_single_checkout(
         &self,
         context: crate::ActorSessionContext,
         cell_source: String,
@@ -6069,6 +6239,354 @@ enum CompiledBlock {
     Rejected(tidepool_runtime::session::CompileRejection),
 }
 
+/// A short-checkout snapshot for [`ResidentActorWorkbench::prepare_cell`]'s
+/// split compile: the exact source-side view the whole-cell check and every
+/// item's compile target, and the declaration module this view currently
+/// imports (`None` before the first declaration ever lands). Mirrors
+/// `bind_command_job`'s `BindJobPrepare`/`begin_fragment_split`'s
+/// `FragmentCompileSnapshot`.
+struct CellSplitSnapshot {
+    view: crate::ActorCompileView,
+    candidate_module: tidepool_repr::SessionModule,
+}
+
+/// Take the checkout-scoped snapshot a split cell preparation needs, then
+/// release the checkout. Mounts the request's JSON input carrier — kept
+/// under this first checkout exactly as the single-checkout path does, GHC
+/// compile and all — and retires its temporary owner lease before
+/// releasing, so an abandoned split attempt (a `Decl` item, or exhausted
+/// retries) never leaves an un-retired binding behind.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_cell_split<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    mut source: ActorWorkbenchSource,
+    type_modules: &[String],
+    response: Option<&ResponseExpectation>,
+    request: Option<crate::RequestId>,
+    json_input: Option<&serde_json::Value>,
+) -> Result<(ActorWorkbenchSource, CellSplitSnapshot), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let mounted_input = json_input
+        .map(|input| mount_json_input(session, context, &source, type_modules, input))
+        .transpose()?;
+    if let Some(input) = &mounted_input {
+        source
+            .workbench_imports
+            .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
+        source.preamble = format!(
+            "{}\ninput = TidepoolHostInput.{}\n",
+            source.preamble, input.name
+        )
+        .into();
+    }
+    if let Some(input) = &mounted_input {
+        session.retire_host_binding_owner(&input.binder);
+    }
+    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    {
+        return Err(ResidentActorWorkbenchError::MachineLost);
+    }
+    let candidate_module = session.next_declaration_module().ok_or_else(|| {
+        ResidentActorWorkbenchError::CompileInfrastructure(
+            "resident cell session has no declaration plane".into(),
+        )
+    })?;
+    source.preamble = match (response, request) {
+        (Some(response), Some(request)) => {
+            response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
+        }
+        (None, None) => source.preamble.to_string(),
+        _ => unreachable!("request workbench scope is constructed atomically"),
+    }
+    .into();
+    source.preamble = actor_preamble(&source.preamble, context).into();
+    let view = actor_compile_view(session, context, &source, type_modules)?;
+    Ok((
+        source,
+        CellSplitSnapshot {
+            view,
+            candidate_module,
+        },
+    ))
+}
+
+/// The whole-cell-check half of a split cell preparation: everything
+/// [`snapshot_cell_split`]'s checkout-only prerequisites make possible once
+/// they are already in hand, including the same-cell redeclaration-collision
+/// retry `prepare_cell_single_checkout` runs. No session or checkout touched
+/// here.
+fn check_cell_off_checkout(
+    snapshot: &CellSplitSnapshot,
+    source: &ActorWorkbenchSource,
+    effects: &str,
+    cell_source: &str,
+) -> Result<CellCheck, ResidentActorWorkbenchError> {
+    let compile_view = &snapshot.view;
+    let prepared = source.prepare(compile_view);
+    let check_preamble =
+        cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())?;
+    let template = resident_cell_check_template(&check_preamble, effects, &prepared.imports);
+    let compile_view_evidence = cell_check_evidence(compile_view, &template, &prepared);
+    let include = prepared
+        .include
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let cell_check_request = || CellCheckRequest {
+        cell_text: cell_source,
+        template: &template,
+        include: &include,
+        session_root: compile_view.session_root(),
+        inject_modules: &prepared.injected,
+        compile_generation: compile_view.next_value_generation().0,
+        compile_view_evidence: &compile_view_evidence,
+    };
+    match check_cell(cell_check_request()) {
+        Ok(checked) => Ok(checked),
+        Err(failure) => {
+            // See `prepare_cell_single_checkout`'s same-cell-shape comment:
+            // a cell that both re-declares and uses a name in the same
+            // statement needs the current generation's collision hidden
+            // before one retry.
+            let mut patched_imports = None;
+            if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+                if let Some(previous_module) = compile_view.library() {
+                    let previous_module = previous_module.module_name();
+                    let message = tidepool_runtime::session::render_cell_compile_error(
+                        &failure.error,
+                        cell_source,
+                    );
+                    let names = tidepool_runtime::session::turn::same_cell_value_collisions(
+                        &message,
+                        &previous_module,
+                        &snapshot.candidate_module.module_name(),
+                    );
+                    patched_imports =
+                        hide_same_cell_collisions(&prepared.imports, &previous_module, &names);
+                }
+            }
+            match patched_imports {
+                Some(patched_imports) => {
+                    let retried_template =
+                        resident_cell_check_template(&check_preamble, effects, &patched_imports);
+                    let retried_evidence =
+                        cell_check_evidence(compile_view, &retried_template, &prepared);
+                    match check_cell(CellCheckRequest {
+                        template: &retried_template,
+                        compile_view_evidence: &retried_evidence,
+                        ..cell_check_request()
+                    }) {
+                        Ok(checked) => Ok(checked),
+                        Err(failure) => Err(cell_check_error(failure, cell_source)),
+                    }
+                }
+                None => Err(cell_check_error(failure, cell_source)),
+            }
+        }
+    }
+}
+
+/// The outcome of [`reserve_cell_generations`]'s re-checkout: either the
+/// snapshot is still fresh and every item's value generation is reserved, or
+/// something else wrote to a scope this compile actually read from and the
+/// caller must retry from a fresh snapshot.
+struct CellReservationReady {
+    view: crate::ActorCompileView,
+    retained: Vec<(SymbolIdentity, u64)>,
+    visible_names: Vec<String>,
+}
+
+enum CellReservation {
+    Ready(Box<CellReservationReady>),
+    Stale,
+}
+
+/// Re-checkout after the whole-cell check to revalidate `snapshot` and
+/// reserve identities for every item this cell is about to compile, all at
+/// once, before releasing the checkout again for the per-item compiles.
+/// Reserving the whole run's generations here (rather than one at a time, as
+/// the single-checkout path does per item) keeps the per-item compiles
+/// entirely off-checkout.
+#[allow(clippy::too_many_arguments)]
+fn reserve_cell_generations<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    snapshot: &CellSplitSnapshot,
+    item_count: usize,
+) -> Result<CellReservation, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let fresh_view = actor_compile_view(session, context, source, type_modules)?;
+    if !fresh_view.compile_relevant_eq(&snapshot.view)
+        || session.next_declaration_module() != Some(snapshot.candidate_module)
+    {
+        return Ok(CellReservation::Stale);
+    }
+    let g0 = fresh_view.next_value_generation();
+    let through = g0.0.saturating_add((item_count.max(1) - 1) as u64);
+    session.reserve_value_generations_through(tidepool_repr::Generation(through));
+    let retained = session.prepared_retained();
+    let visible_names = session
+        .workbench_bindings_in(context.placement.lexical_scope)
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect::<Vec<_>>();
+    Ok(CellReservation::Ready(Box::new(CellReservationReady {
+        view: fresh_view,
+        retained,
+        visible_names,
+    })))
+}
+
+/// The outcome of [`compile_cell_items_off_checkout`]: either every item
+/// compiled and is ready to install, or one was rejected — a rejection needs
+/// no re-checkout, since nothing rejected is ever installed or leased.
+enum CellItemsOutcome {
+    Ready(Vec<PreparedCellItem>),
+    Rejected {
+        index: usize,
+        diagnostic: tidepool_runtime::session::CompileRejection,
+    },
+}
+
+/// The per-item compile half of a split cell preparation: everything
+/// [`reserve_cell_generations`]'s checkout-only prerequisites make possible
+/// once they are already in hand. No session or checkout touched here;
+/// mirrors the non-declaration half of `prepare_cell_in_session`'s item
+/// loop, folding `with_staged_values` exactly as that loop does so each
+/// later item sees the ones compiled before it in this same cell.
+#[allow(clippy::too_many_arguments)]
+fn compile_cell_items_off_checkout(
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    checked: &CellCheck,
+    cell_text: &str,
+    mut compile_view: crate::ActorCompileView,
+    retained: &[(SymbolIdentity, u64)],
+    visible_names: &[String],
+) -> Result<CellItemsOutcome, ResidentActorWorkbenchError> {
+    let mut result = Vec::with_capacity(checked.items.len());
+    let mut staged_names: Vec<String> = Vec::new();
+    for (index, item) in checked.items.iter().enumerate() {
+        debug_assert_ne!(
+            item.verdict.kind,
+            TurnKind::Decl,
+            "declaration cells never reach the split item compile"
+        );
+        let pins = (item.verdict.kind == TurnKind::Bind)
+            .then(|| checked.pins_for_item(index))
+            .transpose()
+            .map_err(ResidentActorWorkbenchError::Compile)?;
+        let expression_plan = (item.verdict.kind == TurnKind::Expr)
+            .then(|| {
+                checked.expression_plan_for_item(
+                    index,
+                    cell_text,
+                    checked.compile_generation,
+                    &checked.compile_view_evidence,
+                )
+            })
+            .transpose()
+            .map_err(ResidentActorWorkbenchError::Compile)?;
+        let block = ParsedBlock {
+            ordinal: index + 1,
+            total: checked.items.len(),
+            source: item.source.clone(),
+        };
+        let compiled = compile_block_off_checkout(
+            context,
+            source,
+            effect_stack,
+            &block,
+            pins.as_deref(),
+            compile_view.clone(),
+            &staged_names,
+            Some(&item.verdict),
+            Some(&checked.prologue),
+            expression_plan.as_ref(),
+            retained,
+            visible_names,
+        )?;
+        let ready = match compiled {
+            CompiledBlock::Ready(ready) => *ready,
+            CompiledBlock::Rejected(diagnostic) => {
+                return Ok(CellItemsOutcome::Rejected { index, diagnostic });
+            }
+        };
+        if let TurnResult::Bind { bound, .. } = &ready.result {
+            if !bound.is_empty() {
+                let module =
+                    tidepool_repr::SessionModule::val(compile_view.next_value_generation());
+                let expected = module.module_name();
+                if bound.iter().any(|binder| binder.module != expected) {
+                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
+                        "staged cell binder module does not match {expected}"
+                    )));
+                }
+                let names = bound
+                    .iter()
+                    .map(|binder| binder.name.clone())
+                    .collect::<Vec<_>>();
+                staged_names.extend(names.iter().cloned());
+                compile_view = compile_view.with_staged_values(module, names);
+            }
+        }
+        result.push(PreparedCellItem {
+            ready: PreparedCellStep::Executable(Box::new(ready)),
+        });
+    }
+    Ok(CellItemsOutcome::Ready(result))
+}
+
+/// The outcome of [`finalize_cell_install`]'s re-checkout: either the
+/// snapshot the items compiled against is still fresh and the cell installs,
+/// or the caller must retry the whole split from a fresh snapshot.
+enum CellInstall {
+    Ready(PreparedCell),
+    Stale,
+}
+
+/// Re-checkout after every item compiled to revalidate against the exact
+/// view [`compile_cell_items_off_checkout`] compiled against, lease the
+/// visible bindings a later item in this same cell might still depend on,
+/// and hand back a ready [`PreparedCell`].
+#[allow(clippy::too_many_arguments)]
+fn finalize_cell_install<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    candidate_module: tidepool_repr::SessionModule,
+    compiled_against: &crate::ActorCompileView,
+    items: Vec<PreparedCellItem>,
+) -> Result<CellInstall, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let fresh_view = actor_compile_view(session, context, source, type_modules)?;
+    if !fresh_view.compile_relevant_eq(compiled_against)
+        || session.next_declaration_module() != Some(candidate_module)
+    {
+        return Ok(CellInstall::Stale);
+    }
+    let visible = session.visible_binding_ids_in(context.placement.lexical_scope);
+    let dependencies = session.lease_bindings(&visible);
+    Ok(CellInstall::Ready(PreparedCell::Ready {
+        items,
+        dependencies,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_cell_in_session<H, O>(
     session: &mut ResidentSession<H, O>,
@@ -6684,6 +7202,71 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    let verdict = match checked_verdict {
+        Some(checked) => Some(checked.clone()),
+        None => tidepool_runtime::session::classify_block(&[&block.source])
+            .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
+            .into_iter()
+            .next(),
+    };
+    // A failed worker may already have published a thin value interface.
+    // Its identity is never reused, whether compilation or execution succeeds.
+    if verdict
+        .as_ref()
+        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
+    {
+        session.reserve_value_generations_through(compile_view.next_value_generation());
+    }
+    // On the prepared route the same compile also projects the turn's program,
+    // linked against every live prepared binding; on Core this is `None`.
+    let retained = session.prepared_retained();
+    let visible_names = session
+        .workbench_bindings_in(context.placement.lexical_scope)
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect::<Vec<_>>();
+    compile_block_off_checkout(
+        context,
+        source,
+        effect_stack,
+        block,
+        pins,
+        compile_view,
+        staged_names,
+        verdict.as_ref(),
+        prologue,
+        expression_plan,
+        &retained,
+        &visible_names,
+    )
+}
+
+/// The GHC-compile half of [`compile_block_in_view`], run against an
+/// already-resolved `verdict` and one already-taken `compile_view` with no
+/// session or checkout held. `retained` and `visible_names` are the exact
+/// snapshots [`compile_block_in_view`] (or a split cell's
+/// [`reserve_cell_generations`]) took before releasing its checkout; the
+/// value generation this compile targets must already be reserved by the
+/// caller. Shared by the single-checkout item loop
+/// (`prepare_cell_in_session` via `compile_block_in_view`) and the split
+/// cell's off-checkout item loop (`compile_cell_items_off_checkout`), as
+/// `compile_host_binding_off_checkout` is shared by `mount_command_job` and
+/// `bind_command_job`.
+#[allow(clippy::too_many_arguments)]
+fn compile_block_off_checkout(
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    block: &ParsedBlock,
+    pins: Option<&[CheckedBinderPin]>,
+    compile_view: crate::ActorCompileView,
+    staged_names: &[String],
+    verdict: Option<&TurnClassification>,
+    prologue: Option<&tidepool_runtime::session::SourcePrologue>,
+    expression_plan: Option<&CheckedExpressionPlan>,
+    retained: &[(SymbolIdentity, u64)],
+    visible_names: &[String],
+) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
     let pin_heads = pins
         .into_iter()
         .flatten()
@@ -6710,20 +7293,13 @@ where
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let mut verdict = match checked_verdict {
-        Some(checked) => Some(checked.clone()),
-        None => tidepool_runtime::session::classify_block(&[&block.source])
-            .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
-            .into_iter()
-            .next(),
-    };
+    let mut verdict = verdict.cloned();
     let observation = if verdict
         .as_ref()
         .is_some_and(|verdict| verdict.kind == TurnKind::Expr)
     {
         let mut name = format!("observation{}", compile_view.next_value_generation().0);
-        let visible = session.workbench_bindings_in(context.placement.lexical_scope);
-        while visible.iter().any(|binding| binding.name == name)
+        while visible_names.iter().any(|existing| existing == &name)
             || staged_names.iter().any(|staged| staged == &name)
         {
             name.push('_');
@@ -6775,9 +7351,6 @@ where
         source = %block.source,
         "compiling resident actor workbench item"
     );
-    // On the prepared route the same compile also projects the turn's program,
-    // linked against every live prepared binding; on Core this is `None`.
-    let retained = session.prepared_retained();
     let request = TurnRequest {
         turn_text: &block.source,
         templates: &templates,
@@ -6787,17 +7360,8 @@ where
         gen: compile_view.next_value_generation().0,
         verdict,
         target: None,
-        retained_imports: &retained,
+        retained_imports: retained,
     };
-    // A failed worker may already have published a thin value interface.
-    // Its identity is never reused, whether compilation or execution succeeds.
-    if request
-        .verdict
-        .as_ref()
-        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
-    {
-        session.reserve_value_generations_through(compile_view.next_value_generation());
-    }
     let compiled = match pins {
         Some(pins) => run_turn_pinned(request, pins),
         None => run_turn(request),
@@ -8318,5 +8882,509 @@ mod request_tests {
                 format!("accepted cell prologue at generation {}", generation.0)
             );
         }
+    }
+
+    /// One prepared item's generation and, for a Bind item, its binder
+    /// names — the exact facts `prepare_cell`'s split path and its
+    /// single-checkout fallback must agree on.
+    fn item_signature(item: &PreparedCellItem) -> (u64, Vec<String>) {
+        match &item.ready {
+            PreparedCellStep::Executable(ready) => {
+                let binders = match &ready.result {
+                    TurnResult::Bind { bound, .. } => {
+                        bound.iter().map(|binder| binder.name.clone()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                (ready.generation.0, binders)
+            }
+            PreparedCellStep::Declaration { generation, .. } => (generation.0, Vec::new()),
+        }
+    }
+
+    /// A two-item bind cell prepared through the split
+    /// (`snapshot_cell_split` → `check_cell_off_checkout` →
+    /// `reserve_cell_generations` → `compile_cell_items_off_checkout` →
+    /// `finalize_cell_install`) must yield the same generations and binders
+    /// as `prepare_cell_in_session`'s single-checkout path, against an
+    /// identically-constructed session.
+    #[test]
+    fn two_item_bind_cell_split_matches_single_checkout_prepare_cell_in_session() {
+        let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
+        let (mut direct_session, direct_context, direct_source, _direct_root) = host_mount_fixture();
+        let cell = "cellA <- pure (1 :: Int)\ncellB <- pure (cellA + 1)";
+
+        let (source, snapshot) = snapshot_cell_split(
+            &mut split_session,
+            &split_context,
+            split_source,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("split snapshot");
+        let checked =
+            check_cell_off_checkout(&snapshot, &source, &split_context.haskell_effects_alias, cell)
+                .expect("split whole-cell check");
+        assert!(
+            checked.items.iter().all(|item| item.verdict.kind != TurnKind::Decl),
+            "a two-item bind cell has no declaration item: {checked:?}"
+        );
+        let reservation = reserve_cell_generations(
+            &mut split_session,
+            &split_context,
+            &source,
+            &[],
+            &snapshot,
+            checked.items.len(),
+        )
+        .expect("reserve generations");
+        let CellReservation::Ready(ready) = reservation else {
+            panic!("no interleaved mutation: the reservation must be fresh");
+        };
+        let CellReservationReady {
+            view,
+            retained,
+            visible_names,
+        } = *ready;
+        let outcome = compile_cell_items_off_checkout(
+            &split_context,
+            &source,
+            &split_context.haskell_effects_alias,
+            &checked,
+            cell,
+            view.clone(),
+            &retained,
+            &visible_names,
+        )
+        .expect("split item compile");
+        let CellItemsOutcome::Ready(items) = outcome else {
+            panic!("both items must compile");
+        };
+        let install = finalize_cell_install(
+            &mut split_session,
+            &split_context,
+            &source,
+            &[],
+            snapshot.candidate_module,
+            &view,
+            items,
+        )
+        .expect("finalize install");
+        let CellInstall::Ready(PreparedCell::Ready {
+            items: split_items, ..
+        }) = install
+        else {
+            panic!("no interleaved mutation: the install must be ready");
+        };
+
+        let direct_view =
+            actor_compile_view(&direct_session, &direct_context, &direct_source, &[])
+                .expect("direct compile view");
+        let direct_prepared = direct_source.prepare(&direct_view);
+        let direct_module = direct_session
+            .next_declaration_module()
+            .expect("declaration plane");
+        let direct_check_preamble =
+            cell_module_preamble(&direct_prepared.preamble, &direct_module.module_name())
+                .expect("preamble names a module");
+        let direct_template = resident_cell_check_template(
+            &direct_check_preamble,
+            &direct_context.haskell_effects_alias,
+            &direct_prepared.imports,
+        );
+        let direct_evidence =
+            cell_check_evidence(&direct_view, &direct_template, &direct_prepared);
+        let direct_include = direct_prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let direct_checked = check_cell(CellCheckRequest {
+            cell_text: cell,
+            template: &direct_template,
+            include: &direct_include,
+            session_root: direct_view.session_root(),
+            inject_modules: &direct_prepared.injected,
+            compile_generation: direct_view.next_value_generation().0,
+            compile_view_evidence: &direct_evidence,
+        })
+        .expect("direct whole-cell check");
+        let direct_prepared_cell = tidepool_runtime::with_compiler_transaction(|| {
+            prepare_cell_in_session(
+                &mut direct_session,
+                &direct_context,
+                &direct_source,
+                &direct_context.haskell_effects_alias,
+                &[],
+                &direct_checked,
+                cell,
+                &direct_evidence,
+                direct_view,
+            )
+        })
+        .expect("direct single-checkout prepare");
+        let PreparedCell::Ready {
+            items: direct_items,
+            ..
+        } = direct_prepared_cell
+        else {
+            panic!("direct single-checkout prepare must be ready");
+        };
+
+        assert_eq!(split_items.len(), 2);
+        assert_eq!(
+            split_items.iter().map(item_signature).collect::<Vec<_>>(),
+            direct_items.iter().map(item_signature).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A write to the same scope between a split cell's per-item compile
+    /// (`compile_cell_items_off_checkout`) and its final re-checkout
+    /// (`finalize_cell_install`) — here, another mount standing in for a
+    /// concurrent actor's install — must be detected by
+    /// `compile_relevant_eq` before installing the stale compile, and a
+    /// fresh snapshot must still recover, the same invariant
+    /// `a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile`
+    /// proves for an ordinary fragment.
+    #[test]
+    fn cell_split_scope_mutation_before_final_checkout_forces_a_recompile() {
+        let (mut session, context, base_source, _root) = host_mount_fixture();
+        let cell = "onlyItem <- pure (1 :: Int)";
+
+        // Each attempt snapshots from the pristine base source, exactly as
+        // `prepare_cell`'s retry loop re-clones `self.access.source` every
+        // iteration — never from a previous attempt's already-mutated
+        // source, which would double up its per-transaction preamble.
+        let (source, snapshot) =
+            snapshot_cell_split(&mut session, &context, base_source.clone(), &[], None, None, None)
+                .expect("snapshot");
+        let checked =
+            check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
+                .expect("whole-cell check");
+        let reservation = reserve_cell_generations(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &snapshot,
+            checked.items.len(),
+        )
+        .expect("reserve generations");
+        let CellReservation::Ready(ready) = reservation else {
+            panic!("no interleaved mutation yet: the reservation must be fresh");
+        };
+        let CellReservationReady {
+            view,
+            retained,
+            visible_names,
+        } = *ready;
+        let outcome = compile_cell_items_off_checkout(
+            &context,
+            &source,
+            &context.haskell_effects_alias,
+            &checked,
+            cell,
+            view.clone(),
+            &retained,
+            &visible_names,
+        )
+        .expect("item compile");
+        let CellItemsOutcome::Ready(items) = outcome else {
+            panic!("the item must compile");
+        };
+
+        // Stand in for another actor writing to this exact scope between the
+        // off-checkout compile and the final re-checkout.
+        mount_text_binding(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            "interloper",
+            "interloper text",
+        )
+        .expect("interloping carrier mounts");
+
+        let install = finalize_cell_install(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            snapshot.candidate_module,
+            &view,
+            items,
+        )
+        .expect("finalize install");
+        assert!(
+            matches!(install, CellInstall::Stale),
+            "an interleaved mutation must invalidate the snapshot"
+        );
+
+        // A fresh snapshot recompiles and installs cleanly — the
+        // bounded-retry recovery `prepare_cell` relies on. Snapshots again
+        // from the pristine base source, not the mutated one above.
+        let (source, retry_snapshot) =
+            snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
+                .expect("retry snapshot");
+        let retry_checked = check_cell_off_checkout(
+            &retry_snapshot,
+            &source,
+            &context.haskell_effects_alias,
+            cell,
+        )
+        .expect("retry whole-cell check");
+        let retry_reservation = reserve_cell_generations(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &retry_snapshot,
+            retry_checked.items.len(),
+        )
+        .expect("retry reserve generations");
+        let CellReservation::Ready(retry_ready) = retry_reservation else {
+            panic!("retry reservation must be fresh");
+        };
+        let CellReservationReady {
+            view: retry_view,
+            retained: retry_retained,
+            visible_names: retry_visible_names,
+        } = *retry_ready;
+        let retry_outcome = compile_cell_items_off_checkout(
+            &context,
+            &source,
+            &context.haskell_effects_alias,
+            &retry_checked,
+            cell,
+            retry_view.clone(),
+            &retry_retained,
+            &retry_visible_names,
+        )
+        .expect("retry item compile");
+        let CellItemsOutcome::Ready(retry_items) = retry_outcome else {
+            panic!("retry item must compile");
+        };
+        let retry_install = finalize_cell_install(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            retry_snapshot.candidate_module,
+            &retry_view,
+            retry_items,
+        )
+        .expect("retry finalize install");
+        assert!(matches!(
+            retry_install,
+            CellInstall::Ready(PreparedCell::Ready { .. })
+        ));
+    }
+
+    /// A registry-backed [`ResidentActorWorkbench`] sharing one resident
+    /// session, for tests that need real checkout contention
+    /// (`prepare_cell`'s split loop itself, not its off-checkout pieces
+    /// directly).
+    fn actor_registry_fixture() -> (
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        let (session, context, source, root) = host_mount_fixture();
+        let session_id = context.placement.session;
+        let machines = Arc::new(ActorMachineRegistry::<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >::new());
+        machines.insert_idle(session_id, Box::new(session));
+        (machines, context, source, root)
+    }
+
+    /// Like [`actor_registry_fixture`], but mints a second, isolated lexical
+    /// scope on the SAME resident session and returns a second context
+    /// placed there — so two actors contend for the one session's checkout
+    /// queue without also racing each other's declaration/value scope, which
+    /// would otherwise force `prepare_cell`'s own bounded staleness retries
+    /// and make a checkout-timing assertion depend on that unrelated
+    /// contention too.
+    fn actor_registry_fixture_two_scopes() -> (
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        crate::ActorSessionContext,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        let (mut session, context_a, source, root) = host_mount_fixture();
+        let mut context_b = context_a.clone();
+        context_b.placement.lexical_scope = session.mint_isolated_scope();
+        let session_id = context_a.placement.session;
+        let machines = Arc::new(ActorMachineRegistry::<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >::new());
+        machines.insert_idle(session_id, Box::new(session));
+        (machines, context_a, context_b, source, root)
+    }
+
+    /// `ResidentActorWorkbench::prepare_cell` must detect a `Decl` item from
+    /// its off-checkout whole-cell check and fall back to
+    /// `prepare_cell_single_checkout` — the exact path
+    /// `same_cell_redeclaration_and_use_needs_hiding_to_resolve` (below)
+    /// exercises directly against `prepare_cell_in_session` — rather than
+    /// installing a declaration through the split's own item loop.
+    #[tokio::test]
+    async fn cell_split_falls_back_to_single_checkout_for_a_declaration_cell() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "declaredFn args = length (args :: [Int])".to_string();
+
+        let (checked, prepared) = workbench
+            .prepare_cell(context, cell)
+            .await
+            .expect("a declaration cell prepares via the single-checkout fallback");
+        assert!(
+            checked
+                .items
+                .iter()
+                .any(|item| item.verdict.kind == TurnKind::Decl),
+            "a bare top-level declaration must classify as Decl: {checked:?}"
+        );
+        let PreparedCell::Ready { mut items, .. } = prepared else {
+            panic!("a declaration cell should prepare as Ready");
+        };
+        assert!(
+            matches!(items.remove(0).ready, PreparedCellStep::Declaration { .. }),
+            "the declaration item must use the declaration plane, not the split's item compile"
+        );
+    }
+
+    /// A minimal [`tracing_subscriber::fmt::MakeWriter`] capturing JSON log
+    /// lines into a shared buffer, so a test can read back structured field
+    /// values (here, `with_host_machine`'s "resident machine checkout
+    /// admitted" `waited_ms`) instead of only formatted text.
+    #[derive(Clone)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Two actors preparing cells concurrently, sharing one resident
+    /// session: the split keeps the machine released across each actor's
+    /// GHC work, so the second actor's checkout admissions
+    /// (`with_host_machine`'s "resident machine checkout admitted"
+    /// `waited_ms`) must stay short snapshot/install waits — never on the
+    /// order of the first actor's own whole-cell compile time, the way an
+    /// unsplit single checkout held across the whole compile would force.
+    #[tokio::test]
+    async fn cell_split_second_actors_checkout_wait_excludes_first_actors_ghc_compile() {
+        let (machines, mut context_a, mut context_b, source, _root) =
+            actor_registry_fixture_two_scopes();
+        let workbench = Arc::new(ResidentActorWorkbench::new(machines, source, None, None, vec![]));
+
+        context_a.actor = crate::ActorRef::first(crate::ActorId(101));
+        context_b.actor = crate::ActorRef::first(crate::ActorId(102));
+        let actor_b_label = context_b.actor.to_string();
+
+        let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let wb_a = Arc::clone(&workbench);
+        let wb_b = Arc::clone(&workbench);
+        // Actor A's cell is deliberately larger (three sequential items, each
+        // its own whole-cell-check-plus-compile round trip) so its total GHC
+        // time dominates the run; actor B's is the smallest possible cell.
+        let cell_a = "wA1 <- pure (1 :: Int)\nwA2 <- pure (wA1 + 1)\nwA3 <- pure (wA2 + 1)".to_string();
+        let cell_b = "wB1 <- pure (1 :: Int)".to_string();
+
+        let started = std::time::Instant::now();
+        let (result_a, result_b) = tokio::join!(
+            wb_a.prepare_cell(context_a, cell_a),
+            wb_b.prepare_cell(context_b, cell_b)
+        );
+        let total = started.elapsed();
+        let (checked_a, _) = result_a.expect("actor A's cell prepares");
+        let (checked_b, _) = result_b.expect("actor B's cell prepares");
+        assert!(checked_a
+            .items
+            .iter()
+            .all(|item| item.verdict.kind != TurnKind::Decl));
+        assert!(checked_b
+            .items
+            .iter()
+            .all(|item| item.verdict.kind != TurnKind::Decl));
+
+        drop(_guard);
+        let log_text = String::from_utf8(
+            log.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("captured log is UTF-8");
+        let waited: Vec<u64> = log_text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| {
+                value
+                    .get("fields")
+                    .and_then(|fields| fields.get("message"))
+                    .and_then(|message| message.as_str())
+                    == Some("resident machine checkout admitted")
+                    && value
+                        .get("fields")
+                        .and_then(|fields| fields.get("actor"))
+                        .and_then(|actor| actor.as_str())
+                        == Some(actor_b_label.as_str())
+            })
+            .filter_map(|value| {
+                let waited_ms = value.get("fields")?.get("waited_ms")?;
+                // `u128` fields render as a JSON string, not a number, in
+                // tracing-subscriber's JSON formatter.
+                waited_ms
+                    .as_u64()
+                    .or_else(|| waited_ms.as_str()?.parse().ok())
+            })
+            .collect();
+        assert!(
+            !waited.is_empty(),
+            "actor B must have logged at least one checkout admission: {log_text}"
+        );
+        let max_wait = *waited.iter().max().expect("non-empty");
+        // With the split, actor B's checkout waits are short
+        // snapshot/reserve/install steps, never actor A's whole GHC compile.
+        // Without the split, actor B's very first checkout wait alone would
+        // be on the order of `total` (actor A holding the machine for its
+        // entire compile).
+        assert!(
+            u128::from(max_wait) < total.as_millis() / 2,
+            "actor B's longest checkout wait ({max_wait}ms) should be a small fraction of the \
+             run's total time ({}ms) — the split must keep the machine released during actor \
+             A's GHC compile",
+            total.as_millis()
+        );
     }
 }
