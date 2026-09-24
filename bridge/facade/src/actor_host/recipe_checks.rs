@@ -53,6 +53,33 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Render a recipe's compile failure with the same per-diagnostic text a
+/// rejected interactive cell shows the model (`session::render_turn_compile_error`),
+/// not just the `CompileError` `Display`'s one-line diagnostic count — the
+/// summary line is kept in front of it. Every other `RuntimeError` variant
+/// (a Jit/Prepared failure once compilation succeeded) keeps its own
+/// `Display`; diagnostics only exist on the compile path.
+fn render_recipe_compile_error(
+    error: &tidepool_runtime::RuntimeError,
+    source: &str,
+    entry: &str,
+) -> Box<dyn std::error::Error> {
+    match error {
+        tidepool_runtime::RuntimeError::Compile(compile_error) => {
+            let detail = tidepool_runtime::session::render_turn_compile_error(
+                compile_error,
+                Some(source),
+                entry,
+                entry,
+            );
+            runtime_error(format!(
+                "recipe {entry} compilation failed: {error}\n{detail}"
+            ))
+        }
+        other => runtime_error(other.to_string()),
+    }
+}
+
 fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&'a String>> {
     match recipe {
         None => Ok(checks.iter().collect()),
@@ -233,7 +260,8 @@ impl Driver {
         );
         tokio::task::block_in_place(|| {
             tidepool_runtime::compile_and_run(&source, "result", &refs, self, &())
-        })?;
+        })
+        .map_err(|error| render_recipe_compile_error(&error, &source, entry))?;
         Ok(())
     }
 
