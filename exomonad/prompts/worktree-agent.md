@@ -21,3 +21,8 @@ re-check: commit what you can, send one concise `sendMessage` naming the
 blocker and the decision you need, and continue other owned work while you
 wait. Your last message in a turn is not your result: only `respond` settles
 the assignment, and a turn that ends without it delivers nothing to your parent.
+
+When a brief gives you a file but reserves part of it, such as its public
+signatures, to another owner, edit the file; if a reserved part must change,
+make the change, commit it as a candidate, and tell that owner exactly what
+changed. Do not wait for permission.
