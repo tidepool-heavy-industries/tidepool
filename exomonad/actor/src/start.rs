@@ -6,16 +6,13 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::{DataConTable, Generation, SessionModule};
 use tidepool_runtime::session::{
-    assemble_display_expression_module, run_turn, ExpressionLift, MaterializedFacade, OutputSink,
-    ResidentHole, ResidentOutcome, ResidentSession, RootCustody, TemplateSelector, TurnRequest,
-    TurnResult, TurnTemplate,
+    MaterializedFacade, OutputSink, ResidentHole, ResidentSession, RootCustody,
 };
 
 use crate::generated::actor::ActorReq;
@@ -91,8 +88,9 @@ pub(crate) struct ActorStartRequest {
     pub parent_actor: crate::ActorRef,
     /// `Just label` on the wire exactly when this launch is the stdlib's
     /// `agentDefinitionUnbound label` (`startForkedAgent`/`AgentLaunchWith`'s
-    /// bare `startAgent`), the only launch shape whose captured `entry` is
-    /// data-reconstructible. See `child_session_eligibility`.
+    /// bare `startAgent`), the shape a selected-context launch is eligible to
+    /// give its own child session — its entry closure reaches that session by
+    /// evacuation. See `child_session_eligibility`.
     pub unbound_label: Option<String>,
 }
 
@@ -248,8 +246,6 @@ pub enum ActorStartCaptureError {
     InvalidModel,
     #[error("select actor effects in its profile or launch options, not both")]
     DuplicateEffectSelection,
-    #[error("could not reconstruct an unbound agent launch's entry on its own session: {0}")]
-    UnboundReconstructionFailed(String),
 }
 
 impl ResidentActorStart {
@@ -437,10 +433,11 @@ impl ResidentActorStart {
     }
 }
 
-/// Whether a launch's `entry` closure is reconstructible on a fresh session,
-/// decided from data the wire request already carries — never by inspecting
-/// the captured `entry` value itself (closures/thunks never cross the bridge;
-/// see `tidepool_bridge::HaskellValue`'s doc comment).
+/// Whether a launch's `entry` closure is eligible to run on its own fresh
+/// child session, decided from data the wire request already carries —
+/// never by inspecting the captured `entry` value itself (closures/thunks
+/// never cross the bridge; see `tidepool_bridge::HaskellValue`'s doc
+/// comment). An eligible entry reaches its child session by evacuation.
 struct ChildSessionEligibility {
     eligible: bool,
     reason: &'static str,
@@ -493,133 +490,6 @@ fn child_session_eligibility(
             reason: "inherited context shares the parent's scope chain and generations",
         },
     }
-}
-
-/// A malformed label would otherwise splice broken Haskell into the
-/// reconstruction turn's source; this mirrors the workbench's own
-/// string-literal escaping (`escape_workbench_haskell_string`) rather than
-/// depending on it, since a wire label is untrusted the same way workbench
-/// key text is.
-#[allow(dead_code, reason = "wired by the child-session launch parcel")]
-fn escape_haskell_string_literal(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Compile and run, as a standalone turn on `session` (already checked out —
-/// the caller owns admission), the exact expression an eligible launch's
-/// entry reconstructs to: `Tidepool.Actors.Internal.Agent.unboundAgentEntry`
-/// applied to `label`. `session_root` is the machine's own session root (the
-/// `ChildSessionFactory` that built it knows this; `ResidentSession` does not
-/// expose it back — see `reap_evicted_stub_sources_in` for the same pattern).
-///
-/// The turn's type is fully closed (`Eff (ActorKernel ': ReadOnlyEffects
-/// AgentProtocol) ()` — see `unboundAgentEntry`'s doc comment for why this
-/// specific shape, alone, can carry a standalone signature at all), so
-/// `effect_stack` below names it exactly; nothing here depends on the
-/// session's own declared workbench effects.
-#[allow(dead_code, reason = "wired by the child-session launch parcel")]
-pub(crate) fn run_unbound_entry_reconstruction<H, O>(
-    session: &mut ResidentSession<H, O>,
-    session_root: &Path,
-    include: &[&Path],
-    // The session's own base preamble (module header, standard prelude) —
-    // `tidepool_mcp::build_preamble`'s result, the same call
-    // `ResidentSession::unbootstrapped`'s caller already made to build this
-    // session's declarations, and NOT something this function builds itself:
-    // `exomonad-actor` does not depend on `tidepool-mcp` (see the crate's own
-    // `H`/`O` genericity), and a hand-rolled `module Main where` won't do —
-    // a bare GHC module here defaults to `Main` and demands a `main`, which
-    // this turn (like any other resident turn) does not have.
-    base_preamble: &str,
-    label: &str,
-) -> Result<ResidentOutcome, ActorStartCaptureError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    // `base_preamble` already aliases `T` (to `Tidepool.Data.Text`, whose
-    // `pack` the workbench scaffold's own hardcoded `T.pack` line relies on)
-    // and already brings `Eff` into scope — this only adds what it doesn't.
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        base_preamble,
-        "qualified Tidepool.Actors.Internal.Agent as TidepoolChildEntry",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Actor.Internal as TidepoolChildEntryActorInternal",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Agent.Ref as TidepoolChildEntryAgentRef",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Effects.Core as TidepoolChildEntryCore",
-    );
-    let preamble = preamble.as_str();
-    let effect_stack = "(TidepoolChildEntryCore.ActorKernel ': \
-                         TidepoolChildEntryActorInternal.ReadOnlyEffects \
-                         TidepoolChildEntryAgentRef.AgentProtocol)";
-    let turn_text = format!(
-        "TidepoolChildEntry.unboundAgentEntry (T.pack \"{}\") 0",
-        escape_haskell_string_literal(label)
-    );
-    // Exactly one candidate, not `resident_workbench_templates`'s usual four
-    // (Effectful/Pure x Display/Opaque): the reconstruction's row is fully
-    // closed and known (see `run_unbound_entry_reconstruction`'s doc
-    // comment), so it is always effectful, never a value to display — the
-    // pure candidates exist for a REPL-style ambiguous user expression,
-    // which this is not, and letting the extract try them first/instead
-    // would hit the workbench's own deliberate "must typecheck in the
-    // current effect row" guard for no reason.
-    let templates = [TurnTemplate {
-        kind: TemplateSelector::Expr,
-        source: assemble_display_expression_module(
-            preamble,
-            "__result",
-            effect_stack,
-            "{{TURN}}",
-            ExpressionLift::Effectful,
-        ),
-    }];
-    let result = run_turn(TurnRequest {
-        turn_text: &turn_text,
-        templates: &templates,
-        include,
-        session_root,
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        // A one-off reconstruction turn: no memo retention across cells.
-        session_id: None,
-        retained_imports: &[],
-    })
-    .map_err(|failure| {
-        ActorStartCaptureError::UnboundReconstructionFailed(format!(
-            "{:?} (attempted source: {})",
-            failure.error,
-            failure.attempted_source.as_deref().unwrap_or("<none>")
-        ))
-    })?;
-    let TurnResult::Expr { compiled, .. } = result else {
-        return Err(ActorStartCaptureError::UnboundReconstructionFailed(
-            "unboundAgentEntry reconstruction did not compile as a bare expression".into(),
-        ));
-    };
-    session
-        .run_with_sites("unbound-agent-entry-reconstruction", compiled.code())
-        .map_err(|error| ActorStartCaptureError::UnboundReconstructionFailed(error.to_string()))
 }
 
 fn materialize_entry_facade<H, O>(
@@ -850,83 +720,6 @@ mod tests {
         assert_eq!(
             super::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
             crate::WorkerLifetime::ParentOwned
-        );
-    }
-
-    /// A minimal, real (extractor-backed) machine with the actors library on
-    /// its include path — everything `run_unbound_entry_reconstruction`
-    /// needs and nothing an interactive workbench session also carries.
-    fn bare_actors_session() -> (
-        tidepool_runtime::session::ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        tempfile::TempDir,
-        Vec<std::path::PathBuf>,
-        String,
-    ) {
-        use tidepool_runtime::session::{ModuleEnv, SessionLib};
-        tidepool_testing::eval_harness::require_extract();
-        let declarations = [tidepool_mcp::notifications_decl()];
-        let base_preamble = tidepool_mcp::build_preamble(&declarations, false);
-        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
-        let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../bridge/haskell/actors"),
-        );
-        let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 9_001);
-        let session_root = tempfile::tempdir().expect("session root");
-        let lib = SessionLib::open(
-            session_id,
-            session_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .expect("declaration plane");
-        (
-            tidepool_runtime::session::ResidentSession::unbootstrapped(
-                frunk::HNil,
-                tidepool_mcp::CapturedOutput::new(),
-                tidepool_runtime::DEFAULT_NURSERY_SIZE,
-                Some(lib),
-            ),
-            session_root,
-            include,
-            base_preamble,
-        )
-    }
-
-    #[test]
-    fn unbound_entry_reconstruction_compiles_and_suspends_at_install_shutdown() {
-        use super::run_unbound_entry_reconstruction;
-        let (mut session, session_root, include, base_preamble) = bare_actors_session();
-        let lexical_scope = session.mint_isolated_scope();
-        let resource_scope = tidepool_codegen::suspension::RealmId::fresh();
-        session
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    lexical_scope,
-                    resource_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            )
-            .expect("actor execution context");
-        let include_refs: Vec<&std::path::Path> = include.iter().map(|p| p.as_path()).collect();
-        let outcome = run_unbound_entry_reconstruction(
-            &mut session,
-            session_root.path(),
-            &include_refs,
-            &base_preamble,
-            "reconstruction-test-label",
-        )
-        .expect("unbound entry reconstructs and runs to its first suspension");
-        assert!(
-            matches!(
-                outcome,
-                tidepool_runtime::session::ResidentOutcome::Suspended { .. }
-            ),
-            "the reconstructed entry's first send is ActorInstallShutdownWith, \
-             which suspends exactly like a captured entry's would: {outcome:?}"
         );
     }
 }
