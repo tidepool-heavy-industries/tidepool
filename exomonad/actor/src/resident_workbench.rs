@@ -538,6 +538,12 @@ impl ResidentMachineMeasurement {
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+    // The `compile_blocking` span omits `include_roots` from every line (the
+    // full search path is long and rarely changes turn to turn); this tracks
+    // the last-logged roots per session so a diagnostic reader still sees
+    // them once, and again whenever they actually change.
+    logged_include_roots:
+        std::sync::Mutex<std::collections::HashMap<tidepool_repr::SessionId, String>>,
 }
 
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
@@ -552,7 +558,11 @@ impl Drop for CancelCompilerTransactionOnDrop {
 
 impl<H, O> ResidentMachineAccess<H, O> {
     fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
-        Self { machines, source }
+        Self {
+            machines,
+            source,
+            logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -1648,6 +1658,29 @@ where
         self.with_machine_wait(context, None, operation).await
     }
 
+    /// Log the ordered include-root search path a session's compiles run
+    /// against, once, and again whenever it actually changes — never on
+    /// every `compile_blocking` line, where it would dominate the log.
+    fn log_include_roots_if_changed(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        source_layer: &[PathBuf],
+    ) {
+        let rendered = render_include_roots(source_layer);
+        let mut logged = self
+            .logged_include_roots
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if logged.get(&session_id) != Some(&rendered) {
+            tracing::info!(
+                session = ?session_id,
+                include_roots = %rendered,
+                "resident compile include roots"
+            );
+            logged.insert(session_id, rendered);
+        }
+    }
+
     async fn with_machine_wait<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
@@ -1665,20 +1698,25 @@ where
     {
         // `compile_blocking` carries the context a compile-cost diagnostic
         // needs and that `spawn_blocking` would otherwise drop: which actor
-        // and input unit (session) this turn belongs to, and the ordered
-        // include roots it compiles against. `Instrument`ing the whole
-        // `with_host_machine` future (not just its `spawn_blocking` closure)
-        // keeps the span active across every `.await` point inside it, so
-        // `Span::current()` is correct wherever `spawn_blocking_in_span` is
-        // eventually called.
-        let compile_span = tracing::debug_span!(
+        // and input unit (session) this turn belongs to. `Instrument`ing the
+        // whole `with_host_machine` future (not just its `spawn_blocking`
+        // closure) keeps the span active across every `.await` point inside
+        // it, so `Span::current()` is correct wherever `spawn_blocking_in_span`
+        // is eventually called. This is `info`, not `debug`: the actor/session
+        // context needs to reach the INFO run log every cell logs at, not
+        // just the detailed trace. `include_roots` stays out of the span
+        // (and every line it prefixes) because the full search path is long
+        // and rarely changes turn to turn; it is logged separately, once per
+        // session and again only when it changes.
+        let compile_span = tracing::info_span!(
             "compile_blocking",
             actor = %context.actor,
             session = %context.placement.session,
             operation = "resident_turn",
-            include_roots = %render_include_roots(&context.source_layer),
         );
+        self.log_include_roots_if_changed(context.placement.session, &context.source_layer);
         self.with_host_machine(
+            context.actor.to_string(),
             context.placement.session,
             max_wait,
             move |session, source| {
@@ -1698,6 +1736,7 @@ where
 
     async fn with_host_machine<T: Send + 'static>(
         &self,
+        actor: impl Into<String>,
         session_id: tidepool_repr::SessionId,
         max_wait: Option<Duration>,
         operation: impl FnOnce(
@@ -1707,6 +1746,7 @@ where
             + Send
             + 'static,
     ) -> Result<T, ResidentActorWorkbenchError> {
+        let actor = actor.into();
         let request = tidepool_runtime::session::registry::CheckoutRequest::Run;
         let admission_started = std::time::Instant::now();
         let checkout = match max_wait {
@@ -1718,9 +1758,13 @@ where
             None => self.machines.checkout_queued(session_id, request).await,
         }
         .map_err(ResidentActorWorkbenchError::Checkout)?;
-        tracing::debug!(session = ?session_id,
+        // Every cell holds the run's resident machine exclusively, so the
+        // wait for it is a primary per-cell cost. `info`, not `debug`: this
+        // needs to reach the run's INFO log, not just the detailed trace.
+        tracing::info!(actor = %actor, session = ?session_id,
             waited_ms = admission_started.elapsed().as_millis(),
             "resident machine checkout admitted");
+        let held_since = std::time::Instant::now();
         let (mut session, receipt) = checkout.into_parts();
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
@@ -1745,6 +1789,9 @@ where
                                 .to_string(),
                         };
                         machines.settle_retire(receipt, reason);
+                        tracing::info!(actor = %actor, session = ?session_id,
+                            held_ms = held_since.elapsed().as_millis(),
+                            "resident machine checkout released (retired)");
                         return outcome;
                     }
 
@@ -1754,6 +1801,9 @@ where
                         .map(str::to_string)
                         .collect();
                     machines.settle_suspended(receipt, session, holes);
+                    tracing::info!(actor = %actor, session = ?session_id,
+                        held_ms = held_since.elapsed().as_millis(),
+                        "resident machine checkout released");
                     outcome
                 }
                 Err(payload) => {
@@ -1768,6 +1818,9 @@ where
                         receipt,
                         format!("machine became unavailable: a resident turn panicked ({message})"),
                     );
+                    tracing::info!(actor = %actor, session = ?session_id,
+                        held_ms = held_since.elapsed().as_millis(),
+                        "resident machine checkout released (panic)");
                     std::panic::resume_unwind(payload);
                 }
             }
@@ -2736,12 +2789,13 @@ where
         };
         let compiler_source = source.clone();
         let effects = context.haskell_effects_alias.clone();
-        let inspection_span = tracing::debug_span!(
+        self.access
+            .log_include_roots_if_changed(context.placement.session, &context.source_layer);
+        let inspection_span = tracing::info_span!(
             "compile_blocking",
             actor = %context.actor,
             session = %context.placement.session,
             operation = "structured_introspection",
-            include_roots = %render_include_roots(&context.source_layer),
         );
         // Enter the span only for the synchronous call that captures it —
         // an `Entered` guard is not `Send` and must not live across the
@@ -5233,7 +5287,7 @@ where
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
         self.access
-            .with_host_machine(session_id, None, move |session, _| {
+            .with_host_machine("root", session_id, None, move |session, _| {
                 let placement = crate::ActorPlacement {
                     session: session_id,
                     resource_scope: RealmId::fresh(),
@@ -5287,10 +5341,16 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         use crate::ActorRunTarget;
         self.access
-            .with_host_machine(placement.session, max_wait.into(), move |session, _| {
-                let _ = session.retire_placement(placement.resource_scope, placement.lexical_scope);
-                Ok(())
-            })
+            .with_host_machine(
+                "root",
+                placement.session,
+                max_wait.into(),
+                move |session, _| {
+                    let _ =
+                        session.retire_placement(placement.resource_scope, placement.lexical_scope);
+                    Ok(())
+                },
+            )
             .await
     }
 
@@ -5299,7 +5359,7 @@ where
         session_id: tidepool_repr::SessionId,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.access
-            .with_host_machine(session_id, None, move |session, _| {
+            .with_host_machine("root", session_id, None, move |session, _| {
                 Ok(crate::ActorPlacement {
                     session: session_id,
                     resource_scope: RealmId::fresh(),
