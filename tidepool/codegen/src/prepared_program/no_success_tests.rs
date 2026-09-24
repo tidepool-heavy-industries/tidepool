@@ -506,7 +506,7 @@ fn w5_no_success_raised_caf_retries_in_one_reusable_invocation() {
     .unwrap();
     let caf_slot = program.top_slots[&ValueId(0)];
     let exception_slot = program.top_slots[&ValueId(1)];
-    let original = untag(invocation.program.root_block.snapshot()[caf_slot] as usize);
+    let original = untag(invocation.roots.snapshot()[caf_slot] as usize);
     invocation.collect(0).unwrap();
     let descriptor = program
         .descriptor_registry
@@ -520,7 +520,7 @@ fn w5_no_success_raised_caf_retries_in_one_reusable_invocation() {
         })
         .unwrap();
     let assert_live = |invocation: &super::invocation::PreparedInvocation<'_>| {
-        let tops = invocation.program.root_block.snapshot();
+        let tops = invocation.roots.snapshot();
         let caf = untag(tops[caf_slot] as usize);
         assert_ne!(caf, original, "the rooted CAF must have relocated");
         assert_eq!(

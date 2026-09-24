@@ -3,11 +3,11 @@
 //!
 //! `PreparedMachine` owns exactly one `MachineState`, one `VMContext`, one
 //! nursery (inside that `MachineState`'s `GcState`), and one `OldSpace`.
-//! Every installed program shares all of it. An `InstalledProgram` keeps only
-//! its code custody (`CompiledProgram`/`ProgramCustody`) -- its top-level
-//! roots live in its own root block (a fixed-address `RootWords`, see
-//! `roots.rs`, that the `CompiledProgram` owns and its generated code embeds
-//! the address of; there is no machine-wide top table), and its contribution
+//! Every installed program shares all of it. An `InstalledProgram` keeps its
+//! code custody (`CompiledProgram`/`ProgramCustody`) and this machine's own
+//! root block for the image (a fixed-address `RootWords`, see `roots.rs`),
+//! published in the machine's root-block table at the image's slot so the
+//! same compiled image runs on any machine that installed it; its contribution
 //! to the shared heap (pinned descriptor layouts, instantiated static image)
 //! is folded into the machine-wide `descriptors`/`descriptor_registry`/
 //! `statics` sets and the shared `MachineState`'s descriptor space at install
@@ -44,7 +44,7 @@
 //! publish leaves every already-installed program's roots, root blocks and
 //! running state untouched (T3).
 
-use super::roots::{OldSpaceScope, RootWords};
+use super::roots::{OldSpaceScope, RootTables, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, register_result_roots, runtime_error,
     runtime_error_for_status, runtime_error_from_machine,
@@ -113,6 +113,10 @@ pub struct ProgramId(u32);
 /// shared and ownerless), and its call/enter rows.
 struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
+    /// This machine's own root block for the image: one collector-updated
+    /// word per top and import slot, published in the machine's root-block
+    /// table at the image's slot for as long as the program is installed.
+    roots: RootWords,
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
 }
@@ -228,6 +232,9 @@ pub struct PreparedMachine<'code> {
     /// delta every time.
     compiled_functions: u64,
     compiled_code_bytes: u64,
+    /// Root blocks of every installed image by image slot, published to
+    /// generated code through `vmctx.root_tables`.
+    root_tables: RootTables,
     /// Static allocation starts mapped to their installed program. The
     /// catalog owns the regions; this is only the reverse owner lookup for a
     /// validated observation hit.
@@ -758,6 +765,7 @@ impl<'code> PreparedMachine<'code> {
             region_owners: HashMap::new(),
             compiled_functions: 0,
             compiled_code_bytes: 0,
+            root_tables: RootTables::default(),
         })
     }
 
@@ -856,10 +864,8 @@ impl<'code> PreparedMachine<'code> {
             .map_err(ExecutionError::Runtime)?;
         let owners = self.machine.mark_prepared_descriptor_owners();
         let stack_maps = self.machine.stack_map_link_count();
-        let block = {
-            let block = &program.get().root_block;
-            (block.as_mut_ptr(), block.len())
-        };
+        let roots = RootWords::new(program.get().root_words)?;
+        let block = (roots.as_mut_ptr(), roots.len());
         let mut transaction = InstallTransaction {
             machine: self,
             block,
@@ -867,7 +873,9 @@ impl<'code> PreparedMachine<'code> {
             stack_maps,
             committed: false,
         };
-        let staged = transaction.machine.install_staged(program.get(), imports);
+        let staged = transaction
+            .machine
+            .install_staged(program.get(), imports, &roots);
         // Acquire the shared owner while the install transaction can still
         // roll descriptors and the candidate static region back. A failed
         // borrow must never commit metadata whose program custody will drop.
@@ -913,10 +921,19 @@ impl<'code> PreparedMachine<'code> {
         if !statics.is_empty() {
             self.region_owners.insert(statics.address_range().start, id);
         }
+        // The block is reachable from generated code only through the
+        // machine's table; publish it last, once nothing can roll back.
+        // No generated frame is live during an install, so replacing the
+        // table base here is safe.
+        let table = self
+            .root_tables
+            .publish(compiled.image_slot, roots.as_mut_ptr())?;
+        self.vmctx.root_tables = table;
         self.programs.insert(
             id,
             InstalledProgram {
                 program,
+                roots,
                 statics,
                 owned_headers,
             },
@@ -928,6 +945,7 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         compiled: &CompiledProgram,
         imports: &ImportBindings,
+        block: &RootWords,
     ) -> Result<Arc<StaticRegion>, ExecutionError> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
@@ -1024,7 +1042,6 @@ impl<'code> PreparedMachine<'code> {
         }
 
         let statics = Arc::new(compiled.statics.instantiate()?);
-        let block = &compiled.root_block;
         let heap_tops: HashSet<_> = compiled.heap_top_specs.iter().map(|spec| spec.id).collect();
         for (&id, &slot) in &compiled.top_slots {
             if heap_tops.contains(&id) {
@@ -1327,7 +1344,7 @@ impl<'code> PreparedMachine<'code> {
             block_words: self
                 .programs
                 .values()
-                .map(|installed| installed.program.get().root_block.len())
+                .map(|installed| installed.roots.len())
                 .sum(),
             persistent_roots: self.machine.persistent_roots_count(),
             handles: self.handle_count(),
@@ -1449,7 +1466,7 @@ impl<'code> PreparedMachine<'code> {
             if retiring.contains(id) {
                 continue;
             }
-            let block = &installed.program.get().root_block;
+            let block = &installed.roots;
             block_roots.extend(
                 installed
                     .reference_slots()
@@ -1518,7 +1535,7 @@ impl<'code> PreparedMachine<'code> {
         loop {
             if let Some(id) = program_work.pop() {
                 if let Some(installed) = self.programs.get(&id) {
-                    let block = installed.program.get().root_block.snapshot();
+                    let block = installed.roots.snapshot();
                     work.extend(installed.reference_slots().map(|slot| block[slot] as usize));
                 }
                 continue;
@@ -1561,7 +1578,7 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
-        let block = &installed.program.get().root_block;
+        let block = &installed.roots;
         let mut roots = Vec::with_capacity(block.len());
         for slot in 0..block.len() {
             if let Some(root) = block.slot_address(slot) {
@@ -1592,7 +1609,8 @@ impl<'code> PreparedMachine<'code> {
         };
         self.pins.remove(&id);
         let compiled = installed.program.get();
-        let block = &compiled.root_block;
+        let block = &installed.roots;
+        self.root_tables.clear(compiled.image_slot);
         // 2. Call and enter rows.
         self.machine
             .retire_prepared_entries(&compiled.dispatch_owned_headers);
@@ -2178,7 +2196,7 @@ impl<'code> PreparedMachine<'code> {
         // registration happened (not merely that metadata implies it should
         // have) -- see `two_closed_programs_share_one_machine_across_a_forced_collection`.
         let compiled = program.program.get();
-        let block = compiled.root_block.as_mut_ptr() as usize;
+        let block = program.roots.as_mut_ptr() as usize;
         let range_end = block + compiled.top_slots.len() * std::mem::size_of::<u64>();
         let mut roots = Vec::new();
         self.machine.extend_persistent_roots(&mut roots);
@@ -2215,7 +2233,7 @@ impl<'code> PreparedMachine<'code> {
             .import_slots
             .iter()
             .find(|candidate| &candidate.identity == identity)
-            .and_then(|candidate| compiled.root_block.slot_address(candidate.slot))
+            .and_then(|candidate| program.roots.slot_address(candidate.slot))
         else {
             return false;
         };
@@ -2231,7 +2249,7 @@ impl<'code> PreparedMachine<'code> {
             return Vec::new();
         };
         let compiled = program.program.get();
-        let mut snapshot = compiled.root_block.snapshot();
+        let mut snapshot = program.roots.snapshot();
         snapshot.truncate(compiled.top_slots.len());
         snapshot
     }
@@ -2285,12 +2303,11 @@ impl<'code> PreparedMachine<'code> {
         class: HandleClass,
     ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
-        let compiled = self
+        let installed = self
             .programs
             .get(&id)
-            .ok_or(ExecutionError::UnknownProgram(id))?
-            .program
-            .get();
+            .ok_or(ExecutionError::UnknownProgram(id))?;
+        let compiled = installed.program.get();
         if compiled.byte_tops.contains_key(&value) {
             return Err(ExecutionError::MissingEntry(value));
         }
@@ -2298,8 +2315,8 @@ impl<'code> PreparedMachine<'code> {
             .top_slots
             .get(&value)
             .ok_or(ExecutionError::MissingEntry(value))?;
-        let word = compiled
-            .root_block
+        let word = installed
+            .roots
             .read(slot)
             .map_err(|cause| runtime_error(&self.machine, cause))?;
         if word == 0 {
@@ -2740,7 +2757,7 @@ impl<'code> InstalledProgram<'code> {
             .keys()
             .filter_map(|top| compiled.top_slots.get(top).copied())
             .collect();
-        (0..compiled.root_block.len()).filter(move |slot| !byte_slots.contains(slot))
+        (0..compiled.root_words).filter(move |slot| !byte_slots.contains(slot))
     }
 
     #[expect(
@@ -3997,6 +4014,64 @@ mod tests {
             assert!(machine.release(child));
         }
         assert!(machine.release(*second_outer));
+    }
+
+    #[test]
+    fn one_image_installs_on_two_machines_with_their_own_root_blocks() {
+        // The same compiled image (one root-block layout, one image slot)
+        // runs on two machines: each allocates its own block, each block is
+        // its own machine's persistent root, and a forced collection on
+        // either machine leaves the other's tops untouched.
+        let compiled = CompiledProgram::compile(&base_program(952)).expect("image compiles");
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, left_id) =
+            PreparedMachine::from_borrowed(&compiled, options).expect("left installs");
+        let (mut right, right_id) =
+            PreparedMachine::from_borrowed(&compiled, options).expect("right installs");
+        assert_eq!(left.persistent_roots_count(left_id), 1);
+        assert_eq!(right.persistent_roots_count(right_id), 1);
+        let left_tops = left.top_words(left_id);
+        let right_tops = right.top_words(right_id);
+        assert_eq!(left_tops.len(), 1);
+        assert_eq!(right_tops.len(), 1);
+        assert_ne!(left_tops[0], 0);
+        assert_ne!(right_tops[0], 0);
+        assert_ne!(
+            left_tops[0], right_tops[0],
+            "each machine allocates its own top"
+        );
+
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: true,
+        };
+        let expect_952 = |values: &[tidepool_bridge::HaskellValue]| {
+            assert!(matches!(
+                values,
+                [tidepool_bridge::HaskellValue::Con(id, fields)]
+                    if *id == tidepool_repr::DataConId(952) && fields.is_empty()
+            ));
+        };
+        let left_run = left
+            .run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("left entry runs under a forced collection");
+        expect_952(&left_run.values);
+        assert_eq!(
+            right.top_words(right_id),
+            right_tops,
+            "a collection on the left machine never touches the right block"
+        );
+        let right_run = right
+            .run_entry(right_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("right entry runs under a forced collection");
+        expect_952(&right_run.values);
+        drop(left);
+        let right_again = right
+            .run_entry(right_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("the right machine outlives the left one on the same image");
+        expect_952(&right_again.values);
     }
 
     #[test]

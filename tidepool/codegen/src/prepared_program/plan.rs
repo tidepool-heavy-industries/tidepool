@@ -1,6 +1,6 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
-use super::roots::RootWords;
+use super::roots::ImageSlot;
 use super::static_bytes::PinnedBytes;
 use super::CompileError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -182,11 +182,11 @@ pub(super) struct ProgramPlan<'a> {
     /// lowering reads `import_slots[id.0]`. Occupies the block range
     /// immediately after `top_slots`.
     pub import_slots: Vec<ImportSlot>,
-    /// This program's own fixed-address root block: one collector-updated
-    /// word per top and import slot. Generated code embeds its address, so
-    /// the block is allocated before emission and lives exactly as long as
-    /// the code that names it.
-    pub root_block: RootWords,
+    /// This image's slot in every machine's root-block table. Generated
+    /// code embeds the slot; the installing machine allocates the block
+    /// (`root_words` collector-updated words, one per top and import slot).
+    pub image_slot: ImageSlot,
+    pub root_words: usize,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
     pub bytes: Arc<PinnedBytes>,
     pub heap_tops: BTreeSet<ValueId>,
@@ -420,8 +420,7 @@ impl<'a> ProgramPlan<'a> {
                 required_evaluated: declaration.required_evaluated,
             })
             .collect::<Vec<_>>();
-        let root_block = RootWords::new(top_slots.len() + import_slots.len())
-            .map_err(|_| CompileError::RootBlock)?;
+        let root_words = top_slots.len() + import_slots.len();
 
         let heap_tops = super::image::heap_top_partition(&top_bindings);
         let pap_layouts = super::apply::layouts(
@@ -480,7 +479,8 @@ impl<'a> ProgramPlan<'a> {
             externals,
             top_slots,
             import_slots,
-            root_block,
+            image_slot: ImageSlot::fresh(),
+            root_words,
             interned_constructors,
             bytes: if bytes.is_empty() {
                 Arc::clone(existing_bytes)

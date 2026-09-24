@@ -46,6 +46,7 @@ mod observe;
 pub(crate) mod resolve;
 mod roots;
 pub use observe::{AddressOrigin, ObservationFailure};
+pub use roots::ImageSlot;
 mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;
@@ -368,16 +369,18 @@ pub struct CompiledProgram {
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) statics: StaticImage,
-    /// Block-local slot of every top; see `root_block`.
+    /// Block-local slot of every top; see `image_slot`/`root_words`.
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
-    /// This program's fixed-address root block, one word per top and import
-    /// slot, whose address the generated code embeds. The installing machine
-    /// registers its heap-top and import words as persistent roots and the
-    /// collector rewrites them in place; the block is freed with the code.
-    pub(crate) root_block: roots::RootWords,
+    /// This image's slot in every machine's root-block table, and the block
+    /// length (one word per top and import slot). Generated code embeds the
+    /// slot; each installing machine allocates its own block, registers the
+    /// heap-top and import words as persistent roots, and the collector
+    /// rewrites them in place. The block is freed with the retirement.
+    pub(crate) image_slot: roots::ImageSlot,
+    pub(crate) root_words: usize,
     /// This program's constructor declarations with the descriptors they
     /// compiled against, so an installing machine can absorb them into its
     /// [`DescriptorInterner`] and later programs share them.
@@ -1037,10 +1040,9 @@ impl CompiledProgram {
             }
             let key = (id, signature.results.clone());
             let abi = abis[&key].clone();
-            let slot_address = plan
-                .root_block
-                .slot_address(slot)
-                .ok_or(CompileError::MissingRepresentation(id))?;
+            if slot >= plan.root_words {
+                return Err(CompileError::MissingRepresentation(id));
+            }
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
                 &format!("prepared_adapter_{}", id.0),
@@ -1050,7 +1052,8 @@ impl CompiledProgram {
                     functions[&id][&signature.results]
                 },
                 &abi,
-                slot_address,
+                plan.image_slot,
+                slot,
             )?;
             entries.insert(
                 id,
@@ -1205,7 +1208,8 @@ impl CompiledProgram {
             statics,
             top_slots: plan.top_slots,
             import_slots: plan.import_slots,
-            root_block: plan.root_block,
+            image_slot: plan.image_slot,
+            root_words: plan.root_words,
             interned_constructors: plan.interned_constructors,
             byte_tops,
             bytes: plan.bytes,
@@ -1227,7 +1231,13 @@ impl CompiledProgram {
     /// import's slot. Accounting class 3 for one installed program.
     #[must_use]
     pub fn root_block_words(&self) -> usize {
-        self.root_block.len()
+        self.root_words
+    }
+
+    /// This image's slot in every machine's root-block table.
+    #[must_use]
+    pub fn image_slot(&self) -> roots::ImageSlot {
+        self.image_slot
     }
 }
 

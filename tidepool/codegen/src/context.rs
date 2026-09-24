@@ -8,8 +8,9 @@ use std::mem;
 /// `prepared_stack_limit` is connected prepared-program state:
 /// generated prepared code may load it when performing its native stack
 /// preflight; legacy code must leave it unused. Prepared code reaches its
-/// tops through its own program's root block, whose address it embeds, not
-/// through this context.
+/// tops through `root_tables`: the machine's table of installed images'
+/// root blocks, indexed by the image slot the code embeds, so one compiled
+/// image runs on any machine that installed it.
 #[repr(C, align(16))]
 pub struct VMContext {
     /// Current bump-pointer allocation cursor.
@@ -25,6 +26,12 @@ pub struct VMContext {
     /// native stack low bound plus the finalized-frame reserve; null disables
     /// the prepared stack preflight for legacy effect-machine entries.
     pub prepared_stack_limit: *const u8,
+    /// This machine's root-block table: one block pointer per installed
+    /// image slot (`crate::prepared_program::ImageSlot`), null for a slot
+    /// the machine has not installed. Generated code loads the table base
+    /// here, then its own image's block, then the top word. Only a machine
+    /// at a quiescent point replaces the table (installs grow it).
+    pub root_tables: *const *mut u64,
 }
 
 impl VMContext {
@@ -36,6 +43,7 @@ impl VMContext {
             alloc_limit: nursery_end,
             machine_state: std::ptr::null_mut(),
             prepared_stack_limit: std::ptr::null(),
+            root_tables: std::ptr::null(),
         }
     }
 }
@@ -49,5 +57,6 @@ const _: () = {
         mem::offset_of!(VMContext, prepared_stack_limit)
             == VMCTX_PREPARED_STACK_LIMIT_OFFSET as usize
     );
+    assert!(mem::offset_of!(VMContext, root_tables) == VMCTX_ROOT_TABLES_OFFSET as usize);
     assert!(mem::align_of::<VMContext>() == 16);
 };

@@ -12,7 +12,7 @@
 //! through shared access even when this owner moves. There is no self-borrowed
 //! cleanup guard: Drop removes registries before releasing their allocations.
 
-use super::roots::{OldSpaceScope, RootWords};
+use super::roots::{OldSpaceScope, RootTables, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, runtime_error, runtime_error_for_status,
     runtime_error_from_machine, runtime_error_from_machine_or_observation,
@@ -37,6 +37,12 @@ pub(super) struct PreparedInvocation<'code> {
     pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
     static_catalog: tidepool_heap::static_region::StaticRegionCatalog,
+    /// This invocation's own root block for the program's tops, published
+    /// through `root_tables` exactly as an installed machine publishes it.
+    pub(super) roots: RootWords,
+    /// Owns the table `vmctx.root_tables` points at for the invocation's
+    /// life; never read from Rust.
+    _root_tables: RootTables,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
@@ -125,9 +131,10 @@ impl<'code> PreparedInvocation<'code> {
 
         let statics = Arc::new(program.statics.instantiate()?);
         let static_catalog = static_catalog(&statics).map_err(runtime_error_without_machine)?;
-        // The program's own root block carries its tops for this invocation,
-        // exactly as it does when installed on a machine.
-        let top_table = &program.root_block;
+        // This invocation's own root block carries the program's tops,
+        // exactly as an installed machine's block does.
+        let roots = RootWords::new(program.root_words)?;
+        let top_table = &roots;
         for (&id, &slot) in &program.top_slots {
             if program.heap_top_specs.iter().any(|spec| spec.id == id) {
                 continue;
@@ -212,12 +219,16 @@ impl<'code> PreparedInvocation<'code> {
         vmctx.alloc_ptr = unsafe { start.add(heap_used) };
         vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
         vmctx.prepared_stack_limit = prepared_stack_limit;
+        let mut root_tables = RootTables::default();
+        vmctx.root_tables = root_tables.publish(program.image_slot, roots.as_mut_ptr())?;
 
         let mut invocation = Self {
             program,
             machine,
             vmctx,
             static_catalog,
+            roots,
+            _root_tables: root_tables,
             results,
             result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
@@ -229,7 +240,7 @@ impl<'code> PreparedInvocation<'code> {
                 .program
                 .top_slots
                 .get(&spec.id)
-                .and_then(|&slot| invocation.program.root_block.slot_address(slot))
+                .and_then(|&slot| invocation.roots.slot_address(slot))
             {
                 invocation.machine.register_rust_root(root);
             }

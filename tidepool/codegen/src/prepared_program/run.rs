@@ -130,7 +130,10 @@ impl ExecutionError {
     /// re-derive this match against `Observation(BudgetExceeded)` itself.
     #[must_use]
     pub fn is_observation_budget_exhausted(&self) -> bool {
-        matches!(self, Self::Observation(ObservationFailure::BudgetExceeded { .. }))
+        matches!(
+            self,
+            Self::Observation(ObservationFailure::BudgetExceeded { .. })
+        )
     }
 }
 

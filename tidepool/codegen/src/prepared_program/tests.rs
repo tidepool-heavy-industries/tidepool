@@ -1186,7 +1186,7 @@ fn enter_uses_one_generated_state_machine_call_without_an_inline_header_chain() 
         .filter(|inst| function.dfg.insts[*inst].opcode() == Opcode::Load)
         .count();
     assert_eq!(
-        loads, 2,
-        "Enter performs one root-block load for the top plus the stack preflight load"
+        loads, 4,
+        "Enter reaches its top through the root-block table (table base, image block, top word) plus the stack preflight load"
     );
 }

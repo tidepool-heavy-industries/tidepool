@@ -23,6 +23,8 @@ pub const VMCTX_ALLOC_PTR_OFFSET: i32 = 0;
 pub const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
 pub const VMCTX_PREPARED_STACK_LIMIT_OFFSET: i32 =
     std::mem::offset_of!(crate::context::VMContext, prepared_stack_limit) as i32;
+pub const VMCTX_ROOT_TABLES_OFFSET: i32 =
+    std::mem::offset_of!(crate::context::VMContext, root_tables) as i32;
 
 // --- Heap object tags (u8), derived from tidepool_heap::layout::HeapTag ---
 
