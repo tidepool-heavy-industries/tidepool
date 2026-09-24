@@ -15,3 +15,9 @@ As reviewer, inspect the exact candidate and drive authorized repairs with its
 implementer. As implementer, return a revised candidate or a precise decision
 need; never queue work back to a reviewer waiting for your reply. Load
 `exomonad-review` for the project repair recipe.
+
+When you are blocked on your parent or another owner, do not sleep and
+re-check: commit what you can, send one concise `sendMessage` naming the
+blocker and the decision you need, and continue other owned work while you
+wait. Your last message in a turn is not your result: only `respond` settles
+the assignment, and a turn that ends without it delivers nothing to your parent.
