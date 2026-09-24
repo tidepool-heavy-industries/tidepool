@@ -53,6 +53,11 @@ pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
     RealmId,
 };
+// Re-exported for callers that pass a value across two resident sessions'
+// machines ([`resident::ResidentSession::export_custody`]/`import_parcel`)
+// and any composition root that wires the sessions' shared image cache
+// ([`resident::ResidentSession::set_image_registry`]).
+pub use tidepool_codegen::prepared_program::{ImageRegistry, Parcel};
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
 

@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
+    session_var_id, ImageRegistry, Parcel, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
 };
 use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
 
@@ -1721,6 +1721,17 @@ where
         }
     }
 
+    /// Share `registry` with this session's machine, once it has one
+    /// (`PreparedEngine::set_image_registry`) -- a no-op before the first
+    /// turn bootstraps it, since there is no machine yet to share an image
+    /// with. The composition root that owns a run's sibling sessions is the
+    /// intended caller.
+    pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.set_image_registry(registry);
+        }
+    }
+
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
     /// `Session::define_scoped`): a declaration turn appends to the gen-versioned
     /// `Lib.G<g>` module a later turn imports. Requires a persistent declaration environment (`Some(lib)`
@@ -2264,6 +2275,64 @@ where
             transfer.commit();
         }
         discarded
+    }
+
+    /// Export the value `custody` roots as a detached [`Parcel`] another
+    /// session's machine (sharing this run's [`tidepool_codegen::prepared_program::ImageRegistry`])
+    /// can import -- the session-layer half of a value crossing two
+    /// [`ResidentSession`]s. Consumes the custody: the export itself is a
+    /// non-consuming read of the machine (`PreparedEngine::export_parcel`,
+    /// like `inspect_retained`), so once the parcel is safely out this
+    /// releases the handle exactly as [`Self::discard_custody`] would --
+    /// the parcel is now the value's only owner on this side.
+    pub fn export_custody(&mut self, custody: RootCustody) -> Result<Parcel, ResidentError> {
+        self.settle_dropped_custody();
+        let transfer = custody.into_transfer();
+        let handle = transfer.handle;
+        let Some(engine) = self.state.prepared_mut() else {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!("cannot export {handle:?}: the prepared machine is not installed"),
+            ))));
+        };
+        let parcel = engine.export_parcel(handle)?;
+        let released = engine.discard_handle(handle);
+        debug_assert!(
+            released,
+            "a handle just exported must still be live to release"
+        );
+        transfer.commit();
+        Ok(parcel)
+    }
+
+    /// Import `parcel` under `owner`, rooting its value as a new old-space
+    /// arena in this session's machine (`PreparedEngine::import_parcel`),
+    /// and mint a [`RootCustody`] over it with this session's own
+    /// cleanup/provenance -- the session-layer half of a value crossing two
+    /// [`ResidentSession`]s, mirroring how [`Self::live_payload_handle_owned_by`]
+    /// mints custody for a handle taken under another resource scope.
+    ///
+    /// The imported value never passed through one of THIS session's yield
+    /// sites -- it was not produced by resuming a parked frame here -- so its
+    /// provenance starts empty, the same choice already made for a value
+    /// minted without a parked frame behind it (see
+    /// [`Self::prepared_binding_handle`]).
+    pub fn import_parcel(
+        &mut self,
+        parcel: Parcel,
+        owner: RealmId,
+    ) -> Result<RootCustody, ResidentError> {
+        self.settle_dropped_custody();
+        let Some(engine) = self.state.prepared_mut() else {
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "cannot import a parcel: the prepared machine is not installed".to_string(),
+            ))));
+        };
+        let handle = engine.import_parcel(parcel, owner)?;
+        Ok(RootCustody::new(
+            handle,
+            Arc::clone(&self.custody_cleanup),
+            Arc::new(ProgramProvenance::default()),
+        ))
     }
 
     /// Resume the turn represented by `hole` by DELIVERING a machine-side

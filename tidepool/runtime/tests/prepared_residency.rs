@@ -380,6 +380,94 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     assert!(notebook.session.parked_holes().is_empty());
 }
 
+/// Parcel 5b: a value crosses two independent [`ResidentSession`]s (their
+/// own machines, sharing one [`tidepool_runtime::session::ImageRegistry`])
+/// through [`ResidentSession::export_custody`]/[`ResidentSession::import_parcel`].
+/// Both sessions run identical turns, so a wired-in constructor like `Int`
+/// shares descriptor content across the two independently bootstrapped
+/// machines even where the registry itself misses on a given install (a
+/// heap-allocated value is always copied on export, never shared by
+/// address -- only a static top needs an actual image hit for that).
+#[test]
+fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
+    use std::sync::Arc;
+    use tidepool_runtime::session::ImageRegistry;
+
+    let mut left = Notebook::new();
+    let mut right = Notebook::new();
+
+    // Bootstrap each machine with a throwaway turn before sharing a
+    // registry: `set_image_registry` is a no-op before a machine exists.
+    // Both machines see `Int`'s descriptor from this alone.
+    let warm = left.prepare_expression("pure (0 :: Int)");
+    left.expression(&warm);
+    let warm = right.prepare_expression("pure (0 :: Int)");
+    right.expression(&warm);
+
+    let registry = Arc::new(ImageRegistry::new());
+    left.session.set_image_registry(Arc::clone(&registry));
+    right.session.set_image_registry(Arc::clone(&registry));
+
+    // A bound value's own top is a static CAF (every `bind()`-produced
+    // `Val.G<gen>` top is), so exporting it always takes the
+    // shared-by-address path (`Parcel::bytes() == 0`) -- valid only when
+    // the importer installed the SAME image, i.e. an actual registry hit.
+    // `left` and `right` run the identical turn sequence against the
+    // identical session id, so their `held` installs are the same content
+    // and `right`'s is the hit: it maps the same static region `left`'s
+    // export points into.
+    left.bind("held <- pure (999999 :: Int)");
+    right.bind("held <- pure (999999 :: Int)");
+    assert!(
+        registry.hits() > 0,
+        "left and right's identical `held` bind should share one compiled image"
+    );
+    let custody = left
+        .session
+        .prepared_binding_handle("held")
+        .expect("the bound name resolves to a live custody token");
+    let before = left
+        .session
+        .render_retained_preview(&custody, 64)
+        .expect("left can render its own custody");
+
+    let left_handles_before = left.session.value_handle_count();
+    let parcel = left
+        .session
+        .export_custody(custody)
+        .expect("the bound value exports as a parcel");
+    assert_eq!(
+        left.session.value_handle_count(),
+        left_handles_before - 1,
+        "export releases the exported handle exactly as discard_custody would"
+    );
+
+    let right_handles_before = right.session.value_handle_count();
+    let imported = right
+        .session
+        .import_parcel(parcel, tidepool_runtime::session::RealmId::ROOT)
+        .expect("the parcel imports against the sibling machine's matching descriptors");
+    assert_eq!(
+        right.session.value_handle_count(),
+        right_handles_before + 1,
+        "import mints exactly one new handle"
+    );
+
+    let after = right
+        .session
+        .render_retained_preview(&imported, 64)
+        .expect("right can render the imported custody");
+    assert_eq!(before, after, "the value round-trips byte-for-byte");
+    assert_eq!(after, "999999");
+
+    // Exact release: discarding the imported custody drops the right
+    // machine's handle count back to where it started, and the left
+    // machine -- whose own copy was already consumed by the export -- is
+    // untouched by any of this.
+    assert!(right.session.discard_custody(imported));
+    assert_eq!(right.session.value_handle_count(), right_handles_before);
+}
+
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
 /// (`tidepool/runtime/src/session/prepared.rs`) -- see the module doc for
 /// why this file cannot read the real constant.
