@@ -9,6 +9,11 @@ cell's final committed bindings plus the conversation through the real tool
 result. Combine independent children applicatively in one `unfold`; keep the
 shared contract and the integration with their parent.
 
+`batch campaign group` builds the `ForkGroupPath`; it has no exported
+constructor of its own, so `ForkGroupPath "..."` does not type-check. Use
+`subgroup group` to nest under the enclosing fork's own path instead of
+starting a new campaign.
+
 ```haskell
 let group = batch "corpus" "fanout"
 let domainLabel = [label|domain|]
@@ -31,8 +36,12 @@ above. Admit with `unfold`, then join the settlements in one watch:
 ```haskell
 joined <- watch "both-ready" $
   (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-pollWatch joined
+joinedState <- pollWatch joined
 ```
+
+Bind `pollWatch`'s result; a bare `pollWatch joined` as a cell's last statement
+leaves its effect row unpinned (`Ambiguous type variable ... arising from a
+use of pollWatch`) with nothing else in the cell to settle it.
 
 Use `awaitSettled` when a failure belongs in the value, `awaitResponse` when an
 unavailable dependency should fail the watch, and `awaitAnySettled` to wake on

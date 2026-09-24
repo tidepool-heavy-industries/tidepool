@@ -9,6 +9,13 @@ contents. A child using `withContext (selected taskContext)` reads relevant skil
 itself or receives the needed facts in its assignment. Its request-local bindings
 come from its own assignment, not the parent's history.
 
+Every `unfold`/`child` needs a `ForkGroupPath`. `ForkGroupPath` is a type, not a
+term: it has no exported constructor, so `ForkGroupPath "..."` does not
+type-check. Reuse `taskGroup task` (or `specialistGroup slot`) when the group
+already exists on your `Task`; build a new one with `batch campaign group` (a
+fresh two-segment path) or `subgroup group` (nested under the enclosing fork's
+own path) — both take plain string literals, e.g. `batch "review" "lane-a"`.
+
 `lunaTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
 builds a branch value on the `luna` alias: the cheap, fast tier, and the default
 for bounded implementation and review children, so fork many of them in one

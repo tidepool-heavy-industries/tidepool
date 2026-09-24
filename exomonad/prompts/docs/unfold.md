@@ -31,8 +31,11 @@ directly, then join their settlements in one watch:
 ```haskell
 joined <- watch "both-ready" $
   (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-pollWatch joined
+joinedState <- pollWatch joined
 ```
+
+Bind `pollWatch`'s result rather than leaving it as the cell's bare last
+statement: with nothing else pinning it, its effect row is ambiguous.
 
 Assignment values, captured closures, and explicit worktree seeds keep their
 ordinary Haskell value semantics; they are not reevaluated at child startup.

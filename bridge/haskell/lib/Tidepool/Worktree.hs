@@ -132,8 +132,10 @@ module Tidepool.Worktree
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Char (isHexDigit)
 import Data.Proxy (Proxy (..))
 import Data.String (IsString (fromString))
+import qualified Prelude as P (error)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
 import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
@@ -394,6 +396,16 @@ instance IsString GitRef where
 
 instance IsString BranchName where
   fromString = mkBranchName . T.pack
+
+-- | Unlike 'GitRef' (any ref spelling, resolved by git) a 'GitOid' literal is
+-- checked at construction: git itself only ever produces a full 40-hex
+-- object id, so anything else is an authoring mistake, not a valid seed for
+-- 'atRef' or a 'Tidepool.Actors.Unfold.Candidate' commit field.
+instance IsString GitOid where
+  fromString raw
+    | T.length text == 40 && T.all isHexDigit text = GitOid text
+    | otherwise = P.error ("GitOid literal must be exactly 40 hex characters: " <> show raw)
+    where text = T.pack raw
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t

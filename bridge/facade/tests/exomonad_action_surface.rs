@@ -235,3 +235,29 @@ fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
             .unwrap_or_else(|error| panic!("concrete {target} should compile: {error}"));
     }
 }
+
+/// `[label|...|]` is `IsWatchLabel`-polymorphic: the same quasiquote must
+/// resolve as a `WatchLabel` at `watch`/`spawnWatched` and as a `Label` at
+/// `assignment`, without per-call-site conversion. A full 40-hex sha must
+/// read directly as a `GitOid` literal, and a fresh `ForkGroupPath` must be
+/// buildable only through `batch`/`subgroup`, never its (unexported) term
+/// constructor.
+#[test]
+fn label_quasiquote_resolves_at_every_expected_site() {
+    eval_harness::require_extract();
+    let include = exomonad_include_paths();
+    let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let source = include_str!("exomonad_action_surface/label_polymorphism.hs");
+
+    for target in [
+        "watchesSettlement",
+        "spawnsWatchedChild",
+        "committedSha",
+        "freshGroup",
+        "nestedGroup",
+    ] {
+        compile_haskell(source, target, &include_refs).unwrap_or_else(|error| {
+            panic!("label/GitOid/ForkGroupPath surface should compile ({target}): {error}")
+        });
+    }
+}

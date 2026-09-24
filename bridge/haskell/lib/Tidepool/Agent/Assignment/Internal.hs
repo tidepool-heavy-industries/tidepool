@@ -5,6 +5,7 @@ module Tidepool.Agent.Assignment.Internal
   , NameError (..)
   , labelFromText
   , labelText
+  , IsWatchLabel (..)
   ) where
 
 import Data.Char (isAsciiLower, isDigit)
@@ -13,6 +14,18 @@ import qualified Data.Text as Text
 
 data Label = Label Text
   deriving (Show, Eq, Ord)
+
+-- | A value buildable from already-validated, kebab-case label text: the
+-- anchor that lets @[label|...|]@ resolve to whichever concrete label type
+-- its use site expects (a plain 'Label' here, or, through
+-- 'Tidepool.Agent.Watch.Internal', a 'Tidepool.Agent.Watch.Internal.WatchLabel')
+-- instead of the quasiquote committing to one type and every other site
+-- needing its own conversion.
+class IsWatchLabel a where
+  fromValidatedLabelText :: Text -> a
+
+instance IsWatchLabel Label where
+  fromValidatedLabelText = Label
 
 data NameError = EmptyName | InvalidKebabName Text | NameTooLong Text
   deriving (Show, Eq)

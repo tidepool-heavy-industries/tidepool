@@ -44,6 +44,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Prelude
 
+import Tidepool.Agent.Assignment.Internal (IsWatchLabel (..))
 import Tidepool.Agent.Reply.Internal
   ( ReplyError (..)
   , Progress (..)
@@ -96,6 +97,12 @@ data WatchLabelError
 
 instance IsString WatchLabel where
   fromString = either (error . show) id . watchLabel . Text.pack
+
+-- | Lets '[label|...|]' resolve to a 'WatchLabel' at a 'watch'/'spawnWatched'
+-- call site with the same kebab-case validation 'watchLabel' already runs;
+-- see 'Tidepool.Agent.Assignment.Internal.IsWatchLabel'.
+instance IsWatchLabel WatchLabel where
+  fromValidatedLabelText = WatchLabel
 
 watchLabel :: Text -> Either WatchLabelError WatchLabel
 watchLabel value

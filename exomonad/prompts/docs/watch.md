@@ -9,8 +9,12 @@ settlement sources still need `report = Silent`.
 let joinLabel = "first-wave-results" :: WatchLabel
 joined <- watch joinLabel $
   (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-pollWatch joined
+joinedState <- pollWatch joined
 ```
+
+Bind `pollWatch`'s result. Left as a cell's bare last statement it has no other
+site pinning its effect row (`Ambiguous type variable ... arising from a use
+of pollWatch`); a `<-` bind, or a `@Result` type application, gives it one.
 
 A combined watch is appropriate when the next decision needs both results.
 Independently integrable work can use the default settlement notices. A wave
