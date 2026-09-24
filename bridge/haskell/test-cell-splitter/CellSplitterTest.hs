@@ -161,6 +161,63 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "import LocalQuoteDependency (value)"
     , "result = value"
     ]
+  -- Two dependencies standing in for the real workspace shape
+  -- ('Project.Work'/'Project.Review' importing 'label' via the open
+  -- 'Tidepool.Actors.Exomonad' import, which re-exports it from
+  -- 'Tidepool.QQ.Label', alongside several other open imports of modules
+  -- that do not export 'label'):
+  --
+  --  1. 'OpenImportDependency' imports the *defining* module,
+  --     'Tidepool.QQ.Label', with no explicit import list, alongside a
+  --     decoy open import that brings nothing relevant into scope.
+  --     Resolution must pick the one open import whose interface actually
+  --     exports 'label', not bail out as ambiguous just because more than
+  --     one import decl has no explicit list.
+  --  2. 'ReexportDependency' imports 'label' (with an explicit list, so
+  --     import-list resolution alone would already succeed) from a
+  --     *re-exporting* convenience module, 'LabelReexport'. Resolution must
+  --     follow the re-export back to "Tidepool.QQ.Label.label" -- the
+  --     allowlist's key -- not stop at "LabelReexport.label".
+  let decoyModule = root </> "Decoy.hs"
+      openImportDependency = root </> "OpenImportDependency.hs"
+      openImportUser = root </> "OpenImportUser.hs"
+      reexportModule = root </> "LabelReexport.hs"
+      reexportDependency = root </> "ReexportDependency.hs"
+      reexportUser = root </> "ReexportUser.hs"
+  writeFile decoyModule $ unlines
+    [ "module Decoy (decoy) where"
+    , "decoy :: Int"
+    , "decoy = 0"
+    ]
+  writeFile openImportDependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module OpenImportDependency (value) where"
+    , "import Tidepool.QQ.Label"
+    , "import Decoy"
+    , "value :: String"
+    , "value = [label|orbit-motif|]"
+    ]
+  writeFile openImportUser $ unlines
+    [ "module OpenImportUser where"
+    , "import OpenImportDependency (value)"
+    , "result = value"
+    ]
+  writeFile reexportModule $ unlines
+    [ "module LabelReexport (label) where"
+    , "import Tidepool.QQ.Label (label)"
+    ]
+  writeFile reexportDependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module ReexportDependency (value) where"
+    , "import LabelReexport (label)"
+    , "value :: String"
+    , "value = [label|orbit-motif|]"
+    ]
+  writeFile reexportUser $ unlines
+    [ "module ReexportUser where"
+    , "import ReexportDependency (value)"
+    , "result = value"
+    ]
   direct <- runPipelineSelected PreparedStg target [root]
   let evidence = pprDependencies direct
   when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
@@ -189,6 +246,27 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
         compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
       when ("tidepool-memo-miss module=LabelDependency" `isInfixOf` labelWarmLog) $
         fail ("a dependency using only [label|...|] missed the memo: " ++ labelWarmLog)
+      -- Same guarantee, reached through an open (no-explicit-list) import of
+      -- the defining module itself, with an unrelated open import present
+      -- too -- the ambiguity the old import-list-only heuristic could not
+      -- see through (every no-list import "brings everything into scope",
+      -- so it bailed out as soon as more than one was present).
+      _ <- compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
+      (_, openImportWarmLog) <- captureStderr root "open-import-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
+      when ("tidepool-memo-miss module=OpenImportDependency" `isInfixOf` openImportWarmLog) $
+        fail ("a dependency using [label|...|] via an open import missed the memo: "
+                ++ openImportWarmLog)
+      -- Same guarantee again, reached through a module that re-exports the
+      -- allowlisted quoter rather than defining it -- resolution must
+      -- follow the re-export back to "Tidepool.QQ.Label.label", the
+      -- allowlist's key, not stop at "LabelReexport.label".
+      _ <- compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
+      (_, reexportWarmLog) <- captureStderr root "reexport-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
+      when ("tidepool-memo-miss module=ReexportDependency" `isInfixOf` reexportWarmLog) $
+        fail ("a dependency using [label|...|] via a re-export missed the memo: "
+                ++ reexportWarmLog)
       -- A dependency using a quasiquoter this resolver cannot place on the
       -- allowlist (here: locally defined, so no import brings it into
       -- scope) stays conservatively uncacheable, same as raw QuasiQuotes —
