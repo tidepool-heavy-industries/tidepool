@@ -300,3 +300,17 @@ copy then install on import. Focused results: heap+codegen 556/556, runtime
 clippy clean on the four crates. Regression test:
 `a_closure_over_an_imported_binding_runs_on_a_machine_that_never_installed_its_image`.
 Not covered: an image with a borrowed (test-only) custody is never named.
+
+### 2026-09-25 — Fable: parcel 6 merged for the second reader
+
+Main 486004650 (`actor: cross resident session boundaries instead of
+refusing them`, d50363086 merged onto df175df8d). Fable's own read before
+merge: `transfer_custody` exports under the source checkout, releases, then
+imports under the destination (no overlap); `export_shared` is the borrowed
+export for retained progress with independent custody per observer via
+`import_shared_custody`; `MailboxValue::into_transfer` is the one
+decomposition (Runtime with its session, Parcel without). Nine gates: five
+converted, two deleted (plain data), two left for parcel 7 with comments.
+Focused results: exomonad-actor 297/297 unit, 13/13 suite; runtime
+`prepared_residency` 13/13; clippy and fmt clean. Please review that OID;
+findings become follow-up commits, the merge is not held on them.
