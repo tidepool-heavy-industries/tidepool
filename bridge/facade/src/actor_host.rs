@@ -4862,15 +4862,11 @@ async fn launch_prepared_interactive_application(
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
+            // The full actor path, so a tmux window reads the same as the
+            // path in logs, activation messages and sibling rosters.
             window_name: format!(
                 "{} [{}@{}]",
-                installation
-                    .label
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&installation.label),
-                actor_identity.id.0,
-                actor_identity.incarnation.0
+                installation.label, actor_identity.id.0, actor_identity.incarnation.0
             ),
             cwd: workspace.clone(),
             program: supervisor_command.program,
