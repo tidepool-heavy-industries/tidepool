@@ -1,7 +1,7 @@
 use std::fmt;
 
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::{ResidentHole, RootCustody};
+use tidepool_runtime::session::{Parcel, ResidentHole, RootCustody};
 
 use crate::ActorRef;
 
@@ -45,12 +45,18 @@ pub(crate) struct ResidentWaitRequest {
     pub(crate) continuation: ResidentHole,
 }
 
-/// One live Haskell value under an exclusive machine-root handle.
+/// One live Haskell value crossing the mailbox, either already rooted under
+/// an exclusive machine handle or still sealed in a detached [`Parcel`].
 ///
 /// The session tag lets the actor kernel reject a cross-machine delivery
-/// before the handle leaves its envelope. Dropping this value drops
-/// [`RootCustody`], which queues the underlying root for release by its
-/// originating resident session.
+/// before a [`RootCustody`] handle ever leaves its envelope -- but only for
+/// the `Runtime` form: a [`Parcel`] carries no machine affinity of its own
+/// (see [`tidepool_codegen::prepared_program::evacuation`]'s module doc) and
+/// is always deliverable, wherever it lands, by importing it into the
+/// receiving machine instead. Dropping this value drops whatever it holds:
+/// a `Runtime` root queues for release by its originating resident session;
+/// a `Parcel`'s detached arena and payloads are simply freed -- it was never
+/// registered with any machine's ledger, so nothing needs releasing there.
 #[must_use = "a live mailbox value must be delivered or deliberately dropped"]
 pub struct MailboxValue {
     session: SessionId,
@@ -59,10 +65,61 @@ pub struct MailboxValue {
 
 enum MailboxRoot {
     Runtime(RootCustody),
+    Parcel(Parcel),
     #[cfg(test)]
     Probe {
         _drop: DropProbe,
+        kind: ProbeKind,
     },
+}
+
+/// Which real form a [`MailboxRoot::Probe`] stands in for -- the probe never
+/// touches a machine, so this only needs to steer [`MailboxValue::deliver`]'s
+/// branch, not carry any actual [`RootCustody`]/[`Parcel`] payload.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeKind {
+    Runtime,
+    Parcel,
+}
+
+/// [`MailboxValue::deliver`]'s accepted outcome: which machine-level
+/// operation the receiving session must still perform. A `Runtime` value
+/// arrives ready to mount; a `Parcel` still needs
+/// [`tidepool_runtime::session::ResidentSession::import_parcel`] run against
+/// the receiving machine before it has a [`RootCustody`] of its own. Wiring
+/// that import into the actor kernel's delivery sites (`run_receiver`,
+/// `finish_receiver`, ...) is a later parcel; this type is the primitive
+/// they will match on.
+pub enum MailboxDelivery {
+    Runtime(RootCustody),
+    Parcel(Parcel),
+    #[cfg(test)]
+    Probe(DropProbe),
+}
+
+impl fmt::Debug for MailboxDelivery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(custody) => f.debug_tuple("Runtime").field(custody).finish(),
+            Self::Parcel(_) => f.debug_tuple("Parcel").finish_non_exhaustive(),
+            #[cfg(test)]
+            Self::Probe(_) => f.debug_tuple("Probe").finish_non_exhaustive(),
+        }
+    }
+}
+
+/// [`MailboxValue::deliver`] rejected a `Runtime` value addressed to a
+/// session other than `destination`: its handle belongs to a different
+/// machine's ledger and was never at risk of leaving its envelope.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "mailbox value from session {actual:?} cannot deliver into session {destination:?}: \
+     a Runtime-rooted value crosses only into its own originating machine"
+)]
+pub struct ForeignMailboxValue {
+    pub destination: SessionId,
+    pub actual: SessionId,
 }
 
 impl MailboxValue {
@@ -70,6 +127,17 @@ impl MailboxValue {
         Self {
             session,
             root: MailboxRoot::Runtime(custody),
+        }
+    }
+
+    /// Wrap a detached [`Parcel`] for delivery. `session` is the value's
+    /// nominal origin (mirrors [`Self::new`]) -- purely informational for
+    /// this form, since [`Self::deliver`] never rejects a `Parcel` on tag
+    /// mismatch the way it does a `Runtime` custody.
+    pub fn parcel(session: SessionId, parcel: Parcel) -> Self {
+        Self {
+            session,
+            root: MailboxRoot::Parcel(parcel),
         }
     }
 
@@ -83,8 +151,42 @@ impl MailboxValue {
     pub fn into_custody(self) -> RootCustody {
         match self.root {
             MailboxRoot::Runtime(custody) => custody,
+            MailboxRoot::Parcel(_) => panic!("parcel root has no runtime custody"),
             #[cfg(test)]
             MailboxRoot::Probe { .. } => panic!("test root has no runtime custody"),
+        }
+    }
+
+    /// Classify `self` for delivery into `destination`'s machine: a
+    /// `Runtime` custody is rejected before its handle leaves the envelope
+    /// when it was minted under a different session, exactly as before
+    /// parcels existed; a `Parcel` is always accepted, regardless of tag --
+    /// the caller imports it into `destination`'s machine to get a
+    /// `RootCustody` of its own.
+    pub fn deliver(self, destination: SessionId) -> Result<MailboxDelivery, ForeignMailboxValue> {
+        match self.root {
+            MailboxRoot::Runtime(custody) => {
+                if self.session == destination {
+                    Ok(MailboxDelivery::Runtime(custody))
+                } else {
+                    Err(ForeignMailboxValue {
+                        destination,
+                        actual: self.session,
+                    })
+                }
+            }
+            MailboxRoot::Parcel(parcel) => Ok(MailboxDelivery::Parcel(parcel)),
+            #[cfg(test)]
+            MailboxRoot::Probe { _drop, kind } => match kind {
+                ProbeKind::Runtime if self.session == destination => {
+                    Ok(MailboxDelivery::Probe(_drop))
+                }
+                ProbeKind::Runtime => Err(ForeignMailboxValue {
+                    destination,
+                    actual: self.session,
+                }),
+                ProbeKind::Parcel => Ok(MailboxDelivery::Probe(_drop)),
+            },
         }
     }
 
@@ -97,6 +199,23 @@ impl MailboxValue {
             session,
             root: MailboxRoot::Probe {
                 _drop: DropProbe(dropped),
+                kind: ProbeKind::Runtime,
+            },
+        }
+    }
+
+    /// [`Self::probe`], but standing in for the `Parcel` form: a foreign
+    /// session tag must not cause [`Self::deliver`] to reject it.
+    #[cfg(test)]
+    pub(crate) fn probe_parcel(
+        session: SessionId,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            session,
+            root: MailboxRoot::Probe {
+                _drop: DropProbe(dropped),
+                kind: ProbeKind::Parcel,
             },
         }
     }
@@ -111,11 +230,82 @@ impl fmt::Debug for MailboxValue {
 }
 
 #[cfg(test)]
-struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+pub struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 #[cfg(test)]
 impl Drop for DropProbe {
     fn drop(&mut self) {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn runtime_form_with_a_foreign_tag_is_rejected() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let value = MailboxValue::probe(SessionId(1), Arc::clone(&dropped));
+        let error = value
+            .deliver(SessionId(2))
+            .expect_err("a Runtime value minted under session 1 must not deliver into session 2");
+        assert_eq!(error.destination, SessionId(2));
+        assert_eq!(error.actual, SessionId(1));
+        // Rejection returns the value's session tag in the error, not the
+        // value itself -- the probe's handle is gone with it, exactly as a
+        // real `Runtime` custody's would be if this were not a probe.
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn runtime_form_with_a_matching_tag_is_accepted() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let value = MailboxValue::probe(SessionId(7), Arc::clone(&dropped));
+        let delivery = value
+            .deliver(SessionId(7))
+            .expect("a Runtime value delivers into its own originating session");
+        assert!(matches!(delivery, MailboxDelivery::Probe(_)));
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "the accepted probe is still held by the returned delivery, not yet dropped"
+        );
+        drop(delivery);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn parcel_form_with_a_foreign_tag_still_imports() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let value = MailboxValue::probe_parcel(SessionId(1), Arc::clone(&dropped));
+        // Session 2 never minted this value -- for a `Runtime` root that
+        // would be `ForeignMailboxValue`, but a parcel has no machine
+        // affinity to be foreign to.
+        let delivery = value
+            .deliver(SessionId(2))
+            .expect("a Parcel value is always deliverable, whatever its nominal origin tag");
+        assert!(matches!(delivery, MailboxDelivery::Probe(_)));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(delivery);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_dropped_parcel_form_releases_nothing_on_any_machine() {
+        // The probe stands in for "no machine registration happened": its
+        // `DropProbe` only ever counts the drop itself, never a release
+        // call against a `PreparedEngine`/`ResidentSession` -- exactly what
+        // a real, never-imported `Parcel`'s `Drop` does (it frees its own
+        // detached arena and payloads; nothing was ever registered with a
+        // machine's ledger for it to release there).
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let value = MailboxValue::probe_parcel(SessionId(4), Arc::clone(&dropped));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(value);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 }

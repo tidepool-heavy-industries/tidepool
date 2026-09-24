@@ -16,7 +16,7 @@ use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
-    ManagedField, ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
+    ManagedField, ManagedNode, Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
     PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
     PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
     RunOptions, MAX_ANSWER_DEPTH,
@@ -236,6 +236,8 @@ impl PreparedRuntimeError {
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::ForeignExternals
+                // An evacuation refusal leaves both machines as they were.
+                | ExecutionError::Evacuation(_)
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
                 | ExecutionError::Answer(_)
@@ -3245,6 +3247,39 @@ impl PreparedEngine {
     /// (`PreparedMachine::rehome_handle`).
     pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
         self.machine.rehome_handle(handle, owner)
+    }
+
+    /// Export the graph the bare cross-engine [`ValueHandle`] roots into a
+    /// detached [`Parcel`] (`PreparedMachine::export_parcel`). Like
+    /// [`Self::inspect_retained`], this is a non-consuming read: the handle
+    /// stays exactly as live afterward, so the caller (`ResidentSession::export_custody`)
+    /// releases it itself once the parcel is safely out.
+    pub fn export_parcel(&mut self, handle: ValueHandle) -> Result<Parcel, PreparedRuntimeError> {
+        let prepared = self
+            .machine
+            .prepared_handle_of(handle)
+            .ok_or(PreparedRuntimeError::Run(
+                ExecutionError::UnknownPreparedHandle,
+            ))?;
+        self.machine
+            .export_parcel(prepared)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// Import `parcel` under `realm`, rooting its value as a new old-space
+    /// arena on this engine's machine, and mint a bare cross-engine
+    /// [`ValueHandle`] over it (`PreparedMachine::import_parcel`), mirroring
+    /// [`Self::live_payload_handle_owned_by`]'s handle minting for a value
+    /// that did not come from a parked frame.
+    pub fn import_parcel(
+        &mut self,
+        parcel: Parcel,
+        realm: RealmId,
+    ) -> Result<ValueHandle, PreparedRuntimeError> {
+        self.machine
+            .import_parcel(parcel, realm)
+            .map(|handle| handle.raw())
+            .map_err(PreparedRuntimeError::Run)
     }
 
     /// The persistent root slot behind a retained handle, by its bare
