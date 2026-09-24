@@ -275,3 +275,25 @@ the run with session size.
   segment, that a path is built by `batch campaign group` or `subgroup`, and
   which argument was wrong. Consider letting `subgroup` accept a path
   literal directly, since children always have their own path at hand.
+
+## Wave-4 slowdown, measured (2026-09-24, run 535e56ca)
+
+- Bash cells went from ~125 ms average (19:40Z) to ~1.9 s average, 33 s max
+  (20:20Z); whole turns from 3.5 s to 21 s average, 217 s max. Two causes,
+  both measured in the run's compiler log:
+  1. **Every compile re-lowers four workspace modules.** `Project.Work` and
+     `Project.Review` use `[label|..|]`, which the memo classifies as
+     `untracked-compile-time-execution`, so they miss on every request
+     (682/683), and `Project.Routing`, `Project.Observe` and each cell's
+     `Expr` miss by dependency (689 each): 3.5-4 s per request, from the
+     first cell. Fix: a library quoter declared pure counts as tracked
+     (lane `memo-quasiquote`).
+  2. **Shared-session checkout waits return at scale.** Checkout waits were
+     ~0 with 5 actors and 65 ms→1.5 s average (max 59 s) with 16 actors on
+     one session. The persistent daemon's other worker slots sit idle
+     (workers 0 and 1 served everything; slot 2 never) because compiles
+     serialize behind the one machine. Per-child sessions (parcel 3) is the
+     fix; the pool is fine.
+- Not the cause: Jev (157 hook calls, ~20 s total), the daemon (0 ms queue,
+  no rejections), model latency (separate: the root's turns show ~7 min
+  between tool calls late in the run, worth its own look).
