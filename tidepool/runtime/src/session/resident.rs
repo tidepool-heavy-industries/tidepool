@@ -1051,7 +1051,13 @@ fn push_bounded(out: &mut String, text: &str, budget: &mut usize) {
 /// appending [`PREVIEW_TRUNCATED_NOTE`] when anything was cut. A value with
 /// no newline before `budget` cuts at the nearest earlier char boundary
 /// instead -- still bounded, just without a line to cut at.
-fn truncate_preview_at_line(text: String, budget: usize) -> String {
+///
+/// The one truncation implementation for a settlement notice's reply
+/// preview, whichever side rendered the untruncated text: this session's own
+/// non-forcing retained-heap walk, or a preview the replying Haskell program
+/// rendered itself (`Tidepool.Agent.Reply.Internal.reply`) and carried
+/// across the boundary untruncated.
+pub fn truncate_preview_at_line(text: String, budget: usize) -> String {
     if text.len() <= budget {
         return text;
     }

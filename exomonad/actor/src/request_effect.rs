@@ -82,10 +82,13 @@ pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, HaskellValue, (i64, i64), Option<RequestDuration>),
+    // The `String` is the bounded reply preview `Tidepool.Agent.Reply.Internal.reply`/
+    // `attemptReply` render on the Haskell side (`WorkbenchDisplay`), ahead
+    // of the host's own line-boundary truncation in `stage_request_reply`.
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    AttemptReplyWith(i64, HaskellValue),
+    AttemptReplyWith(i64, HaskellValue, String),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    ReplyWith(i64, HaskellValue),
+    ReplyWith(i64, HaskellValue, String),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ObserveResponseWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
@@ -170,6 +173,11 @@ pub(crate) struct ReplyAttempt {
     pub request: RequestId,
     pub result: RootCustody,
     pub recoverable: bool,
+    /// The reply preview Haskell rendered at the reply site (`WorkbenchDisplay`),
+    /// ahead of the host's own truncation. `None` when the reply carries no
+    /// preview (an older non-Replies reply path); `stage_request_reply` falls
+    /// back to its own retained-heap walk in that case.
+    pub preview: Option<String>,
 }
 
 pub(crate) struct ResponsePoll {

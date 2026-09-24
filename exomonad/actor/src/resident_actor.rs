@@ -20,11 +20,12 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellSourceSpan, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
-    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
+    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -2242,6 +2243,7 @@ where
         context: &ActorSessionContext,
         request: crate::RequestId,
         result: RootCustody,
+        carried_preview: Option<String>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
             if self.environment.fork_groups.has_incomplete(context.actor) {
@@ -2281,22 +2283,36 @@ where
             // Best-effort: a settlement notice that carries the reply data
             // saves the owner a `pollResponse` compile just to read it. The
             // preview never blocks or fails the reply itself -- an unreadable
-            // shape (a function, an exhausted budget) simply omits it.
-            let (result, reply_preview) = match self
-                .environment
-                .runner
-                .preview_retained(
-                    context.clone(),
+            // shape (a function, an exhausted budget) simply omits it. The
+            // replying Haskell program already rendered a preview through
+            // `WorkbenchDisplay` (readable even for a `Text` field, unlike
+            // this session's own non-forcing heap walk); prefer that,
+            // enforcing this session's own line-boundary budget on it, and
+            // fall back to the retained-heap walk only when it is absent.
+            let (result, reply_preview) = match carried_preview {
+                Some(carried) if !carried.is_empty() => (
                     result,
-                    Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
-                )
-                .await
-            {
-                Ok(pair) => pair,
-                Err(error) => {
-                    self.standing = ResidentStanding::Interactive(awaiting);
-                    return Err(error);
-                }
+                    Some(truncate_preview_at_line(
+                        carried,
+                        Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
+                    )),
+                ),
+                _ => match self
+                    .environment
+                    .runner
+                    .preview_retained(
+                        context.clone(),
+                        result,
+                        Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
+                    )
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        self.standing = ResidentStanding::Interactive(awaiting);
+                        return Err(error);
+                    }
+                },
             };
             if reply_preview.is_none() {
                 tracing::debug!(
@@ -4981,6 +4997,7 @@ where
                                 return Ok(ResidentWorkbenchStep::Replied {
                                     request: attempt.request,
                                     result: attempt.result,
+                                    preview: attempt.preview,
                                 });
                             }
                             Err(error) if attempt.recoverable => {
@@ -6305,8 +6322,9 @@ where
                 ResidentWorkbenchStep::Replied {
                     request: request_id,
                     result,
+                    preview,
                 } => {
-                    self.stage_request_reply(kernel, context, request_id, result)
+                    self.stage_request_reply(kernel, context, request_id, result, preview)
                         .await
                         .map_err(|error| {
                             workbench_failure_after_operations(
@@ -7472,6 +7490,7 @@ where
                                         &context,
                                         attempt.request,
                                         attempt.result,
+                                        attempt.preview,
                                     )
                                     .await?;
                                     return Ok(true);

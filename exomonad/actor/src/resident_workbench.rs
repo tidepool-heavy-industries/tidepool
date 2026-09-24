@@ -1009,6 +1009,7 @@ pub(crate) enum ResidentWorkbenchStep {
     Replied {
         request: crate::RequestId,
         result: RootCustody,
+        preview: Option<String>,
     },
     CancellationAcknowledged {
         request: crate::RequestId,
@@ -5637,7 +5638,7 @@ where
                             },
                         ))
                     }
-                    ResidentRequest::Replies(RepliesReq::AttemptReplyWith(request_id, _)) => {
+                    ResidentRequest::Replies(RepliesReq::AttemptReplyWith(request_id, _, preview)) => {
                         let result = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -5651,9 +5652,10 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                             result,
                             recoverable: true,
+                            preview: if preview.is_empty() { None } else { Some(preview) },
                         }))
                     }
-                    ResidentRequest::Replies(RepliesReq::ReplyWith(request_id, _)) => {
+                    ResidentRequest::Replies(RepliesReq::ReplyWith(request_id, _, preview)) => {
                         let result = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -5667,6 +5669,7 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                             result,
                             recoverable: false,
+                            preview: if preview.is_empty() { None } else { Some(preview) },
                         }))
                     }
                     ResidentRequest::Replies(RepliesReq::ObserveResponseWith(request_id)) => {

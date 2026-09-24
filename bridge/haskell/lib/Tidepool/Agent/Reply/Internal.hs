@@ -62,6 +62,7 @@ import Tidepool.Duration (Duration)
 import Tidepool.Agent.Assignment (Label, SettlementReporting (..), labelText)
 import Tidepool.Agent.Ref (AgentRef)
 import Tidepool.Agent.Launch (AdmissionReceipt, allocatedPath)
+import Tidepool.Inspection.Display (WorkbenchDisplay (workbenchActivationDisplay))
 
 import Tidepool.Internal.ExitCell
   ( ExitCell
@@ -257,8 +258,16 @@ data RawReplyObservation
 data Replies a where
   ReserveRequestWith :: Text -> (Int, Int) -> Bool -> Replies Int
   SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies ()
-  AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
-  ReplyWith :: Int -> result -> Replies Void
+  -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
+  -- 'replyPreviewCharBudget'), carried alongside the live value so the
+  -- settlement notice the reply produces can show readable text -- 'Text'
+  -- fields included -- without the host forcing a packed byte array through
+  -- a non-forcing heap walk. Rendering runs on the Haskell side, where the
+  -- 'WorkbenchDisplay' instance a reply type already needs (the same
+  -- constraint 'Tidepool.Actors.Unfold.Branch' demands of a child's input)
+  -- can read it.
+  AttemptReplyWith :: Int -> result -> Text -> Replies (Either ReplyError Void)
+  ReplyWith :: Int -> result -> Text -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
   CancelRequestWith :: Int -> Replies CancelRequestOutcome
   AbandonResponseWith :: Int -> Replies AbandonOutcome
@@ -327,16 +336,28 @@ replyRequestId (Reply request) = request
 readResponse :: Response result -> Maybe (ResponseResult result)
 readResponse (Response _ _ _ cell) = readExitCell () cell
 
+-- | Character budget for the rendered preview 'reply' and 'attemptReply'
+-- carry alongside the live value. Generous relative to the settlement
+-- notice's own display budget (the host's
+-- @SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET@, 2048 characters): the host cuts to
+-- its exact budget at a line boundary, so this side only needs to avoid
+-- rendering far more than that could ever need, not match it exactly.
+replyPreviewCharBudget :: Int
+replyPreviewCharBudget = 8192
+
 attemptReply
-  :: Member Replies effs
+  :: (Member Replies effs, WorkbenchDisplay result)
   => Reply result
   -> result
   -> Eff effs (Either ReplyError Void)
 attemptReply (Reply (RequestId request)) result =
-  send (AttemptReplyWith request result)
+  let (preview, _) = workbenchActivationDisplay replyPreviewCharBudget result
+   in send (AttemptReplyWith request result preview)
 
-reply :: Member Replies effs => Reply result -> result -> Eff effs Void
-reply (Reply (RequestId request)) result = send (ReplyWith request result)
+reply :: (Member Replies effs, WorkbenchDisplay result) => Reply result -> result -> Eff effs Void
+reply (Reply (RequestId request)) result =
+  let (preview, _) = workbenchActivationDisplay replyPreviewCharBudget result
+   in send (ReplyWith request result preview)
 
 pollResponse
   :: Member Replies effs

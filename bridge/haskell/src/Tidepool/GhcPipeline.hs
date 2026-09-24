@@ -438,11 +438,15 @@ rejectedCellInstances plan failure = nub
       , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance' ]
     rejectedTypes _ = []
 
+-- | 'Display' is authored in "Tidepool.Inspection.Display" (split out of
+-- "Tidepool.Inspection" so "Tidepool.Agent.Reply.Internal" can depend on it
+-- without a module cycle) and re-exported from "Tidepool.Inspection", the
+-- surface authored code and this pass otherwise reference.
 isDisplayClass :: Class -> Bool
 isDisplayClass cls =
   let name = className cls
    in occNameString (nameOccName name) == "Display"
-      && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection"
+      && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection.Display"
 
 cellDisplayDeclarations :: CellDisplayPass -> CheckedEnvironmentResult -> CellSourcePlan -> IO String
 cellDisplayDeclarations pass result plan = do
