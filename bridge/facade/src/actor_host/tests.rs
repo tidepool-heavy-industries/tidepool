@@ -2191,7 +2191,7 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
         1,
         "settlement notice for request 20 must reach the backend exactly once despite the stuck row ahead of it: {pushes:?}"
     );
-    assert!(pushes.iter().any(|message| *message == rendered));
+    assert!(pushes.contains(&rendered));
 }
 
 #[tokio::test]
