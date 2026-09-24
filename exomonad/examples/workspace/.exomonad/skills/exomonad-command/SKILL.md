@@ -52,7 +52,9 @@ value for `watch`; see the routing example linked below.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Execution defaults: 256 MiB and a 30-second observation. Expiry leaves the
+Execution defaults: 256 MiB and a 30-second observation; `yield_time_ms` accepts
+0..300000, so a long-running command can be observed in one call instead of
+polling with `write_stdin` every 30 seconds. Expiry leaves the
 command alive.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
 use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
