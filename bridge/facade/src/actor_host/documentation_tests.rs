@@ -3133,6 +3133,47 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     repository
 }
 
+/// `exomonad check --workspace` resolves the installed spec's required
+/// effects against every launchable child role's effect row and fails
+/// closed, naming the role and the effect, instead of letting a spec a child
+/// cannot satisfy compile clean and fail only once a child is admitted (the
+/// `Journal` friction the preflight exists to catch before that fork).
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
+    let repository = recipe_workspace(None);
+    let spec = repository.path().join(".exomonad/AgentSpec.hs");
+    let original = std::fs::read_to_string(&spec).unwrap();
+    let widened = original
+        .replacen(
+            "import Tidepool.Effects.Core (ActorContext, Commands, Jev, Lookup, Notifications, Reflect)",
+            "import Tidepool.Effects.Core (ActorContext, Commands, Jev, Lookup, Notifications, Reflect)\nimport Tidepool.Effects (Journal)",
+            1,
+        )
+        .replacen(
+            "Member Reflect effects\n  ) =>",
+            "Member Reflect effects, Member Journal effects\n  ) =>",
+            1,
+        );
+    assert_ne!(
+        widened, original,
+        "fixture's AgentSpec.hs no longer matches either replaced string"
+    );
+    std::fs::write(&spec, widened).unwrap();
+    super::test_campaign::commit_workspace(repository.path());
+    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("role research lacks effect Journal required by AgentSpec.agentSpec"),
+        "{message}"
+    );
+    assert!(
+        message.contains("role coding lacks effect Journal required by AgentSpec.agentSpec"),
+        "{message}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_workspace_runs_its_own_model_free_recipes() {
     let repository = recipe_workspace(None);

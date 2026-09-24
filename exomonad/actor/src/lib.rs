@@ -21,7 +21,7 @@
 //! or owner shutdown. Published children remain independently addressable.
 
 pub(crate) mod after_tool;
-pub(crate) mod agent_spec;
+pub mod agent_spec;
 mod call_timing;
 mod conversation;
 mod descriptor;

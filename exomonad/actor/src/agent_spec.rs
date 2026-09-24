@@ -24,7 +24,7 @@ pub(crate) const SPEC_VALUE: &str = "agentSpec";
 
 /// Which of the four rules answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SpecRule {
+pub enum SpecRule {
     /// `AgentSpec.agentSpec`, found in a source root of the actor's own
     /// checkout.
     CheckoutModule,
@@ -50,18 +50,18 @@ impl SpecRule {
 
 /// What one compile installs, and which rule chose it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedSpec {
-    pub(crate) rule: SpecRule,
+pub struct ResolvedSpec {
+    pub rule: SpecRule,
     /// The qualified Haskell value the install fragment applies. `None` under
     /// [`SpecRule::BuiltinDefault`]: nothing is named, so nothing is
     /// installed and the actor behaves exactly as it does with no spec.
-    pub(crate) entry: Option<String>,
+    pub entry: Option<String>,
     /// The file the entry was read from, when discovery found one on disk.
     /// A configured entry point names a module, not a path, so it has none.
-    pub(crate) file: Option<PathBuf>,
+    pub file: Option<PathBuf>,
     /// The source roots that were searched for the spec module, in the order
     /// GHC would have taken them.
-    pub(crate) searched: Vec<PathBuf>,
+    pub searched: Vec<PathBuf>,
 }
 
 impl ResolvedSpec {
@@ -106,7 +106,7 @@ impl ResolvedSpec {
 /// compiles against, ahead of everything shared. An actor with no checkout of
 /// its own carries an empty layer, so rule one cannot answer for it and the
 /// workspace's keys decide, which is exactly today's behaviour.
-pub(crate) fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
+pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
     let searched: Vec<PathBuf> = layer.to_vec();
     if let Some(file) = layer.iter().find_map(|root| {
         let candidate = root.join(format!("{SPEC_MODULE}.hs"));
@@ -162,9 +162,81 @@ pub(crate) fn layer_revision(layer: &[PathBuf]) -> Option<String> {
     Some(revision.file_name()?.to_str()?.to_owned())
 }
 
+/// Effect names named in `Member <Effect> ...` constraints in the type
+/// signature `source` gives `value`, in the order they first appear.
+///
+/// This is a textual read of exactly the context GHC would need to accept a
+/// call into that effect, spelled the same way
+/// [`crate::ActorEffectKey::haskell_name`] spells it — not a type check.
+/// `exomonad check --workspace` uses it to catch what a role's effect row is
+/// missing before a child is ever admitted, rather than after; it does not
+/// replace GHC, and a spec that hides its requirement behind polymorphism
+/// GHC infers rather than an explicit `Member` constraint is invisible to it.
+#[must_use]
+pub fn required_effects_from_signature(source: &str, value: &str) -> Vec<String> {
+    let needle = format!("{value} ::");
+    let Some(start) = source.find(&needle) else {
+        return Vec::new();
+    };
+    let rest = &source[start + needle.len()..];
+    // A context always ends at `=>`; a signature with none has no
+    // constraints to read, so there is nothing more to find.
+    let Some(context_end) = rest.find("=>") else {
+        return Vec::new();
+    };
+    let context = &rest[..context_end];
+    let mut names = Vec::new();
+    let mut cursor = context;
+    while let Some(index) = cursor.find("Member") {
+        let after = cursor[index + "Member".len()..].trim_start();
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
+            .collect();
+        cursor = &after[name.len()..];
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_effects_reads_the_member_constraints_of_the_named_value() {
+        let source = r#"
+module AgentSpec (agentSpec) where
+
+agentSpec ::
+  ( Member Commands effects, Member Lookup effects, Member Journal effects
+  ) =>
+  AgentSpec Tools.WorkspaceTools effects
+agentSpec = defaultSpec { specTools = Tools.tools }
+"#;
+        assert_eq!(
+            required_effects_from_signature(source, "agentSpec"),
+            vec![
+                "Commands".to_owned(),
+                "Lookup".to_owned(),
+                "Journal".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_signature_with_no_context_requires_nothing() {
+        let source =
+            "agentSpec :: AgentSpec Tools.WorkspaceTools effects\nagentSpec = defaultSpec\n";
+        assert!(required_effects_from_signature(source, "agentSpec").is_empty());
+    }
+
+    #[test]
+    fn an_absent_value_requires_nothing() {
+        assert!(required_effects_from_signature("module X where\n", "agentSpec").is_empty());
+    }
 
     /// Rule one wins over both configured keys, and names the file it was read
     /// from, so a model never has to guess which spec is live.

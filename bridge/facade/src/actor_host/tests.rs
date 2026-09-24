@@ -1945,7 +1945,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     let rendered = settled_with_preview.render(Some(0));
     assert!(rendered.contains("request 12 \"implementation\" settled Ready"));
     assert!(rendered.contains("Reply:\n\"looks correct, ship it\""));
-    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
+    assert!(rendered.contains(
+        "Read the full value with `pollResponse` only if you need more than this preview"
+    ));
     assert!(!rendered.contains("Inspect its retained `Response` with `pollResponse`"));
 
     // A `Ready` settlement with no preview (observation failed, or the
@@ -1967,7 +1969,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     });
     let rendered = settled_without_preview.render(Some(0));
     assert!(rendered.contains("request 13 \"implementation\" settled Ready"));
-    assert!(rendered.contains("Inspect its retained `Response` with `pollResponse`; settlement is not integration."));
+    assert!(rendered.contains(
+        "Inspect its retained `Response` with `pollResponse`; settlement is not integration."
+    ));
     assert!(!rendered.contains("Reply:\n"));
 
     // A preview `tidepool_runtime::ResidentSession::render_retained_preview`
@@ -1993,7 +1997,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     let rendered = settled_with_truncated_preview.render(Some(0));
     assert!(rendered.contains(&format!("Reply:\n{long_preview}")));
     assert!(rendered.contains("[reply preview truncated]"));
-    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
+    assert!(rendered.contains(
+        "Read the full value with `pollResponse` only if you need more than this preview"
+    ));
 }
 
 #[tokio::test]
@@ -2105,9 +2111,11 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
         watermark: exomonad_actor::ActorEventSequence(2),
     };
     inbox
-        .publish(DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
-            notification: notification.clone(),
-        }))
+        .publish(DurableActorEvent::Typed(
+            TypedActorEvent::SettlementChanged {
+                notification: notification.clone(),
+            },
+        ))
         .unwrap();
 
     let backend = LostAckThenLate {
@@ -2149,14 +2157,17 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
     .is_err());
     {
         let messages = backend.submissions.lock().unwrap();
-        assert_eq!(messages.len(), 1, "the stuck row was attempted exactly once");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the stuck row was attempted exactly once"
+        );
     }
-    let pushed_after_first_tick = backend
-        .queries
-        .lock()
-        .unwrap()
-        .clone();
-    assert!(pushed_after_first_tick.is_empty(), "not queried until Unconfirmed");
+    let pushed_after_first_tick = backend.queries.lock().unwrap().clone();
+    assert!(
+        pushed_after_first_tick.is_empty(),
+        "not queried until Unconfirmed"
+    );
     // The barrier still holds: nothing is acknowledged yet.
     assert_eq!(inbox.cursor(), 0);
 
@@ -2176,7 +2187,11 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
     .await
     .is_err());
     assert_eq!(backend.queries.lock().unwrap().len(), 1);
-    assert_eq!(inbox.cursor(), 0, "the stuck row still fences acknowledgement");
+    assert_eq!(
+        inbox.cursor(),
+        0,
+        "the stuck row still fences acknowledgement"
+    );
 
     // The rendered settlement text reached the backend out of order, even
     // though the stuck native row ahead of it never resolved — and exactly
