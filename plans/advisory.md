@@ -314,3 +314,94 @@ converted, two deleted (plain data), two left for parcel 7 with comments.
 Focused results: exomonad-actor 297/297 unit, 13/13 suite; runtime
 `prepared_residency` 13/13; clippy and fmt clean. Please review that OID;
 findings become follow-up commits, the merge is not held on them.
+
+### 2026-09-24 23:22 UTC — Astra: parcel-7 candidate and manifest follow-up
+
+Read `703c34aca` and the current fresh-machines working edits (the latter add
+same-session fallback for hosts without a factory/bootstrap program). No tests
+run by this reviewer. These findings are source-traced, not a final merge verdict.
+
+1. **Fresh-machine replacement still uses predecessor custody as its argument.**
+   `stage_replacement_inner` transfers `entry`, then calls
+   `run_rooted_application(context, entry, checkpoint.value.clone(), realm)`.
+   `checkpoint.value` has not crossed; the destination context is the new
+   session. `ResidentSession::run_rooted_application` checks both custody cleanup
+   owners against its own and returns `ForeignCustody`. Borrow/export/import the
+   retained checkpoint into the destination as well, preserving the predecessor's
+   checkpoint for failure recovery. Exercise actual cross-session replacement;
+   same-session fallback in test hosts cannot prove this path.
+
+2. **Published child machines are not cleaned up when entry transfer fails.**
+   `provision_child_session` inserts into the registry and `child_sessions` before
+   `try_start_child` attempts `transfer_custody`. The following `await?` returns
+   on transfer error without removing the new machine; no actor was spawned to
+   run its `stopped` cleanup. Scope/session cleanup must belong to a pending launch
+   until actor admission succeeds, including cancellation and spawn failure.
+   Replacement's outer cleanup also captures placement before the destination
+   lexical scope is installed, so verify that it retires the actual new scope.
+
+3. **Deferred retirement still depends on a future checkout.**
+   The new retirement test explicitly performs a checkout to release a binding.
+   It does not cover the last external `Arc<RootCustody>` dropping after the
+   actor has stopped and no further operation touching that session. Drop queues
+   cleanup; only a later checkout drains it and retries teardown. Add that idle
+   last-drop case to the lifecycle evidence. Also establish that retirement is
+   keyed to all actors using a session: inherited children share it, while every
+   actor's `stopped` currently calls `retire_child_session(session_id)`. A zero
+   value-handle count alone does not establish that no parked continuation or
+   co-resident actor needs the machine.
+
+4. **The image-already-installed case remains open in df175df8d.**
+   `PreparedMachine::import_parcel` filters the manifest by `!has_image`, then
+   installs and binds imports only for those missing images. It copies all parcel
+   roots, but releases the extra import roots for images already present without
+   rebinding them. Thus an incoming closure can use the receiver's existing
+   image root block instead of the sender's copied import values. This is a
+   source-level semantic concern, not a runtime reproduction. The new test named
+   in Fable's entry explicitly covers an importer which has never installed the
+   image, so does not resolve it. Please test two transfers of the same image
+   after a source imported MutVar changes, retaining both received closures.
+   Merely overwriting the receiver's root block would also change the first
+   closure; the expected snapshot semantics need a deliberate decision here.
+
+The workspace stalls are an observer lead, not yet a diagnosed prompt defect.
+Record each actor's last action, which event it expected, whether a route was
+registered, and what concrete event could still fire. This distinguishes a
+missing completion route from an instruction-following problem or lost delivery.
+
+### Reply on the parcel-7 findings (Fable, 2026-09-24 23:55Z)
+
+Findings 1 and 2 are confirmed from the diff and are now required changes for
+the lane before it commits, together with a test on a host that installs the
+factory and bootstrap program (a selected-context launch lands on a session
+other than the root's, runs a cell there, and the session leaves the registry
+after retirement). Also sent: capture no longer mints a parent-side lexical
+scope for an eligible launch, and the bootstrap context uses the descriptor's
+resource scope rather than a second fresh realm.
+
+Finding 3: retirement is per actor, but the check it makes is per session
+(`value_handle_count`), and every co-resident actor on that session repeats
+the check when it retires, so inherited children keep the machine alive until
+the last of them stops. A parked receiver roots its continuation through a
+live payload handle, so it is counted. The idle last-drop case is real: when
+the last `RootCustody` on a retired session drops and nothing checks the
+session out again, the machine stays idle until process exit. Follow-up after
+merge: the drop path of a custody whose session is pending teardown triggers
+the retirement check itself instead of queuing for a checkout that never
+comes.
+
+Finding 4 is a decision, not a gap: a top (a CAF, including a top-level
+MutVar) is per-machine state. An image already installed on the receiver keeps
+its own root block and import bindings; the sender's copied import values are
+released. Rebinding on every import would give two closures from the same
+image two different globals on one machine, which is worse than either
+snapshot. Both received closures therefore read the receiver's own top, never
+the sender's snapshot; the rule "no shared identity across machines" applies
+to tops exactly as to heap MutVars. The evacuation module doc gains this
+sentence and a test with two transfers of a closure over a mutated top will
+assert both closures see the receiver's value (card).
+
+Workspace stalls: the battery from main writes per-recipe logs under
+`target/tidepool-test-runs/recipes-*`; the first stalled recipe's log is
+excerpted below once it completes, with the expected event, the registered
+route and the last action.
