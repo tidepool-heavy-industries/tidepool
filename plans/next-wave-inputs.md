@@ -265,3 +265,13 @@ the run with session size.
   each expiry costs a turn and reads like an error. Default the yield window
   for `cargo`/`nix` invocations higher, or return the retained-job receipt
   as a normal result rather than a failed observation.
+
+## Label versus path at the fork API (2026-09-24, wave 4)
+
+- Actor 20 failed a cell with `InvalidKebabName "correction-20260924/core-execution"`:
+  a child copied its own group path from the activation into a place that
+  takes a single kebab label (`batch`/`subgroup`/`[label|..|]`). The rejection
+  is right; the message is not: it should say that labels are one kebab
+  segment, that a path is built by `batch campaign group` or `subgroup`, and
+  which argument was wrong. Consider letting `subgroup` accept a path
+  literal directly, since children always have their own path at hand.
