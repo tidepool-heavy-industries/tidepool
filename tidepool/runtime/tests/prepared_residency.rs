@@ -612,3 +612,114 @@ fn fresh_host_binders_preserve_prior_request_input_for_captured_closures() {
     };
     assert_eq!(result.to_json(), serde_json::json!([11, "11"]));
 }
+
+#[test]
+fn rust_session_var_id_matches_extract_minted_bound_binder_var_id() {
+    let mut notebook = Notebook::new();
+    let binder = notebook.bind("parityVal <- pure (1 :: Int)");
+    let expected = tidepool_codegen::prepared_program::session_var_id(&binder.module, &binder.name);
+    assert_eq!(
+        expected, binder.var_id,
+        "Rust-minted session_var_id({:?}, {:?}) = 0x{expected:016x} does not match \
+         the extract-minted BoundBinder.var_id 0x{:016x}",
+        binder.module, binder.name, binder.var_id
+    );
+}
+
+#[test]
+fn host_carrier_mounts_two_json_payloads_from_one_compile() {
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
+
+    let mut notebook = Notebook::new();
+    // Host-carrier stub modules are hand-written source, found by GHC's
+    // ordinary downsweep on the session root -- unlike a real bind's `.hi`
+    // (injected explicitly), the root itself must be on the include path.
+    notebook.include.push(notebook.root.path().to_path_buf());
+
+    // Compile ONE anchor bind turn to obtain a real (BoundBinder, CompiledTurn)
+    // pair -- this is the only GHC compile this test performs.
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile_in_current_value_view(
+        "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]])",
+    ) else {
+        panic!("carrier anchor must compile as a bind");
+    };
+    let [anchor_binder] = bound.as_slice() else {
+        panic!("carrier anchor must produce exactly one binder");
+    };
+    let carrier = HostCarrier::from_compiled(
+        anchor_binder,
+        compiled.code(),
+        HostBindingType::JSON_VALUE,
+    );
+
+    // Mount TWO payloads through the carrier, each under a fresh name/gen,
+    // with no further GHC compile.
+    let gen_a = tidepool_repr::Generation(notebook.generation);
+    let binder_a = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "carriedA",
+            gen_a,
+            &carrier,
+            HostPayload::Json(&serde_json::json!({"tag": "A"})),
+        )
+        .expect("mount first carrier payload");
+    notebook.injected.push(binder_a.module.clone());
+
+    notebook.generation += 1;
+    let gen_b = tidepool_repr::Generation(notebook.generation);
+    let binder_b = notebook
+        .session
+        .mount_carrier_in(
+            notebook.root.path(),
+            ScopeId::ROOT,
+            "carriedB",
+            gen_b,
+            &carrier,
+            HostPayload::Json(&serde_json::json!({"tag": "B"})),
+        )
+        .expect("mount second carrier payload");
+    notebook.injected.push(binder_b.module.clone());
+
+    // Both stub generations must never be offered as --inject-val (no .hi
+    // exists for either) -- the whole point of a stub mount.
+    let injected = notebook.session.inject_val_modules();
+    assert!(!injected.contains(&binder_a.module));
+    assert!(!injected.contains(&binder_b.module));
+
+    // A later turn resolves BOTH mounted names through their hand-written
+    // stub modules with no GHC error -- the retained-generation symbol
+    // lookup this design depends on (see `session_var_id` and the
+    // `mount_carrier_in` doc comment) links successfully for both.
+    //
+    // NOTE: reading the carried `Aeson.Value`s back with a `case` pattern
+    // match on their constructor (`Aeson.Object fields -> ...`) reliably
+    // produces a JIT `CaseMiss` here, even though `Aeson.Object`'s stable
+    // constructor id (`Tidepool.Identity.varId`'s data-con path, itself a
+    // `stableVarId` over the constructor's work-id name -- deterministic,
+    // not generation-salted) should be identical however the value's
+    // program was installed. This reproduces regardless of which
+    // generation the mount targets, including the anchor's own generation,
+    // so it is not a generation mismatch. It was NOT root-caused in this
+    // pass -- see the task report. Until it is, do not read a
+    // `HostCarrier`-mounted `Aeson.Value` back with a constructor `case` in
+    // production code.
+    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view(
+        "(carriedA, carriedB) `seq` T.pack \"read both carried values\"",
+    ) else {
+        panic!("reading both carried values must compile as an expression");
+    };
+    let outcome = notebook
+        .session
+        .run_with_sites("read_both_carried", compiled.into_code())
+        .expect("read both carried values");
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+}

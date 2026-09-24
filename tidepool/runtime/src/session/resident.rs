@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
-use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
+use tidepool_codegen::prepared_program::{session_var_id, PreparedHandle, ProgramId};
 use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
@@ -148,6 +148,93 @@ impl HostBindingType {
         name: "Job",
         constructors: &["Tidepool.Command.Types.Job"],
     };
+}
+
+/// The generation-independent facts a compiled host-binder shape carries,
+/// reused verbatim by every [`HostCarrier`] mount rather than re-derived
+/// from a fresh compile.
+#[derive(Clone, Debug)]
+struct HostCarrierShape {
+    tier: ValueTier,
+    type_display: String,
+    root_head: Option<NominalHead>,
+    host_authority: Option<HostBindingAuthority>,
+}
+
+/// A compiled host-binder program, built once from a real `(BoundBinder,
+/// CompiledTurn)` and mounted under as many fresh names/generations as the
+/// caller needs with no further GHC compile.
+///
+/// A compiled binder's `table`/`prepared` carry no generation-specific fact
+/// (see [`Self::from_compiled`]); only the binder's `name`, `module`
+/// (`Val.G<gen>`), and `var_id` are per-mount. [`ResidentSession::mount_carrier_in`]
+/// mints those three from `name`/`gen` with
+/// [`tidepool_codegen::prepared_program::session_var_id`] instead of asking
+/// GHC to mint a fresh binder.
+pub struct HostCarrier {
+    table: DataConTable,
+    prepared: PreparedProgram,
+    shape: HostCarrierShape,
+    host_type: HostBindingType,
+}
+
+impl HostCarrier {
+    /// Build a carrier from one real compiled `(BoundBinder, CompiledTurn)`
+    /// (any generation — its own module/var_id are discarded; only the
+    /// binder's shape and the turn's table/program are kept). `host_type`
+    /// is the authenticated host surface this binder was compiled against
+    /// ([`Self::mount_carrier_in`]'s validation target).
+    #[must_use]
+    pub fn from_compiled(binder: &BoundBinder, code: TurnCode<'_>, host_type: HostBindingType) -> Self {
+        HostCarrier {
+            table: code.table.into_owned(),
+            prepared: code.prepared.into_owned(),
+            shape: HostCarrierShape {
+                tier: binder.tier,
+                type_display: binder.type_display.clone(),
+                root_head: binder.root_head.clone(),
+                host_authority: binder.host_authority,
+            },
+            host_type,
+        }
+    }
+
+    fn code(&self) -> TurnCode<'_> {
+        TurnCode {
+            table: std::borrow::Cow::Borrowed(&self.table),
+            sites: std::borrow::Cow::Borrowed(&[]),
+            prepared: std::borrow::Cow::Borrowed(&self.prepared),
+        }
+    }
+
+    /// The hand-written source stub a mount under `module_name`/`binder_name`
+    /// writes at `<session_root>/<relative_hs_path>` — an ordinary home
+    /// module GHC's downsweep finds on the session include path, never
+    /// passed as `--inject-val` (it has no `.hi`). Its self-referential
+    /// `NOINLINE` body is never evaluated: only the binder's `Name` (and
+    /// through it, its `stableVarId`) is real; the persistent binding store
+    /// supplies the actual value at link time.
+    fn stub_source(&self, module_name: &str, binder_name: &str) -> String {
+        format!(
+            "module {module_name} ({binder_name}) where\n\
+             import qualified {ty_module} as TidepoolCarrierType\n\
+             {{-# NOINLINE {binder_name} #-}}\n\
+             {binder_name} :: TidepoolCarrierType.{ty_name}\n\
+             {binder_name} = {binder_name}\n",
+            ty_module = self.host_type.module,
+            ty_name = self.host_type.name,
+        )
+    }
+}
+
+/// One host value to mount through a [`HostCarrier`]. Mirrors the payload
+/// shapes [`ResidentSession::mount_json_binding_in`],
+/// [`ResidentSession::mount_text_binding_in`], and
+/// [`ResidentSession::mount_typed_binding_in`] already accept.
+pub enum HostPayload<'a> {
+    Json(&'a serde_json::Value),
+    Text(&'a str),
+    Job(&'a dyn tidepool_bridge::ToHaskell),
 }
 
 fn json_runtime_layout_optional(prepared: &PreparedProgram) -> Option<JsonLayout<DataConId>> {
@@ -1949,6 +2036,93 @@ where
         self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
             engine.build_host_value(realm, value, table)
         })
+    }
+
+    /// Mount `payload` under a freshly minted `name`/`gen` binder through a
+    /// [`HostCarrier`] built once from a real compiled turn, with NO GHC
+    /// compile for this mount: the binder's `var_id` is minted directly
+    /// ([`tidepool_codegen::prepared_program::session_var_id`]), its
+    /// `Val.G<gen>` source is a hand-written stub written at
+    /// `<session_root>/Tidepool/Session/Val/G<gen>.hs` (an ordinary home
+    /// module a later turn's downsweep finds on the include path -- never
+    /// injected via `--inject-val`, since it has no `.hi`), and it is
+    /// validated exactly as a compiler-issued binder
+    /// ([`Self::validate_compiled_mount_target`]).
+    ///
+    /// `gen`'s module is recorded as a stub generation
+    /// ([`super::persistent::PersistentSession::mark_stub_generation`]) so
+    /// `compile_view_in` and [`Self::inject_val_modules`] never name it as
+    /// `--inject-val`.
+    pub fn mount_carrier_in(
+        &mut self,
+        session_root: &Path,
+        scope: ScopeId,
+        name: &str,
+        gen: Generation,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+    ) -> Result<BoundBinder, ResidentError> {
+        self.settle_dropped_custody();
+        let module = SessionModule::val(gen).module_name();
+        let binder = BoundBinder {
+            name: name.to_string(),
+            var_id: session_var_id(&module, name),
+            module: module.clone(),
+            tier: carrier.shape.tier,
+            type_display: carrier.shape.type_display.clone(),
+            root_head: carrier.shape.root_head.clone(),
+            host_authority: carrier.shape.host_authority,
+        };
+        self.validate_compiled_mount_target(scope, &binder, gen, &carrier.code(), carrier.host_type)?;
+        if carrier.host_type == HostBindingType::TEXT {
+            self.validate_text_runtime_constructor(&carrier.code())?;
+        }
+
+        let stub_source = carrier.stub_source(&module, name);
+        let stub_path = session_root.join(SessionModule::val(gen).relative_hs_path());
+        if let Some(parent) = stub_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                    "host carrier stub directory {}: {error}",
+                    parent.display()
+                ))))
+            })?;
+        }
+        std::fs::write(&stub_path, stub_source).map_err(|error| {
+            ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+                "host carrier stub {}: {error}",
+                stub_path.display()
+            ))))
+        })?;
+
+        match payload {
+            HostPayload::Json(value) => {
+                let layout = json_runtime_layout(&carrier.prepared)?;
+                self.mount_host_value_in(scope, &binder, gen, carrier.code(), |engine, realm, _| {
+                    engine.build_host_json(realm, value, &layout)
+                })?;
+            }
+            HostPayload::Text(text) => {
+                self.mount_host_value_in(
+                    scope,
+                    &binder,
+                    gen,
+                    carrier.code(),
+                    |engine, realm, table| engine.build_host_text(realm, text, table),
+                )?;
+            }
+            HostPayload::Job(value) => {
+                self.mount_host_value_in(
+                    scope,
+                    &binder,
+                    gen,
+                    carrier.code(),
+                    |engine, realm, table| engine.build_host_value(realm, value, table),
+                )?;
+            }
+        }
+        self.state.mark_stub_generation(gen);
+        Ok(binder)
     }
 
     /// Record a host `Text` identity after its freshly minted compiler binder

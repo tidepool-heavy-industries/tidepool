@@ -104,6 +104,15 @@ pub struct PersistentSession {
     live_payload: LivePayloadPolicy,
     /// JIT nursery size for the resident machine.
     nursery_size: usize,
+    /// Value-binding generations minted by [`super::resident::ResidentSession::mount_carrier_in`]
+    /// rather than a real bind turn: their `Val.G<g>` source is a hand-written
+    /// stub on the session include path, not an extract-compiled `.hi`. A
+    /// stub generation must never be named `--inject-val` (no `.hi` exists
+    /// for it) — [`Self::live_val_modules`] and [`Self::compile_view_in`]'s
+    /// injected set both exclude it, while it stays an ordinary member of
+    /// every other live-module computation (unqualified imports, shadowing,
+    /// eviction) exactly like a real bind's generation.
+    stub_generations: std::collections::BTreeSet<u64>,
 }
 
 /// The committed fact from moving one name into the persistent binding store.
@@ -148,7 +157,19 @@ impl PersistentSession {
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             nursery_size,
+            stub_generations: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Record that `generation`'s `Val.G<g>` module is a hand-written source
+    /// stub (a [`super::resident::HostCarrier`] mount), never an extract
+    /// `.hi`. Idempotent.
+    pub(super) fn mark_stub_generation(&mut self, generation: Generation) {
+        self.stub_generations.insert(generation.0);
+    }
+
+    fn is_stub_module(&self, module: SessionModule) -> bool {
+        self.stub_generations.contains(&module.gen().0)
     }
 
     // -- accessors ---------------------------------------------------------
@@ -503,7 +524,19 @@ impl PersistentSession {
     /// so already-compiled fragments / closure captures keep resolving. Includes
     /// shadowed older gens.
     pub fn live_val_modules(&self) -> Vec<String> {
-        self.binding_index.live_modules()
+        if self.stub_generations.is_empty() {
+            return self.binding_index.live_modules();
+        }
+        let stub_names: std::collections::BTreeSet<String> = self
+            .stub_generations
+            .iter()
+            .map(|gen| SessionModule::val(Generation(*gen)).module_name())
+            .collect();
+        self.binding_index
+            .live_modules()
+            .into_iter()
+            .filter(|module| !stub_names.contains(module))
+            .collect()
     }
 
     /// The CURRENT (newest) `Val.G<g>` module per still-live name — what a turn
@@ -573,7 +606,11 @@ impl PersistentSession {
                 visible_value_names.push((entry.module, vec![name.0.clone()]));
             }
         }
-        let injected_values = self.bindings.live_modules().collect();
+        let injected_values = self
+            .bindings
+            .live_modules()
+            .filter(|module| !self.is_stub_module(*module))
+            .collect();
         let mut shadowing = lib
             .current_declarations_in(scope)
             .into_iter()
