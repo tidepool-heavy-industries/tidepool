@@ -197,12 +197,14 @@ const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// with a handful of requests each in flight at once, so this is roughly an
 /// order of magnitude of headroom over a realistic burst, not a routine
 /// operating point. It exists to cap memory under a stalled or absent
-/// observer, not to apply steady-state backpressure. See the `try_send`
-/// overflow policy on every producer below: a full channel is handled
-/// exactly like a closed one (each site already has a defined fallback for
-/// "no observer"), so nothing is silently and invisibly lost — the caller
-/// either sees an explicit denial or the event was already documented as
-/// having no correctness effect when unobserved.
+/// observer, not to apply steady-state backpressure. Most producers below use
+/// `try_send` and treat a full channel exactly like a closed one, because
+/// each of those sites already has a defined fallback for "no observer" and
+/// nothing is silently and invisibly lost. `WatchChanged`/`SettlementChanged`
+/// (`publish_watch_notifications`) are the exception: the consumer is the
+/// only path a settled reply reaches the owning actor's inbox through, so
+/// those two use the channel's real backpressure (`send(...).await`) instead
+/// of `try_send`, and only a closed channel drops them.
 const DEPLOYMENT_CHANNEL_CAPACITY: usize = 256;
 
 struct ResidentEnvironment<H, O> {
@@ -1239,7 +1241,17 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
-    fn publish_watch_notifications(
+    /// Unlike the other `deployments` producers in this file, a `WatchChanged`
+    /// or `SettlementChanged` notice is not merely observer traffic: the
+    /// `deployments` consumer is the sole path that turns a durably-settled
+    /// reply into a row in the owning actor's own inbox (see
+    /// `publish_inbox_event_for` in `bridge/facade/src/actor_host.rs`).
+    /// `try_send(...).ok()` on a full channel would silently discard a
+    /// settled reply with nothing left to reconstruct it from but a manual
+    /// `status` poll. Use the bounded channel's real backpressure
+    /// (`send(...).await`) instead so a transient burst waits rather than
+    /// drops; only a closed channel (no consumer left at all) is unrecoverable.
+    async fn publish_watch_notifications(
         &self,
         notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
     ) {
@@ -1255,18 +1267,57 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             {
                 continue;
             }
-            // best-effort: deployment observer channel may have no listener.
-            self.environment
+            let owner = notification.owner;
+            let watch = notification.watch;
+            match self
+                .environment
                 .deployments
-                .try_send(LocalResidentDeployment::WatchChanged { notification })
-                .ok();
+                .send(LocalResidentDeployment::WatchChanged { notification })
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    actor = ?owner,
+                    watch = ?watch,
+                    kind = "watch_changed",
+                    outcome = "sent",
+                    "publishing watch notice"
+                ),
+                Err(_closed) => tracing::warn!(
+                    actor = ?owner,
+                    watch = ?watch,
+                    kind = "watch_changed",
+                    outcome = "closed",
+                    "publishing watch notice: deployment observer channel has no consumer"
+                ),
+            }
         }
         for notification in self.environment.requests.take_settlement_notifications() {
-            // best-effort: deployment observer channel may have no listener.
-            self.environment
+            let owner = notification.owner;
+            let request = notification.request;
+            let preview_len = notification.reply_preview.as_ref().map(String::len);
+            match self
+                .environment
                 .deployments
-                .try_send(LocalResidentDeployment::SettlementChanged { notification })
-                .ok();
+                .send(LocalResidentDeployment::SettlementChanged { notification })
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    actor = ?owner,
+                    request = ?request,
+                    kind = "settlement_changed",
+                    preview_len,
+                    outcome = "sent",
+                    "publishing settlement notice"
+                ),
+                Err(_closed) => tracing::warn!(
+                    actor = ?owner,
+                    request = ?request,
+                    kind = "settlement_changed",
+                    preview_len,
+                    outcome = "closed",
+                    "publishing settlement notice: deployment observer channel has no consumer"
+                ),
+            }
         }
     }
 
@@ -1807,10 +1858,31 @@ where
             tokio::time::sleep_until(deadline.due_monotonic()).await;
             let (cancellation, notifications) = requests.deadline_request(owner, request);
             for notification in notifications {
-                // best-effort: deployment observer channel may have no listener.
-                deployments
-                    .try_send(LocalResidentDeployment::WatchChanged { notification })
-                    .ok();
+                // Same discipline as `publish_watch_notifications`: this is
+                // the sole path a deadline's watch transition reaches the
+                // owning actor's inbox through, so a full channel must wait
+                // rather than silently drop it.
+                let owner = notification.owner;
+                let watch = notification.watch;
+                match deployments
+                    .send(LocalResidentDeployment::WatchChanged { notification })
+                    .await
+                {
+                    Ok(()) => tracing::info!(
+                        actor = ?owner,
+                        watch = ?watch,
+                        kind = "watch_changed",
+                        outcome = "sent",
+                        "publishing deadline watch notice"
+                    ),
+                    Err(_closed) => tracing::warn!(
+                        actor = ?owner,
+                        watch = ?watch,
+                        kind = "watch_changed",
+                        outcome = "closed",
+                        "publishing deadline watch notice: deployment observer channel has no consumer"
+                    ),
+                }
             }
             if let Some(notification) = cancellation {
                 // best-effort: deployment observer channel may have no listener.
@@ -2347,7 +2419,7 @@ where
                 .environment
                 .requests
                 .fail_reply_settlement(request, error.to_string());
-            self.publish_watch_notifications(notifications);
+            self.publish_watch_notifications(notifications).await;
         }
         settled
     }
@@ -2734,7 +2806,7 @@ where
                         .forget_terminal_actor_metadata(forget.target)
                     {
                         Ok(notifications) => {
-                            self.publish_watch_notifications(notifications);
+                            self.publish_watch_notifications(notifications).await;
                             self.environment.actors.lock().remove(&forget.target);
                             self.environment.retired.lock().remove(&forget.target);
                             let _ = kernel.forget_terminal_actor(forget.target);
@@ -2939,7 +3011,7 @@ where
                         .cleanup_campaign_metadata(owner, &targets);
                     forgotten_responses.extend(forgotten.forgotten_responses);
                     forgotten_watches.extend(forgotten.forgotten_watches);
-                    self.publish_watch_notifications(forgotten.watch_notifications);
+                    self.publish_watch_notifications(forgotten.watch_notifications).await;
                 }
                 forgotten_responses.sort_unstable();
                 forgotten_watches.sort_unstable();
@@ -2996,7 +3068,7 @@ where
                             .forget_terminal_actor_metadata(actor)
                         {
                             Ok(notifications) => {
-                                self.publish_watch_notifications(notifications);
+                                self.publish_watch_notifications(notifications).await;
                                 self.environment.actors.lock().remove(&actor);
                                 self.environment.retired.lock().remove(&actor);
                                 let _ = kernel.forget_terminal_actor(actor);
@@ -3597,7 +3669,7 @@ where
                             .environment
                             .requests
                             .mark_target_unavailable(context.actor, submission.request);
-                        self.publish_watch_notifications(notifications);
+                        self.publish_watch_notifications(notifications).await;
                     }
                     let outcome = self
                         .environment
@@ -3613,7 +3685,7 @@ where
                         .environment
                         .requests
                         .mark_target_unavailable(context.actor, submission.request);
-                    self.publish_watch_notifications(notifications);
+                    self.publish_watch_notifications(notifications).await;
                     let outcome = self
                         .environment
                         .runner
@@ -3643,14 +3715,17 @@ where
                 request,
                 value,
             } => Box::pin(async move {
-                let outcome = self
+                let published = self
                     .environment
                     .requests
-                    .publish_progress(context.actor, request, value)
-                    .map(|(revision, notifications)| {
-                        self.publish_watch_notifications(notifications);
-                        revision
-                    });
+                    .publish_progress(context.actor, request, value);
+                let outcome = match published {
+                    Ok((revision, notifications)) => {
+                        self.publish_watch_notifications(notifications).await;
+                        Ok(revision)
+                    }
+                    Err(error) => Err(error),
+                };
                 self.environment
                     .runner
                     .resume_progress_publication(context.clone(), continuation, outcome)
@@ -3733,28 +3808,34 @@ where
                     .await
             }),
             ResidentActorBoundary::ResponseAbandonment(abandonment) => Box::pin(async move {
-                let projected = self
+                let abandoned = self
                     .environment
                     .requests
-                    .abandon_response(context.actor, abandonment.request)
-                    .map(|(outcome, notifications)| {
-                        self.publish_watch_notifications(notifications);
-                        outcome
-                    });
+                    .abandon_response(context.actor, abandonment.request);
+                let projected = match abandoned {
+                    Ok((outcome, notifications)) => {
+                        self.publish_watch_notifications(notifications).await;
+                        Ok(outcome)
+                    }
+                    Err(error) => Err(error),
+                };
                 self.environment
                     .runner
                     .resume_abandonment(context.clone(), abandonment.continuation, projected)
                     .await
             }),
             ResidentActorBoundary::ResponseForget(forget) => Box::pin(async move {
-                let outcome = self
+                let forgotten = self
                     .environment
                     .requests
-                    .forget_response(context.actor, forget.request)
-                    .map(|(outcome, notifications)| {
-                        self.publish_watch_notifications(notifications);
-                        outcome
-                    });
+                    .forget_response(context.actor, forget.request);
+                let outcome = match forgotten {
+                    Ok((outcome, notifications)) => {
+                        self.publish_watch_notifications(notifications).await;
+                        Ok(outcome)
+                    }
+                    Err(error) => Err(error),
+                };
                 self.environment
                     .runner
                     .resume_response_forget(context.clone(), forget.continuation, outcome)
@@ -3791,7 +3872,7 @@ where
                             "route registration rejected: {error:?}"
                         ))
                     })?;
-                self.publish_watch_notifications(notifications);
+                self.publish_watch_notifications(notifications).await;
                 self.environment
                     .runner
                     .resume_int(context.clone(), registration.continuation, watch.0)
@@ -3845,7 +3926,7 @@ where
                             error,
                         ))
                     })?;
-                self.publish_watch_notifications(notifications);
+                self.publish_watch_notifications(notifications).await;
                 self.environment
                     .runner
                     .resume_int(context.clone(), registration.continuation, watch.0)
@@ -4893,7 +4974,7 @@ where
                                     .environment
                                     .requests
                                     .finish_cancellation_acknowledgement(request);
-                                self.publish_watch_notifications(notifications);
+                                self.publish_watch_notifications(notifications).await;
                                 return self
                                     .stabilize_program(kernel, context, ancestry, outcome)
                                     .await;
@@ -7370,7 +7451,7 @@ where
             if rejected {
                 let (aborted, notifications) =
                     self.environment.requests.abort_unsubmitted(context.actor);
-                self.publish_watch_notifications(notifications);
+                self.publish_watch_notifications(notifications).await;
                 if !aborted.is_empty() {
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
                 }
@@ -7564,14 +7645,14 @@ where
                 }
             }
             let (_, notifications) = self.environment.requests.abort_unsubmitted(context.actor);
-            self.publish_watch_notifications(notifications);
+            self.publish_watch_notifications(notifications).await;
             self.active_route = None;
             self.active_fork_boundary = None;
             let notification = self
                 .environment
                 .requests
                 .finish_route(context.actor, watch, result);
-            self.publish_watch_notifications(notification);
+            self.publish_watch_notifications(notification).await;
             Ok(if resume_reply {
                 KernelStep::ContinueLater(())
             } else {
@@ -7623,14 +7704,14 @@ where
                             .environment
                             .requests
                             .finish_reply(request, reply_preview);
-                        self.publish_watch_notifications(notifications);
+                        self.publish_watch_notifications(notifications).await;
                     }
                     if let Some(request) = self.pending_cancellation.take() {
                         let notifications = self
                             .environment
                             .requests
                             .finish_cancellation_acknowledgement(request);
-                        self.publish_watch_notifications(notifications);
+                        self.publish_watch_notifications(notifications).await;
                     }
                     self.runtime_observation
                         .publish_workbench_posture(crate::ActorWorkbenchPosture::Idle);
@@ -7643,7 +7724,7 @@ where
                             request,
                             format!("reply continuation failed after acceptance: {error}"),
                         );
-                        self.publish_watch_notifications(notifications);
+                        self.publish_watch_notifications(notifications).await;
                     }
                     if let Some(request) = self.pending_cancellation.take() {
                         self.environment
@@ -7708,7 +7789,7 @@ where
                 .environment
                 .requests
                 .actor_stopped(context.actor, terminal);
-            self.publish_watch_notifications(notifications);
+            self.publish_watch_notifications(notifications).await;
             self.abort_unpublished_groups(
                 kernel,
                 context.actor,
@@ -7808,7 +7889,7 @@ where
                 .environment
                 .requests
                 .actor_stopped(kernel.identity(), terminal);
-            self.publish_watch_notifications(notifications);
+            self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
         })
     }
@@ -8942,6 +9023,80 @@ mod tests {
             receiver.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    /// `publish_watch_notifications` sends `WatchChanged`/`SettlementChanged`
+    /// with `send(...).await`, not `try_send`, precisely because those two
+    /// are the sole path a settled reply reaches the owning actor's inbox
+    /// through: a full channel must apply backpressure, never silently
+    /// drop the notice the way the other `try_send(...).ok()` producers in
+    /// this module may. This exercises that exact discipline on the channel
+    /// itself: a `send` on a full channel does not resolve until the
+    /// receiver drains it, and the value is delivered, never lost.
+    #[tokio::test]
+    async fn deployment_channel_send_on_full_channel_waits_and_never_drops_a_settlement() {
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<crate::LocalResidentDeployment>(1);
+        let filler = crate::LocalResidentDeployment::Retired {
+            actor: ActorRef::first(ActorId(1)),
+            terminal: crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: "filler".into(),
+            },
+        };
+        sender.try_send(filler).expect("one slot of capacity");
+        // The channel is now full: a `try_send` would report `Full`, exactly
+        // as the sibling test above confirms.
+        assert!(matches!(
+            sender.try_send(crate::LocalResidentDeployment::Retired {
+                actor: ActorRef::first(ActorId(2)),
+                terminal: crate::ActorTerminal {
+                    kind: crate::ActorExitKind::Cancelled,
+                    summary: "would overflow".into(),
+                },
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        let settlement_owner = ActorRef::first(ActorId(9));
+        let blocked_send = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                sender
+                    .send(crate::LocalResidentDeployment::Retired {
+                        actor: settlement_owner,
+                        terminal: crate::ActorTerminal {
+                            kind: crate::ActorExitKind::Cancelled,
+                            summary: "settlement".into(),
+                        },
+                    })
+                    .await
+            }
+        });
+
+        // The channel is still full; the blocking send has not resolved.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !blocked_send.is_finished(),
+            "send on a full channel must wait, not drop"
+        );
+
+        // Draining the filler frees capacity; the pending send now
+        // completes and its value is delivered, never dropped.
+        let drained = receiver.recv().await.expect("filler was queued");
+        assert_eq!(drained.kind(), "Retired");
+        blocked_send
+            .await
+            .expect("task did not panic")
+            .expect("receiver was retained");
+        let delivered = receiver.recv().await.expect("settlement was queued");
+        match delivered {
+            crate::LocalResidentDeployment::Retired { actor, terminal } => {
+                assert_eq!(actor, settlement_owner);
+                assert_eq!(terminal.summary, "settlement");
+            }
+            other => panic!("expected the blocked settlement send, got {}", other.kind()),
+        }
     }
 
     #[test]

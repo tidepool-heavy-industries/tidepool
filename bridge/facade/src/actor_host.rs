@@ -5434,6 +5434,13 @@ async fn deliver_pending_checked(
             .map_err(|error| format!("inbox reader task: {error}"))?
             .map_err(|error| error.to_string())?;
     let Some(last) = pending.last() else {
+        // The front row is tracked (a native request update/notification).
+        // `deliver_tracked_message` below only ever advances that exact
+        // sequence, one at a time; if it is stuck (`Submitted`/`Unconfirmed`
+        // and not resolving), any settlement/watch notice queued behind it
+        // would otherwise never reach the model. Surface those out of band
+        // before attempting the stuck row itself.
+        deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation).await?;
         return deliver_tracked_message(
             actor,
             inbox,
@@ -5446,11 +5453,22 @@ async fn deliver_pending_checked(
         .await;
     };
     let inbox_sequence = last.sequence;
+    let already_surfaced = {
+        let surfaced_inbox = Arc::clone(inbox);
+        tidepool_runtime::spawn_blocking_in_span(move || surfaced_inbox.surfaced_out_of_order())
+            .await
+            .map_err(|error| format!("inbox reader task: {error}"))?
+    };
+    let mut out_of_order_delivered = Vec::new();
     let mut suppressed_watches = Vec::new();
     let mut stale_watches = Vec::new();
     let pending = pending
         .into_iter()
         .filter(|message| {
+            if already_surfaced.contains(&message.sequence) {
+                out_of_order_delivered.push(message.sequence);
+                return false;
+            }
             let DurableActorEvent::Typed(TypedActorEvent::WatchChanged { notification }) =
                 &message.payload
             else {
@@ -5493,6 +5511,14 @@ async fn deliver_pending_checked(
                 inbox_sequence,
                 stale_watches = ?stale_watches,
                 "acknowledged queued watch notices the owner had already observed settled"
+            );
+        }
+        if !out_of_order_delivered.is_empty() {
+            tracing::info!(
+                actor = ?actor,
+                inbox_sequence,
+                out_of_order_delivered = ?out_of_order_delivered,
+                "acknowledged notices already pushed out of order past a stuck delivery"
             );
         }
         return Ok(());
@@ -5563,6 +5589,58 @@ async fn deliver_pending_checked(
             "acknowledged queued watch notices the owner had already observed settled"
         );
     }
+    if !out_of_order_delivered.is_empty() {
+        tracing::info!(
+            actor = ?actor,
+            inbox_sequence,
+            out_of_order_delivered = ?out_of_order_delivered,
+            "acknowledged notices already pushed out of order past a stuck delivery"
+        );
+    }
+    Ok(())
+}
+
+/// Untracked (settlement/watch/cancellation) notices queued anywhere behind a
+/// stuck tracked row, pushed to the backend out of order and marked so the
+/// ordinary batch path above does not render them again once the barrier
+/// clears. See `ActorInbox::legacy_notices_beyond_barrier`.
+async fn deliver_out_of_order_notices(
+    actor: ActorRef,
+    inbox: &Arc<ActorInbox>,
+    thread: &QueueReadyThread,
+    backend: &dyn InteractiveAgentBackend,
+    cwd: &str,
+    runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
+) -> Result<(), String> {
+    let beyond_inbox = Arc::clone(inbox);
+    let beyond =
+        tidepool_runtime::spawn_blocking_in_span(move || beyond_inbox.legacy_notices_beyond_barrier())
+            .await
+            .map_err(|error| format!("inbox reader task: {error}"))?
+            .map_err(|error| error.to_string())?;
+    if beyond.is_empty() {
+        return Ok(());
+    }
+    let rendered = beyond
+        .iter()
+        .map(|message| {
+            message
+                .payload
+                .render(runtime_observation.snapshot().launched_at_unix_ms)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    backend
+        .push(cwd, thread, &rendered)
+        .await
+        .map_err(|error| error.to_string())?;
+    let sequences = beyond.iter().map(|message| message.sequence).collect::<Vec<_>>();
+    inbox.mark_surfaced_out_of_order(sequences.iter().copied());
+    tracing::info!(
+        actor = ?actor,
+        sequences = ?sequences,
+        "delivered settlement/watch notice queued behind a stuck native delivery"
+    );
     Ok(())
 }
 

@@ -7,7 +7,7 @@
 //! The owner also controls both hierarchies against concurrent rename/removal;
 //! symlink entries, targets and target ancestry must already be durable.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -154,6 +154,13 @@ struct InboxState<T, R> {
     compacted_through: u64,
     pending: VecDeque<DurableEnvelope<T, R>>,
     poisoned: bool,
+    /// Untracked sequences already delivered out of order past a stuck
+    /// tracked row ahead of them (see `legacy_notices_beyond_barrier`).
+    /// In-memory only, never persisted: it only prevents the ordinary batch
+    /// path from rendering the same notice a second time once the barrier
+    /// ahead of it clears, and it is pruned as those sequences are
+    /// acknowledged (`discard_acknowledged`).
+    surfaced_out_of_order: BTreeSet<u64>,
 }
 
 pub struct DurableInbox<T, R = ()> {
@@ -355,6 +362,7 @@ where
                     .filter(|row| row.sequence > cursor)
                     .collect(),
                 poisoned: false,
+                surfaced_out_of_order: BTreeSet::new(),
             }),
             #[cfg(test)]
             fault: Mutex::new(None),
@@ -480,6 +488,46 @@ where
             .take_while(|row| row.receipt_context.is_none())
             .cloned()
             .collect())
+    }
+    /// Untracked rows anywhere in the pending queue that have not yet been
+    /// surfaced out of order — not just the contiguous prefix
+    /// `legacy_pending_prefix` sees. A tracked row stuck earlier in the queue
+    /// (native delivery `Submitted`/`Unconfirmed` and not yet resolving) must
+    /// not hide a later settlement/watch notice indefinitely:
+    /// `deliver_tracked_message` only ever advances the exact stuck sequence,
+    /// one at a time. This exposes the rest so a delivery pump can push them
+    /// out of band. Acknowledgement of these sequences remains fenced behind
+    /// the earlier tracked row exactly as `acknowledge` already enforces;
+    /// callers must not treat this as an ack-eligible batch on its own — pair
+    /// it with `mark_surfaced_out_of_order` so the ordinary batch path does
+    /// not render the same notice again once the barrier ahead clears.
+    pub fn legacy_notices_beyond_barrier(&self) -> Result<Vec<DurableEnvelope<T, R>>, InboxError> {
+        let state = lock_state(&self.state);
+        healthy(&state)?;
+        Ok(state
+            .pending
+            .iter()
+            .filter(|row| {
+                row.receipt_context.is_none() && !state.surfaced_out_of_order.contains(&row.sequence)
+            })
+            .cloned()
+            .collect())
+    }
+    /// Records that `sequences` were already delivered through
+    /// `legacy_notices_beyond_barrier`, so the ordinary batch path renders
+    /// them only once. In-memory only: a restart before the barrier clears
+    /// re-delivers those rows once more, an acceptable duplicate at a process
+    /// boundary rather than a routine one.
+    pub fn mark_surfaced_out_of_order(&self, sequences: impl IntoIterator<Item = u64>) {
+        let mut state = lock_state(&self.state);
+        state.surfaced_out_of_order.extend(sequences);
+    }
+    /// Sequences already delivered through `legacy_notices_beyond_barrier`
+    /// and not yet acknowledged. Lets the ordinary batch path
+    /// (`legacy_pending_prefix`) skip rendering a row a second time once the
+    /// barrier ahead of it clears, while still acknowledging it normally.
+    pub fn surfaced_out_of_order(&self) -> BTreeSet<u64> {
+        lock_state(&self.state).surfaced_out_of_order.clone()
     }
     /// Exact durable front row for an ordered consumer. Receipt state still
     /// decides whether this row may be submitted or only reconciled.
@@ -706,6 +754,9 @@ where
         {
             state.pending.pop_front();
         }
+        state
+            .surfaced_out_of_order
+            .retain(|sequence| *sequence > state.checkpoint.sequence);
         if state
             .checkpoint
             .sequence
