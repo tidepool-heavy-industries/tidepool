@@ -120,7 +120,6 @@ impl HostToolControl {
     /// endpoint. The host must separately serialize raw drain against pending
     /// seals/completions; this operation does not reserve completion access.
     /// A seal is not cleanup.
-    #[allow(dead_code)] // Parent pending/lifecycle consumer is staged separately.
     pub(crate) fn quiesce_and_seal(
         &self,
         expected: exomonad_actor::ActorRef,
@@ -148,8 +147,6 @@ impl HostToolControl {
         })
     }
 
-    // Parent host integration is staged separately from this owning primitive.
-    #[allow(dead_code)]
     pub(crate) fn quiesce(&self) {
         self.phase.send_modify(|phase| {
             if *phase == HostToolPhase::Serving {
@@ -158,7 +155,6 @@ impl HostToolControl {
         });
     }
 
-    #[allow(dead_code)]
     pub(crate) fn drain(&self) {
         self.phase.send_replace(HostToolPhase::Draining);
     }
@@ -304,7 +300,6 @@ impl HostDynamicToolService {
     }
 
     /// Retain this control before moving the service into its server task.
-    #[allow(dead_code)]
     pub(crate) fn control(&self) -> HostToolControl {
         self.state.control.clone()
     }

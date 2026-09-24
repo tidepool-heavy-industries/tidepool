@@ -18,7 +18,6 @@ mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
-#[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 #[cfg(test)]
 mod hosted_tools_tests;
@@ -40,7 +39,6 @@ mod tui_sleep_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
-pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
 use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
 mod model_free;
 mod prompt_catalog;
@@ -1693,15 +1691,9 @@ impl std::error::Error for RetainedInteractiveFleet {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RetainedHostedError {
-    #[error("exact actor has no retained hosted service")]
-    NoHostedActor,
-}
-
 /// Host-only operations. These never select a launch mode, release the command
 /// gate, establish host-work quiescence, or settle workspace custody.
-#[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
+#[cfg(test)]
 pub(crate) enum RetainedProcessOperation {
     Observe,
     #[cfg(test)]
@@ -1709,30 +1701,32 @@ pub(crate) enum RetainedProcessOperation {
     Stop,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum RetainedProcessState {
     Reserved,
-    #[cfg(test)]
-    Spawning,
-    #[cfg(test)]
-    NotSpawned(String),
     Blocked,
     Pinned,
     Released,
     ReleaseUnconfirmed,
     Stopping,
+    #[allow(
+        dead_code,
+        reason = "carried to keep the cleanup handle's own drop-time effects \
+                  alive on the observation; tests only match the variant"
+    )]
     ProcessStopped(Option<exomonad_node::ServiceScopeCleanup>),
 }
 
+#[cfg(test)]
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct RetainedProcessObservation {
     pub(crate) actor: ActorRef,
     pub(crate) actor_terminal: Option<ActorTerminal>,
     pub(crate) process: RetainedProcessState,
 }
 
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RetainedProcessError {
     #[error("exact actor has no retained scoped process")]
@@ -1745,7 +1739,7 @@ pub(crate) enum RetainedProcessError {
     Supervisor(String),
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl RetainedInteractiveFleet {
     /// Recover the actual resource-bearing error after the host's ordinary
     /// Box<dyn Error> propagation. Crate visibility lets exomonad own a subsequent
@@ -1754,23 +1748,6 @@ impl RetainedInteractiveFleet {
         error: &'a mut (dyn std::error::Error + 'static),
     ) -> Option<&'a mut Self> {
         error.downcast_mut::<Self>()
-    }
-
-    /// Continue the exact stored seal/shutdown/service operations after waiter
-    /// loss. Abort is an explicit host decision; no native-success branch exists.
-    pub(crate) async fn recover_hosted(
-        &self,
-        actor: ActorRef,
-        boundary: CompletionBoundary,
-        timeout: Duration,
-    ) -> Result<HostedObservation, RetainedHostedError> {
-        let owner = {
-            let rows = self.owners.lock();
-            rows.get(&actor)
-                .and_then(|row| row.hosted.lock().clone())
-                .ok_or(RetainedHostedError::NoHostedActor)?
-        };
-        Ok(hosted_retirement::observe(&owner, boundary, timeout).await)
     }
 
     /// Blocking, deadline-bounded host operation: call outside an actor turn.
