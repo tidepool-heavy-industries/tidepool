@@ -1715,16 +1715,19 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
         "",
     )
     .await;
-    let requests = backend.requests.lock();
-    assert!(
-        !requests.is_empty(),
-        "a command whose text reads as destructive must still reach the heuristics battery"
-    );
-    assert!(
-        requests.iter().any(|r| r.to_string().contains("destructive_command")),
-        "expected a destructive_command heuristic question among the requests: {requests:?}"
-    );
-    drop(requests);
+    {
+        let requests = backend.requests.lock();
+        assert!(
+            !requests.is_empty(),
+            "a command whose text reads as destructive must still reach the heuristics battery"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.to_string().contains("destructive_command")),
+            "expected a destructive_command heuristic question among the requests: {requests:?}"
+        );
+    }
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
