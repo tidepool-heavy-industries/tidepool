@@ -213,3 +213,14 @@ the run with session size.
   with this reason, after its cells were brought up to `forkGroupHandle ::
   Maybe` and a typed `[label|..|]`) expects staleness first. Decide which
   refusal a stale plan should surface, then re-enable the test.
+
+## Nudge ledger and child effect rows (2026-09-24, wave 4)
+
+- The harness nudge layer (`.exomonad/Project/Nudges.hs`, 67e082e) writes its
+  ledger through the `Journal` effect, which children do not carry, so the
+  after-tool hook could not install on any child. Wave 4's root repaired it
+  in its first minutes (`amend(correction): allow child startup without
+  Journal effect`) by reverting to `Project.Watchdog`, so the ledger never
+  ran. Either children get `Journal` in their rows or the ledger uses the
+  doc's fallback (a file appended by pathspec). Verify with a harness recipe
+  that admits a child under the spec, not only the replay test.
