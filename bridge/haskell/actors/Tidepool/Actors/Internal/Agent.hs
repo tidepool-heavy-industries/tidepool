@@ -58,6 +58,12 @@ module Tidepool.Actors.Internal.Agent
   , NotificationReceipt
   , NotificationError (..)
   , NotificationState (..)
+  -- Exposed only so a fresh child session's own bootstrap turn can compile
+  -- and run it directly, fully applied to the transferred label — the
+  -- reconstruction 'child_session_eligibility' (exomonad-actor) relies on.
+  -- Not model-facing; stays out of 'Tidepool.Actor'/'Tidepool.Actors.Unfold's
+  -- own public re-export lists.
+  , unboundAgentEntry
   ) where
 
 import Control.Monad.Freer (Eff, Member, raise, send)
@@ -513,6 +519,18 @@ stopAgent (AgentRef target _) = do
     AgentStopUnauthorized -> StopUnauthorized
     AgentStopFailed detail -> StopFailed detail
 
+-- | Applying an already-launched actor's continuation is repeated identically
+-- for every launch shape (fresh, forked, and — via
+-- 'unboundLaunchEntrySource' — the standalone turn a fresh child session
+-- compiles): install the shutdown hook, run initialization, attach declared
+-- sources, announce readiness, run behavior, publish the exit. It cannot be
+-- ONE shared polymorphic function: 'Actor.ActorDefinition's effect row is
+-- existentially hidden inside the value, so a caller-visible @effs@ in a
+-- standalone signature can never be proven equal to it (GHC: "Couldn't match
+-- type 'effs' with 'ActorKernel : actorEffs'"). Each copy instead lets type
+-- inference pin its own @effs@ to the ONE existential its own local
+-- 'Actor.ActorDefinition' pattern match reveals. Keep the three copies
+-- byte-identical in shape; a change to one is a change to all three.
 launchFreshActor
   :: forall effs startup api exit
    . Member AgentLaunch effs
@@ -667,6 +685,50 @@ agentDefinitionUnbound actorLabel = definition
         , Actor.behavior = \() () -> agentLoop
         , Actor.onShutdown = const (pure ())
         }
+
+-- | 'launchForkedActor's own @entry@, specialized to 'agentDefinitionUnbound'
+-- — same body, but 'ReadOnly' pins 'agentDefinitionUnbound''s effect row to
+-- the CONCRETE 'ReadOnlyEffects AgentProtocol' (see 'Tidepool.Actor.Internal'
+-- 's @EffectProfile@), so unlike the general case this one specific shape
+-- CAN carry a standalone, nameable signature. This is what makes a launch
+-- eligible for its own session reconstructible at all: a fresh session's
+-- bootstrap turn compiles exactly this expression, applied to the
+-- transferred label, in place of the captured (heap-native, un-transferable)
+-- @entry@ 'launchForkedActor' would otherwise have built on the launching
+-- session. See @exomonad-actor@'s @child_session_eligibility@ and
+-- @plans/wave3/dives/per-child-sessions-design.md@.
+unboundAgentEntry :: Text -> Int -> Eff (ActorKernel ': Actor.ReadOnlyEffects AgentProtocol) ()
+-- A GADT record selector on an existentially-quantified field (every field
+-- here) cannot be used as a plain function — only pattern matching extracts
+-- it, and it must be matched directly in THIS equation (a separately
+-- generalized `where`-bound helper re-hides the existential GHC just fixed
+-- from this signature, and "escapes" again). Hence the pattern here, not
+-- `Actor.initialization (agentDefinitionUnbound actorLabel)`.
+unboundAgentEntry actorLabel _ =
+  case agentDefinitionUnbound actorLabel of
+    definition@Actor.ActorDefinition
+      { Actor.effectProfile = profile
+      , Actor.initialization = startupAction
+      , Actor.behavior = install
+      , Actor.onShutdown = shutdownAction
+      } ->
+      -- `initialization`/`behavior`/`onShutdown`'s row is only PROVABLY
+      -- `ReadOnlyEffects AgentProtocol` once `profile` is itself matched
+      -- against `Actor.ReadOnly` — the pattern synonym above brings no
+      -- `actorEffs ~ ReadOnlyEffects protocol` equality into scope by
+      -- itself; `EffectProfile`'s own GADT constructor is what proves it.
+      case profile of
+        Actor.ReadOnly -> do
+          let cell = newExitCell ()
+              shutdownEntry reasonCode =
+                raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
+          send (ActorInstallShutdownWith 0 shutdownEntry)
+          initial <- raiseActorKernel (startupAction ())
+          mapM_ installSource (ActorInternal.actorSources definition)
+          send ActorReadyWith
+          result <- raiseActorKernel (install () initial)
+          case fillExitCell cell result of
+            () -> pure ()
 
 agentLoop :: Eff (Actor.ReadOnlyEffects AgentProtocol) ()
 agentLoop = do
