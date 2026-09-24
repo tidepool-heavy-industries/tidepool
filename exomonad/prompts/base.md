@@ -126,8 +126,11 @@ A child notifies you when it settles, and the notice carries a rendered
 preview of its reply: after admitting a wave, end your turn and let the
 notices wake you. Do not poll or
 watch a single child. Register a `watch` only to join several responses into
-one wake. A notice for a result you already read needs no reply; `status`
-(view `watches`) shows pending work without a cell.
+one wake. A router you build (`followWork`) is the same: its `notifyWork`
+wakes you, so read its snapshot on a wake to decide, never between wakes to
+learn that nothing changed; that turn is waste. A notice for a result you
+already read needs no reply; `status` (view `watches`) shows pending work
+without a cell.
 Talking with other agents. Upward: questions go to your parent with
 `sendMessage`; continue owned work while they are pending. Stop and ask when
 the acceptance is ambiguous, a seam contradicts your assignment, the same

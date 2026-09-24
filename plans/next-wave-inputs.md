@@ -340,3 +340,31 @@ the run with session size.
   under the checkout) should be cached per layer revision; the daemon ran 2
   workers for 16 actors; model turns are flat (3-6 s), tool time is 82% of
   actors' wall time.
+
+## Root friction file, correction wave (2026-09-24, judged)
+
+Source: `~/dev/exomonad-harness/docs/exomonad-friction.md` (the root's own
+notes). Acted on now: `&&` gating, `Blocked` is not a transport, owner-scoped
+formatting, event waiting as the default (core prompt + coordinate skill),
+spec preflight per role in `exomonad check`, label-vs-path and ambiguous-name
+teaching errors, `reviewCommit` from the root, notice previews naming the
+child's path and source revision, after-tool hook on `haskell` cells.
+Deferred, one card each:
+
+- **Failure streak to the owner.** A per-actor count of failed checks and
+  time since the last candidate, visible in `status` and nudged at a
+  threshold. Try the prompt rule (stop-and-ping after two failed rounds)
+  for one wave first; mechanize only if interviews show it ignored.
+- **Typed incorporation acknowledgement.** A `sendMessage` proves delivery,
+  not that the recipient rebased or changed behavior. The reply already must
+  say whether an unowned change was applied; a typed receipt tied to the
+  commit is a workflow helper the workspace can write before the engine.
+- **Expected-red gate.** A marked failing test with owner and expiry in
+  integration status is project policy: a `Candidate` gate field in the
+  harness workspace, not an engine feature.
+- **Bigger experiments** (the root's list: friction-to-experiment compiler,
+  promotion ladder, typed event algebra, behavioral replay, continuity
+  inspector, delegation preflight, uncertainty ledger). Feature work; the
+  delegation preflight's first slice is the spec-preflight lane. The next
+  wave brief may pick one; the harness `NEXT.md` carries prompt-level
+  trials of the rest.
