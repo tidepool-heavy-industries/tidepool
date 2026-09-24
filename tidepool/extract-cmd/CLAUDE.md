@@ -39,7 +39,7 @@ daemon recovers it through the same worker-replacement path a crash uses,
 which only `--persistent` survives.
 
 A `--persistent` daemon serves `--workers N` concurrent GHC workers
-(`daemon::DEFAULT_WORKER_COUNT`, 2 by default) rather than one: a single
+(`daemon::DEFAULT_WORKER_COUNT`, 3 by default) rather than one: a single
 accept thread still owns every fence check (epoch, watched-stamp) and
 PREFLIGHT/STOP handling, but hands each accepted, fenced connection to a free
 worker slot over a bounded (rendezvous) queue — an over-subscribed daemon
