@@ -2187,7 +2187,9 @@ fn check_cell_impl(
     }
     let turn_out_path = temp.path().join("turn.cbor");
     if let Some(fold) = &fold {
-        cmd.cell_fold_turn().turn_out(&turn_out_path).bind_gen(fold.gen);
+        cmd.cell_fold_turn()
+            .turn_out(&turn_out_path)
+            .bind_gen(fold.gen);
         for (i, tmpl) in fold.templates.iter().enumerate() {
             let path = temp.path().join(format!("fold-template-{i}.hs"));
             std::fs::write(&path, &tmpl.source)?;
@@ -3965,7 +3967,7 @@ mod tests {
             "value\n",
         );
         let checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: cell,
             template,
             include: &include,
@@ -4084,7 +4086,7 @@ mod tests {
             "fixed\n",
         );
         let checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: cell,
             template,
             include: &include,
@@ -4327,7 +4329,7 @@ mod tests {
         // Named class defaulting selects the exact effect row in the first
         // whole-cell check; no diagnostic-triggered retry is involved.
         let checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4380,7 +4382,7 @@ mod tests {
         let cell = format!("{EFF_DECLS}1 + 1 :: Int\n");
 
         let checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4401,7 +4403,7 @@ mod tests {
 
         // Repeating the same request makes the same compiler-owned decision.
         let repeated = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: &cell,
             template: &template,
             include: &include,
@@ -4811,7 +4813,7 @@ mod tests {
     fn run_turn_missing_template_is_clean_error_not_panic() {
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
         let req = TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: "1 + 1",
             templates: &[],
             include: &[],
@@ -4852,7 +4854,7 @@ mod tests {
             },
         ];
         let err = run_turn(TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: "1 :: Int",
             templates: &templates,
             include: &[],
@@ -4891,7 +4893,7 @@ mod tests {
             source: format!("module Expr where\n__result = {name}\n"),
         });
         let failure = run_turn(TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: "()",
             templates: &templates,
             include: &[],

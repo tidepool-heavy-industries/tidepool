@@ -205,10 +205,7 @@ impl From<lookup_tool::LookupResult> for LookupResult {
                     attempted,
                     suggestions,
                 } => LookupOutcome::Missing(
-                    attempted
-                        .into_iter()
-                        .map(|a| a.miss().to_owned())
-                        .collect(),
+                    attempted.into_iter().map(|a| a.miss().to_owned()).collect(),
                     suggestions,
                 ),
                 lookup_tool::LookupOutcome::Rejected { diagnostic } => LookupOutcome::Rejected(

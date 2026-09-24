@@ -478,7 +478,8 @@ fn child_session_eligibility(
             } else {
                 ChildSessionEligibility {
                     eligible: true,
-                    reason: "selected context, unbound agent launch, no RepoEvent in the resolved row",
+                    reason:
+                        "selected context, unbound agent launch, no RepoEvent in the resolved row",
                 }
             }
         }
@@ -781,11 +782,8 @@ mod tests {
     #[test]
     fn inherited_context_is_ineligible_even_with_unbound_label() {
         use super::{child_session_eligibility, ForkContext};
-        let decision = child_session_eligibility(
-            ForkContext::InheritedContext,
-            Some("luna/implement"),
-            &[],
-        );
+        let decision =
+            child_session_eligibility(ForkContext::InheritedContext, Some("luna/implement"), &[]);
         assert!(!decision.eligible);
     }
 

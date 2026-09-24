@@ -35,10 +35,10 @@ use tidepool_runtime::session::{
     run_turn_pinned, validate_declaration_candidate, BoundBinder, CellCheck, CellCheckRequest,
     CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
     DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
-    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
-    PendingPreparedMode, PreparedRuntimeError, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentResumeError, ResidentSession, RootCustody, SourceImports, StagedDeclaration,
-    TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
+    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
+    PendingPreparedInstall, PendingPreparedMode, PreparedRuntimeError, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
+    StagedDeclaration, TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -1775,7 +1775,12 @@ impl<H, O> ResidentActorRunner<H, O> {
             .clone()
             .ok_or_else(|| "no child-session factory installed".to_string())?;
         let machine = factory(session_id)?;
-        if self.access.machines.insert_idle(session_id, machine).is_some() {
+        if self
+            .access
+            .machines
+            .insert_idle(session_id, machine)
+            .is_some()
+        {
             return Err(format!(
                 "session {session_id} already had a live entry; refusing to overwrite it"
             ));
@@ -2673,9 +2678,9 @@ where
         reply_declaration_modules: Vec<String>,
     ) -> Result<(String, String), ResidentActorWorkbenchError> {
         let reply_declaration = reply_declaration.filter(|_| {
-            reply_declaration_modules
-                .iter()
-                .any(|module| declaration_worth_showing(module, &self.access.source.workspace_modules))
+            reply_declaration_modules.iter().any(|module| {
+                declaration_worth_showing(module, &self.access.source.workspace_modules)
+            })
         });
         let mut source = self.access.source.clone();
         if let (Some(response), Some(request)) = (&self.response, self.request) {
@@ -2998,7 +3003,9 @@ where
                 // `compile_relevant_eq` passing (should not happen, but is
                 // cheap to guard) and this attempt falls back to an
                 // ordinary compile rather than installing a wrong binder.
-                Some(folded) if fold_result_matches_generation(&folded, c_view.next_value_generation()) => {
+                Some(folded)
+                    if fold_result_matches_generation(&folded, c_view.next_value_generation()) =>
+                {
                     let ready = ReadyBlock {
                         result: folded,
                         generation: c_view.next_value_generation(),
@@ -3015,79 +3022,82 @@ where
                     )
                 }
                 _ => {
-            let compile_source = source.clone();
-            let compile_effects = effects.clone();
-            let compile_cell_source = cell_source.clone();
-            let compile_context = context.clone();
-            let compile_view = c_view.clone();
-            let compile_cancellation = cancellation.clone();
-                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    tidepool_runtime::with_compiler_transaction_cancellable(
-                        compile_cancellation,
-                        || {
-                            let candidate_dir = declaration_candidate
-                                .is_some()
-                                .then(tempfile::tempdir)
-                                .transpose()
-                                .map_err(|error| {
-                                    ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                                        "declaration candidate directory: {error}"
-                                    ))
-                                })?;
-                            let staged = match (declaration_candidate, &candidate_dir) {
-                                (Some((candidate, visible_values)), Some(candidate_dir)) => {
-                                    match validate_declaration_candidate(
-                                        candidate,
-                                        candidate_dir.path(),
-                                    ) {
-                                        Ok(staged) => {
-                                            Some(staged.with_visible_values(visible_values))
-                                        }
-                                        Err(error)
-                                            if classify_session(&error).class
-                                                == FailureClass::UserHaskell =>
-                                        {
-                                            let diagnostic =
-                                                classify_session(&error).message.into();
-                                            let index = declaration_index.unwrap_or(0);
-                                            return Ok((
-                                                checked,
-                                                CellItemsOutcome::Rejected { index, diagnostic },
-                                                None,
-                                            ));
-                                        }
-                                        Err(error) => {
-                                            return Err(ResidentActorWorkbenchError::Resident(
-                                                ResidentError::Session(error),
-                                            ))
+                    let compile_source = source.clone();
+                    let compile_effects = effects.clone();
+                    let compile_cell_source = cell_source.clone();
+                    let compile_context = context.clone();
+                    let compile_view = c_view.clone();
+                    let compile_cancellation = cancellation.clone();
+                    crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                        tidepool_runtime::with_compiler_transaction_cancellable(
+                            compile_cancellation,
+                            || {
+                                let candidate_dir = declaration_candidate
+                                    .is_some()
+                                    .then(tempfile::tempdir)
+                                    .transpose()
+                                    .map_err(|error| {
+                                        ResidentActorWorkbenchError::CompileInfrastructure(format!(
+                                            "declaration candidate directory: {error}"
+                                        ))
+                                    })?;
+                                let staged = match (declaration_candidate, &candidate_dir) {
+                                    (Some((candidate, visible_values)), Some(candidate_dir)) => {
+                                        match validate_declaration_candidate(
+                                            candidate,
+                                            candidate_dir.path(),
+                                        ) {
+                                            Ok(staged) => {
+                                                Some(staged.with_visible_values(visible_values))
+                                            }
+                                            Err(error)
+                                                if classify_session(&error).class
+                                                    == FailureClass::UserHaskell =>
+                                            {
+                                                let diagnostic =
+                                                    classify_session(&error).message.into();
+                                                let index = declaration_index.unwrap_or(0);
+                                                return Ok((
+                                                    checked,
+                                                    CellItemsOutcome::Rejected {
+                                                        index,
+                                                        diagnostic,
+                                                    },
+                                                    None,
+                                                ));
+                                            }
+                                            Err(error) => {
+                                                return Err(ResidentActorWorkbenchError::Resident(
+                                                    ResidentError::Session(error),
+                                                ))
+                                            }
                                         }
                                     }
-                                }
-                                _ => None,
-                            };
-                            let compile_view = match &staged {
-                                Some(staged) => compile_view
-                                    .with_staged_library(staged.module(), staged.items()),
-                                None => compile_view,
-                            };
-                            let outcome = compile_cell_items_off_checkout(
-                                &compile_context,
-                                &compile_source,
-                                &compile_effects,
-                                &checked,
-                                &compile_cell_source,
-                                compile_view,
-                                &retained,
-                                &visible_names,
-                                staged.as_ref(),
-                                candidate_dir.as_ref().map(|dir| dir.path()),
-                            );
-                            outcome.map(|outcome| (checked, outcome, staged))
-                        },
-                    )
-                }))
-                .await
-                .map_err(ResidentActorWorkbenchError::Join)??
+                                    _ => None,
+                                };
+                                let compile_view = match &staged {
+                                    Some(staged) => compile_view
+                                        .with_staged_library(staged.module(), staged.items()),
+                                    None => compile_view,
+                                };
+                                let outcome = compile_cell_items_off_checkout(
+                                    &compile_context,
+                                    &compile_source,
+                                    &compile_effects,
+                                    &checked,
+                                    &compile_cell_source,
+                                    compile_view,
+                                    &retained,
+                                    &visible_names,
+                                    staged.as_ref(),
+                                    candidate_dir.as_ref().map(|dir| dir.path()),
+                                );
+                                outcome.map(|outcome| (checked, outcome, staged))
+                            },
+                        )
+                    }))
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Join)??
                 }
             };
 
@@ -3259,7 +3269,7 @@ where
                             .map(PathBuf::as_path)
                             .collect::<Vec<_>>();
                         let cell_check_request = || CellCheckRequest {
-                session_id: Some(compile_view.session_id()),
+                            session_id: Some(compile_view.session_id()),
                             cell_text: &cell_source,
                             template: &template,
                             include: &include,
@@ -4115,7 +4125,7 @@ fn compile_fragment_off_checkout(
         None
     };
     let request = TurnRequest {
-                session_id: Some(snapshot.view.session_id()),
+        session_id: Some(snapshot.view.session_id()),
         turn_text: &block.source,
         templates: &templates,
         include: &include_refs,
@@ -4431,12 +4441,16 @@ where
                             installed_bindings: receipt.binders.clone(),
                         }),
                         Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                            Ok(ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
-                                &format!("<cell item {}>", block.ordinal),
-                                &block.source,
-                            )))
+                            Ok(ResidentWorkbenchStep::Rejected(
+                                failure.rejection_for_input(
+                                    &format!("<cell item {}>", block.ordinal),
+                                    &block.source,
+                                ),
+                            ))
                         }
-                        Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                        Err(error)
+                            if classify_session(&error).class == FailureClass::UserHaskell =>
+                        {
                             Ok(ResidentWorkbenchStep::Rejected(
                                 classify_session(&error).message.into(),
                             ))
@@ -4535,9 +4549,8 @@ where
     access
         .with_machine(context, move |session, context, _| {
             let outcome = match bound.as_slice() {
-                [] => {
-                    session.run_with_sites("actor_interactive_discard_bind", compiled_turn.into_code())
-                }
+                [] => session
+                    .run_with_sites("actor_interactive_discard_bind", compiled_turn.into_code()),
                 [binder] if observation.is_some() => session.run_observation_with_sites(
                     compiled_turn.into_code(),
                     binder,
@@ -4871,8 +4884,7 @@ mod activation_preview_tests {
 /// `Tidepool.*` boot-package type is already named by "reply type X", and its
 /// declaration would add representation detail with no construction value.
 fn declaration_worth_showing(module: &str, workspace_modules: &[String]) -> bool {
-    module.starts_with("Tidepool.Session.")
-        || workspace_modules.iter().any(|known| known == module)
+    module.starts_with("Tidepool.Session.") || workspace_modules.iter().any(|known| known == module)
 }
 
 // Bound the demanded character prefix as well as the rendered UTF-8 bytes.
@@ -7365,7 +7377,7 @@ fn check_cell_off_checkout(
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let cell_check_request = || CellCheckRequest {
-                session_id: Some(compile_view.session_id()),
+        session_id: Some(compile_view.session_id()),
         cell_text: cell_source,
         template: &template,
         include: &include,
@@ -8069,7 +8081,7 @@ fn compile_host_binding_off_checkout(
         )
     };
     let result = run_turn(TurnRequest {
-                session_id: Some(view.session_id()),
+        session_id: Some(view.session_id()),
         turn_text: &turn,
         templates: &templates,
         include: &include,
@@ -8655,7 +8667,7 @@ fn compile_block_off_checkout(
         "compiling resident actor workbench item"
     );
     let request = TurnRequest {
-                session_id: Some(compile_view.session_id()),
+        session_id: Some(compile_view.session_id()),
         turn_text: &block.source,
         templates: &templates,
         include: &include_refs,
@@ -10109,7 +10121,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let expression_checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: expression,
             template: &expression_template,
             include: &expression_include,
@@ -10362,7 +10374,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let direct_checked = check_cell(CellCheckRequest {
-                session_id: None,
+            session_id: None,
             cell_text: cell,
             template: &direct_template,
             include: &direct_include,
@@ -10619,13 +10631,12 @@ mod request_tests {
         // Keep the fixture's tempdir alive for the factory's one call — a
         // production factory instead captures the run's real session root.
         let held_root = std::sync::Mutex::new(None);
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source).with_child_session_factory(
-            Arc::new(move |session_id| {
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
+            .with_child_session_factory(Arc::new(move |session_id| {
                 let (session, root) = bare_session_at(session_id);
                 *held_root.lock().unwrap() = Some(root);
                 Ok(Box::new(session))
-            }),
-        );
+            }));
         assert_eq!(machines.kind(child_id), None, "not present before spawning");
         runner
             .spawn_child_session(child_id)

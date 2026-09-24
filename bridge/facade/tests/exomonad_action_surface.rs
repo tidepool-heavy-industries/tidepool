@@ -155,7 +155,9 @@ fn exomonad_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
         "result",
         &include_refs,
     )
-    .expect("two children in one unfold compile with the sibling roster plumbed through requestBranch");
+    .expect(
+        "two children in one unfold compile with the sibling roster plumbed through requestBranch",
+    );
 
     compile_haskell(
         include_str!("exomonad_action_surface/research_can_unfold.hs"),

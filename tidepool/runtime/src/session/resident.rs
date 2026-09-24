@@ -881,7 +881,10 @@ impl PendingPreparedMode {
                 generation: *generation,
                 observation: observation.clone(),
             },
-            PendingPreparedMode::Projected { binders, generation } => PreparedTurnMode::Projected {
+            PendingPreparedMode::Projected {
+                binders,
+                generation,
+            } => PreparedTurnMode::Projected {
                 binders,
                 generation: *generation,
             },
@@ -919,8 +922,10 @@ impl PendingPreparedInstall {
     /// other turns hold the checkout this snapshot was taken under.
     pub fn compile_off_checkout(
         &mut self,
-    ) -> Result<tidepool_codegen::prepared_program::CompiledProgram, tidepool_codegen::prepared_program::CompileError>
-    {
+    ) -> Result<
+        tidepool_codegen::prepared_program::CompiledProgram,
+        tidepool_codegen::prepared_program::CompileError,
+    > {
         super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
     }
 }
@@ -3191,7 +3196,10 @@ where
             park,
         } = pending;
         let install_started = std::time::Instant::now();
-        let program = match self.state.revalidate_and_install_prepared(snapshot, compiled)? {
+        let program = match self
+            .state
+            .revalidate_and_install_prepared(snapshot, compiled)?
+        {
             Some(program) => program,
             None => return Ok(None),
         };

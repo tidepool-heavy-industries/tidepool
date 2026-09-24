@@ -611,7 +611,10 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
 
     {
         let requests = backend.requests.lock();
-        assert!(!requests.is_empty(), "a focused, over-budget call must invoke Jev");
+        assert!(
+            !requests.is_empty(),
+            "a focused, over-budget call must invoke Jev"
+        );
         assert!(
             requests[0]["state"]
                 .as_str()
@@ -683,7 +686,9 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
         )
         .await
     });
-    let command_output = (1..=200).map(|line| format!("{line}\n")).collect::<String>();
+    let command_output = (1..=200)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
         request = backend_request(&mut campaign) => request,
@@ -748,7 +753,9 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         )
         .await
     });
-    let command_output = (1..=5000).map(|line| format!("{line}\n")).collect::<String>();
+    let command_output = (1..=5000)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
         request = backend_request(&mut campaign) => request,
@@ -824,7 +831,9 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
         )
         .await
     });
-    let command_output = (1..=900).map(|line| format!("{line}\n")).collect::<String>();
+    let command_output = (1..=900)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
         request = backend_request(&mut campaign) => request,

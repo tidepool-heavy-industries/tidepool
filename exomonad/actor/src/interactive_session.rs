@@ -112,10 +112,7 @@ impl ActivationContract {
         if self.siblings.is_empty() {
             return String::new();
         }
-        let mut block = format!(
-            "\n\nSiblings admitted with you ({}):",
-            self.siblings.len()
-        );
+        let mut block = format!("\n\nSiblings admitted with you ({}):", self.siblings.len());
         for sibling in &self.siblings {
             block.push_str(&format!(
                 "\n- {} ({}): {}",
@@ -260,12 +257,16 @@ mod tests {
                     SiblingPreview {
                         label: "worker-a".into(),
                         path: "exomonad/wave/worker-a".into(),
-                        preview: "CodingTask { ownedPaths = [\"src/a.rs\"], obligation = \"add a\" }".into(),
+                        preview:
+                            "CodingTask { ownedPaths = [\"src/a.rs\"], obligation = \"add a\" }"
+                                .into(),
                     },
                     SiblingPreview {
                         label: "worker-b".into(),
                         path: "exomonad/wave/worker-b".into(),
-                        preview: "CodingTask { ownedPaths = [\"src/b.rs\"], obligation = \"add b\" }".into(),
+                        preview:
+                            "CodingTask { ownedPaths = [\"src/b.rs\"], obligation = \"add b\" }"
+                                .into(),
                     },
                 ],
             },

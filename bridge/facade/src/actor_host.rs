@@ -2750,7 +2750,7 @@ fn compile_driver(
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
     let compiled = match run_turn(HaskellTurnRequest {
-                session_id: None,
+        session_id: None,
         turn_text: DRIVER_ENTRY,
         templates: &templates,
         include: &include_refs,

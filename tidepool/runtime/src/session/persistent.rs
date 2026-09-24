@@ -528,9 +528,12 @@ impl PersistentSession {
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
         match self.machine.as_mut() {
             None => Ok(None),
-            Some(engine) => {
-                engine.revalidate_and_install(snapshot, compiled, &self.bindings, &self.binding_index)
-            }
+            Some(engine) => engine.revalidate_and_install(
+                snapshot,
+                compiled,
+                &self.bindings,
+                &self.binding_index,
+            ),
         }
     }
 

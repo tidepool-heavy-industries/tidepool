@@ -161,8 +161,9 @@ impl ExtractRequest {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
                 }
                 Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
-                Some("--session-incarnation") => request
-                    .session_incarnation(value(&mut args, "--session-incarnation")?),
+                Some("--session-incarnation") => {
+                    request.session_incarnation(value(&mut args, "--session-incarnation")?)
+                }
                 Some("--inject-val") => request.inject_val(value(&mut args, "--inject-val")?),
                 Some("--bind-gen") => {
                     let raw = text_value(&mut args, "--bind-gen")?;

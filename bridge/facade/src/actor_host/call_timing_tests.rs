@@ -131,7 +131,10 @@ async fn bash_call_logs_one_call_timing_summary_line() {
     // The backend settled only after a real ~50ms delay while this call's
     // Cmd.observe awaited it, so the command-effect total must reflect that
     // wait, not the near-instant Cmd.start dispatch alone.
-    assert!(exec_ms > 0, "exec_ms did not capture the command's own execution: {fields}");
+    assert!(
+        exec_ms > 0,
+        "exec_ms did not capture the command's own execution: {fields}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -185,7 +188,8 @@ async fn second_cell_install_compiles_off_checkout() {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|value| {
-            value.get("target").and_then(|t| t.as_str()) == Some("tidepool_runtime::prepared_install")
+            value.get("target").and_then(|t| t.as_str())
+                == Some("tidepool_runtime::prepared_install")
         })
         .collect();
     assert!(
@@ -195,7 +199,11 @@ async fn second_cell_install_compiles_off_checkout() {
     let off_checkout = installs.iter().any(|line| {
         line.get("fields")
             .and_then(|fields| fields.get("compiled_off_checkout"))
-            .and_then(|value| value.as_bool().or_else(|| value.as_str().map(|s| s == "true")))
+            .and_then(|value| {
+                value
+                    .as_bool()
+                    .or_else(|| value.as_str().map(|s| s == "true"))
+            })
             == Some(true)
     });
     assert!(

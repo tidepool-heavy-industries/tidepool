@@ -3712,7 +3712,13 @@ mod tests {
     /// `MachineImports` `install_importing` uses.
     fn engine_with_bound_producer(
         force: bool,
-    ) -> (PreparedEngine, ProgramId, ValueId, BindingTable, BindingIndex) {
+    ) -> (
+        PreparedEngine,
+        ProgramId,
+        ValueId,
+        BindingTable,
+        BindingIndex,
+    ) {
         let prepared = producer_program();
         let top = prepared.entry();
         let (mut engine, first) = PreparedEngine::bootstrap(prepared).expect("producer bootstraps");
@@ -3760,13 +3766,21 @@ mod tests {
     fn split_install_matches_single_checkout_install_with_imports() {
         let (mut single, _, _, bindings, index) = engine_with_bound_producer(true);
         let single_program = single
-            .install(plain_import_consumer_program(true, Some(1)), &bindings, &index)
+            .install(
+                plain_import_consumer_program(true, Some(1)),
+                &bindings,
+                &index,
+            )
             .expect("single-checkout install links against the bound producer");
         let single_read = read_consumer_import(&mut single, single_program);
 
         let (mut split, _, _, bindings, index) = engine_with_bound_producer(true);
         let snapshot = split
-            .snapshot_install(plain_import_consumer_program(true, Some(1)), &bindings, &index)
+            .snapshot_install(
+                plain_import_consumer_program(true, Some(1)),
+                &bindings,
+                &index,
+            )
             .expect("snapshot step resolves the same imports off no checkout yet");
         let mut snapshot = snapshot;
         let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
@@ -3831,7 +3845,11 @@ mod tests {
         // revalidating.
         let (mut engine, first, top, bindings, index) = engine_with_bound_producer(false);
         let snapshot = engine
-            .snapshot_install(plain_import_consumer_program(false, Some(1)), &bindings, &index)
+            .snapshot_install(
+                plain_import_consumer_program(false, Some(1)),
+                &bindings,
+                &index,
+            )
             .expect("snapshot resolves the still-unforced import");
         let mut snapshot = snapshot;
         let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
@@ -3864,7 +3882,11 @@ mod tests {
         // to the single-checkout path -- still succeeds against the now-
         // forced import.
         engine
-            .install(plain_import_consumer_program(false, Some(1)), &bindings, &index)
+            .install(
+                plain_import_consumer_program(false, Some(1)),
+                &bindings,
+                &index,
+            )
             .expect("the single-checkout fallback installs against the current import");
     }
 

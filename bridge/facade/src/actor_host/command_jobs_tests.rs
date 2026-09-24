@@ -1293,7 +1293,8 @@ async fn oom_command_result_names_the_applied_limit_and_a_rerun_hint() {
 
     let output = run["items"][0]["output"].as_str().unwrap();
     assert!(
-        output.contains("out of memory · memory_mib=2048 exceeded · rerun with a larger memory_mib"),
+        output
+            .contains("out of memory · memory_mib=2048 exceeded · rerun with a larger memory_mib"),
         "{run}"
     );
     // A killed process does not read as a real exit code.

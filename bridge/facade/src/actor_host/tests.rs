@@ -143,21 +143,23 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     // Two fork levels: the research policy's depth budget of 1 lets the
     // child itself unfold one further generation (the grandchild), which
     // then has none left.
-    let mut campaign = test_campaign::TestCampaign::start_with_research_policy(
-        exomonad_actor::ResearchPolicy {
+    let mut campaign =
+        test_campaign::TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
             maximum_depth: 1,
             maximum_active_children: Some(1),
             default_depth: 1,
-        },
-    )
-    .await;
+        })
+        .await;
     let root = campaign.root_installation.policy.clone();
     let root_id = campaign.actor.identity();
 
     let root_for_setup = root.clone();
     let setup = tokio::spawn(async move {
-        dispatch_haskell_script(root_for_setup.as_ref(), include_str!("descendants_setup.hs"))
-            .await
+        dispatch_haskell_script(
+            root_for_setup.as_ref(),
+            include_str!("descendants_setup.hs"),
+        )
+        .await
     });
     let child_installation = campaign
         .next_deployment(

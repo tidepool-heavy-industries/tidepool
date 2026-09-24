@@ -133,7 +133,7 @@ impl Notebook {
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         run_turn(TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -180,7 +180,7 @@ impl Notebook {
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
         run_turn(TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -708,7 +708,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         let injected = notebook.session.inject_val_modules();
         let retained = notebook.session.prepared_retained();
         run_turn(TurnRequest {
-                session_id: None,
+            session_id: None,
             turn_text: text,
             templates: &templates,
             include: &include,
@@ -1212,7 +1212,8 @@ impl Incarnation {
             bound, compiled, ..
         } = self.compile_in_current_value_view(
             "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
-        ) else {
+        )
+        else {
             panic!("json anchor must compile as a bind");
         };
         let [anchor_binder] = bound.as_slice() else {
@@ -1260,7 +1261,9 @@ fn stub_growth_admission_compile_time() {
         if next_checkpoint < CHECKPOINTS.len() && i == CHECKPOINTS[next_checkpoint] {
             eprintln!(
                 "stub_growth_admission_compile_time incarnation={} stubs={} wall_ms={}",
-                use_incarnation, i, elapsed.as_millis()
+                use_incarnation,
+                i,
+                elapsed.as_millis()
             );
             next_checkpoint += 1;
         }
@@ -1286,7 +1289,11 @@ fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generati
 
     let mut first = Incarnation::open(tidepool_repr::SessionId(910_001), root.path());
     let first_carrier = first.json_anchor();
-    let first_binder = first.mount_json(&first_carrier, "carried", &serde_json::json!({"who": "first"}));
+    let first_binder = first.mount_json(
+        &first_carrier,
+        "carried",
+        &serde_json::json!({"who": "first"}),
+    );
 
     // A fresh incarnation at the SAME root: `SessionLib::open` sweeps the
     // first incarnation's stub sources (existing behavior), and `val_gen`
@@ -1294,17 +1301,20 @@ fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generati
     // number the first incarnation used.
     let mut second = Incarnation::open(tidepool_repr::SessionId(910_002), root.path());
     let second_carrier = second.json_anchor();
-    let second_binder =
-        second.mount_json(&second_carrier, "carried", &serde_json::json!({"who": "second"}));
+    let second_binder = second.mount_json(
+        &second_carrier,
+        "carried",
+        &serde_json::json!({"who": "second"}),
+    );
     assert_eq!(
         first_binder.module, second_binder.module,
         "the second incarnation must reissue the first's generation number (same module name) \
          for this test to exercise a real same-name collision"
     );
 
-    let TurnResult::Expr { compiled, .. } =
-        second.compile_in_current_value_view("case carried of { Aeson.Object o -> Map.lookup \"who\" o }")
-    else {
+    let TurnResult::Expr { compiled, .. } = second.compile_in_current_value_view(
+        "case carried of { Aeson.Object o -> Map.lookup \"who\" o }",
+    ) else {
         panic!("reading the carried value must compile as an expression");
     };
     let outcome = second

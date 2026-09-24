@@ -807,7 +807,10 @@ mod tests {
         // `LookupOutcome::Missing`) now renders this same text instead of a
         // bare "name"/"module"/"type search" label.
         assert_eq!(LookupInterpretation::Name.miss(), "not in scope as a name");
-        assert_eq!(LookupInterpretation::Module.miss(), "no module of that name");
+        assert_eq!(
+            LookupInterpretation::Module.miss(),
+            "no module of that name"
+        );
         assert_eq!(
             LookupInterpretation::TypeSearch.miss(),
             "no value with that type"
