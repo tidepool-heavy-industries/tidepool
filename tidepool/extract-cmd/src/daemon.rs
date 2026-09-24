@@ -100,19 +100,97 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 const DEFAULT_WORKER_COUNT: usize = 3;
 /// Total resident-worker RSS budget a `--persistent` daemon divides evenly
 /// across its worker slots for each slot's default rotation ceiling
-/// (`worker_rss_ceiling_mb = DEFAULT_MEMORY_BUDGET_MB / worker_count`).
+/// (`worker_rss_ceiling_mb = default_memory_budget_mb() / worker_count`).
 /// `--rss-ceiling-mb` keeps its old meaning — a per-worker ceiling — and, when
 /// given explicitly, overrides that derived figure instead of the total.
 ///
-/// Sized for a 31 GiB box that runs nothing else: at the default
-/// `DEFAULT_WORKER_COUNT` (3) this is 7 GiB per worker. The ceiling comes
-/// from measurement, not headroom arithmetic: a real warm GHC worker's RSS
-/// runs 6.1-6.5 GiB, so a lower ceiling (e.g. the 6 GiB a fourth slot would
-/// leave) rotates on almost every request and discards the module memo the
-/// ceiling exists to protect. Three 7 GiB workers (21 GiB) leaves roughly
-/// 10 GiB for the concurrent cargo/nextest build issuing those `ghc-heavy`
-/// requests alongside the pool. A shared box should pass `--workers 2`.
+/// This is a CEILING on the default, not a fixed figure: `default_memory_budget_mb`
+/// derives the actual default from memory available at daemon start, so two
+/// compiler daemons that size themselves independently (this repo's own
+/// persistent test daemon and an unrelated caller's, such as one Exomonad
+/// run's daemon) do not both assume the whole machine budget is theirs to
+/// claim. See that function's doc comment.
+///
+/// The figure itself comes from measurement on a 31 GiB box that runs
+/// nothing else: at the default `DEFAULT_WORKER_COUNT` (3) this is 7 GiB per
+/// worker. The ceiling comes from measurement, not headroom arithmetic: a
+/// real warm GHC worker's RSS runs 6.1-6.5 GiB, so a lower ceiling (e.g. the
+/// 6 GiB a fourth slot would leave) rotates on almost every request and
+/// discards the module memo the ceiling exists to protect. Three 7 GiB
+/// workers (21 GiB) leaves roughly 10 GiB for the concurrent cargo/nextest
+/// build issuing those `ghc-heavy` requests alongside the pool. A shared box
+/// should pass `--workers 2`.
 const DEFAULT_MEMORY_BUDGET_MB: u64 = 21 * 1024;
+/// Memory reserved out of what's available at daemon start, never claimed by
+/// the default worker budget — for the concurrent cargo/nextest build (or
+/// whatever else the caller is doing) and for `/proc/meminfo`'s own
+/// estimation slop. Matches the roughly 10 GiB the historical fixed budget
+/// already left over on its reference 31 GiB box.
+const DEFAULT_MEMORY_HEADROOM_MB: u64 = 10 * 1024;
+/// Floor under the derived default so a box that's nearly out of memory
+/// still gets a daemon that can serve requests, just with a worker that
+/// rotates often, rather than one sized to effectively nothing. Below this,
+/// a warm module memo cannot survive between requests anyway, so there is no
+/// further floor worth defending — the request still completes, just cold
+/// every time.
+const MINIMUM_MEMORY_BUDGET_MB: u64 = 2 * 1024;
+/// Default total RSS budget for this daemon's worker pool: the smaller of
+/// the historical fixed ceiling (`DEFAULT_MEMORY_BUDGET_MB`) and what's
+/// actually available right now, minus a headroom reserve
+/// (`DEFAULT_MEMORY_BUDGET_MB`'s doc comment explains the collision this
+/// avoids). A quiet box with ample free memory still gets the historical
+/// figure; a box where another compiler daemon (this repo's persistent test
+/// daemon, or a prior run's daemon that never exited) already holds RSS sees
+/// less of it counted as available and sizes down instead of assuming the
+/// whole machine is free.
+///
+/// This is the one place daemon sizing reads machine memory. It deliberately
+/// does not add a second cross-process budget registry alongside
+/// `exomonad-node`'s `command_resources` admission service: that service
+/// already gates actor starts on memory actually available
+/// (`/proc/meminfo`'s `MemAvailable`), so a daemon that also sizes itself
+/// from current availability composes with that check for free — the
+/// second daemon to start simply sees less room, without either side having
+/// to register or negotiate anything with the other.
+fn default_memory_budget_mb() -> u64 {
+    budget_from_available(available_memory_mb())
+}
+
+/// Pure sizing rule, split out from the `/proc` read so it can be tested
+/// without a real machine's memory state.
+fn budget_from_available(available_mb: Option<u64>) -> u64 {
+    match available_mb {
+        Some(available) => DEFAULT_MEMORY_BUDGET_MB
+            .min(available.saturating_sub(DEFAULT_MEMORY_HEADROOM_MB))
+            .max(MINIMUM_MEMORY_BUDGET_MB),
+        None => DEFAULT_MEMORY_BUDGET_MB,
+    }
+}
+
+/// Memory actually available for new allocations right now, from
+/// `/proc/meminfo`'s `MemAvailable` — the kernel's own headroom-aware
+/// estimate (reclaimable caches counted back in), the same field
+/// `exomonad-node`'s `command_resources` admission check reads. `None` when
+/// `/proc/meminfo` is unreadable or malformed (non-Linux, a sandboxed
+/// environment without `/proc`): callers fall back to the historical fixed
+/// budget.
+#[cfg(target_os = "linux")]
+fn available_memory_mb() -> Option<u64> {
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = text.lines().find_map(|line| {
+        line.strip_prefix("MemAvailable:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kib / 1024)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn available_memory_mb() -> Option<u64> {
+    None
+}
 /// Absolute wall-clock bound on a single compiler request served by the
 /// pinned GHC worker (begin_transaction/request/end_transaction are cheap;
 /// this bounds the request itself). The daemon's accept loop is
@@ -765,7 +843,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
     // across this run's worker count (see `DEFAULT_MEMORY_BUDGET_MB`).
     let rss_ceiling_mb = config
         .rss_ceiling_mb
-        .unwrap_or(DEFAULT_MEMORY_BUDGET_MB / worker_count as u64);
+        .unwrap_or(default_memory_budget_mb() / worker_count as u64);
     let request_deadline = config
         .request_deadline_secs
         .map(Duration::from_secs)
@@ -2059,6 +2137,63 @@ mod tests {
             7 * 1024,
             "the default per-worker RSS ceiling is the total budget split across the default worker count"
         );
+    }
+
+    /// A quiet box with ample free memory still gets the historical fixed
+    /// budget — this must not regress the common (no competing daemon) case.
+    #[test]
+    fn budget_from_available_uses_the_fixed_ceiling_when_memory_is_plentiful() {
+        assert_eq!(
+            budget_from_available(Some(
+                DEFAULT_MEMORY_BUDGET_MB + DEFAULT_MEMORY_HEADROOM_MB + 4 * 1024
+            )),
+            DEFAULT_MEMORY_BUDGET_MB
+        );
+    }
+
+    /// The scenario this change exists for: a competing compiler daemon
+    /// (this repo's persistent test daemon, or a stray prior run) already
+    /// holds enough RSS that only a fraction of the historical budget is
+    /// actually available. The default must size down to what's left minus
+    /// headroom, not claim the fixed figure regardless.
+    #[test]
+    fn budget_from_available_sizes_down_next_to_a_competing_daemon() {
+        // 31 GiB box, ~16.5 GiB already held by a warm test daemon: about
+        // 14.5 GiB available.
+        let available = 14 * 1024 + 512;
+        assert_eq!(
+            budget_from_available(Some(available)),
+            available - DEFAULT_MEMORY_HEADROOM_MB
+        );
+        assert!(budget_from_available(Some(available)) < DEFAULT_MEMORY_BUDGET_MB);
+    }
+
+    /// Never sizes to (near) zero even when memory is almost gone — the
+    /// daemon still starts and serves requests, just with a worker that
+    /// rotates often.
+    #[test]
+    fn budget_from_available_floors_at_the_minimum_when_memory_is_scarce() {
+        assert_eq!(budget_from_available(Some(0)), MINIMUM_MEMORY_BUDGET_MB);
+        assert_eq!(
+            budget_from_available(Some(DEFAULT_MEMORY_HEADROOM_MB)),
+            MINIMUM_MEMORY_BUDGET_MB
+        );
+    }
+
+    /// `/proc/meminfo` unreadable (non-Linux, a sandbox) falls back to the
+    /// historical fixed figure rather than failing the daemon.
+    #[test]
+    fn budget_from_available_falls_back_to_the_fixed_ceiling_when_unknown() {
+        assert_eq!(budget_from_available(None), DEFAULT_MEMORY_BUDGET_MB);
+    }
+
+    /// `/proc/meminfo` parsing itself, against a real MemAvailable line —
+    /// exercised only where `/proc` exists.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn available_memory_mb_reads_a_positive_value_from_proc_meminfo() {
+        let available = available_memory_mb().expect("this test runs on Linux, /proc exists");
+        assert!(available > 0);
     }
 
     #[derive(Clone, Default)]

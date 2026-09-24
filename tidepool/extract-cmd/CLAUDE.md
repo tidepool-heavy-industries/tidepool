@@ -57,16 +57,22 @@ designed around.
 
 `--rss-ceiling-mb` keeps its historical meaning, a per-worker RSS ceiling;
 only its *default* changed, from a fixed figure to a shared total budget
-(`daemon::DEFAULT_MEMORY_BUDGET_MB`, 20 GiB) divided across the daemon's
-worker count — a persistent daemon running more workers does not multiply
-its default total RSS footprint. The default worker count (2) and budget are
-sized from measurement, not headroom arithmetic: a real warm GHC worker's RSS
-runs 6.1-6.5 GiB, so the ceiling stays at 10 GiB per worker (unchanged from
-the single-worker daemon) rather than being divided down further, which would
-rotate workers on almost every request and defeat the module-memo cache the
-ceiling protects. See `daemon::DEFAULT_WORKER_COUNT`'s and
-`DEFAULT_MEMORY_BUDGET_MB`'s doc comments for the exact sizing and the
-matching `.config/nextest.toml` `[test-groups.ghc-heavy] max-threads`.
+(`daemon::default_memory_budget_mb()`) divided across the daemon's worker
+count — a persistent daemon running more workers does not multiply its
+default total RSS footprint. That total budget is itself the smaller of a
+measured fixed ceiling and memory actually available at daemon start
+(`/proc/meminfo`'s `MemAvailable`, minus a headroom reserve): a quiet box
+still gets the fixed figure, but a daemon that starts next to another
+compiler daemon already holding RSS — this repo's own persistent test
+daemon, or an unrelated caller's — sizes down instead of assuming the whole
+machine budget is free. This is deliberately the only place daemon sizing
+reads machine memory; it does not register anywhere or coordinate with the
+other daemon directly, and adds no second budget registry alongside
+`exomonad-node`'s `command_resources` admission service, which already gates
+actor starts on the same `MemAvailable` figure. See
+`daemon::DEFAULT_WORKER_COUNT`'s and `daemon::default_memory_budget_mb`'s doc
+comments for the exact sizing and the matching `.config/nextest.toml`
+`[test-groups.ghc-heavy] max-threads`.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
