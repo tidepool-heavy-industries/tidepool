@@ -67,7 +67,17 @@ fi
 # Give nix's mktemp a private TMPDIR we control instead, and remove that
 # whole directory ourselves once the command exits, keeping its exit status
 # (nix propagates signal-terminated commands as the usual 128+signal status).
-dev_shell_tmp=$(mktemp -d -t tidepool-dev-shell.XXXXXX)
+# Nesting one dev shell inside another (the default shell running `just`,
+# whose recipe enters the exomonad shell) must not stack TMPDIRs: each level
+# would add `tidepool-dev-shell.X/nix-shell.Y` to the path until a unix
+# socket under it (sccache's) exceeds SUN_LEN. Place this shell's directory
+# beside an enclosing dev shell's, so the depth is always one.
+if [[ ${TMPDIR:-} == */tidepool-dev-shell.*/nix-shell.* ]]; then
+  dev_shell_tmp_root=$(dirname "$(dirname "$TMPDIR")")
+else
+  dev_shell_tmp_root=${TMPDIR:-/tmp}
+fi
+dev_shell_tmp=$(mktemp -d -p "$dev_shell_tmp_root" tidepool-dev-shell.XXXXXX)
 cleanup_dev_shell_tmp() {
   local dir=$1 pid
   # A command run in this shell can start a detached process that outlives
