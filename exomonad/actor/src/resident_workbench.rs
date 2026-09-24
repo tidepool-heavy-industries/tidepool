@@ -3798,10 +3798,17 @@ where
                 CompiledBlock::Ready(ready) => *ready,
             };
 
+            // Revalidate the GHC-compiled `ready` against the current
+            // source-side view in one short checkout, then hand off to
+            // `begin_ready_block_split` for the JIT
+            // install: that keeps this split's own Cranelift compile off
+            // any checkout too, exactly as `begin_prepared_cell_item`
+            // already does for a split cell's item install, instead of
+            // running it under the checkout this closure used to hold for
+            // `begin_ready_block`'s whole install-and-run.
             let install_source = source.clone();
             let install_type_modules = type_modules.clone();
-            let install_block = block.clone();
-            let outcome = self
+            let still_fresh = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
                     if session.machine_disposition()
@@ -3815,32 +3822,27 @@ where
                         &install_source,
                         &install_type_modules,
                     )?;
-                    if !fresh_view.compile_relevant_eq(&snapshot.view) {
-                        return Ok(FragmentInstall::Stale);
-                    }
-                    let step = begin_ready_block(
-                        session,
-                        context,
-                        &install_source,
-                        RequestWorkbenchScope {
-                            response: None,
-                            request: None,
-                            type_modules: &install_type_modules,
-                        },
-                        install_block,
-                        ready,
-                        8192,
-                    )?;
-                    Ok(FragmentInstall::Installed(step))
+                    Ok(fresh_view.compile_relevant_eq(&snapshot.view))
                 })
                 .await?;
-            match outcome {
-                FragmentInstall::Installed(step) => {
-                    cancel_on_drop.0 = None;
-                    return Ok(step);
-                }
-                FragmentInstall::Stale => continue,
+            if !still_fresh {
+                continue;
             }
+            let install_source = source.clone();
+            let install_type_modules = type_modules.clone();
+            let install_block = block.clone();
+            let step = begin_ready_block_split(
+                &self.access,
+                context.clone(),
+                install_source,
+                install_type_modules,
+                install_block,
+                ready,
+                8192,
+            )
+            .await?;
+            cancel_on_drop.0 = None;
+            return Ok(step);
         }
 
         // Contention exhausted the bounded split-compile retries — fall back
@@ -3999,14 +4001,6 @@ where
         }
         index += 1;
     }
-}
-
-/// The outcome of `begin_fragment_split`'s re-checkout install step.
-enum FragmentInstall {
-    Installed(ResidentWorkbenchStep),
-    /// The re-derived view no longer matches the one this compile ran
-    /// against; the caller must recompile against a fresh snapshot.
-    Stale,
 }
 
 /// A short-checkout snapshot for `begin_fragment_split`'s split compile:
@@ -11236,6 +11230,119 @@ mod request_tests {
              A's GHC compile",
             total.as_millis()
         );
+    }
+
+    /// `begin_fragment_split`'s install step must hand off to
+    /// `begin_ready_block_split` for a STEADY-STATE fragment (one compiled
+    /// after the resident machine is already bootstrapped) — the same
+    /// off-checkout JIT install `begin_prepared_cell_item` already uses for
+    /// a split cell's item, instead of running the Cranelift compile under
+    /// the checkout the way `begin_ready_block` does. `prepare_tools` (the
+    /// child spec installer wave 4 measured holding the machine for 272s of
+    /// JIT across 22 installs) is built on `begin_fragment_split`. This
+    /// must still commit the exact same output and bindings as the
+    /// original single-checkout `begin_fragment`, against an identically
+    /// warmed-up session — `begin_ready_block_split`'s own tests (e.g.
+    /// `stale_import_between_snapshot_and_revalidation_falls_back` in
+    /// tidepool-runtime) already cover that its JIT compile itself runs
+    /// off-checkout; this proves the swap did not change what
+    /// `begin_fragment_split` commits.
+    #[tokio::test]
+    async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
+        let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
+        let split_workbench = ResidentActorWorkbench::new(
+            split_machines,
+            split_source.clone(),
+            None,
+            None,
+            vec![],
+        );
+        let (mut direct_session, direct_context, direct_source, _direct_root) =
+            host_mount_fixture();
+
+        // A brand-new session's very first turn bootstraps the resident
+        // machine and has no split path at all (`ResidentSession::
+        // prepared_machine_ready`'s doc comment): warm the split side up
+        // with one throwaway fragment first, so the fragment under test
+        // exercises the split's STEADY-STATE install
+        // (`begin_ready_block_split`), not the one-time bootstrap install
+        // this change does not touch. The receipt text and installed
+        // binder names carry no generation number, so this warmup does not
+        // need a matching one on the direct (single-checkout) side.
+        let warmup_block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: "fragInstallWarmup <- pure (0 :: Int)".into(),
+        };
+        let warmup_verdict = TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec!["fragInstallWarmup".into()],
+            items: Vec::new(),
+        };
+        split_workbench
+            .begin_fragment_split(
+                split_context.clone(),
+                split_source.clone(),
+                Vec::new(),
+                warmup_block,
+                Some(warmup_verdict),
+            )
+            .await
+            .expect("warmup fragment installs");
+
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: "fragInstallOffCheckout <- pure (1 :: Int)".into(),
+        };
+        let verdict = TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec!["fragInstallOffCheckout".into()],
+            items: Vec::new(),
+        };
+        let split_step = split_workbench
+            .begin_fragment_split(
+                split_context,
+                split_source,
+                Vec::new(),
+                block.clone(),
+                Some(verdict.clone()),
+            )
+            .await
+            .expect("fragment installs through the post-bootstrap split");
+        let direct_step = begin_fragment(
+            &mut direct_session,
+            &direct_context,
+            &direct_source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            block,
+            None,
+            Some(&verdict),
+        )
+        .expect("single-checkout begin_fragment installs and runs");
+
+        let ResidentWorkbenchStep::Committed {
+            output: split_output,
+            installed_bindings: split_bindings,
+            ..
+        } = split_step
+        else {
+            panic!("post-bootstrap split fragment did not commit");
+        };
+        let ResidentWorkbenchStep::Committed {
+            output: direct_output,
+            installed_bindings: direct_bindings,
+            ..
+        } = direct_step
+        else {
+            panic!("single-checkout begin_fragment did not commit");
+        };
+        assert_eq!(split_output, direct_output);
+        assert_eq!(split_bindings, direct_bindings);
     }
 
     /// A declaration cell's own GHC validation runs off-checkout, against a
