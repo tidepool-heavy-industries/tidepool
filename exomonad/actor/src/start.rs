@@ -598,6 +598,8 @@ where
         gen: 1,
         verdict: None,
         target: None,
+        // A one-off reconstruction turn: no memo retention across cells.
+        session_id: None,
         retained_imports: &[],
     })
     .map_err(|failure| {
