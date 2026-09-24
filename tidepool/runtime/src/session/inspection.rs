@@ -1292,6 +1292,7 @@ mod tests {
             "module Expr where\n",
             "import BrowseFixture\n",
             "import qualified BrowseFixture as Alias\n",
+            "localPreambleValue = exportedValue\n",
         );
         let current = ScopeProvenance {
             scope: NameScope::Current,
@@ -1385,6 +1386,9 @@ mod tests {
         queries.push(InspectionQuery::TypeSearch("Public ->".into()));
         queries.push(InspectionQuery::TypeSearch("Public -> _".into()));
         queries.push(InspectionQuery::ScopeBrowse);
+        // A preamble declaration lives only in the typechecked query module;
+        // a request's `respond` is bound this way.
+        queries.push(InspectionQuery::Info("localPreambleValue".into()));
         let results = run_inspections(InspectionRequest {
             preamble,
             imports: "",
@@ -1401,7 +1405,7 @@ mod tests {
             module, entries, ..
         } = &results[22]
         else {
-            panic!("expected current-scope browse");
+            panic!("expected current-scope browse, got {:?}", results[22]);
         };
         assert!(module.is_empty());
         assert!(entries.iter().any(|entry| entry.name == "exportedValue"));
@@ -1413,6 +1417,11 @@ mod tests {
 
         assert!(results[0].render().contains("exportedValue :: Int"));
         assert!(results[1].render().contains("data Public"));
+        assert!(
+            results[23].render().contains("localPreambleValue :: Int"),
+            "{:?}",
+            results[23]
+        );
         assert!(matches!(results[2], InspectionResult::Rejected { .. }));
         assert_eq!(
             results[3],

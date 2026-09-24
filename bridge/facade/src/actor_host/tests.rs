@@ -3201,20 +3201,11 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
 }
 
 /// Companion to [`held_native_delivery_preserves_typed_request_bindings`]:
-/// `lookup` must select the same request-aware workbench `respond` cells
-/// do. `ResidentActorBoundary::Lookup`'s handler in `resolve_effect` now
-/// calls `active_workbench()` (the same selection `execute_workbench`
-/// uses, confirmed by `held_native_delivery_preserves_typed_request_bindings`
-/// passing for cell execution and by "not in scope as a name" — the new
-/// production wording from `lookup.rs`'s conversion — showing up in this
-/// test's own failure, so the fix's wording reaches this path). The
-/// self-hosted "lookup" tool call still answers "no match" here regardless,
-/// so something upstream of `resolve_effect`'s Lookup arm — most likely the
-/// tool dispatch compiled at `install_interactive_policy`'s
-/// `prepare_tools(...)` time, before the request activated — is not
-/// carrying the request-aware scope into the query. Root cause not found in
-/// this pass; ignored rather than left red. See the reply-bindings report.
-#[ignore = "lookup hosted-tool dispatch does not yet reach the request-aware workbench; respond cells do (see held_native_delivery_preserves_typed_request_bindings)"]
+/// `lookup` selects the same request-aware workbench `respond` cells do,
+/// and the extractor resolves the preamble's own declarations (where
+/// `respond`/`sessionReply`/`sessionInput` are bound) through the query
+/// module's typechecked environment, since that module is never loaded and
+/// `getInfo` alone cannot see its top level.
 #[tokio::test]
 async fn lookup_during_held_native_delivery_returns_respond_signature() {
     let mut campaign = test_campaign::TestCampaign::start().await;

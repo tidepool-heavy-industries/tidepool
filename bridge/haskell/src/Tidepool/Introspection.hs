@@ -38,7 +38,7 @@ import GHC.Core.TyCo.Tidy (tidyOpenType)
 import GHC.Core.Type (getTyVar_maybe, splitTyConApp_maybe, substTy)
 import GHC.Tc.Solver (tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
-import GHC.Tc.Types (TcGblEnv)
+import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env)
 import GHC.Tc.Utils.Monad (initTcWithGbl)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Data.FastString (mkFastString)
@@ -55,7 +55,8 @@ import GHC.Core.Multiplicity (scaledThing)
 import GHC.Core.TyCon (isAlgTyCon)
 import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (AltPpr (..), ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
-import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name (nameIsLocalOrFrom, nameModule_maybe, nameOccName)
+import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Name (isDataConName, isTyConName, isVarName)
 import GHC.Types.Name.Occurrence (isSymOcc, mkTyVarOcc, occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc)
@@ -821,14 +822,28 @@ visibleDisplay visible thing =
           ss_forall = ShowForAllWhen
         }
 
+-- | The query module is typechecked, never loaded, so 'getInfo' cannot see its
+-- own top-level binders: the preamble's declarations, including a pending
+-- request's @respond@/@sessionReply@/@sessionInput@. Those resolve through the
+-- typechecked module's own type environment instead, and report no defining
+-- module, because the generated query module is not one a cell can import.
 entriesFor :: (GhcMonad m) => AvailabilityContext -> [Name] -> [Name] -> m [InfoEntry]
 entriesFor context visible names = fmap concat $ forM names $ \name -> do
   found <- getInfo False name
-  case found of
+  let tcg = availabilityTcGblEnv context
+      local
+        | nameIsLocalOrFrom (tcg_mod tcg) name = lookupTypeEnv (tcg_type_env tcg) name
+        | otherwise = Nothing
+      resolved = case found of
+        Just (thing, _fixity, _instances, _families, _extra) -> Just (thing, False)
+        Nothing -> (\thing -> (thing, True)) <$> local
+  case resolved of
     Nothing -> pure []
-    Just (thing, _fixity, _instances, _families, _extra) ->
+    Just (thing, isLocal) ->
       let display = visibleDisplay visible thing
-          definingModule = moduleNameString . moduleName <$> nameModule_maybe name
+          definingModule
+            | isLocal = Nothing
+            | otherwise = moduleNameString . moduleName <$> nameModule_maybe name
        in do
           availability <- thingAvailability context thing
           pure
