@@ -603,6 +603,13 @@ async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
         pending.to_string().contains("ResponsePending"),
         "{pending:?}"
     );
+    // Carries the target's own progress (lifecycle, provider health, last
+    // activity, progress revision) as data, so a caller has something to
+    // look at besides "pending" again.
+    assert!(
+        pending.to_string().contains("state="),
+        "{pending:?}"
+    );
     let sent = dispatch_haskell_script(
         root.as_ref(),
         "Right clarification <- updateRequest answer \"Tabs must be clickable\"",
@@ -641,6 +648,10 @@ async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
     let pending = dispatch_haskell_script(root.as_ref(), "pollResponse answer").await;
     assert!(
         pending.to_string().contains("ResponsePending"),
+        "{pending:?}"
+    );
+    assert!(
+        pending.to_string().contains("state="),
         "{pending:?}"
     );
     // The backend seam owns the proof of input insertion. This test drives

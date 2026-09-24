@@ -13,6 +13,7 @@ module Tidepool.Agent.Reply.Internal
   , ProgressSink (..)
   , ProgressCursor (..)
   , ProgressState (..)
+  , PendingProgress (..)
   , reportRequestProgress
   , pollProgress
   , RequestUpdate
@@ -68,7 +69,14 @@ import Tidepool.Internal.ExitCell
   , newExitCell
   , readExitCell
   )
-import Tidepool.Effects.Core (GitOid, SubmissionObservation, WorktreeError, WorktreeReceipt)
+import Tidepool.Effects.Core
+  ( GitOid
+  , SubmissionObservation
+  , WorktreeError
+  , WorktreeReceipt
+  , AgentRosterState (..)
+  , ProviderHealth (..)
+  )
 
 newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
@@ -102,6 +110,21 @@ data ProgressState progress
   | ProgressUpdate ProgressCursor progress
   | ProgressClosed
   | ProgressRejected ReplyError
+  deriving (Show, Eq)
+
+-- | Everything the host already tracks about the producing actor of one
+-- still-pending request or watch dependency, carried as data so a caller can
+-- tell whether work is moving without polling again: the same lifecycle and
+-- provider evidence 'Tidepool.Actors.Internal.Agent.observeAgent' reports,
+-- not a second tracker. 'pendingWatched' is set when a registered watch will
+-- wake the caller once this settles.
+data PendingProgress = PendingProgress
+  { pendingActorState :: AgentRosterState
+  , pendingProviderHealth :: ProviderHealth
+  , pendingLastActivityUnixMs :: Maybe Int
+  , pendingProgressRevision :: Maybe Int
+  , pendingWatched :: Bool
+  }
   deriving (Show, Eq)
 
 -- | An observation of presentation for one exact request, not a new assignment.
@@ -171,8 +194,10 @@ data ResponseResult result = ResponseResult
 data ResponseState result
   = -- | The target is presented with the request and has an observed
     -- provider turn underway. Distinct from 'ResponseStarting', which covers
-    -- the admitted-but-not-yet-running interval.
-    ResponsePending
+    -- the admitted-but-not-yet-running interval. Carries the producing
+    -- actor's own progress, so a re-poll has nothing to add that this did
+    -- not already carry.
+    ResponsePending PendingProgress
   | ResponseCancellationPending CancellationReason
   | ResponseReady (ResponseResult result)
   | ResponseUnavailable ResponseFailure
@@ -216,7 +241,7 @@ data ReplyState
   deriving (Show, Eq)
 
 data RawResponseObservation
-  = RawResponsePending
+  = RawResponsePending PendingProgress
   | RawResponseCancellationPending CancellationReason
   | RawResponseReady
   | RawResponseUnavailable ResponseFailure
@@ -320,7 +345,7 @@ pollResponse
 pollResponse response@(Response (RequestId request) _ _ _) = do
   observation <- send (ObserveResponseWith request)
   pure $ case observation of
-    RawResponsePending -> ResponsePending
+    RawResponsePending progress -> ResponsePending progress
     RawResponseCancellationPending reason -> ResponseCancellationPending reason
     RawResponseReady ->
       case readResponse response of

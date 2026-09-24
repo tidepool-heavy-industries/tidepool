@@ -88,9 +88,31 @@ pub enum ResponseFailure {
     SettlementFailed(String),
 }
 
+/// The producing actor's own progress as of one poll, carried on a
+/// still-pending response or watch observation. Reuses
+/// `ActorRuntimeObservation`, the same evidence `AgentInspection` already
+/// reports for `observeAgent`; this is not a second tracker, only another
+/// projection of it. A caller holding this has nothing a re-poll would add:
+/// `watched` already says whether a registered watch will wake it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProgress {
+    pub actor_terminal: Option<ActorTerminal>,
+    pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
+    /// The producing actor's most recently observed provider activity
+    /// (its latest recorded usage sample), if any has been observed yet.
+    pub last_activity_unix_ms: Option<u64>,
+    /// The current revision of this request's `Progress` channel, if the
+    /// target has published to it at least once.
+    pub progress_revision: Option<u64>,
+    /// A registered watch depends on this exact request (or, for a watch
+    /// observation, this observation itself is that registration) and will
+    /// wake its owner when the dependency settles.
+    pub watched: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseObservation {
-    Pending,
+    Pending(PendingProgress),
     CancellationPending(CancellationReason),
     Ready,
     Unavailable(ResponseFailure),
@@ -179,7 +201,7 @@ pub enum WatchStateProjection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchObservation {
-    Pending,
+    Pending(PendingProgress),
     Ready(Vec<(RequestId, ResponseFailure)>),
     Unavailable {
         request: RequestId,
@@ -1022,6 +1044,18 @@ impl RequestRegistry {
         state.requests.get(&request).map(|record| record.target)
     }
 
+    /// The target actor of one still-pending watch's first unsettled
+    /// dependency, for callers correlating a pending watch observation with
+    /// that actor's runtime progress. `None` for a watch that is not
+    /// currently pending, or has no unsettled dependency (should not arise
+    /// for a pending watch; see `first_pending_dependency`).
+    pub(crate) fn watch_pending_target(&self, watch: WatchId) -> Option<ActorRef> {
+        let state = self.state.lock();
+        let record = state.watches.get(&watch)?;
+        let request = first_pending_dependency(&state, record)?;
+        state.requests.get(&request).map(|record| record.target)
+    }
+
     pub(crate) fn observe_response(
         &self,
         _owner: ActorRef,
@@ -1037,7 +1071,7 @@ impl RequestRegistry {
                 TargetState::CancellationRequested { reason, .. } => {
                     ResponseObservation::CancellationPending(reason)
                 }
-                _ => ResponseObservation::Pending,
+                _ => ResponseObservation::Pending(base_pending_progress(&state, request)),
             },
         })
     }
@@ -1441,7 +1475,18 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
         Ok(match &record.state {
-            WatchState::Pending => WatchObservation::Pending,
+            WatchState::Pending => WatchObservation::Pending(PendingProgress {
+                actor_terminal: None,
+                provider_turn: None,
+                last_activity_unix_ms: None,
+                progress_revision: first_pending_dependency(&state, record)
+                    .and_then(|request| state.requests.get(&request))
+                    .and_then(|dependency_record| dependency_record.progress.as_ref())
+                    .map(|snapshot| snapshot.revision),
+                // Polling this observation is itself the registered watch;
+                // its own settlement always wakes the caller.
+                watched: true,
+            }),
             WatchState::Ready => WatchObservation::Ready(
                 record
                     .dependencies
@@ -1588,6 +1633,45 @@ impl RequestRegistry {
         transition(record);
         reevaluate_watches(&mut state)
     }
+}
+
+/// The registry-owned half of one request's `PendingProgress`: whether a
+/// still-pending registered watch depends on it, and its `Progress` channel's
+/// current revision, if it has published at least once. The producing
+/// actor's own lifecycle and last activity are filled in afterward from the
+/// actor runtime observation, which this registry does not hold.
+fn base_pending_progress(state: &RequestStateTable, request: RequestId) -> PendingProgress {
+    PendingProgress {
+        actor_terminal: None,
+        provider_turn: None,
+        last_activity_unix_ms: None,
+        progress_revision: state
+            .requests
+            .get(&request)
+            .and_then(|record| record.progress.as_ref())
+            .map(|snapshot| snapshot.revision),
+        watched: request_has_pending_watcher(state, request),
+    }
+}
+
+/// The first dependency of one watch whose own request has not yet settled,
+/// in dependency-list order. A still-pending watch always has at least one:
+/// once every dependency settles the watch itself becomes `Ready`.
+fn first_pending_dependency(state: &RequestStateTable, watch: &WatchRecord) -> Option<RequestId> {
+    watch.dependencies.iter().find_map(|dependency| {
+        let record = state.requests.get(&dependency.request)?;
+        (record.owner_state == OwnerState::Observing).then_some(dependency.request)
+    })
+}
+
+fn request_has_pending_watcher(state: &RequestStateTable, request: RequestId) -> bool {
+    state.watches.values().any(|watch| {
+        watch.state == WatchState::Pending
+            && watch
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.request == request)
+    })
 }
 
 fn is_owner_terminal(state: &OwnerState) -> bool {
@@ -1947,10 +2031,10 @@ mod tests {
         assert_eq!(notices[0].transition, SettlementTransition::Ready);
         assert_eq!(notices[1].request, failed);
         assert_eq!(notices[1].label, "failed");
-        assert_eq!(
+        assert!(matches!(
             notices[1].transition,
             SettlementTransition::Unavailable(ResponseFailure::TargetUnavailable)
-        );
+        ));
         assert!(registry.take_settlement_notifications().is_empty());
     }
 
@@ -1994,13 +2078,13 @@ mod tests {
         registry.present(target, request).unwrap();
         assert_eq!(authorize(target), Ok(()));
         assert_eq!(authorize(owner), Err(ReplyError::Unauthorized));
-        assert_eq!(
+        assert!(matches!(
             authorize(ActorRef {
                 id: target.id,
                 incarnation: Incarnation(2)
             }),
             Err(ReplyError::WrongIncarnation)
-        );
+        ));
         registry.abandon_response(owner, request).unwrap();
         assert_eq!(authorize(target), Err(ReplyError::AlreadySettled));
     }
@@ -2067,7 +2151,7 @@ mod tests {
                         .unwrap();
                     assert!(matches!(
                         registry.observe_watch(owner, watch),
-                        Ok(WatchObservation::Pending)
+                        Ok(WatchObservation::Pending(_))
                     ));
                     registry
                         .begin_cancellation_acknowledgement(target, request)
@@ -2113,7 +2197,7 @@ mod tests {
         assert!(initial.is_empty());
         assert!(matches!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Pending)
+            Ok(WatchObservation::Pending(_))
         ));
         let (foreign_watch, _) = registry
             .register_watch_requirements(
@@ -2353,10 +2437,10 @@ mod tests {
             registry.observe_response(owner, leaked),
             Err(ReplyError::Stale)
         );
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(owner, committed),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
         assert_eq!(registry.abort_unsubmitted(other_owner).0, vec![unrelated]);
         assert!(registry.abort_unsubmitted(owner).0.is_empty());
     }
@@ -2457,10 +2541,10 @@ mod tests {
             registry.begin_reply(restarted, request),
             Err(ReplyError::WrongIncarnation)
         );
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(owner, request),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
     }
 
     #[test]
@@ -2823,19 +2907,19 @@ mod tests {
         let request = registry.reserve(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(intruder, request),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
         let (watch, _) = registry.register_watch(intruder, vec![request]).unwrap();
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(intruder, watch),
-            Ok(WatchObservation::Pending)
-        );
-        assert_eq!(
+            Ok(WatchObservation::Pending(_))
+        ));
+        assert!(matches!(
             registry.observe_reply(intruder, request),
             Ok(ReplyObservation::Open)
-        );
+        ));
         assert_eq!(
             registry.begin_reply(intruder, request),
             Err(ReplyError::Unauthorized)
@@ -2939,10 +3023,10 @@ mod tests {
             .unwrap();
         registry.begin_reply(target, completed).unwrap();
         assert!(registry.finish_reply(completed).is_empty());
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(child, watch),
-            Ok(WatchObservation::Pending)
-        );
+            Ok(WatchObservation::Pending(_))
+        ));
 
         let (_, notices) = registry.forget_response(owner, completed).unwrap();
         assert_eq!(notices.len(), 1);
@@ -3134,9 +3218,11 @@ mod tests {
         assert_eq!(outcome.forgotten_watches, vec![ready_watch]);
         assert_eq!(outcome.pending_responses, vec![pending]);
         assert!(outcome.pending_watches.is_empty());
-        assert_eq!(
-            registry.observe_response(owner, outside),
-            Ok(ResponseObservation::Pending),
+        assert!(
+            matches!(
+                registry.observe_response(owner, outside),
+                Ok(ResponseObservation::Pending(_))
+            ),
             "another campaign remains untouched"
         );
     }

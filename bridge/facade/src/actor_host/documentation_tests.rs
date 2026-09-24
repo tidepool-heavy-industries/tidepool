@@ -847,7 +847,16 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
         )
         .await;
     let pending = committed(root.as_ref(), "state <- pollWatch ready\ninspectFull state").await;
-    assert_eq!(pending["items"][1]["output"], "WatchPending");
+    let rendered = pending["items"][1]["output"].as_str().unwrap();
+    // A pending watch observation is itself the registered wake: its
+    // `PendingProgress` carries the dependency's lifecycle/provider evidence
+    // and `pendingWatched = True`, so `inspectFull` shows there is nothing a
+    // re-poll would add.
+    assert!(rendered.contains("WatchPending"), "{rendered}");
+    assert!(rendered.contains("PendingProgress"), "{rendered}");
+    assert!(rendered.contains("pendingActorState"), "{rendered}");
+    assert!(rendered.contains("pendingProviderHealth"), "{rendered}");
+    assert!(rendered.contains("pendingWatched = True"), "{rendered}");
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
@@ -2560,6 +2569,12 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
+    // Carries the producing actor's own progress, so this poll answers "is
+    // it moving" without a second round trip.
+    assert!(
+        pending.to_string().contains("state="),
+        "{pending}"
+    );
     let delivery = campaign
         .next_deployment(
             "decision request update",

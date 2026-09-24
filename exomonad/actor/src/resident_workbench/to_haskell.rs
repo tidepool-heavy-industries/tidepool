@@ -8,7 +8,7 @@
 
 use super::*;
 
-pub(super) fn visit_named(
+pub(crate) fn visit_named(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     module: &str,
@@ -28,7 +28,7 @@ pub(super) fn visit_named(
     visitor.end_constructor()
 }
 
-pub(super) fn actor_haskell_int(value: u64, label: &str) -> Result<i64, BridgeError> {
+pub(crate) fn actor_haskell_int(value: u64, label: &str) -> Result<i64, BridgeError> {
     i64::try_from(value)
         .map_err(|_| BridgeError::UnsupportedType(format!("{label} exceeds Haskell Int")))
 }
@@ -40,6 +40,64 @@ pub(super) fn visit_core(
     fields: impl FnOnce(&mut dyn HaskellVisitor) -> Result<(), BridgeError>,
 ) -> Result<(), BridgeError> {
     visit_named(table, visitor, "Tidepool.Effects.Core", name, fields)
+}
+
+/// One actor's `AgentRosterState`, derived from its retained exit terminal.
+/// Shared by `AgentRosterEntry` (the `observeAgent` roster) and
+/// `PendingProgress` (a still-pending response or watch observation) so both
+/// project the same lifecycle evidence instead of each deriving their own.
+pub(crate) fn visit_agent_roster_state(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    terminal: Option<&crate::ActorTerminal>,
+) -> Result<(), BridgeError> {
+    match terminal {
+        None => visit_core(table, visitor, "RosterRunning", |_| Ok(())),
+        Some(t) => match t.kind {
+            crate::ActorExitKind::Completed => visit_core(table, visitor, "RosterStopped", |_| Ok(())),
+            crate::ActorExitKind::Failed => {
+                visit_core(table, visitor, "RosterFailed", |v| t.summary.visit(table, v))
+            }
+            crate::ActorExitKind::Cancelled => {
+                visit_core(table, visitor, "RosterCancelled", |v| t.summary.visit(table, v))
+            }
+        },
+    }
+}
+
+/// One actor's `ProviderHealth`, derived from its latest observed provider
+/// turn. Shared by `AgentRosterEntry` and `PendingProgress`; see
+/// `visit_agent_roster_state`.
+pub(crate) fn visit_provider_health(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    provider_turn: Option<&exomonad_model::ProviderTurnObservation>,
+) -> Result<(), BridgeError> {
+    match provider_turn.map(|t| &t.state) {
+        None => visit_core(table, visitor, "ProviderUnknown", |_| Ok(())),
+        Some(exomonad_model::ProviderTurnState::Active) => {
+            visit_core(table, visitor, "ProviderActive", |_| Ok(()))
+        }
+        Some(exomonad_model::ProviderTurnState::Succeeded) => {
+            visit_core(table, visitor, "ProviderSucceeded", |_| Ok(()))
+        }
+        Some(exomonad_model::ProviderTurnState::Interrupted) => {
+            visit_core(table, visitor, "ProviderInterrupted", |_| Ok(()))
+        }
+        Some(exomonad_model::ProviderTurnState::Failed(f)) => {
+            visit_core(table, visitor, "ProviderFailed", |v| match f {
+                exomonad_model::ProviderFailure::RequestRejected => {
+                    visit_core(table, v, "RequestRejected", |_| Ok(()))
+                }
+                exomonad_model::ProviderFailure::TransportFailed => {
+                    visit_core(table, v, "TransportFailed", |_| Ok(()))
+                }
+                exomonad_model::ProviderFailure::Other(d) => {
+                    visit_core(table, v, "OtherProviderFailure", |v| d.visit(table, v))
+                }
+            })
+        }
+    }
 }
 
 pub(super) struct RouteStateAnswer(
@@ -567,49 +625,8 @@ impl ToHaskell for AgentRosterProjection {
                 .map(|x| actor_haskell_int(x.incarnation.0, "context parent incarnation"))
                 .transpose()?
                 .visit(table, visitor)?;
-            match &self.terminal {
-                None => visit_core(table, visitor, "RosterRunning", |_| Ok(()))?,
-                Some(t) => match t.kind {
-                    crate::ActorExitKind::Completed => {
-                        visit_core(table, visitor, "RosterStopped", |_| Ok(()))?
-                    }
-                    crate::ActorExitKind::Failed => {
-                        visit_core(table, visitor, "RosterFailed", |v| {
-                            t.summary.visit(table, v)
-                        })?
-                    }
-                    crate::ActorExitKind::Cancelled => {
-                        visit_core(table, visitor, "RosterCancelled", |v| {
-                            t.summary.visit(table, v)
-                        })?
-                    }
-                },
-            }
-            match self.runtime.provider_turn.as_ref().map(|t| &t.state) {
-                None => visit_core(table, visitor, "ProviderUnknown", |_| Ok(()))?,
-                Some(exomonad_model::ProviderTurnState::Active) => {
-                    visit_core(table, visitor, "ProviderActive", |_| Ok(()))?
-                }
-                Some(exomonad_model::ProviderTurnState::Succeeded) => {
-                    visit_core(table, visitor, "ProviderSucceeded", |_| Ok(()))?
-                }
-                Some(exomonad_model::ProviderTurnState::Interrupted) => {
-                    visit_core(table, visitor, "ProviderInterrupted", |_| Ok(()))?
-                }
-                Some(exomonad_model::ProviderTurnState::Failed(f)) => {
-                    visit_core(table, visitor, "ProviderFailed", |v| match f {
-                        exomonad_model::ProviderFailure::RequestRejected => {
-                            visit_core(table, v, "RequestRejected", |_| Ok(()))
-                        }
-                        exomonad_model::ProviderFailure::TransportFailed => {
-                            visit_core(table, v, "TransportFailed", |_| Ok(()))
-                        }
-                        exomonad_model::ProviderFailure::Other(d) => {
-                            visit_core(table, v, "OtherProviderFailure", |v| d.visit(table, v))
-                        }
-                    })?
-                }
-            }
+            visit_agent_roster_state(table, visitor, self.terminal.as_ref())?;
+            visit_provider_health(table, visitor, self.runtime.provider_turn.as_ref())?;
             self.runtime
                 .provider_turn
                 .as_ref()

@@ -1,7 +1,7 @@
 guideWatchTypes :: Watch result -> EventWatch -> (Watch result, EventWatch)
 guideWatchTypes readiness event = (readiness, event)
 guideIsUnavailable :: WatchState result -> Bool
-guideIsUnavailable WatchPending = False
+guideIsUnavailable (WatchPending _) = False
 guideIsUnavailable (WatchReady _) = False
 guideIsUnavailable (WatchUnavailable _) = True
 let failureLabel = [label|guide-unavailable|]

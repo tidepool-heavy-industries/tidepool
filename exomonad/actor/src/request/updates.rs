@@ -479,10 +479,10 @@ mod tests {
         let (update, _) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             registry.observe_update(target, update),
             Ok(RequestUpdateState::UpdateQueued)
-        );
+        ));
         assert_eq!(
             registry.observe_update(restarted, update),
             Ok(RequestUpdateState::UpdateQueued)
@@ -516,25 +516,25 @@ mod tests {
             registry.begin_reply(target, request),
             Err(ReplyError::UpdatePending)
         );
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(owner, request),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
         presentation.presented();
-        assert_eq!(
+        assert!(matches!(
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdatePresented)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             registry.observe_response(owner, request),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
         registry.begin_reply(target, request).unwrap();
         registry.finish_reply(request);
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Ready)
-        );
+        ));
     }
 
     #[test]
@@ -779,10 +779,10 @@ mod tests {
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdatePresented)
         );
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(owner, request),
-            Ok(ResponseObservation::Pending)
-        );
+            Ok(ResponseObservation::Pending(_))
+        ));
         registry.begin_reply(target, request).unwrap();
     }
 

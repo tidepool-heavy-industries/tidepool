@@ -119,8 +119,9 @@ pub use request::{
     DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, ReplyError,
     ReplyObservation, RequestCancellationNotification, RequestDeadline, RequestId,
     RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation,
-    RequestUpdateReconciler, RequestUpdateState, ResponseFailure, ResponseObservation,
-    SettlementNotification, SettlementTransition, UpdateReconciliationError, WatchId,
+    PendingProgress, RequestUpdateReconciler, RequestUpdateState, ResponseFailure,
+    ResponseObservation, SettlementNotification, SettlementTransition,
+    UpdateReconciliationError, WatchId,
     WatchNotification, WatchObservation, WatchStateProjection, WatchTransition,
 };
 pub use resident_actor::{

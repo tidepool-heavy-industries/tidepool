@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod structured_introspection;
-mod to_haskell;
+pub(crate) mod to_haskell;
 
 use structured_introspection::StructuredIntrospectionAnswer;
 #[cfg(test)]

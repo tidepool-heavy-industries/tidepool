@@ -3,10 +3,47 @@ use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
-use crate::{
-    ActorRef, CancellationReason, ReplyError, ReplyObservation, RequestId, ResponseFailure,
-    ResponseObservation, WatchId, WatchObservation,
+use crate::resident_workbench::to_haskell::{
+    actor_haskell_int, visit_agent_roster_state, visit_named, visit_provider_health,
 };
+use crate::{
+    ActorRef, CancellationReason, PendingProgress, ReplyError, ReplyObservation, RequestId,
+    ResponseFailure, ResponseObservation, WatchId, WatchObservation,
+};
+
+/// The wire counterpart of `Tidepool.Agent.Reply.Internal.PendingProgress`:
+/// the producing actor's lifecycle and provider health project through the
+/// same `visit_agent_roster_state`/`visit_provider_health` helpers
+/// `AgentRosterEntry` uses for `observeAgent`, so a still-pending response
+/// or watch carries the identical evidence, not a second tracker.
+impl tidepool_bridge::sealed::ToHaskellSealed for PendingProgress {}
+impl ToHaskell for PendingProgress {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        visit_named(
+            table,
+            visitor,
+            "Tidepool.Agent.Reply.Internal",
+            "PendingProgress",
+            |visitor| {
+                visit_agent_roster_state(table, visitor, self.actor_terminal.as_ref())?;
+                visit_provider_health(table, visitor, self.provider_turn.as_ref())?;
+                self.last_activity_unix_ms
+                    .map(|value| actor_haskell_int(value, "last activity"))
+                    .transpose()?
+                    .visit(table, visitor)?;
+                self.progress_revision
+                    .map(|value| actor_haskell_int(value, "progress revision"))
+                    .transpose()?
+                    .visit(table, visitor)?;
+                self.watched.visit(table, visitor)
+            },
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromHaskell)]
 #[allow(
@@ -282,7 +319,9 @@ impl ToHaskell for RequestAnswer {
             };
         }
         match self {
-            Self::Response(Ok(ResponseObservation::Pending)) => emit!("RawResponsePending"),
+            Self::Response(Ok(ResponseObservation::Pending(progress))) => {
+                emit!("RawResponsePending", progress)
+            }
             Self::Response(Ok(ResponseObservation::CancellationPending(reason))) => {
                 emit!("RawResponseCancellationPending", reason)
             }
@@ -330,7 +369,9 @@ impl ToHaskell for RequestAnswer {
             }
             Self::Reply(Ok(ReplyObservation::Closed)) => emit!("RawReplyClosed"),
             Self::Reply(Err(error)) => emit!("RawReplyRejected", error),
-            Self::Watch(Ok(WatchObservation::Pending)) => emit!("RawWatchPending"),
+            Self::Watch(Ok(WatchObservation::Pending(progress))) => {
+                emit!("RawWatchPending", progress)
+            }
             Self::Watch(Ok(WatchObservation::Ready(failures))) => emit!("RawWatchReady", failures),
             Self::Watch(Ok(WatchObservation::Unavailable { request, failure })) => {
                 emit!("RawWatchUnavailable", request, failure)

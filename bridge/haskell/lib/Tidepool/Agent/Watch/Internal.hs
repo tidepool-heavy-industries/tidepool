@@ -49,6 +49,7 @@ import Tidepool.Agent.Reply.Internal
   , Progress (..)
   , ProgressCursor (..)
   , ProgressState (..)
+  , PendingProgress (..)
   , RequestId (..)
   , Response
   , ResponseFailure
@@ -118,13 +119,16 @@ data WatchFailure
   deriving (Show, Eq)
 
 data WatchState result
-  = WatchPending
+  = -- | Carries the still-pending dependency's producing-actor progress, so
+    -- a re-poll after 'WatchPending' has nothing to add: the registered
+    -- watch already wakes the caller when it settles.
+    WatchPending PendingProgress
   | WatchReady result
   | WatchUnavailable WatchFailure
   deriving (Show, Eq, Functor)
 
 data RawWatchObservation
-  = RawWatchPending
+  = RawWatchPending PendingProgress
   | RawWatchReady [(Int, ResponseFailure)]
   | RawWatchUnavailable RequestId ResponseFailure
   | RawWatchRejected ReplyError
@@ -222,7 +226,7 @@ pollWatch
 pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
   observation <- send (ObserveWatchWith watchId)
   case observation of
-    RawWatchPending -> pure WatchPending
+    RawWatchPending progress -> pure (WatchPending progress)
     RawWatchReady rawFailures -> do
       captured <- observe watchId (map (\(request, failure) -> (RequestId request, failure)) rawFailures)
       case captured of
@@ -266,7 +270,7 @@ route awaiting@(Await groups _) callback = do
         case observed of
           WatchReady result -> callback result
           WatchUnavailable failure -> error (show failure)
-          WatchPending -> error "route ran before its dependency was ready"
+          WatchPending _ -> error "route ran before its dependency was ready"
   Route <$> case flattenSingletons groups of
     Just dependencies -> send (RegisterRouteWith "route" entry dependencies)
     Nothing -> send (RegisterRouteGroupsWith "route" entry groups)

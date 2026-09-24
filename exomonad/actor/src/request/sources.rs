@@ -536,14 +536,14 @@ mod tests {
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(predecessor, vec![request]).unwrap();
         registry.transfer_owner(predecessor, &successor);
-        assert_eq!(
+        assert!(matches!(
             registry.observe_response(predecessor, request),
-            Ok(super::super::ResponseObservation::Pending)
-        );
-        assert_eq!(
+            Ok(super::super::ResponseObservation::Pending(_))
+        ));
+        assert!(matches!(
             registry.observe_watch(predecessor, watch),
-            Ok(super::super::WatchObservation::Pending)
-        );
+            Ok(super::super::WatchObservation::Pending(_))
+        ));
         assert_eq!(registry.state.lock().requests[&request].target, target);
         registry.begin_reply(target, request).unwrap();
         let notices = registry.finish_reply(request);

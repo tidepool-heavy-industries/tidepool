@@ -81,7 +81,7 @@ workSummary observed = Text.unlines
   , "Definitions: " <> observedDefinition observed
   , "Owner: " <> shown (observedOwner observed) <> "; visible: " <> shown (observedOwnerVisible observed)
   , "Outcome: " <> case observedResult observed of
-      ResponsePending -> "pending"
+      ResponsePending _ -> "pending"
       ResponseCancellationPending reason -> "cancellation pending: " <> shown reason
       ResponseUnavailable failure -> "unavailable: " <> shown failure
       ResponseReady result -> deliverySummary (responseValue result)

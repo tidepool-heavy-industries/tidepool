@@ -258,8 +258,31 @@ responseWorktreeSummary (WorktreeObserved _ submitted observation) =
       <> " ignored=" <> counts dirty.ignoredExcluded
       <> maybe "" (\operation -> " operation=" <> Text.pack (show operation)) working.operation
 
+-- | The producing actor's lifecycle, provider health, last-activity
+-- timestamp and progress revision, plus the wake clause when a registered
+-- watch will already resume the caller. All data; a re-poll has nothing to
+-- add that this did not already carry.
+instance WorkbenchDisplay PendingProgress where
+  workbenchDisplay progress =
+    ( Text.intercalate " "
+        [ "state=" <> Text.pack (show (pendingActorState progress))
+        , "health=" <> Text.pack (show (pendingProviderHealth progress))
+        , "lastActivityUnixMs=" <> Text.pack (show (pendingLastActivityUnixMs progress))
+        , "progressRevision=" <> Text.pack (show (pendingProgressRevision progress))
+        ]
+        <> wakeClause (pendingWatched progress)
+    , False
+    )
+
+wakeClause :: Bool -> Text
+wakeClause True =
+  " · a registered watch wakes this turn when this settles; ending the turn is how to wait for it"
+wakeClause False = ""
+
 instance WorkbenchDisplay (ResponseState a) where
-  workbenchDisplay ResponsePending = ("ResponsePending", False)
+  workbenchDisplay (ResponsePending progress) =
+    let (text, _) = workbenchDisplay progress
+     in ("ResponsePending · " <> text, False)
   workbenchDisplay (ResponseCancellationPending reason) =
     let (text, omitted) = workbenchDisplay reason
      in ("ResponseCancellationPending · " <> text, omitted)
@@ -270,7 +293,9 @@ instance WorkbenchDisplay (ResponseState a) where
   workbenchDisplay (ResponseStarting detail) = ("starting: " <> detail, False)
 
 instance WorkbenchDisplay (WatchState a) where
-  workbenchDisplay WatchPending = ("WatchPending", False)
+  workbenchDisplay (WatchPending progress) =
+    let (text, _) = workbenchDisplay progress
+     in ("WatchPending · " <> text, False)
   workbenchDisplay (WatchReady _) = ("WatchReady", True)
   workbenchDisplay (WatchUnavailable reason) =
     let (text, omitted) = workbenchDisplay reason
@@ -400,7 +425,7 @@ instance Display a => Display (ResponseResult a) where
 
 instance Display a => Display (ResponseState a) where
   displayTree = displayTreePrec 0
-  displayTreePrec _ ResponsePending = TextLeaf "ResponsePending"
+  displayTreePrec precedence (ResponsePending progress) = application precedence "ResponsePending" [displayTreePrec 11 progress]
   displayTreePrec precedence (ResponseCancellationPending reason) = application precedence "ResponseCancellationPending" [displayTreePrec 11 reason]
   displayTreePrec precedence (ResponseReady value) = application precedence "ResponseReady" [displayTreePrec 11 value]
   displayTreePrec precedence (ResponseUnavailable reason) = application precedence "ResponseUnavailable" [displayTreePrec 11 reason]
@@ -408,7 +433,7 @@ instance Display a => Display (ResponseState a) where
 
 instance Display a => Display (WatchState a) where
   displayTree = displayTreePrec 0
-  displayTreePrec _ WatchPending = TextLeaf "WatchPending"
+  displayTreePrec precedence (WatchPending progress) = application precedence "WatchPending" [displayTreePrec 11 progress]
   displayTreePrec precedence (WatchReady value) = application precedence "WatchReady" [displayTreePrec 11 value]
   displayTreePrec precedence (WatchUnavailable reason) = application precedence "WatchUnavailable" [displayTreePrec 11 reason]
 

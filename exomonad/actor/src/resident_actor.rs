@@ -327,33 +327,86 @@ fn actor_in_tree(
 
 /// Refines a bare `Pending` observation into `Starting` while the host is
 /// still launching the request target's provider application (the host's
-/// `launch_pending` phase on the target's runtime observation). A target with
-/// no launch in progress stays `Pending`.
+/// `launch_pending` phase on the target's runtime observation); otherwise
+/// fills its `PendingProgress` with that same target's current lifecycle,
+/// provider health, and last observed activity, so a caller holding the
+/// result has nothing a re-poll would add.
 fn starting_observation<H, O>(
     environment: &ResidentEnvironment<H, O>,
     request: crate::RequestId,
     observation: crate::ResponseObservation,
 ) -> crate::ResponseObservation {
-    if observation != crate::ResponseObservation::Pending {
+    let crate::ResponseObservation::Pending(base) = observation else {
         return observation;
-    }
+    };
     let Some(target) = environment.requests.target_for(request) else {
-        return observation;
+        return crate::ResponseObservation::Pending(base);
     };
-    let phase = {
-        let records = environment.actors.lock();
-        let Some(record) = records.get(&target) else {
-            return observation;
-        };
-        record.runtime_observation.snapshot().launch_pending
+    enrich_pending_progress(environment, target, base)
+}
+
+/// Fills in the actor-runtime half of `PendingProgress` (lifecycle, provider
+/// health, last activity) for the given target, leaving the registry-owned
+/// half (`progress_revision`, `watched`) from `base` untouched. Refines to
+/// `Starting` instead while the host is still launching the target's
+/// provider application.
+fn enrich_pending_progress<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    target: crate::ActorRef,
+    base: crate::PendingProgress,
+) -> crate::ResponseObservation {
+    let records = environment.actors.lock();
+    let Some(record) = records.get(&target) else {
+        return crate::ResponseObservation::Pending(base);
     };
-    match phase {
-        Some(phase) => crate::ResponseObservation::Starting(format!(
+    let runtime = record.runtime_observation.snapshot();
+    if let Some(phase) = &runtime.launch_pending {
+        return crate::ResponseObservation::Starting(format!(
             "actor {}@{} admitted; provider not started ({phase})",
             target.id.0, target.incarnation.0
-        )),
-        None => observation,
+        ));
     }
+    crate::ResponseObservation::Pending(crate::PendingProgress {
+        actor_terminal: record.terminal.clone(),
+        provider_turn: runtime.provider_turn.clone(),
+        last_activity_unix_ms: runtime
+            .provider_usage
+            .last()
+            .map(|sample| sample.observed_at_unix_ms),
+        ..base
+    })
+}
+
+/// The watch analogue of `starting_observation`: fills a pending watch
+/// observation's `PendingProgress` with the runtime state of its first
+/// unsettled dependency's target actor. A watch has no launch-phase
+/// refinement of its own; a dependency still launching simply reports that
+/// actor's current lifecycle like any other pending target.
+fn watch_pending_observation<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    watch: crate::WatchId,
+    observation: crate::WatchObservation,
+) -> crate::WatchObservation {
+    let crate::WatchObservation::Pending(base) = observation else {
+        return observation;
+    };
+    let Some(target) = environment.requests.watch_pending_target(watch) else {
+        return crate::WatchObservation::Pending(base);
+    };
+    let records = environment.actors.lock();
+    let Some(record) = records.get(&target) else {
+        return crate::WatchObservation::Pending(base);
+    };
+    let runtime = record.runtime_observation.snapshot();
+    crate::WatchObservation::Pending(crate::PendingProgress {
+        actor_terminal: record.terminal.clone(),
+        provider_turn: runtime.provider_turn.clone(),
+        last_activity_unix_ms: runtime
+            .provider_usage
+            .last()
+            .map(|sample| sample.observed_at_unix_ms),
+        ..base
+    })
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -3515,7 +3568,10 @@ where
                 let observation = self
                     .environment
                     .requests
-                    .observe_watch(context.actor, poll.watch);
+                    .observe_watch(context.actor, poll.watch)
+                    .map(|observation| {
+                        watch_pending_observation(&self.environment, poll.watch, observation)
+                    });
                 self.environment
                     .runner
                     .resume_watch_observation(context.clone(), poll.continuation, observation)
