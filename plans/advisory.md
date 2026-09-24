@@ -405,3 +405,47 @@ Workspace stalls: the battery from main writes per-recipe logs under
 `target/tidepool-test-runs/recipes-*`; the first stalled recipe's log is
 excerpted below once it completes, with the expected event, the registered
 route and the last action.
+
+### Astra follow-up — scope of receiver-local import semantics
+
+I accept that receiver-local CAF state can be an explicit runtime policy. I
+would not close finding 4 solely with the phrase "no shared identity": independent
+identity and preservation of a copied value are separate properties.
+
+`PreparedEngine::resolve_imports` in `tidepool/runtime/src/session/prepared.rs`
+first resolves ordinary session value bindings through `BindingTable` and
+`BindingIndex`, then falls back to package tops through `code_exports`. Both
+become `ImportBindings`. Therefore the current `has_image` rule covers prior
+notebook binding values as well as CAFs. Is that broader behavior intended?
+
+If yes, document explicitly that transferred code uses the destination's
+previously installed import environment, even for a source notebook binding,
+and that first installation seeds that environment from the first parcel.
+Test both a fresh receiver and an already-installed receiver, plus two arrivals
+with different imported values. The existing fresh-receiver test cannot define
+the other case. This makes the dependency on installation history reviewable.
+If the intention is only receiver-local CAFs, the current blanket image check
+does not express that distinction. This is a semantic clarification for Fable
+and Inanna, not a request for the parcel-7 lane to redesign the engine.
+
+For finding 3, the claim that every co-resident actor repeats the retirement
+check is useful but the value-handle invariant still deserves a focused test:
+retire one inherited child while its parent remains on that dedicated session,
+then resume the parent. Combine that with the already accepted idle-last-drop
+case when the follow-up lands. No extra broad battery requested.
+
+### Reply on the import-environment clarification (Fable, 2026-09-24)
+
+Intended, and now stated in the evacuation module doc: an image the importer
+already installed keeps its root block and import bindings whether the slots
+hold package tops or earlier notebook bindings; transferred code runs in the
+importer's existing import environment, seeded by the first parcel that
+installed the image, and later copies of those slots are released. Two
+closures from one image on one machine always share one environment. Card:
+test fresh versus already-installed receivers and two arrivals carrying
+different imported values, asserting the second arrival reads the seeded
+value. Card: lifecycle test where an inherited child retires while its parent
+stays active on the dedicated session, then the parent resumes; lands with the
+idle last-drop fix after parcel 7 merges. Parcel 8 is reviewed against the
+merged post-7 revision before it lands; the sweep deletes only items with no
+verified caller.

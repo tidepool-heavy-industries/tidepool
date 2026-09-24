@@ -385,3 +385,16 @@ Deferred, one card each:
   freezes the workspace (`FrozenWorkspace`), so every process of the run
   reads the frozen copy and a checkout edit cannot invalidate a restart;
   until then, launch dogfood runs from the deployed embedding build only.
+
+## Per-actor machines follow-ups (2026-09-24, from Astra's parcel-7 review)
+
+- Idle last-drop teardown: when the last `RootCustody` on a retired dedicated
+  session drops and nothing checks the session out again, the machine stays
+  idle until process exit. The custody drop path for a session pending
+  teardown runs the retirement check itself. With it: a lifecycle test where
+  an inherited child retires while its parent stays active on the dedicated
+  session, then the parent resumes.
+- Import-environment test: one image, a fresh receiver and an already-installed
+  receiver, two arrivals carrying different imported values (a mutated
+  imported MutVar); both received closures read the receiver's seeded value.
+  Rule stated in `tidepool/codegen/src/prepared_program/evacuation.rs`.
