@@ -6182,23 +6182,37 @@ where
                         format!("{command_prefix}\n{output}")
                     };
                     // The tool-result boundary: the result exists and has not
-                    // been returned. Only a hosted tool call reaches here —
-                    // `status` and `reload_agent_spec` never acquire
-                    // a dispatcher, and an authored cell is not a tool call at
-                    // all — so a broken slot can never block its own repair.
-                    let output = match (request.tool_call().cloned(), tool_dispatch.as_ref()) {
-                        (Some(call), Some(dispatch)) => {
+                    // been returned. A hosted tool call reaches here with its
+                    // own dispatcher; an authored Haskell cell reaches here
+                    // too, under the `haskell` tool name and the same
+                    // installed spec's dispatcher — `status` and
+                    // `reload_agent_spec` are the only committed outcomes
+                    // that never acquire one, so a broken slot can never
+                    // block its own repair.
+                    let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());
+                    let cell_call = if hosted_call.is_none() && cell_check.is_some() {
+                        self.compiled_tools.as_ref().map(|tools| {
+                            (
+                                tidepool_runtime::session::workbench::WorkbenchToolCall {
+                                    name: crate::HASKELL_TOOL.to_string(),
+                                    arguments: serde_json::Value::String(
+                                        request.items[index].clone(),
+                                    ),
+                                },
+                                Arc::clone(&tools.dispatch),
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    let output = match hosted_call.or(cell_call) {
+                        Some((call, dispatch)) => {
                             self.annotate_tool_result(
-                                kernel,
-                                context,
-                                &workbench,
-                                Arc::clone(dispatch),
-                                &call,
-                                output,
+                                kernel, context, &workbench, dispatch, &call, output,
                             )
                             .await
                         }
-                        _ => output,
+                        None => output,
                     };
                     if let Some(checked) = &cell_check {
                         let spent = if checked.items[index].verdict.kind

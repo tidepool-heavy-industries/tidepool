@@ -84,6 +84,34 @@ noted call result
     )
 }
 
+/// Like `spec_module`, but the slot reacts to the `haskell` tool name instead
+/// of `probe` — the name an authored cell's finished receipt reaches the slot
+/// under, since a cell is not a tool call of its own.
+fn spec_module_for_haskell_cell(slot: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Tidepool.Agent.Contract
+import qualified Project.Tools as Tools
+
+agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  {{ specTools = Tools.tools
+  , afterTool = Just noted
+  }}
+
+noted :: ToolCall -> ToolResult -> Eff effects Annotation
+noted call result
+  | toolCallName call /= T.pack "haskell" = pure NoAnnotation
+  | otherwise = {slot}
+"#
+    )
+}
+
 /// A spec module whose slot can suspend on the resident `Sleep` effect: the
 /// same shape as `spec_module`, with a `Member Sleep effects` constraint and
 /// the imports that constraint needs. Kept separate so the plain
@@ -196,6 +224,34 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
             let authored = config.workspace.join(".exomonad");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), spec_module(&slot)).unwrap();
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await
+}
+
+/// A root whose spec is named by rule two, carrying a slot that reacts to the
+/// `haskell` tool name — the name an authored cell's receipt reaches it under.
+async fn start_with_cell_slot(slot: &str) -> TestCampaign {
+    let slot = slot.to_owned();
+    TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        move |config| {
+            write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
+            let authored = config.workspace.join(".exomonad");
+            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                spec_module_for_haskell_cell(&slot),
+            )
+            .unwrap();
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
@@ -865,10 +921,13 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
 }
 
 /// The two tools a model repairs a broken slot with are never annotated, so a
-/// slot can never block its own repair. Neither is an authored cell, which is
-/// not a tool call at all.
+/// slot can never block its own repair — `status` and `reload_agent_spec`
+/// never acquire a dispatcher and never reach the slot at all. An authored
+/// cell's receipt DOES reach the slot, under the `haskell` tool name; this
+/// spec's slot only reacts to `probe`, so the cell still comes back
+/// unannotated.
 #[tokio::test]
-async fn the_repair_tools_and_authored_cells_are_never_annotated() {
+async fn the_repair_tools_are_never_annotated_and_cells_reach_the_slot_unmatched() {
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
@@ -877,14 +936,75 @@ async fn the_repair_tools_and_authored_cells_are_never_annotated() {
     assert!(reloaded.contains("swapped"), "{reloaded}");
     assert!(!reloaded.contains("[after-tool]"), "{reloaded}");
 
-    let status = status(policy).await;
-    assert!(!status.contains("[after-tool]"), "{status}");
+    let status_before_cell = status(policy).await;
+    assert!(
+        !status_before_cell.contains("[after-tool]"),
+        "{status_before_cell}"
+    );
 
     let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
     assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
+    // The cell's receipt still reached the slot — as `haskell`, which this
+    // spec's `noted` does not match — so the log carries a silent invocation.
+    let status_after_cell = status(policy).await;
+    assert!(
+        status_after_cell.contains("after-tool#1 haskell"),
+        "{status_after_cell}"
+    );
+    assert!(status_after_cell.contains("silent"), "{status_after_cell}");
+
     // And the slot is installed and working, so none of that was vacuous.
     assert!(probe(policy).await.contains("twice before"));
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A haskell cell's finished receipt reaches the after-tool slot exactly once,
+/// under the tool name `haskell` — the same slot, budget, and abstention
+/// semantics a hosted tool call gets, not a second hook path.
+#[tokio::test]
+async fn a_haskell_cells_receipt_reaches_the_after_tool_slot_as_haskell() {
+    let campaign = start_with_cell_slot(ANNOTATES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+    let output = cell["items"][0]["output"].as_str().unwrap_or_default();
+    assert!(output.contains('2'), "{cell}");
+    assert!(output.contains("[after-tool]"), "{cell}");
+    assert!(
+        output.contains("asked about this topic twice before"),
+        "{cell}"
+    );
+
+    let status = status(policy).await;
+    assert!(status.contains("after-tool#1 haskell"), "{status}");
+    assert!(status.contains("annotated"), "{status}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Abstention on a cell is silent, exactly as it is for a hosted tool call:
+/// the receipt is delivered untouched and the reason is recorded only in the
+/// actor's own inspectable log.
+#[tokio::test]
+async fn an_abstained_cell_receipt_is_delivered_untouched() {
+    let campaign = start_with_cell_slot(ABSTAINS).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+
+    let status = status(policy).await;
+    assert!(status.contains("after-tool#1 haskell"), "{status}");
+    assert!(
+        status.contains("abstained: the result is already minimal"),
+        "{status}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
