@@ -75,23 +75,15 @@ impl ExecHandler {
     }
 
     fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<Proc, ExecError> {
-        // TODO(launcher): Exec's whole point is running an arbitrary,
-        // caller-named host command (see this crate's CLAUDE.md,
-        // "Exec is NOT filesystem-sandboxed") — it is not a fixed
-        // process this crate owns the lifecycle of. `spawn_and_capture`
-        // already gives it its own process-group timeout/kill, which is
-        // this handler's substitute for the launcher's die-with-owner
-        // guarantee. Routing this through exomonad-node's process_scope
-        // (no dependency cycle: exomonad-node does not depend on
-        // tidepool-handlers) is real future work, not a drop-in swap —
-        // deferred rather than attempted under a lint-triage parcel.
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "Exec spawns an arbitrary caller command with its own \
-                      timeout/process-group lifecycle, not a launcher-owned \
-                      long-lived child; see TODO(launcher) above"
-        )]
-        let mut command = Command::new("sh");
+        // Exec's whole point is running an arbitrary, caller-named host
+        // command (see this crate's CLAUDE.md, "Exec is NOT
+        // filesystem-sandboxed") — it is not a fixed process this crate owns
+        // the lifecycle of. `spawn_and_capture` gives it its own
+        // process-group timeout/kill, which is this handler's substitute for
+        // the launcher's die-with-owner guarantee; `exomonad_node`'s
+        // `host_command::command` is still the one place that builds the
+        // `Command`, matching every other caller in this shape.
+        let mut command: Command = exomonad_node::host_command::command("sh");
         command.arg("-c").arg(cmd).current_dir(dir);
         Self::spawn_and_capture(command, Self::exec_timeout())
     }
@@ -286,16 +278,10 @@ impl ExecHandler {
         if argv.is_empty() {
             return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }
-        // TODO(launcher): same reasoning as `run_command` above — an
-        // arbitrary caller-named command, not a launcher-owned long-lived
-        // child.
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "Exec spawns an arbitrary caller command with its own \
-                      timeout/process-group lifecycle, not a launcher-owned \
-                      long-lived child; see TODO(launcher) on run_command"
-        )]
-        let mut command = Command::new(&argv[0]);
+        // Same reasoning as `run_command` above — an arbitrary caller-named
+        // command with its own process-group timeout/kill, built through the
+        // launcher's synchronous `command` constructor.
+        let mut command: Command = exomonad_node::host_command::command(&argv[0]);
         command.args(&argv[1..]).current_dir(&self.root);
         Self::spawn_and_capture(command, Self::exec_timeout())
     }

@@ -37,6 +37,21 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Construct a plain, synchronous [`std::process::Command`] for a caller that
+/// spawns and supervises it itself — its own timeout, its own process-group,
+/// its own output-capture policy — rather than handing the whole lifecycle to
+/// [`HostCommand`]. This is the launcher's counterpart to `HostCommand` for
+/// that shape of caller (see `bridge/handlers/src/handlers/exec.rs`'s
+/// `ExecHandler`, whose arbitrary caller-named command owns a process-group
+/// timeout/kill that is its substitute for `HostCommand`'s die-with-owner
+/// guarantee): every `Command::new` in such a caller routes through here
+/// instead of constructing its own, so the launcher stays the one place that
+/// decides how a command is built, even when it does not also own spawning it.
+#[allow(clippy::disallowed_methods, reason = "the process launcher")]
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
 /// How the child's standard input is provided. A resident actor has no
 /// terminal, so a PTY is not offered here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +512,59 @@ mod tests {
         assert_eq!(
             command.page(HostStream::Stdout, 0, u64::MAX).text,
             "echoed\n"
+        );
+    }
+
+    /// `kill_on_drop(true)` is `HostCommand`'s die-with-owner contract: a
+    /// child outlives the `Child` handle only until that handle drops.
+    /// Dropping the whole `HostCommand` here — not calling `wait()` first —
+    /// proves the child is reaped even when nothing ever collects its exit
+    /// status, matching `tidepool-extract-cmd`'s parent-death test pattern
+    /// (poll `/proc/<pid>` until the entry disappears).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_child_is_reaped_when_its_host_command_is_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("child.pid");
+        let command = HostCommand::spawn(HostCommandSpec {
+            argv: &[
+                "sh".into(),
+                "-c".into(),
+                format!("echo $$ > {}; sleep 30", pid_file.display()),
+            ],
+            directory: directory.path(),
+            environment: &[],
+            stdin: HostStdin::Closed,
+            cgroup: None,
+            boundary: None,
+            bubblewrap: None,
+        })
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid: u32 = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never wrote its pid"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+
+        drop(command);
+
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while proc_entry.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !proc_entry.exists(),
+            "child {pid} survived after its HostCommand was dropped"
         );
     }
 

@@ -25,6 +25,10 @@ exomonad-worktree.workspace = true
 # PRD 18 lane 1: the Subagent handler drives the coupled-spawn saga — the
 # saga and backend seam live THERE, not here.
 exomonad-agent.workspace = true
+# Exec's process launcher: host_command::command is the one allowed
+# std::process::Command::new for an arbitrary caller-named command with its
+# own process-group timeout/kill (see handlers/exec.rs).
+exomonad-node.workspace = true
 # Jev/System One handler: resolves TYPESAFE_API_KEY via the shared config/secrets
 # path resolver (see `tidepool-toolchain::paths::secrets_dir`).
 tidepool-toolchain.workspace = true

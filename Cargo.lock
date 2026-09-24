@@ -3513,6 +3513,7 @@ dependencies = [
  "blake3",
  "camino",
  "exomonad-agent",
+ "exomonad-node",
  "exomonad-worktree",
  "frunk",
  "genai",

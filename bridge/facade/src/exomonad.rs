@@ -14,6 +14,7 @@ use exomonad_agent::{
     copy_interactive_binding, read_interactive_binding, BackendThreadId,
     InteractiveAgentInstallation, InteractiveLaunchMode, ReasoningEffort,
 };
+use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
 use exomonad_node::{TmuxLaunch, TmuxSession};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -1021,50 +1022,49 @@ async fn retain_packaged_interactive_agent_from(
     let runtime = workspace.join(".exomonad/runtime");
     std::fs::create_dir_all(&runtime)?;
     let link = runtime.join("interactive-agent");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(launcher): route through exomonad-node process_scope/host_command; for now this is a timeout-bounded, immediately-`.wait()`-ed probe with kill_on_drop(true) as its own supervision"
-    )]
-    let mut child = tokio::process::Command::new(&nix_store)
-        .arg("--realise")
-        .arg(&target)
-        .arg("--add-root")
-        .arg(&link)
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+    let argv = [
+        nix_store.to_string_lossy().into_owned(),
+        "--realise".to_string(),
+        target.to_string_lossy().into_owned(),
+        "--add-root".to_string(),
+        link.to_string_lossy().into_owned(),
+    ];
+    let command = HostCommand::spawn(HostCommandSpec {
+        argv: &argv,
+        directory: workspace,
+        environment: &[],
+        stdin: HostStdin::Closed,
+        cgroup: None,
+        boundary: None,
+        bubblewrap: None,
+    })
+    .map_err(|error| {
+        runtime_error(format!(
+            "cannot start {ENV_NIX_STORE_BIN} {}: {error}",
+            nix_store.display()
+        ))
+    })?;
+    let status = tokio::time::timeout(GC_ROOT_TIMEOUT, command.wait())
+        .await
+        .map_err(|_| runtime_error(format!("Nix GC-root creation exceeded {GC_ROOT_TIMEOUT:?}")))?
         .map_err(|error| {
             runtime_error(format!(
-                "cannot start {ENV_NIX_STORE_BIN} {}: {error}",
-                nix_store.display()
+                "cannot register Nix GC root {}: {error}",
+                link.display()
             ))
         })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        runtime_error(format!(
-            "{ENV_NIX_STORE_BIN} did not expose its diagnostic stream"
-        ))
-    })?;
-    let result = tokio::time::timeout(GC_ROOT_TIMEOUT, async {
-        tokio::try_join!(
-            read_bounded_diagnostics(stderr, GC_ROOT_ERROR_LIMIT, "Nix GC-root creation"),
-            child.wait()
-        )
-    })
-    .await
-    .map_err(|_| runtime_error(format!("Nix GC-root creation exceeded {GC_ROOT_TIMEOUT:?}")))?;
-    let (stderr, status) = result.map_err(|error| {
-        runtime_error(format!(
-            "cannot register Nix GC root {}: {error}",
-            link.display()
-        ))
-    })?;
-    if !status.success() {
+    let stderr_available = command.available(HostStream::Stderr);
+    if stderr_available > GC_ROOT_ERROR_LIMIT as u64 {
         return Err(runtime_error(format!(
-            "cannot register Nix GC root {} ({status}): {}",
+            "Nix GC-root creation diagnostics exceeded {GC_ROOT_ERROR_LIMIT} bytes"
+        )));
+    }
+    if !matches!(status, HostExit::Exited(0)) {
+        let stderr = command.page(HostStream::Stderr, 0, u64::MAX).text;
+        return Err(runtime_error(format!(
+            "cannot register Nix GC root {} ({status:?}): {}",
             link.display(),
-            String::from_utf8_lossy(&stderr).trim()
+            stderr.trim()
         )));
     }
     Ok(())
