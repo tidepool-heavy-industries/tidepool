@@ -315,6 +315,22 @@ struct EvidencePlan {
     verb_sites: Vec<(DataConId, usize)>,
 }
 
+/// Everything [`PreparedEngine::snapshot_install`] produces under a machine
+/// checkout for an off-checkout compile: owned data with no reference to
+/// the machine or its checkout. `values`/`imports` are kept alongside
+/// `linked` (which consumes the resolved imports into linkage order) so
+/// [`PreparedEngine::revalidate_and_install`] can compare a fresh resolve
+/// against exactly what this snapshot resolved, by value.
+pub(crate) struct InstallSnapshot {
+    linked: tidepool_repr::execution_schema::LinkedProgram,
+    values: MachineImports,
+    imports: ImportBindings,
+    facts: ProgramFacts,
+    plan: EvidencePlan,
+    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    compile: tidepool_codegen::prepared_program::PreparedCompileSnapshot,
+}
+
 /// Which installed program's site table is authoritative for one site id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SiteWitness {
@@ -1982,6 +1998,65 @@ impl PreparedEngine {
             clock = now;
             elapsed.as_millis() as u64
         };
+        let (values, imports) = self.resolve_imports(&prepared, bindings, index)?;
+        let resolve_imports_ms = lap();
+        let import_count = imports.len();
+        let exports = exportable_code_tops(&prepared);
+        let facts = ProgramFacts::of(&prepared);
+        // Site evidence is checked before anything is compiled or published:
+        // a conflicting duplicate leaves the machine, its programs and the
+        // site index exactly as they were.
+        let plan = self.plan_evidence(&facts)?;
+        let evidence_ms = lap();
+        let linked = link_program(prepared, &values)?;
+        let link_ms = lap();
+        let compiled = self
+            .machine
+            .compile_for_install(&linked)
+            .map_err(PreparedRuntimeError::Compile)?;
+        let compile_ms = lap();
+        let program = self
+            .machine
+            .install_program(compiled, imports)
+            .map_err(PreparedRuntimeError::Run)?;
+        let install_ms = lap();
+        tracing::info!(
+            target: "tidepool_runtime::prepared_install",
+            resolve_imports_ms,
+            evidence_ms,
+            link_ms,
+            compile_ms,
+            install_ms,
+            imports = import_count,
+            compiled_off_checkout = false,
+            "prepared install"
+        );
+        self.programs.insert(program, facts);
+        self.publish_evidence(program, plan);
+        self.publish_code_exports(program, exports);
+        // Held live across the install-to-first-run gap; the turn's
+        // bind/complete path (`resident.rs`) unpins it once the run's
+        // outcome is bound, released or parked.
+        self.machine
+            .pin(program)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.installs_since_major += 1;
+        Ok(program)
+    }
+
+    /// Resolve `prepared`'s declared globals against `bindings`/`index` (and
+    /// this machine's package-top exports), one live-handle fact snapshot
+    /// per import: `MachineImports` for `link_program`, `ImportBindings` for
+    /// `install_program`. Shared by the single-checkout [`Self::install`]
+    /// and both ends of the off-checkout split
+    /// ([`Self::snapshot_install`]/[`Self::revalidate_and_install`]) so a
+    /// snapshot and its revalidation resolve imports exactly the same way.
+    fn resolve_imports(
+        &self,
+        prepared: &PreparedProgram,
+        bindings: &BindingTable,
+        index: &BindingIndex,
+    ) -> Result<(MachineImports, ImportBindings), PreparedRuntimeError> {
         let mut values = MachineImports::default();
         let mut imports = ImportBindings::new();
         for declaration in prepared.globals() {
@@ -2030,40 +2105,81 @@ impl PreparedEngine {
             );
             imports.insert(identity.clone(), handle);
         }
-        let resolve_imports_ms = lap();
-        let import_count = imports.len();
+        Ok((values, imports))
+    }
+
+    /// Step (a) of the off-checkout split install: resolve `prepared`'s
+    /// imports, plan its evidence and take a compile snapshot -- everything
+    /// [`Self::compile_off_checkout`] needs -- without compiling. Run this
+    /// under the machine checkout; the returned [`InstallSnapshot`] carries
+    /// no machine reference and may be compiled after the checkout is
+    /// released.
+    pub(crate) fn snapshot_install(
+        &mut self,
+        prepared: PreparedProgram,
+        bindings: &BindingTable,
+        index: &BindingIndex,
+    ) -> Result<InstallSnapshot, PreparedRuntimeError> {
+        let (values, imports) = self.resolve_imports(&prepared, bindings, index)?;
         let exports = exportable_code_tops(&prepared);
         let facts = ProgramFacts::of(&prepared);
-        // Site evidence is checked before anything is compiled or published:
-        // a conflicting duplicate leaves the machine, its programs and the
-        // site index exactly as they were.
         let plan = self.plan_evidence(&facts)?;
-        let evidence_ms = lap();
         let linked = link_program(prepared, &values)?;
-        let link_ms = lap();
-        let compiled = self
-            .machine
-            .compile_for_install(&linked)
-            .map_err(PreparedRuntimeError::Compile)?;
-        let compile_ms = lap();
+        let compile = self.machine.compile_snapshot();
+        Ok(InstallSnapshot {
+            linked,
+            values,
+            imports,
+            facts,
+            plan,
+            exports,
+            compile,
+        })
+    }
+
+    /// Step (b): compile `snapshot`'s linked program off any checkout. Pure
+    /// with respect to the machine; safe to run on a blocking thread while
+    /// other turns hold the checkout.
+    pub(crate) fn compile_off_checkout(
+        snapshot: &mut InstallSnapshot,
+    ) -> Result<CompiledProgram, CompileError> {
+        snapshot.compile.compile(&snapshot.linked)
+    }
+
+    /// Step (c): under the machine checkout again, re-resolve `snapshot`'s
+    /// imports and compare them against the facts the off-checkout compile
+    /// ran against. An import that became evaluated, changed representation
+    /// or generation, or was retired invalidates the compile: this returns
+    /// `Ok(None)` and the caller must recompile (or fall back to the
+    /// single-checkout [`Self::install`]) rather than install a program
+    /// linked against stale import facts. Otherwise installs, publishes and
+    /// pins exactly as [`Self::install`] does.
+    pub(crate) fn revalidate_and_install(
+        &mut self,
+        snapshot: InstallSnapshot,
+        compiled: CompiledProgram,
+        bindings: &BindingTable,
+        index: &BindingIndex,
+    ) -> Result<Option<ProgramId>, PreparedRuntimeError> {
+        let (fresh_values, fresh_imports) =
+            self.resolve_imports(snapshot.linked.prepared(), bindings, index)?;
+        if fresh_values != snapshot.values || fresh_imports != snapshot.imports {
+            return Ok(None);
+        }
+        let import_count = snapshot.imports.len();
         let program = self
             .machine
-            .install_program(compiled, imports)
+            .install_program(compiled, snapshot.imports)
             .map_err(PreparedRuntimeError::Run)?;
-        let install_ms = lap();
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
-            resolve_imports_ms,
-            evidence_ms,
-            link_ms,
-            compile_ms,
-            install_ms,
             imports = import_count,
+            compiled_off_checkout = true,
             "prepared install"
         );
-        self.programs.insert(program, facts);
-        self.publish_evidence(program, plan);
-        self.publish_code_exports(program, exports);
+        self.programs.insert(program, snapshot.facts);
+        self.publish_evidence(program, snapshot.plan);
+        self.publish_code_exports(program, snapshot.exports);
         // Held live across the install-to-first-run gap; the turn's
         // bind/complete path (`resident.rs`) unpins it once the run's
         // outcome is bound, released or parked.
@@ -2071,7 +2187,7 @@ impl PreparedEngine {
             .pin(program)
             .map_err(PreparedRuntimeError::Run)?;
         self.installs_since_major += 1;
-        Ok(program)
+        Ok(Some(program))
     }
 
     /// Run `program`'s settled scaffold under `realm` and read its one
@@ -3356,6 +3472,7 @@ mod tests {
         StorageLayout, TopBinding, UpdatePolicy, ValueRef,
     };
     use tidepool_repr::DataCon;
+    use tidepool_repr::SessionModule;
 
     #[test]
     fn integrity_failure_is_typed_independently_from_its_cause() {
@@ -3545,6 +3662,210 @@ mod tests {
             evaluated: machine.handle_is_evaluated(handle).expect("handle is live"),
             generation,
         }
+    }
+
+    /// [`consumer_program`] declares its import with `entry_signature:
+    /// Some(_)`, matching how [`install_importing`]'s hand-built
+    /// [`ImportedValue`]s model a `code_exports` import. A real session
+    /// value resolved through [`resolve_prepared_import`] never carries an
+    /// entry signature (see [`PreparedEngine::resolve_imports`]), so a
+    /// split-install test exercising that real path needs its own
+    /// plain-import consumer, otherwise every install (single-checkout
+    /// included) is refused by `link_program`'s `wrong_entry` check.
+    fn plain_import_consumer_program(
+        required_evaluated: bool,
+        required_generation: Option<u64>,
+    ) -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: producer_identity(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated,
+            required_generation,
+        }];
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 0,
+        };
+        testing::prepare(wire).expect("plain-import consumer fixture")
+    }
+
+    /// A bootstrapped [`PreparedEngine`] whose producer top is bound into a
+    /// real `BindingTable`/`BindingIndex` pair under `producer_identity()`
+    /// at generation 1 -- the same shape [`PreparedEngine::install`]'s
+    /// `resolve_imports` reads through [`resolve_prepared_import`], built
+    /// the way `ResidentSession::bind_prepared` builds one (`adopt` then a
+    /// `BindingEntry`), so a split install against it exercises the same
+    /// import-resolution path a live turn does, not the hand-assembled
+    /// `MachineImports` `install_importing` uses.
+    fn engine_with_bound_producer(
+        force: bool,
+    ) -> (PreparedEngine, ProgramId, ValueId, BindingTable, BindingIndex) {
+        let prepared = producer_program();
+        let top = prepared.entry();
+        let (mut engine, first) = PreparedEngine::bootstrap(prepared).expect("producer bootstraps");
+        if force {
+            engine
+                .machine
+                .run_entry(
+                    first,
+                    top,
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: RunOptions::default().observation_budget,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .expect("producer entry runs");
+        }
+        let handle = engine
+            .machine
+            .retain_top(first, top)
+            .expect("producer top binds");
+        let root = engine.adopt(handle).expect("retained handle adopts a root");
+        let entry = BindingEntry {
+            name: tidepool_repr::BindingName("producer".into()),
+            id: SessionVarId::from_extract(1),
+            module: SessionModule::val(tidepool_repr::Generation(1)),
+            value: BoundValue {
+                root,
+                handle,
+                identity: producer_identity(),
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: tidepool_codegen::scope::ScopeId::ROOT,
+        };
+        let mut index = BindingIndex::new();
+        index.on_bind(&entry);
+        let mut bindings = BindingTable::new();
+        bindings.bind(entry);
+        (engine, first, top, bindings, index)
+    }
+
+    #[test]
+    fn split_install_matches_single_checkout_install_with_imports() {
+        let (mut single, _, _, bindings, index) = engine_with_bound_producer(true);
+        let single_program = single
+            .install(plain_import_consumer_program(true, Some(1)), &bindings, &index)
+            .expect("single-checkout install links against the bound producer");
+        let single_read = read_consumer_import(&mut single, single_program);
+
+        let (mut split, _, _, bindings, index) = engine_with_bound_producer(true);
+        let snapshot = split
+            .snapshot_install(plain_import_consumer_program(true, Some(1)), &bindings, &index)
+            .expect("snapshot step resolves the same imports off no checkout yet");
+        let mut snapshot = snapshot;
+        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
+            .expect("off-checkout compile of the linked program succeeds");
+        let split_program = split
+            .revalidate_and_install(snapshot, compiled, &bindings, &index)
+            .expect("revalidation runs")
+            .expect("nothing changed the import between snapshot and revalidation");
+        let split_read = read_consumer_import(&mut split, split_program);
+
+        // Both engines were bootstrapped and bound identically, so the split
+        // install must be observably the same program as the single-checkout
+        // one: same value read back through the same import.
+        assert_eq!(single_read, split_read);
+    }
+
+    /// Run `program`'s one entry (a [`plain_import_consumer_program`],
+    /// which just returns its imported global) and decode the constructor
+    /// it reads back, releasing the observed value afterward.
+    fn read_consumer_import(
+        engine: &mut PreparedEngine,
+        program: ProgramId,
+    ) -> (tidepool_repr::DataConId, Vec<u64>) {
+        let read = engine
+            .machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .expect("consumer entry runs and reads its import through the slot");
+        let mut values = read.values;
+        let PreparedResult::Managed(value) = values.remove(0) else {
+            panic!("consumer must return the imported managed value");
+        };
+        let CodegenPreparedOuter::Constructor { identity, fields } = engine
+            .machine
+            .inspect_outer(value, RealmId::ROOT)
+            .expect("imported value inspects through the shared machine");
+        let scalars = fields
+            .iter()
+            .map(|field| match field {
+                PreparedResult::Scalar(n) => *n,
+                other => panic!("expected a scalar field, got {other:?}"),
+            })
+            .collect();
+        assert!(engine.machine.release(value));
+        (identity, scalars)
+    }
+
+    #[test]
+    fn stale_import_between_snapshot_and_revalidation_falls_back() {
+        // Snapshot against the UNFORCED producer top (required_evaluated:
+        // false, so linking the snapshot itself does not reject it), then
+        // force the CAF -- simulating another actor's turn mutating the
+        // same shared import while this compile ran off-checkout -- before
+        // revalidating.
+        let (mut engine, first, top, bindings, index) = engine_with_bound_producer(false);
+        let snapshot = engine
+            .snapshot_install(plain_import_consumer_program(false, Some(1)), &bindings, &index)
+            .expect("snapshot resolves the still-unforced import");
+        let mut snapshot = snapshot;
+        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
+            .expect("off-checkout compile succeeds against the unforced snapshot");
+
+        engine
+            .machine
+            .run_entry(
+                first,
+                top,
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .expect("forcing the CAF between snapshot and revalidation");
+
+        let outcome = engine
+            .revalidate_and_install(snapshot, compiled, &bindings, &index)
+            .expect("revalidation itself does not error");
+        assert!(
+            outcome.is_none(),
+            "an import that became evaluated between snapshot and revalidation \
+             must invalidate the split compile rather than install it"
+        );
+
+        // The caller's documented recovery -- recompile fresh, or fall back
+        // to the single-checkout path -- still succeeds against the now-
+        // forced import.
+        engine
+            .install(plain_import_consumer_program(false, Some(1)), &bindings, &index)
+            .expect("the single-checkout fallback installs against the current import");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use tidepool_codegen::binding_table::BoundValue;
 use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{PreparedEngine, PreparedRuntimeError};
+use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError};
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
     SessionError, SessionLib, SourceImports,
@@ -495,6 +495,42 @@ impl PersistentSession {
                 Ok(program)
             }
             Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index),
+        }
+    }
+
+    /// Step (a) of the off-checkout split install (see
+    /// `PreparedEngine::snapshot_install`): `None` when this is the
+    /// session's first turn (the machine does not exist yet to snapshot,
+    /// so bootstrapping -- and its one inline compile -- is the caller's
+    /// only option; `install_prepared` remains correct for that case).
+    pub(crate) fn snapshot_install_prepared(
+        &mut self,
+        prepared: PreparedProgram,
+    ) -> Result<Option<InstallSnapshot>, PreparedRuntimeError> {
+        match self.machine.as_mut() {
+            None => Ok(None),
+            Some(engine) => engine
+                .snapshot_install(prepared, &self.bindings, &self.binding_index)
+                .map(Some),
+        }
+    }
+
+    /// Step (c) of the off-checkout split install: revalidate `snapshot`'s
+    /// imports and, if still current, install `compiled` (see
+    /// `PreparedEngine::revalidate_and_install`). `None` both when the
+    /// machine went away since the snapshot was taken (caller falls back to
+    /// [`Self::install_prepared`]) and when revalidation finds a stale
+    /// import (caller recompiles from a fresh snapshot, or falls back).
+    pub(crate) fn revalidate_and_install_prepared(
+        &mut self,
+        snapshot: InstallSnapshot,
+        compiled: tidepool_codegen::prepared_program::CompiledProgram,
+    ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
+        match self.machine.as_mut() {
+            None => Ok(None),
+            Some(engine) => {
+                engine.revalidate_and_install(snapshot, compiled, &self.bindings, &self.binding_index)
+            }
         }
     }
 

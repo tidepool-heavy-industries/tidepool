@@ -254,6 +254,24 @@ pub struct PreparedHandle {
     rep: RuntimeRep,
 }
 
+/// See [`PreparedMachine::compile_snapshot`].
+pub struct PreparedCompileSnapshot {
+    interner: super::DescriptorInterner,
+    existing_bytes: Arc<super::static_bytes::PinnedBytes>,
+}
+
+impl PreparedCompileSnapshot {
+    /// Compile `linked` against this snapshot, exactly as
+    /// [`PreparedMachine::compile_for_install`] would have at snapshot
+    /// time. No machine access: safe to call off any checkout.
+    pub fn compile(
+        &mut self,
+        linked: &tidepool_repr::execution_schema::LinkedProgram,
+    ) -> Result<CompiledProgram, super::CompileError> {
+        CompiledProgram::compile_with(linked, &mut self.interner, &self.existing_bytes)
+    }
+}
+
 /// One completed object owned by an active [`ManagedBuilder`]. The index is
 /// meaningful only to that builder and never escapes as a heap address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -785,6 +803,24 @@ impl<'code> PreparedMachine<'code> {
         // installs (see `Self::install_staged`).
         let existing_bytes = self.machine.interned_bytes();
         CompiledProgram::compile_with(linked, &mut staged, &existing_bytes)
+    }
+
+    /// A snapshot of everything [`Self::compile_for_install`] reads from
+    /// live machine state -- the descriptor interner overlay and the
+    /// permanent literal pool -- as owned, `Send` data with no reference to
+    /// this machine or its checkout. [`PreparedCompileSnapshot::compile`]
+    /// then compiles with no further machine access, so it may run after
+    /// the checkout that produced this snapshot is released; the caller
+    /// installs the result through [`Self::install_program`], whose
+    /// `install_staged`/`check_absorb` reconciles this snapshot's interner
+    /// against whatever the machine absorbed while the compile was running
+    /// off-checkout (see the interner's own overlay-and-absorb doc comment).
+    #[must_use]
+    pub fn compile_snapshot(&self) -> PreparedCompileSnapshot {
+        PreparedCompileSnapshot {
+            interner: self.interner.clone(),
+            existing_bytes: self.machine.interned_bytes(),
+        }
     }
 
     /// Install one more program on this machine. Its tops live in its own
