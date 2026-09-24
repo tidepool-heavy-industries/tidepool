@@ -22,6 +22,16 @@ many typed requests and model rounds. A root or child actor application becomes
 idle when a model round ends; it is not completed by ending that round or by
 settling one reply.
 
+A **descendant** is any actor application whose spawn ancestry (`startAgent`
+or a fork) reaches the caller through zero or more intermediate actors — its
+immediate children and their own descendants alike; `rosterCreatorId`/
+`rosterCreatorIncarnation` on an `AgentRosterEntry` name that ancestry, and
+`creationTree` (`Tidepool.Actors.Observe`) walks it. **live descendants**
+names the subset still running (`rosterState == RosterRunning`); a retired
+descendant is not one. Use "descendant"/"live descendants" for this exact
+relation, not "subtree" (the supervision tree, a different ancestry) or
+"swarm" (every actor a `SwarmSnapshot` can reach).
+
 ## Model tiers
 
 **Sol**, **Luna**, and **Astra** name model tiers, not people or actor roles.

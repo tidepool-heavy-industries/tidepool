@@ -131,6 +131,133 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
     campaign.hosted.await.unwrap();
 }
 
+// `descendants_observe.hs` composes existing primitives — `actorContext`
+// (self identity), `snapshot`/`listAgentsFull` (the same registry
+// `observeAgent` reads), and `creationTree` (a pure roster filter by
+// `rosterCreatorId`/`rosterCreatorIncarnation`) — into "my live
+// descendants". No new effect is needed: the registry already scopes
+// `listAgentsFull` to what the caller may observe, and `creationTree` is
+// already exported for exactly this composition.
+#[tokio::test]
+async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
+    // Two fork levels: the research policy's depth budget of 1 lets the
+    // child itself unfold one further generation (the grandchild), which
+    // then has none left.
+    let mut campaign = test_campaign::TestCampaign::start_with_research_policy(
+        exomonad_actor::ResearchPolicy {
+            maximum_depth: 1,
+            maximum_active_children: Some(1),
+            default_depth: 1,
+        },
+    )
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    let root_id = campaign.actor.identity();
+
+    let root_for_setup = root.clone();
+    let setup = tokio::spawn(async move {
+        dispatch_haskell_script(root_for_setup.as_ref(), include_str!("descendants_setup.hs"))
+            .await
+    });
+    let child_installation = campaign
+        .next_deployment(
+            "descendants child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    let child_id = child_installation.actor.identity();
+    campaign.authority.install_grant(
+        child_id.into(),
+        worktree_grant(child_installation.effective_role.role()),
+    );
+    child_installation
+        .fork_gate
+        .as_ref()
+        .expect("child fork gate")
+        .mark_ready()
+        .unwrap();
+    let setup = setup.await.unwrap();
+    assert_eq!(setup["status"], "committed", "{setup:?}");
+
+    let child_policy = child_installation.policy.clone();
+    let child_spawn = tokio::spawn(async move {
+        dispatch_haskell_script(
+            child_policy.as_ref(),
+            include_str!("descendants_child_spawn.hs"),
+        )
+        .await
+    });
+    let grandchild_installation = campaign
+        .next_deployment(
+            "descendants grandchild policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        grandchild_installation.actor.identity().into(),
+        worktree_grant(grandchild_installation.effective_role.role()),
+    );
+    grandchild_installation
+        .fork_gate
+        .as_ref()
+        .expect("grandchild fork gate")
+        .mark_ready()
+        .unwrap();
+    let child_spawn = child_spawn.await.unwrap();
+    assert_eq!(child_spawn["status"], "committed", "{child_spawn:?}");
+
+    let observed =
+        dispatch_haskell_script(root.as_ref(), include_str!("descendants_observe.hs")).await;
+    assert_eq!(observed["status"], "committed", "{observed:?}");
+    let rendered = observed.to_string();
+    assert!(
+        rendered.contains("descendants-child") && rendered.contains("descendants-grandchild"),
+        "expected both the child and the grandchild in the root's descendants: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("rosterCreatorId = Just {}", child_id.id.0)),
+        "expected the grandchild's roster entry to name the child as its creator: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("rosterCreatorId = Just {}", root_id.id.0)),
+        "expected the child's roster entry to name the root as its creator: {rendered}"
+    );
+
+    let stopped = dispatch_haskell_script(
+        child_installation.policy.as_ref(),
+        "stopAgent (responseActor grandchildResponse)",
+    )
+    .await;
+    assert_eq!(stopped["status"], "committed", "{stopped:?}");
+
+    let after_retirement =
+        dispatch_haskell_script(root.as_ref(), include_str!("descendants_observe.hs")).await;
+    assert_eq!(
+        after_retirement["status"], "committed",
+        "{after_retirement:?}"
+    );
+    let rendered_after = after_retirement.to_string();
+    assert!(
+        rendered_after.contains("descendants-child"),
+        "the live child must remain: {rendered_after}"
+    );
+    assert!(
+        !rendered_after.contains("descendants-grandchild"),
+        "the retired grandchild must drop out of the caller's live descendants: {rendered_after}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 #[tokio::test]
 async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
     use exomonad_actor::ResidentToolEndpoint as _;
