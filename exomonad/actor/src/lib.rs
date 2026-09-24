@@ -137,8 +137,8 @@ pub use resident_tools::{
     WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
-    ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
-    ResidentActorWorkbenchError, ResidentMachineMeasurement,
+    ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, ResidentActorRunner,
+    ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
 };
 pub use role::{
     render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,

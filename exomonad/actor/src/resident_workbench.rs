@@ -1762,7 +1762,13 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// fails, or `session_id` somehow already names a live entry (it is
     /// minted fresh by the caller — `tidepool_repr::SessionId` collision is
     /// not expected, but silently overwriting a live session is never safe).
-    #[allow(dead_code, reason = "wired by the child-session launch parcel")]
+    #[allow(
+        dead_code,
+        reason = "installed by the composition root (actor_host.rs's compile_root), \
+                  but nothing calls it outside tests yet: capture_decoded still keeps \
+                  every launch on the shared session until the next parcel wires \
+                  child_session_eligibility's callsite"
+    )]
     pub(crate) fn spawn_child_session(
         &self,
         session_id: tidepool_repr::SessionId,

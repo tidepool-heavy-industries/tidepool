@@ -36,6 +36,8 @@ pub(super) struct TestCampaign {
     pub actor: exomonad_actor::LocalActorRef,
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
+    pub child_session_factory:
+        exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
     pub hosted: tokio::task::JoinHandle<()>,
     deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
     /// Deployments scanned by [`Self::next_deployment`] that did not match
@@ -249,6 +251,7 @@ impl TestCampaign {
             actor,
             forest,
             _program: program,
+            _child_session_factory: child_session_factory,
             hosted,
             deployments,
             root_installation,
@@ -269,6 +272,7 @@ impl TestCampaign {
             actor,
             forest,
             program,
+            child_session_factory,
             hosted,
             deployments,
             pending: std::collections::VecDeque::new(),

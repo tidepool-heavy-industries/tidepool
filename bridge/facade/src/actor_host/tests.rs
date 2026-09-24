@@ -131,6 +131,53 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
     campaign.hosted.await.unwrap();
 }
 
+/// The composition root's `ChildSessionFactory` (installed on `forest` in
+/// `actor_host.rs::compile_root`/`run`, per-actor-machines parcel 2) builds a
+/// session that can actually run a cell — not just an idle placeholder. This
+/// runs the SAME compiled driver turn the root itself bootstraps with
+/// (`campaign.program`), directly against a factory-built machine, mirroring
+/// `compile_root`'s own bootstrap sequence exactly. Nothing here goes through
+/// `capture_decoded`/`child_session_eligibility` (that wiring is a later
+/// parcel); this only proves the factory itself, called directly, produces a
+/// working machine.
+#[tokio::test]
+async fn composition_root_child_session_factory_runs_a_cell() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let child_session_id = tidepool_runtime::session::fresh_session_id();
+    let mut child_machine = (campaign.child_session_factory)(child_session_id)
+        .expect("the composition root's factory builds a fresh session");
+
+    child_machine.set_effect_execution(
+        EffectRunPolicy::HandleOrSuspend,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let lexical_scope = child_machine.mint_isolated_scope();
+    child_machine
+        .set_actor_execution(
+            tidepool_runtime::session::SessionRunContext {
+                lexical_scope,
+                resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            },
+            EffectRunPolicy::HandleOrSuspend,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .expect("a freshly bootstrapped machine accepts actor execution context");
+    let outcome = child_machine
+        .run_with_sites("exomonad_root_driver", campaign.program.code())
+        .expect("the driver cell the root itself bootstraps with also runs on a child machine");
+    assert!(
+        matches!(
+            outcome,
+            tidepool_runtime::session::ResidentOutcome::Suspended { .. }
+        ),
+        "expected the driver cell to suspend attaching its permanent application, got {outcome:?}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 // `descendants_observe.hs` composes existing primitives — `actorContext`
 // (self identity), `snapshot`/`listAgentsFull` (the same registry
 // `observeAgent` reads), and `creationTree` (a pure roster filter by
@@ -1945,7 +1992,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     let rendered = settled_with_preview.render(Some(0));
     assert!(rendered.contains("request 12 \"implementation\" settled Ready"));
     assert!(rendered.contains("Reply:\n\"looks correct, ship it\""));
-    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
+    assert!(rendered.contains(
+        "Read the full value with `pollResponse` only if you need more than this preview"
+    ));
     assert!(!rendered.contains("Inspect its retained `Response` with `pollResponse`"));
 
     // A `Ready` settlement with no preview (observation failed, or the
@@ -1967,7 +2016,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     });
     let rendered = settled_without_preview.render(Some(0));
     assert!(rendered.contains("request 13 \"implementation\" settled Ready"));
-    assert!(rendered.contains("Inspect its retained `Response` with `pollResponse`; settlement is not integration."));
+    assert!(rendered.contains(
+        "Inspect its retained `Response` with `pollResponse`; settlement is not integration."
+    ));
     assert!(!rendered.contains("Reply:\n"));
 
     // A preview `tidepool_runtime::ResidentSession::render_retained_preview`
@@ -1993,7 +2044,9 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     let rendered = settled_with_truncated_preview.render(Some(0));
     assert!(rendered.contains(&format!("Reply:\n{long_preview}")));
     assert!(rendered.contains("[reply preview truncated]"));
-    assert!(rendered.contains("Read the full value with `pollResponse` only if you need more than this preview"));
+    assert!(rendered.contains(
+        "Read the full value with `pollResponse` only if you need more than this preview"
+    ));
 }
 
 #[tokio::test]
@@ -2105,9 +2158,11 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
         watermark: exomonad_actor::ActorEventSequence(2),
     };
     inbox
-        .publish(DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
-            notification: notification.clone(),
-        }))
+        .publish(DurableActorEvent::Typed(
+            TypedActorEvent::SettlementChanged {
+                notification: notification.clone(),
+            },
+        ))
         .unwrap();
 
     let backend = LostAckThenLate {
@@ -2149,14 +2204,17 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
     .is_err());
     {
         let messages = backend.submissions.lock().unwrap();
-        assert_eq!(messages.len(), 1, "the stuck row was attempted exactly once");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the stuck row was attempted exactly once"
+        );
     }
-    let pushed_after_first_tick = backend
-        .queries
-        .lock()
-        .unwrap()
-        .clone();
-    assert!(pushed_after_first_tick.is_empty(), "not queried until Unconfirmed");
+    let pushed_after_first_tick = backend.queries.lock().unwrap().clone();
+    assert!(
+        pushed_after_first_tick.is_empty(),
+        "not queried until Unconfirmed"
+    );
     // The barrier still holds: nothing is acknowledged yet.
     assert_eq!(inbox.cursor(), 0);
 
@@ -2176,7 +2234,11 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
     .await
     .is_err());
     assert_eq!(backend.queries.lock().unwrap().len(), 1);
-    assert_eq!(inbox.cursor(), 0, "the stuck row still fences acknowledgement");
+    assert_eq!(
+        inbox.cursor(),
+        0,
+        "the stuck row still fences acknowledgement"
+    );
 
     // The rendered settlement text reached the backend out of order, even
     // though the stuck native row ahead of it never resolved — and exactly
