@@ -50,7 +50,6 @@ checks = [
   "Project.RoutingChecks.declaredRepair",
   "Project.RoutingChecks.forwardingFailure",
   "Project.RoutingChecks.handlerCall",
-  "Project.Checks.workbench",
   "Project.CollaborationChecks.collaboration",
   "Project.SkillChecks.skills",
   "Project.JevChecks.investigation",
