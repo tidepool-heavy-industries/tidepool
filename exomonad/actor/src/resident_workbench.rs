@@ -624,6 +624,13 @@ type HostCarrierCache =
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+    /// Builds a fresh, idle machine for a session id this host has decided
+    /// deserves its own — installed once by the composition root; `None`
+    /// keeps every launch on the shared session, unchanged, which is also
+    /// today's behavior everywhere this hasn't been wired up yet. See
+    /// [`crate::start::child_session_eligibility`] for the one caller that
+    /// consults this.
+    child_session_factory: Option<ChildSessionFactory<H, O>>,
     // The `compile_blocking` span omits `include_roots` from every line (the
     // full search path is long and rarely changes turn to turn); this tracks
     // the last-logged roots per session so a diagnostic reader still sees
@@ -654,6 +661,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines,
             source,
+            child_session_factory: None,
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
@@ -669,11 +677,20 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
+            child_session_factory: self.child_session_factory.clone(),
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::clone(&self.carriers),
         }
     }
 }
+
+/// Builds a fresh, idle [`ResidentSession`] for a session id the caller has
+/// already minted — the composition root's one factory, installed once and
+/// called by [`ResidentActorRunner::spawn_child_session`]. `Fn`, not
+/// `FnOnce`: called once per eligible child for the life of the host.
+pub type ChildSessionFactory<H, O> = Arc<
+    dyn Fn(tidepool_repr::SessionId) -> Result<Box<ResidentSession<H, O>>, String> + Send + Sync,
+>;
 
 /// Keeps `prepare_cell`'s split-mounted request-input host binding alive
 /// (leased, never retired) across every checkout the split releases and
@@ -1727,6 +1744,43 @@ impl<H, O> ResidentActorRunner<H, O> {
         Self {
             access: ResidentMachineAccess::new(machines, source),
         }
+    }
+
+    /// Install the composition root's child-session factory. Omitted, every
+    /// launch keeps running on the session that admitted it — today's
+    /// behavior, unchanged.
+    #[must_use]
+    pub fn with_child_session_factory(mut self, factory: ChildSessionFactory<H, O>) -> Self {
+        self.access.child_session_factory = Some(factory);
+        self
+    }
+
+    /// Build a fresh machine for `session_id` and register it idle in the
+    /// shared registry, using the installed [`ChildSessionFactory`]. Returns
+    /// an error naming why when no factory is installed, the factory itself
+    /// fails, or `session_id` somehow already names a live entry (it is
+    /// minted fresh by the caller — `tidepool_repr::SessionId` collision is
+    /// not expected, but silently overwriting a live session is never safe).
+    pub(crate) fn spawn_child_session(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> Result<(), String>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        let factory = self
+            .access
+            .child_session_factory
+            .clone()
+            .ok_or_else(|| "no child-session factory installed".to_string())?;
+        let machine = factory(session_id)?;
+        if self.access.machines.insert_idle(session_id, machine).is_some() {
+            return Err(format!(
+                "session {session_id} already had a live entry; refusing to overwrite it"
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn resident_session_state(
@@ -10527,6 +10581,72 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
+    }
+
+    /// A bare, unbootstrapped-but-idle machine at an arbitrary session id —
+    /// everything a [`ChildSessionFactory`] needs to hand back, without the
+    /// notifications/preamble setup [`host_mount_fixture`] does for tests
+    /// that actually run a turn.
+    fn bare_session_at(
+        session_id: tidepool_repr::SessionId,
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        tempfile::TempDir,
+    ) {
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+        let session_root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            session_id,
+            session_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("declaration plane");
+        (
+            ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                Some(lib),
+            ),
+            session_root,
+        )
+    }
+
+    #[test]
+    fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(1));
+        // Keep the fixture's tempdir alive for the factory's one call — a
+        // production factory instead captures the run's real session root.
+        let held_root = std::sync::Mutex::new(None);
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source).with_child_session_factory(
+            Arc::new(move |session_id| {
+                let (session, root) = bare_session_at(session_id);
+                *held_root.lock().unwrap() = Some(root);
+                Ok(Box::new(session))
+            }),
+        );
+        assert_eq!(machines.kind(child_id), None, "not present before spawning");
+        runner
+            .spawn_child_session(child_id)
+            .expect("factory-built session installs idle");
+        assert_eq!(
+            machines.kind(child_id),
+            Some(tidepool_runtime::session::SlotKind::Idle)
+        );
+        // The parent's own session is untouched by spawning a sibling.
+        assert!(machines.kind(context.placement.session).is_some());
+    }
+
+    #[test]
+    fn spawn_child_session_without_an_installed_factory_is_a_named_error() {
+        let (machines, _context, source, _root) = actor_registry_fixture();
+        let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
+            ResidentActorRunner::new(machines, source);
+        let error = runner
+            .spawn_child_session(tidepool_repr::SessionId(999_999))
+            .expect_err("no factory installed");
+        assert!(error.contains("no child-session factory"));
     }
 
     /// Like [`actor_registry_fixture`], but mints a second, isolated lexical

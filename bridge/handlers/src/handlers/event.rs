@@ -663,6 +663,35 @@ pub trait ObservationSource: Send {
     fn observe(&mut self, worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError>;
 }
 
+/// A source for a `RepoEventHandler` that must exist (the handler hlist type
+/// is fixed for every session in one run) but is never meant to be reached —
+/// a per-child-session machine whose only eligible actor's effect row proves
+/// out to never dispatch `RepoEvent`. `register`/`observe` both fail loudly
+/// rather than silently reconciling nothing, so a future effect-row change
+/// that DID reach this handler would surface as this error, not as silently
+/// missing repository events.
+///
+/// `RepoEventHandler` also owns per-machine `mailboxes`/subscription-registry
+/// state that must not be shared across two live heaps, so each session gets
+/// its own `RepoEventHandler` (built with this source, or the production
+/// one) rather than a clone of another session's.
+#[derive(Debug, Default)]
+pub struct InertObservationSource;
+
+impl ObservationSource for InertObservationSource {
+    fn register(&mut self, _worktree: &WtWorktreeId) -> Result<(), EventError> {
+        Err(EventError::EventSourceLost(
+            "repository events are served by the root session".into(),
+        ))
+    }
+
+    fn observe(&mut self, _worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        Err(EventError::EventSourceLost(
+            "repository events are served by the root session".into(),
+        ))
+    }
+}
+
 /// The production source: [`WorktreeMonitor`](exomonad_worktree::WorktreeMonitor)
 /// does the git reading and the honest classification; this adapter only maps
 /// its domain types onto the wire types and mints the per-pass event id.
@@ -1570,6 +1599,19 @@ mod tests {
         WtWorktreeId {
             raw: name.to_string(),
         }
+    }
+
+    #[test]
+    fn inert_observation_source_refuses_register_and_observe() {
+        let mut source = InertObservationSource;
+        assert!(matches!(
+            source.register(&wt("a")),
+            Err(EventError::EventSourceLost(_))
+        ));
+        assert!(matches!(
+            source.observe(&wt("a")),
+            Err(EventError::EventSourceLost(_))
+        ));
     }
 
     fn commit_event(id: i64, tree: &str, oid: &str) -> EvRepositoryEvent {

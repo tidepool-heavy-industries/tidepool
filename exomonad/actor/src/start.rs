@@ -348,20 +348,6 @@ impl ResidentActorStart {
         }) {
             return Err(ActorStartCaptureError::InvalidModel);
         }
-        let eligibility = child_session_eligibility(context, unbound_label.as_deref());
-        tracing::info!(
-            actor_label = %label,
-            parent = ?parent_actor,
-            context = ?context,
-            eligible = eligibility.eligible,
-            reason = eligibility.reason,
-            "selected-context child session eligibility decided"
-        );
-        // The fresh-machine factory (a shared "spawn child session" primitive
-        // extracted from `bridge/facade`'s root bootstrap) does not exist yet
-        // — see plans/wave3/dives/per-child-sessions-design.md parcels 2-3.
-        // Every launch, eligible or not, still gets the launching session's
-        // id until that factory lands; this call site is the seam.
         let (profile, effect_keys) = profile.resolve(effect_keys)?;
         let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
@@ -383,6 +369,32 @@ impl ResidentActorStart {
             }
             None => effective_role,
         };
+        // Decided from the RESOLVED effect keys, not the wire role alone: a
+        // future change that grants RepoEvent (or widens the row some other
+        // way) to an `ActorInheritedRole`/`ActorSelectedProfile` launch turns
+        // eligibility off by itself, rather than this check silently going
+        // stale and a launch reaching the inert `RepoEventHandler` source a
+        // fresh session installs for it (see `bridge/handlers`'s
+        // `InertObservationSource`).
+        let eligibility = child_session_eligibility(
+            context,
+            unbound_label.as_deref(),
+            effective_role.effect_keys(),
+        );
+        tracing::info!(
+            actor_label = %label,
+            parent = ?parent_actor,
+            context = ?context,
+            eligible = eligibility.eligible,
+            reason = eligibility.reason,
+            "selected-context child session eligibility decided"
+        );
+        // The fresh-machine factory (a shared "spawn child session" primitive
+        // extracted from `bridge/facade`'s root bootstrap) does not exist yet
+        // — see plans/wave3/dives/per-child-sessions-design.md parcel 2.
+        // Every launch, eligible or not, still gets the launching session's
+        // id until that factory lands and its caller wires it in; this call
+        // site is the seam.
         let mut descriptor = ActorDescriptor::new(
             label,
             crate::ActorPlacement {
@@ -440,12 +452,31 @@ struct ChildSessionEligibility {
 fn child_session_eligibility(
     context: ForkContext,
     unbound_label: Option<&str>,
+    resolved_effect_keys: &[crate::ActorEffectKey],
 ) -> ChildSessionEligibility {
     match (context, unbound_label) {
-        (ForkContext::SelectedContext, Some(_)) => ChildSessionEligibility {
-            eligible: true,
-            reason: "selected context, unbound agent launch",
-        },
+        (ForkContext::SelectedContext, Some(_)) => {
+            // The inert `RepoEventHandler` a fresh session installs for this
+            // actor never dispatches RepoEvent; if the RESOLVED row somehow
+            // grants that key anyway, refuse instead of reaching it. Checked
+            // here, not assumed from `agentDefinitionUnbound`'s fixed
+            // `ReadOnlyEffects AgentProtocol` shape, precisely so a later row
+            // change is caught by this check rather than by a runtime error
+            // inside the inert source.
+            if resolved_effect_keys.contains(&crate::ActorEffectKey::RepoEvent) {
+                ChildSessionEligibility {
+                    eligible: false,
+                    reason: "selected context, unbound agent launch, but the resolved \
+                             effect row includes RepoEvent — a fresh session's \
+                             RepoEventHandler cannot serve it",
+                }
+            } else {
+                ChildSessionEligibility {
+                    eligible: true,
+                    reason: "selected context, unbound agent launch, no RepoEvent in the resolved row",
+                }
+            }
+        }
         (ForkContext::SelectedContext, None) => ChildSessionEligibility {
             eligible: false,
             reason: "selected context, but entry is a caller-authored ActorDefinition \
@@ -606,23 +637,41 @@ mod tests {
     fn unbound_launch_in_selected_context_is_eligible() {
         use super::{child_session_eligibility, ForkContext};
         let decision =
-            child_session_eligibility(ForkContext::SelectedContext, Some("luna/implement"));
+            child_session_eligibility(ForkContext::SelectedContext, Some("luna/implement"), &[]);
         assert!(decision.eligible);
     }
 
     #[test]
     fn selected_context_without_unbound_label_is_ineligible() {
         use super::{child_session_eligibility, ForkContext};
-        let decision = child_session_eligibility(ForkContext::SelectedContext, None);
+        let decision = child_session_eligibility(ForkContext::SelectedContext, None, &[]);
         assert!(!decision.eligible);
     }
 
     #[test]
     fn inherited_context_is_ineligible_even_with_unbound_label() {
         use super::{child_session_eligibility, ForkContext};
-        let decision =
-            child_session_eligibility(ForkContext::InheritedContext, Some("luna/implement"));
+        let decision = child_session_eligibility(
+            ForkContext::InheritedContext,
+            Some("luna/implement"),
+            &[],
+        );
         assert!(!decision.eligible);
+    }
+
+    #[test]
+    fn unbound_launch_is_ineligible_when_the_resolved_row_grants_repo_event() {
+        use super::{child_session_eligibility, ForkContext};
+        let decision = child_session_eligibility(
+            ForkContext::SelectedContext,
+            Some("luna/implement"),
+            &[crate::ActorEffectKey::RepoEvent],
+        );
+        assert!(
+            !decision.eligible,
+            "a resolved row granting RepoEvent must turn eligibility off, \
+             since a fresh session's RepoEventHandler cannot serve it"
+        );
     }
 
     #[test]
