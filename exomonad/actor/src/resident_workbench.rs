@@ -1814,6 +1814,20 @@ impl<H, O> ResidentActorRunner<H, O> {
         self
     }
 
+    /// Whether this host can give a launch its own dedicated machine at
+    /// all: both [`Self::with_child_session_factory`] and
+    /// [`Self::with_child_bootstrap_program`] were installed.
+    /// `try_start_child`/`replacement.rs`'s matching resolution consult
+    /// this before calling [`Self::provision_child_session`], so a host
+    /// that never opted into per-actor machines (most test harnesses
+    /// included) still runs every launch on the session that admitted it,
+    /// exactly as before this capability existed, rather than failing an
+    /// otherwise-ordinary fork over a host capability nothing asked for.
+    #[must_use]
+    pub fn supports_child_sessions(&self) -> bool {
+        self.access.child_session_factory.is_some() && self.access.child_bootstrap_program.is_some()
+    }
+
     /// Install this run's shared [`tidepool_runtime::session::ImageRegistry`].
     /// Omitted, every session compiles its own images unchanged. Applied to
     /// a session's engine on every checkout, root and child alike — see
@@ -1881,6 +1895,11 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// private machine and the reserved session id without ever publishing
     /// it — the shared registry is unchanged.
     ///
+    /// `resource_scope` is the descriptor's own resource scope, minted at
+    /// capture time (`crate::start::capture_decoded`'s `child_realm`) — the
+    /// SAME realm `transfer_custody` will later import the entry under, not
+    /// a second one of this call's own minting nothing afterward would use.
+    ///
     /// Returns the child's own freshly minted lexical scope
     /// (`ActorDescriptor::with_lexical_scope` replaces the placeholder the
     /// parent minted at capture time with this one). The caller still owns
@@ -1889,6 +1908,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     pub(crate) async fn provision_child_session(
         &self,
         session_id: tidepool_repr::SessionId,
+        resource_scope: RealmId,
     ) -> Result<tidepool_codegen::scope::ScopeId, String>
     where
         H: DispatchEffect<O> + Send + 'static,
@@ -1906,7 +1926,6 @@ impl<H, O> ResidentActorRunner<H, O> {
             .ok_or_else(|| "no child bootstrap program installed".to_string())?;
         let mut machine = factory(session_id)?;
         let lexical_scope = machine.mint_isolated_scope();
-        let resource_scope = RealmId::fresh();
         machine
             .set_actor_execution(
                 tidepool_runtime::session::SessionRunContext {
@@ -2011,6 +2030,42 @@ impl<H, O> ResidentActorRunner<H, O> {
         // session (zero live handles) or left it idle and logged the
         // deferral (nonzero) — nothing further to do here either way.
         Ok(())
+    }
+
+    /// Discard `session_id`'s dedicated machine immediately, unconditionally
+    /// — for a `provision_child_session` that succeeded (the machine is
+    /// registered) but something later in the same launch failed before any
+    /// actor ever admitted onto it (a `transfer_custody`/shared-import
+    /// failure, most likely). No actor exists yet to retire, so there is no
+    /// "outstanding custody" worth deferring for, unlike
+    /// [`Self::retire_child_session`]: this call site is the one place a
+    /// child session with nothing depending on it is removed outright, so
+    /// a failed launch never orphans a registered-but-unowned machine.
+    /// Called from both `try_start_child` and `replacement.rs`'s matching
+    /// resolution on any error after their own `provision_child_session`
+    /// call succeeds.
+    pub(crate) fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
+        self.access
+            .child_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+        self.access
+            .pending_child_teardown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+        if self
+            .access
+            .machines
+            .remove(
+                session_id,
+                "child session launch failed before any actor admitted",
+            )
+            .is_some()
+        {
+            tracing::info!(session = ?session_id, "discarded a dedicated child session after a failed launch");
+        }
     }
 
     pub(crate) fn resident_session_state(
@@ -7804,6 +7859,24 @@ where
                     resource_scope: RealmId::fresh(),
                     lexical_scope: session.mint_isolated_scope(),
                 })
+            })
+            .await
+    }
+
+    /// Mint a fresh, isolated lexical scope on `session_id`'s own scope
+    /// forest, alone — for a launch `child_session_eligibility` marked
+    /// eligible (so `capture_decoded` minted it no real scope, only a
+    /// placeholder) but whose host offers no dedicated-machine primitive
+    /// (`Self::supports_child_sessions` false): it falls back to running on
+    /// the launching session, which still needs an actual scope of its own,
+    /// same as any other launch there.
+    pub(crate) async fn mint_lexical_scope(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine("mint-lexical-scope", session_id, None, move |session, _| {
+                Ok(session.mint_isolated_scope())
             })
             .await
     }

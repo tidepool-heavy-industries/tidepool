@@ -373,13 +373,6 @@ impl ResidentActorStart {
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let facade = materialize_entry_facade(session, &entry)?;
-        let lexical_scope = if context_fork {
-            session
-                .mint_scope(session.run_context().lexical_scope)
-                .ok_or(ActorStartCaptureError::ParentScopeRetired)?
-        } else {
-            session.mint_isolated_scope()
-        };
         let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
@@ -415,10 +408,29 @@ impl ResidentActorStart {
         // sessions checked out at once). An ineligible launch, or any
         // `InheritedContext` fork, is unchanged: it keeps the launching
         // session's id, and never crosses at all.
-        let launch_session = if eligibility.eligible {
-            tidepool_runtime::session::fresh_session_id()
+        //
+        // The lexical scope is minted on THIS, the parent's, session too —
+        // but only when there is no later child session to mint it on
+        // instead: an eligible launch's own scope belongs to the CHILD's
+        // scope forest, minted there once `try_start_child` provisions it
+        // (`ActorDescriptor::with_lexical_scope` replaces this placeholder).
+        // Minting one here anyway, for a scope nothing on the parent will
+        // ever use, would leak an empty scope into the parent's forest on
+        // every eligible launch.
+        let (launch_session, lexical_scope) = if eligibility.eligible {
+            (
+                tidepool_runtime::session::fresh_session_id(),
+                tidepool_codegen::scope::ScopeId::ROOT,
+            )
+        } else if context_fork {
+            (
+                session_id,
+                session
+                    .mint_scope(session.run_context().lexical_scope)
+                    .ok_or(ActorStartCaptureError::ParentScopeRetired)?,
+            )
         } else {
-            session_id
+            (session_id, session.mint_isolated_scope())
         };
         let mut descriptor = ActorDescriptor::new(
             label,

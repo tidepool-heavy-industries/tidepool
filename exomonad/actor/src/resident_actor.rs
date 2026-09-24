@@ -1944,7 +1944,22 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let crate::ResidentActorStart { parent_hole, child } = start;
         let fork_group = child.descriptor.fork_group();
+        // Captured before the move below: if this launch minted itself a
+        // fresh session (`child_session_eligibility`) and admission fails
+        // anywhere from here on, that session may already have been
+        // provisioned (published into the shared registry) with nothing
+        // left to own it — discard it outright rather than orphaning it.
+        // A session `try_start_child` never provisioned (ineligible, or
+        // the host fell back to the launching session) is simply not a
+        // member of `child_sessions`, so discarding it here is always safe,
+        // whether or not provisioning ever actually happened.
+        let launch_session = child.descriptor.placement().session;
         let started = self.try_start_child(kernel, context, child).await;
+        if started.is_err() && launch_session != context.placement.session {
+            self.environment
+                .runner
+                .discard_child_session(launch_session);
+        }
         let (child, allocated_label, admitted_worktree) = match started {
             Ok(started) => started,
             Err(error) if fork_group.is_some() => {
@@ -2171,15 +2186,35 @@ where
         // resident-machine-boundary site already uses
         // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
         // any step here leaves the launching session untouched and starts
-        // nothing.
+        // nothing; the caller (`start_child`) discards a provisioned but
+        // now-orphaned child session on any error this whole admission
+        // sequence returns from here on, by comparing the ORIGINAL
+        // captured launch's session against the one it actually admits on.
         let entry = if descriptor.placement().session == context.placement.session {
+            entry
+        } else if !self.environment.runner.supports_child_sessions() {
+            // Eligible, but this host never installed a child-session
+            // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
+            // — fall back to the launching session, rather than failing an
+            // otherwise-ordinary fork over a capability nothing asked for.
+            // `capture_decoded` minted no real lexical scope for this
+            // (eligible) launch, only a placeholder; mint the actual one
+            // here, on the session this actor is actually falling back to.
+            let lexical_scope = self
+                .environment
+                .runner
+                .mint_lexical_scope(context.placement.session)
+                .await?;
+            descriptor = descriptor
+                .with_session(context.placement.session)
+                .with_lexical_scope(lexical_scope);
             entry
         } else {
             let child_session = descriptor.placement().session;
             let lexical_scope = self
                 .environment
                 .runner
-                .provision_child_session(child_session)
+                .provision_child_session(child_session, descriptor.placement().resource_scope)
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_lexical_scope(lexical_scope);
@@ -7941,10 +7976,10 @@ where
                 .actor_stopped(kernel.identity(), terminal);
             self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
-            // A dedicated child session (`crate::start::CapturedEntry::Crossing`)
-            // is a no-op check for every actor that never got one (the
-            // shared session is never a member). One bounded checkout, no
-            // wait for whoever still needs this machine's output — see
+            // A no-op check for every actor that never got a dedicated
+            // child session (the shared session is never a member). One
+            // bounded checkout, no wait for whoever still needs this
+            // machine's output — see
             // `ResidentActorRunner::retire_child_session`'s doc comment.
             if let Err(error) = self
                 .environment
@@ -8179,6 +8214,30 @@ where
     #[must_use]
     pub fn resident_session_state(&self) -> tidepool_runtime::session::ResidentSessionState {
         self.environment.runner.resident_session_state(self.session)
+    }
+
+    /// The session `actor` is currently placed on, if it is still in the
+    /// directory — for a `SelectedContext` launch this may differ from
+    /// [`Self::session`] (this forest's own root), see per-actor machines
+    /// parcel 7. A thin, read-only observability primitive: callers decide
+    /// what to do with the id, this never mutates anything.
+    #[must_use]
+    pub fn actor_session(&self, actor: ActorRef) -> Option<tidepool_repr::SessionId> {
+        self.directory
+            .session_context(actor)
+            .map(|context| context.placement.session)
+    }
+
+    /// Whether `session` is still live in the shared machine registry — for
+    /// asserting a dedicated child session's teardown
+    /// (`ResidentActorRunner::retire_child_session`) actually happened,
+    /// without reaching into any crate-private state.
+    #[must_use]
+    pub fn session_state_of(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> tidepool_runtime::session::ResidentSessionState {
+        self.environment.runner.resident_session_state(session)
     }
 
     /// Read-only resident counters for matched measurement harnesses. A

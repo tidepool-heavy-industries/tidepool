@@ -240,15 +240,34 @@ impl ActorDescriptor {
     }
 
     /// Replace the placement's lexical scope alone, after construction — for
-    /// a launch whose entry crossed to a fresh child session
-    /// (`crate::start::CapturedEntry::Crossing`): the scope minted at
-    /// capture time belonged to the PARENT's scope forest, never valid on
-    /// the child's own session, so the child's actual lexical scope (minted
-    /// on the child, once it exists) replaces it here before the actor
-    /// admits. Every other placement field is unaffected.
+    /// an eligible `SelectedContext` launch whose entry crosses to a fresh
+    /// child session (`crate::resident_actor`'s `try_start_child`, once
+    /// `ResidentActorRunner::provision_child_session` has built it): the
+    /// scope minted at capture time belonged to the PARENT's scope forest,
+    /// never valid on the child's own session, so the child's actual
+    /// lexical scope (minted on the child, once it exists) replaces it here
+    /// before the actor admits. Every other placement field is unaffected.
     #[must_use]
     pub(crate) fn with_lexical_scope(mut self, scope: tidepool_codegen::scope::ScopeId) -> Self {
         self.placement.lexical_scope = scope;
+        self
+    }
+
+    /// Replace the placement's session alone — for a launch
+    /// `child_session_eligibility` marked eligible for its own machine
+    /// (and so already minted a fresh session id for at capture time), but
+    /// whose host offers no dedicated-machine primitive at all
+    /// (`ResidentActorRunner::supports_child_sessions` false: no factory,
+    /// no bootstrap program installed). Falls back to the launching
+    /// session exactly as every launch behaved before per-actor machines,
+    /// rather than failing the whole launch over a host capability nothing
+    /// asked for. The resource scope and lexical scope minted at capture
+    /// time are unaffected: for an ordinary (non-context-fork) launch they
+    /// were already minted on the checked-out PARENT session, so they stay
+    /// valid once the placement's session reverts to match it.
+    #[must_use]
+    pub(crate) fn with_session(mut self, session: tidepool_repr::SessionId) -> Self {
+        self.placement.session = session;
         self
     }
 
