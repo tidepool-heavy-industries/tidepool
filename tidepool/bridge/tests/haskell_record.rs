@@ -2,6 +2,12 @@
 //! representative struct and enum, exercising the type map, snake→camel field
 //! naming, `#[haskell(hs = ...)]` / `#[haskell(hs_type = ...)]` overrides, and the
 //! `inventory` registration.
+#![allow(
+    dead_code,
+    reason = "fixture types exist for the derive macro to render into Haskell \
+              declarations; their fields and variants are never read or \
+              constructed from Rust"
+)]
 
 use tidepool_bridge::{all_record_decls, HaskellRecord};
 use tidepool_bridge_derive::HaskellRecord;

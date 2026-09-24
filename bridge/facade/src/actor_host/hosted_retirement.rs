@@ -51,6 +51,11 @@ pub(crate) enum SealObservation {
     Pending,
     TerminalPath,
     Confirmed(HostedWorkSeal),
+    #[allow(
+        dead_code,
+        reason = "carried for its Debug rendering in diagnostics; retirement \
+                  logic only checks the variant, never the error text"
+    )]
     Failed(String),
 }
 #[derive(Debug, Clone)]
@@ -62,6 +67,11 @@ pub(crate) enum InputSealObservation {
     Pending,
     Sealed,
     Rejected,
+    #[allow(
+        dead_code,
+        reason = "carried for its Debug rendering in diagnostics; retirement \
+                  logic only checks the variant, never the error text"
+    )]
     Unconfirmed(String),
 }
 
@@ -79,14 +89,29 @@ impl InputSealObservation {
 pub(crate) enum ResidentObservation {
     Pending,
     Absent,
+    #[allow(
+        dead_code,
+        reason = "carried for its Debug rendering in diagnostics; retirement \
+                  logic only checks the variant, never the referenced actor"
+    )]
     Foreign(ActorRef),
     Accounted(ResidentCleanupOutcome),
+    #[allow(
+        dead_code,
+        reason = "carried for its Debug rendering in diagnostics; retirement \
+                  logic only checks the variant, never the error text"
+    )]
     Failed(String),
 }
 #[derive(Debug, Clone)]
 pub(crate) enum HttpObservation {
     Pending,
     Drained,
+    #[allow(
+        dead_code,
+        reason = "carried for its Debug rendering in diagnostics; retirement \
+                  logic only checks the variant, never the error text"
+    )]
     Failed(String),
 }
 #[derive(Debug, Clone)]

@@ -75,7 +75,12 @@ impl RequestDuration {
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
-#[allow(dead_code, clippy::enum_variant_names)]
+#[allow(
+    dead_code,
+    clippy::enum_variant_names,
+    reason = "decode-only shape mirrors the Haskell constructor names; fields \
+              exist to make the FromHaskell arity match, not for Rust reads"
+)]
 pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64), bool),

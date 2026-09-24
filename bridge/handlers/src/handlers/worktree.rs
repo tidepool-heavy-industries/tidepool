@@ -1056,7 +1056,6 @@ impl WorktreeHandler {
     /// resolved to a handle first; a lookup failure (never-registered or
     /// lost) surfaces as the typed error rather than being swallowed. No
     /// local `rev-parse`, no `source_head` shortcut.
-    #[allow(dead_code)]
     pub(crate) fn worktree_head_of(
         &mut self,
         tree_id: WtWorktreeId,

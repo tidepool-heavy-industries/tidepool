@@ -182,8 +182,6 @@ const TOMBSTONE_CAPACITY: usize = 64;
 struct Tombstone {
     id: SessionId,
     reason: String,
-    #[allow(dead_code, reason = "diagnostic timestamp; not yet read anywhere")]
-    when: Instant,
 }
 
 #[derive(Default)]
@@ -239,11 +237,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         if tombstones.len() >= TOMBSTONE_CAPACITY {
             tombstones.pop_front();
         }
-        tombstones.push_back(Tombstone {
-            id,
-            reason,
-            when: Instant::now(),
-        });
+        tombstones.push_back(Tombstone { id, reason });
     }
 
     /// The most recent tombstoned reason for `id`, if it was ever retired

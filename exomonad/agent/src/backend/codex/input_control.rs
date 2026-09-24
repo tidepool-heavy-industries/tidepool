@@ -9,10 +9,12 @@ use codex_shoal_protocol::{
 };
 
 use crate::interactive::{
-    InputAdmission, InputEnvelopeError, InputOperationId, InputProducerControlOutcome,
-    InputProducerId, InputPurpose, InteractiveInputEnvelope, InteractiveInputError,
-    InteractiveInputMode, InteractiveInputTarget, QueueReadyThread,
+    InputAdmission, InputOperationId, InputProducerControlOutcome, InputProducerId, InputPurpose,
+    InteractiveInputEnvelope, InteractiveInputError, InteractiveInputMode, QueueReadyThread,
 };
+#[cfg(test)]
+use crate::interactive::{InputEnvelopeError, InteractiveInputTarget};
+#[cfg(test)]
 use crate::BackendThreadId;
 
 use super::super::controller;
@@ -161,6 +163,10 @@ pub(super) async fn acknowledge(
 
 trait InputEnvelopeWireExt: Sized {
     fn from_envelope(value: &InteractiveInputEnvelope) -> Self;
+    /// Decodes back to the domain envelope; exercised by the round-trip
+    /// tests below to prove wire fidelity. The owning TUI input relay does
+    /// its own decoding on the receiving end.
+    #[cfg(test)]
     fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError>;
 }
 
@@ -191,6 +197,7 @@ impl InputEnvelopeWireExt for InputEnvelopeWire {
     }
 
     /// Recompute the canonical digest before this operation can cross native admission.
+    #[cfg(test)]
     fn validate(self) -> Result<InteractiveInputEnvelope, InputControlWireError> {
         let sequence =
             std::num::NonZeroU64::new(self.sequence).ok_or(InputControlWireError::ZeroSequence)?;
@@ -222,6 +229,7 @@ impl InputEnvelopeWireExt for InputEnvelopeWire {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputControlWireError {
     #[error("input sequence must be nonzero")]
@@ -242,6 +250,7 @@ fn encode_digest(digest: &[u8; 32]) -> String {
     encoded
 }
 
+#[cfg(test)]
 fn decode_digest(encoded: &str) -> Result<[u8; 32], InputControlWireError> {
     if encoded.len() != 64
         || !encoded

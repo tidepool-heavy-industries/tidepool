@@ -632,8 +632,8 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-GHC source-order detection (stage one only — NOT source-order
-// execution, which is a later experiment).
+// Pre-GHC source-order detection: flags the hazard lexically; it does not
+// reorder execution to match source order.
 //
 // A notebook cell is split into units and its declaration-kind units are
 // hoisted above its statement-kind units once GHC assembles the checked

@@ -25,7 +25,6 @@ use crate::{
 };
 use exomonad_model::{ConversationTurn, ProviderObservation};
 
-#[allow(dead_code)]
 #[path = "input_control.rs"]
 mod input_control;
 #[path = "rollout_conversation.rs"]

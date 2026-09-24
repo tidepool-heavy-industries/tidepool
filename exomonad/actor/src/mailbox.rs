@@ -87,10 +87,8 @@ pub(crate) enum ProbeKind {
 /// operation the receiving session must still perform. A `Runtime` value
 /// arrives ready to mount; a `Parcel` still needs
 /// [`tidepool_runtime::session::ResidentSession::import_parcel`] run against
-/// the receiving machine before it has a [`RootCustody`] of its own. Wiring
-/// that import into the actor kernel's delivery sites (`run_receiver`,
-/// `finish_receiver`, ...) is a later parcel; this type is the primitive
-/// they will match on.
+/// the receiving machine before it has a [`RootCustody`] of its own. This is
+/// the primitive a delivery site matches on to decide which operation to run.
 pub enum MailboxDelivery {
     Runtime(RootCustody),
     Parcel(Parcel),
