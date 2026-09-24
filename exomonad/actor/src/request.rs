@@ -468,16 +468,54 @@ pub(crate) enum CleanupAdmissionError {
     Pending,
 }
 
+/// Bound on how long a `RequestCleanupGuard` may hold its targets marked
+/// `cleaning` before the guard's own watchdog force-releases them. Reuses
+/// `local_actor::SHUTDOWN_BUDGET`: the guard is normally held across exactly
+/// the retirements `local_actor`'s own shutdown path already bounds by that
+/// budget (see `resident_actor::ResidentActorBoundary::CleanupExecute`), so
+/// a stuck retirement is already supposed to give up within it. This is a
+/// last-resort safety valve, not a routine operating point: a plan that
+/// legitimately retires several actors, each close to the full budget,
+/// sequentially, could still exceed it and trip the watchdog early. Widen
+/// this constant (not a second timing system) if that turns out to matter.
+const CLEANUP_GUARD_BUDGET: std::time::Duration = crate::local_actor::SHUTDOWN_BUDGET;
+
 pub(crate) struct RequestCleanupGuard {
     registry: std::sync::Arc<RequestRegistry>,
     targets: std::collections::HashSet<ActorRef>,
+    /// Set by whichever of {this guard's `Drop`, its watchdog task} settles
+    /// the retained `cleaning` marks first; the other observes it already
+    /// set and does nothing. Exactly one of the two ever calls
+    /// `release_cleaning`, so a watchdog expiry followed by an eventual
+    /// (late) `Drop` of the still-held guard is a no-op, not a double
+    /// release of a possibly-since-reclaimed target.
+    released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watchdog: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RequestCleanupGuard {
+    fn release_cleaning(registry: &RequestRegistry, targets: &std::collections::HashSet<ActorRef>) {
+        let mut state = registry.state.lock();
+        for actor in targets {
+            state.cleaning.remove(actor);
+        }
+    }
 }
 
 impl Drop for RequestCleanupGuard {
     fn drop(&mut self) {
-        let mut state = self.registry.state.lock();
-        for actor in &self.targets {
-            state.cleaning.remove(actor);
+        use std::sync::atomic::Ordering;
+        if self
+            .released
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            Self::release_cleaning(&self.registry, &self.targets);
+        }
+        // The watchdog is only needed while this guard is alive; an already
+        // fired watchdog is a harmless no-op abort.
+        if let Some(watchdog) = self.watchdog.take() {
+            watchdog.abort();
         }
     }
 }
@@ -587,9 +625,36 @@ impl RequestRegistry {
             return Err(CleanupAdmissionError::Pending);
         }
         state.cleaning.extend(targets.iter().copied());
+        drop(state);
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Only spawn the watchdog inside a running Tokio executor: unit
+        // tests exercise this admission logic synchronously, with no
+        // runtime, and are expected to release purely through `Drop`.
+        let watchdog = tokio::runtime::Handle::try_current().ok().map(|handle| {
+            let registry = std::sync::Arc::clone(self);
+            let watchdog_targets = targets.clone();
+            let released = std::sync::Arc::clone(&released);
+            handle.spawn(async move {
+                tokio::time::sleep(CLEANUP_GUARD_BUDGET).await;
+                use std::sync::atomic::Ordering;
+                if released
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    tracing::warn!(
+                        actors = ?watchdog_targets,
+                        budget = ?CLEANUP_GUARD_BUDGET,
+                        "cleanup guard watchdog force-released cleaning marks after budget expiry"
+                    );
+                    RequestCleanupGuard::release_cleaning(&registry, &watchdog_targets);
+                }
+            })
+        });
         Ok(RequestCleanupGuard {
             registry: std::sync::Arc::clone(self),
             targets,
+            released,
+            watchdog,
         })
     }
 
@@ -3280,5 +3345,47 @@ mod tests {
             },
             watch
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_guard_watchdog_settles_once_and_a_late_drop_is_a_no_op() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let inspected = [(target, registry.cleanup_revision(target))];
+
+        // Simulate a cleanup holder that never comes back (a stuck retire_by
+        // RPC to `target`, or similar): the guard is admitted and then just
+        // held, never dropped by its own logic.
+        let stuck = registry.begin_cleanup(owner, &inspected).ok().unwrap();
+        assert!(registry.state.lock().cleaning.contains(&target));
+
+        // Give the freshly spawned watchdog task its first poll so its
+        // `sleep` timer is actually registered before we advance past it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(CLEANUP_GUARD_BUDGET + std::time::Duration::from_millis(1)).await;
+        // Let the spawned watchdog task actually run past its sleep.
+        tokio::task::yield_now().await;
+        assert!(
+            !registry.state.lock().cleaning.contains(&target),
+            "the watchdog must force-release a guard held past its budget"
+        );
+
+        // A fresh cleanup can now be admitted for the same actor.
+        let inspected = [(target, registry.cleanup_revision(target))];
+        let fresh = registry.begin_cleanup(owner, &inspected).ok().unwrap();
+        assert!(registry.state.lock().cleaning.contains(&target));
+
+        // The original (stuck) guard's holder finally returns and drops it.
+        // That late release must be a no-op: it must not clear the fresh
+        // guard's still-active claim on the same actor.
+        drop(stuck);
+        assert!(
+            registry.state.lock().cleaning.contains(&target),
+            "a late release from an expired guard must not clear a fresh guard's claim"
+        );
+
+        drop(fresh);
+        assert!(!registry.state.lock().cleaning.contains(&target));
     }
 }

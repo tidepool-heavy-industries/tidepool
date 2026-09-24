@@ -3143,7 +3143,7 @@ async fn retain_input_custody_and_bind(
 }
 
 async fn run_interactive_applications(
-    mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    mut lifecycle: mpsc::Receiver<LocalResidentDeployment>,
     application_owners: InteractiveOwners,
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<Option<NativeRetirement>>,

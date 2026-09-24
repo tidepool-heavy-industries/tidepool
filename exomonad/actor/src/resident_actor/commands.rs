@@ -73,7 +73,7 @@ where
                             if self
                                 .environment
                                 .deployments
-                                .send(LocalResidentDeployment::CommandBackend(request.clone()))
+                                .try_send(LocalResidentDeployment::CommandBackend(request.clone()))
                                 .is_err()
                             {
                                 request.supply(Err(CommandError::CommandUnavailable(

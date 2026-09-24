@@ -37,7 +37,7 @@ pub(super) struct TestCampaign {
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub hosted: tokio::task::JoinHandle<()>,
-    deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
     /// Deployments scanned by [`Self::next_deployment`] that did not match
     /// what the caller was awaiting. Parked here, in arrival order, rather
     /// than dropped, so a later call can still find them.
@@ -151,16 +151,13 @@ impl TestCampaign {
     /// not be called on this campaign again afterward.
     pub fn take_deployments(
         &mut self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment> {
+    ) -> tokio::sync::mpsc::Receiver<LocalResidentDeployment> {
         assert!(
             self.pending.is_empty(),
             "deployments already parked: {:?}; drain them before detaching the channel",
             self.pending_kinds()
         );
-        std::mem::replace(
-            &mut self.deployments,
-            tokio::sync::mpsc::unbounded_channel().1,
-        )
+        std::mem::replace(&mut self.deployments, tokio::sync::mpsc::channel(1).1)
     }
 
     pub async fn await_watch_ready(&mut self) {

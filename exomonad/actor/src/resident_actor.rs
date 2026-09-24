@@ -189,9 +189,24 @@ pub enum ResourceRelease {
 /// workspace step may wait longer for a running host Git command.
 const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Bound on the deployment observer channel. A deployment's events come from
+/// per-actor lifecycle transitions (install, session-ready, retire) plus
+/// request-update/watch/settlement traffic proportional to concurrently
+/// in-flight requests; observed deployments run at most a few dozen actors
+/// with a handful of requests each in flight at once, so this is roughly an
+/// order of magnitude of headroom over a realistic burst, not a routine
+/// operating point. It exists to cap memory under a stalled or absent
+/// observer, not to apply steady-state backpressure. See the `try_send`
+/// overflow policy on every producer below: a full channel is handled
+/// exactly like a closed one (each site already has a defined fallback for
+/// "no observer"), so nothing is silently and invisibly lost — the caller
+/// either sees an explicit denial or the event was already documented as
+/// having no correctness effect when unobserved.
+const DEPLOYMENT_CHANNEL_CAPACITY: usize = 256;
+
 struct ResidentEnvironment<H, O> {
     runner: ResidentActorRunner<H, O>,
-    deployments: mpsc::UnboundedSender<LocalResidentDeployment>,
+    deployments: mpsc::Sender<LocalResidentDeployment>,
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
     requests: Arc<RequestRegistry>,
     commands: crate::command_jobs::CommandJobs,
@@ -973,7 +988,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         // effect since the policy flag above is already committed to state.
         self.environment
             .deployments
-            .send(LocalResidentDeployment::PolicyInstalled(Box::new(
+            .try_send(LocalResidentDeployment::PolicyInstalled(Box::new(
                 installation,
             )))
             .ok();
@@ -1013,7 +1028,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         if self
             .environment
             .deployments
-            .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+            .try_send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
             .is_err()
         {
             tracing::error!(actor = ?source, "actor failure notice could not reach inbox owner");
@@ -1036,7 +1051,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::Retired { actor, terminal })
+                .try_send(LocalResidentDeployment::Retired { actor, terminal })
                 .ok();
         }
     }
@@ -1065,7 +1080,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         if self
             .environment
             .deployments
-            .send(LocalResidentDeployment::ReleaseAwait(request))
+            .try_send(LocalResidentDeployment::ReleaseAwait(request))
             .is_err()
         {
             return AgentStopProjection::StoppedNow;
@@ -1098,14 +1113,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::WatchChanged { notification })
+                .try_send(LocalResidentDeployment::WatchChanged { notification })
                 .ok();
         }
         for notification in self.environment.requests.take_settlement_notifications() {
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::SettlementChanged { notification })
+                .try_send(LocalResidentDeployment::SettlementChanged { notification })
                 .ok();
         }
     }
@@ -1118,7 +1133,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::RequestCancellation { notification })
+                .try_send(LocalResidentDeployment::RequestCancellation { notification })
                 .ok();
         }
     }
@@ -1593,13 +1608,13 @@ where
             for notification in notifications {
                 // best-effort: deployment observer channel may have no listener.
                 deployments
-                    .send(LocalResidentDeployment::WatchChanged { notification })
+                    .try_send(LocalResidentDeployment::WatchChanged { notification })
                     .ok();
             }
             if let Some(notification) = cancellation {
                 // best-effort: deployment observer channel may have no listener.
                 deployments
-                    .send(LocalResidentDeployment::RequestCancellation { notification })
+                    .try_send(LocalResidentDeployment::RequestCancellation { notification })
                     .ok();
             }
         });
@@ -3204,7 +3219,7 @@ where
                     if self
                         .environment
                         .deployments
-                        .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+                        .try_send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
                         .is_err()
                     {
                         Err(crate::NotificationError::Unavailable)
@@ -3240,7 +3255,7 @@ where
                         if self
                             .environment
                             .deployments
-                            .send(LocalResidentDeployment::NotificationPoll(Arc::new(command)))
+                            .try_send(LocalResidentDeployment::NotificationPoll(Arc::new(command)))
                             .is_err()
                         {
                             Err(crate::NotificationError::Unavailable)
@@ -3402,9 +3417,15 @@ where
                         if let Err(error) = self
                             .environment
                             .deployments
-                            .send(LocalResidentDeployment::RequestUpdate { delivery })
+                            .try_send(LocalResidentDeployment::RequestUpdate { delivery })
                         {
-                            if let LocalResidentDeployment::RequestUpdate { delivery } = error.0 {
+                            // A full channel and a closed one both mean the
+                            // deployment owner cannot observe this update
+                            // right now; treat them alike rather than
+                            // silently keeping the update queued unseen.
+                            if let LocalResidentDeployment::RequestUpdate { delivery } =
+                                error.into_inner()
+                            {
                                 if let Some(presentation) = delivery.begin() {
                                     presentation
                                         .not_presented("deployment owner unavailable".into());
@@ -3839,7 +3860,7 @@ where
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::SessionReady { activation })
+                .try_send(LocalResidentDeployment::SessionReady { activation })
                 .ok();
         }
         Ok(InteractivePark::Parked)
@@ -4063,7 +4084,7 @@ where
             // best-effort: deployment observer channel may have no listener.
             self.environment
                 .deployments
-                .send(LocalResidentDeployment::ChildExited { notice })
+                .try_send(LocalResidentDeployment::ChildExited { notice })
                 .ok();
         }
         Ok(())
@@ -7496,7 +7517,7 @@ where
                 // best-effort: deployment observer channel may have no listener.
                 self.environment
                     .deployments
-                    .send(LocalResidentDeployment::ChildExited { notice })
+                    .try_send(LocalResidentDeployment::ChildExited { notice })
                     .ok();
             }
         })
@@ -7510,7 +7531,7 @@ pub async fn spawn_resident_root<H, O>(
     (
         LocalActorRef,
         ractor::concurrency::JoinHandle<()>,
-        mpsc::UnboundedReceiver<LocalResidentDeployment>,
+        mpsc::Receiver<LocalResidentDeployment>,
     ),
     ractor::SpawnErr,
 >
@@ -7529,7 +7550,7 @@ pub async fn spawn_resident_root_with_fork_admission<H, O>(
     (
         LocalActorRef,
         ractor::concurrency::JoinHandle<()>,
-        mpsc::UnboundedReceiver<LocalResidentDeployment>,
+        mpsc::Receiver<LocalResidentDeployment>,
     ),
     ractor::SpawnErr,
 >
@@ -7551,7 +7572,7 @@ pub async fn spawn_resident_root_in_incarnation<H, O>(
     (
         LocalActorRef,
         ractor::concurrency::JoinHandle<()>,
-        mpsc::UnboundedReceiver<LocalResidentDeployment>,
+        mpsc::Receiver<LocalResidentDeployment>,
     ),
     ractor::SpawnErr,
 >
@@ -7666,7 +7687,7 @@ where
         machine: ResidentSession<H, O>,
         fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
         incarnation: crate::Incarnation,
-    ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
+    ) -> (Self, mpsc::Receiver<LocalResidentDeployment>) {
         Self::new_with_launch_resolver(source, session, machine, fork_workspaces, incarnation, None)
     }
 
@@ -7677,11 +7698,11 @@ where
         fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
         incarnation: crate::Incarnation,
         launch_resolver: Option<crate::WorkerLaunchResolver>,
-    ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
+    ) -> (Self, mpsc::Receiver<LocalResidentDeployment>) {
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
         let runner = ResidentActorRunner::new(machines, source);
-        let (deployments, receiver) = mpsc::unbounded_channel();
+        let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let environment = ResidentEnvironment {
             commands: Default::default(),
             runner,
@@ -8462,6 +8483,52 @@ mod tests {
         fn make_writer(&'writer self) -> Self::Writer {
             CapturedGuard(std::sync::Arc::clone(&self.0))
         }
+    }
+
+    /// The deployment observer channel is bounded with a `try_send`
+    /// overflow policy: a slow or absent receiver never makes a producer
+    /// block, and once the receiver drains below capacity, sends succeed
+    /// again. This exercises the mechanism directly (bypassing the full
+    /// `ResidentForest`) since every production call site already reduces
+    /// to exactly this: bound the queue, `try_send`, and treat `Full`
+    /// exactly like a closed channel (each site's own fallback already
+    /// covers "no observer").
+    #[test]
+    fn deployment_channel_applies_backpressure_via_bounded_try_send_not_unbounded_growth() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<crate::LocalResidentDeployment>(1);
+        let event = |summary: &str| crate::LocalResidentDeployment::Retired {
+            actor: ActorRef::first(ActorId(1)),
+            terminal: crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: summary.to_owned(),
+            },
+        };
+
+        // One event fits in the bound.
+        assert!(sender.try_send(event("first")).is_ok());
+        // A slow/stalled receiver leaves the channel full; the overflow
+        // policy is an explicit, immediate `Full` error, never an
+        // unboundedly growing queue and never a blocking send.
+        let overflow = sender.try_send(event("second"));
+        assert!(matches!(
+            overflow,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        // Once the receiver catches up, the channel accepts new events
+        // again; capacity, not the count of events ever sent, bounds it.
+        let drained = receiver.try_recv().expect("first event was queued");
+        assert_eq!(drained.kind(), "Retired");
+        assert!(sender.try_send(event("third")).is_ok());
+
+        // Dropping every sender closes the channel; a still-pending event
+        // is delivered before the receiver observes the close.
+        drop(sender);
+        assert_eq!(receiver.try_recv().expect("third event was queued").kind(), "Retired");
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]

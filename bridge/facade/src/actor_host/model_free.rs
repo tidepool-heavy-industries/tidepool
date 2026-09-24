@@ -13,7 +13,7 @@ pub(super) struct ModelFreeSession {
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub _program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub hosted: tokio::task::JoinHandle<()>,
-    pub deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    pub deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
     pub root_installation: exomonad_actor::LocalResidentInstallation,
 }
 
