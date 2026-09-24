@@ -664,7 +664,6 @@ fn rust_session_var_id_matches_extract_minted_bound_binder_var_id() {
     );
 }
 
-
 #[test]
 fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     use tidepool_codegen::scope::ScopeId;
@@ -754,7 +753,8 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         "textAnchor <- pure (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of \
          TidepoolHostTextInternal.Text bytes offset length -> \
          TidepoolHostTextInternal.Text bytes offset length)",
-    ) else {
+    )
+    else {
         panic!("text anchor must compile as a bind");
     };
     let [text_anchor_binder] = bound.as_slice() else {
@@ -908,7 +908,8 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
         bound, compiled, ..
     } = notebook.compile_in_current_value_view(
         "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
-    ) else {
+    )
+    else {
         panic!("anchor must compile as a bind");
     };
     let [anchor_binder] = bound.as_slice() else {
@@ -1024,7 +1025,8 @@ fn failed_carrier_mount_leaves_no_stub_source() {
         bound, compiled, ..
     } = notebook.compile_in_current_value_view(
         "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\"]])",
-    ) else {
+    )
+    else {
         panic!("anchor must compile as a bind");
     };
     let [anchor_binder] = bound.as_slice() else {

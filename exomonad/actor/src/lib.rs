@@ -117,12 +117,11 @@ pub use recovery::{
 };
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
-    DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, ReplyError,
-    ReplyObservation, RequestCancellationNotification, RequestDeadline, RequestId,
+    DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, PendingProgress,
+    ReplyError, ReplyObservation, RequestCancellationNotification, RequestDeadline, RequestId,
     RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation,
-    PendingProgress, RequestUpdateReconciler, RequestUpdateState, ResponseFailure,
-    ResponseObservation, SettlementNotification, SettlementTransition,
-    UpdateReconciliationError, WatchId,
+    RequestUpdateReconciler, RequestUpdateState, ResponseFailure, ResponseObservation,
+    SettlementNotification, SettlementTransition, UpdateReconciliationError, WatchId,
     WatchNotification, WatchObservation, WatchStateProjection, WatchTransition,
 };
 pub use resident_actor::{

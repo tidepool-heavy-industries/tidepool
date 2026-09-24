@@ -149,9 +149,7 @@ impl TestCampaign {
     /// rest of the test (e.g. a background command-backend responder
     /// spawned for the test's duration). `next_deployment` and friends must
     /// not be called on this campaign again afterward.
-    pub fn take_deployments(
-        &mut self,
-    ) -> tokio::sync::mpsc::Receiver<LocalResidentDeployment> {
+    pub fn take_deployments(&mut self) -> tokio::sync::mpsc::Receiver<LocalResidentDeployment> {
         assert!(
             self.pending.is_empty(),
             "deployments already parked: {:?}; drain them before detaching the channel",

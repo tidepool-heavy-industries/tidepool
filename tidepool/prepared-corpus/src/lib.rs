@@ -80,26 +80,26 @@ impl<'de> Deserialize<'de> for Expectation {
         match kind.as_deref() {
             Some("no_finite_observation") => Ok(Expectation::NoFiniteObservation),
             Some("cyclic_observation") => Ok(Expectation::CyclicObservation),
-            Some("int") => serde_json::from_value::<i64>(
-                value.get("value").cloned().unwrap_or(Value::Null),
-            )
-            .map(Expectation::Int)
-            .map_err(serde::de::Error::custom),
-            Some("bool") => serde_json::from_value::<bool>(
-                value.get("value").cloned().unwrap_or(Value::Null),
-            )
-            .map(Expectation::Bool)
-            .map_err(serde::de::Error::custom),
-            Some("char") => serde_json::from_value::<char>(
-                value.get("value").cloned().unwrap_or(Value::Null),
-            )
-            .map(Expectation::Char)
-            .map_err(serde::de::Error::custom),
-            Some("text") => serde_json::from_value::<String>(
-                value.get("value").cloned().unwrap_or(Value::Null),
-            )
-            .map(Expectation::Text)
-            .map_err(serde::de::Error::custom),
+            Some("int") => {
+                serde_json::from_value::<i64>(value.get("value").cloned().unwrap_or(Value::Null))
+                    .map(Expectation::Int)
+                    .map_err(serde::de::Error::custom)
+            }
+            Some("bool") => {
+                serde_json::from_value::<bool>(value.get("value").cloned().unwrap_or(Value::Null))
+                    .map(Expectation::Bool)
+                    .map_err(serde::de::Error::custom)
+            }
+            Some("char") => {
+                serde_json::from_value::<char>(value.get("value").cloned().unwrap_or(Value::Null))
+                    .map(Expectation::Char)
+                    .map_err(serde::de::Error::custom)
+            }
+            Some("text") => {
+                serde_json::from_value::<String>(value.get("value").cloned().unwrap_or(Value::Null))
+                    .map(Expectation::Text)
+                    .map_err(serde::de::Error::custom)
+            }
             Some("float64_approx") => serde_json::from_value::<Float64ApproxPayload>(
                 value.get("value").cloned().unwrap_or(Value::Null),
             )
@@ -1580,9 +1580,10 @@ mod tests {
     #[test]
     fn float64_approx_deserializes_under_arbitrary_precision() {
         // Direct float64_approx expectation
-        let json_str = r#"{"kind":"float64_approx","value":{"expected":1.0,"absolute_tolerance":0.0}}"#;
-        let deserialized: Expectation = serde_json::from_str(json_str)
-            .expect("failed to deserialize float64_approx from JSON");
+        let json_str =
+            r#"{"kind":"float64_approx","value":{"expected":1.0,"absolute_tolerance":0.0}}"#;
+        let deserialized: Expectation =
+            serde_json::from_str(json_str).expect("failed to deserialize float64_approx from JSON");
         match deserialized {
             Expectation::Float64Approx {
                 expected,

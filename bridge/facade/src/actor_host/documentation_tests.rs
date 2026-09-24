@@ -2571,10 +2571,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
     // Carries the producing actor's own progress, so this poll answers "is
     // it moving" without a second round trip.
-    assert!(
-        pending.to_string().contains("state="),
-        "{pending}"
-    );
+    assert!(pending.to_string().contains("state="), "{pending}");
     let delivery = campaign
         .next_deployment(
             "decision request update",
@@ -3323,11 +3320,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     )
     .await;
     assert_eq!(retained["items"][0]["output"], "1", "{retained}");
-    committed(
-        root.as_ref(),
-        "finishWork collector",
-    )
-    .await;
+    committed(root.as_ref(), "finishWork collector").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

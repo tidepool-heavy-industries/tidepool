@@ -2808,19 +2808,23 @@ where
             let check_effects = effects.clone();
             let check_cell_source = cell_source.clone();
             let check_cancellation = cancellation.clone();
-            let (snapshot, checked) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(check_cancellation, || {
-                    let checked = check_cell_off_checkout(
-                        &snapshot,
-                        &check_source,
-                        &check_effects,
-                        &check_cell_source,
-                    );
-                    checked.map(|checked| (snapshot, checked))
-                })
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
+            let (snapshot, checked) =
+                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                    tidepool_runtime::with_compiler_transaction_cancellable(
+                        check_cancellation,
+                        || {
+                            let checked = check_cell_off_checkout(
+                                &snapshot,
+                                &check_source,
+                                &check_effects,
+                                &check_cell_source,
+                            );
+                            checked.map(|checked| (snapshot, checked))
+                        },
+                    )
+                }))
+                .await
+                .map_err(ResidentActorWorkbenchError::Join)??;
 
             let has_declaration = checked
                 .items
@@ -2837,7 +2841,9 @@ where
                     guard.retire(&self.access).await;
                 }
                 cancel_on_drop.0 = None;
-                return self.prepare_cell_single_checkout(context, cell_source).await;
+                return self
+                    .prepare_cell_single_checkout(context, cell_source)
+                    .await;
             }
 
             let reserve_source = source.clone();
@@ -2877,23 +2883,27 @@ where
             let compile_context = context.clone();
             let compile_view = c_view.clone();
             let compile_cancellation = cancellation.clone();
-            let (checked, outcome) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-                    let outcome = compile_cell_items_off_checkout(
-                        &compile_context,
-                        &compile_source,
-                        &compile_effects,
-                        &checked,
-                        &compile_cell_source,
-                        compile_view,
-                        &retained,
-                        &visible_names,
-                    );
-                    outcome.map(|outcome| (checked, outcome))
-                })
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
+            let (checked, outcome) =
+                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                    tidepool_runtime::with_compiler_transaction_cancellable(
+                        compile_cancellation,
+                        || {
+                            let outcome = compile_cell_items_off_checkout(
+                                &compile_context,
+                                &compile_source,
+                                &compile_effects,
+                                &checked,
+                                &compile_cell_source,
+                                compile_view,
+                                &retained,
+                                &visible_names,
+                            );
+                            outcome.map(|outcome| (checked, outcome))
+                        },
+                    )
+                }))
+                .await
+                .map_err(ResidentActorWorkbenchError::Join)??;
 
             let items = match outcome {
                 CellItemsOutcome::Rejected { index, diagnostic } => {
@@ -2972,7 +2982,8 @@ where
             guard.retire(&self.access).await;
         }
         cancel_on_drop.0 = None;
-        self.prepare_cell_single_checkout(context, cell_source).await
+        self.prepare_cell_single_checkout(context, cell_source)
+            .await
     }
 
     /// The original, unsplit whole-cell preparation: one exclusive machine
@@ -3377,22 +3388,23 @@ where
         // every other actor's turn against this session.
         let effects = context.haskell_effects_alias.clone();
         let source = self.access.source.clone();
-        let (binder, compiled) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            compile_host_binding_off_checkout(
-                &view,
-                &source,
-                &effects,
-                generation,
-                kind.carrier_binding_name(),
-                kind.type_name(),
-                kind.anchor(),
-                kind.imports(),
-                kind.retain_text_constructor(),
-                &retained,
-            )
-        }))
-        .await
-        .map_err(ResidentActorWorkbenchError::Join)??;
+        let (binder, compiled) =
+            crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                compile_host_binding_off_checkout(
+                    &view,
+                    &source,
+                    &effects,
+                    generation,
+                    kind.carrier_binding_name(),
+                    kind.type_name(),
+                    kind.anchor(),
+                    kind.imports(),
+                    kind.retain_text_constructor(),
+                    &retained,
+                )
+            }))
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
 
         let carrier = Arc::new(HostCarrier::from_compiled(
             &binder,
@@ -3516,19 +3528,23 @@ where
             let compile_block_text = block.clone();
             let effects = context.haskell_effects_alias.clone();
             let compile_cancellation = cancellation.clone();
-            let (snapshot, compiled) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-                    let compiled = compile_fragment_off_checkout(
-                        &snapshot,
-                        &compile_source,
-                        &effects,
-                        &compile_block_text,
-                    );
-                    compiled.map(|compiled| (snapshot, compiled))
-                })
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
+            let (snapshot, compiled) =
+                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                    tidepool_runtime::with_compiler_transaction_cancellable(
+                        compile_cancellation,
+                        || {
+                            let compiled = compile_fragment_off_checkout(
+                                &snapshot,
+                                &compile_source,
+                                &effects,
+                                &compile_block_text,
+                            );
+                            compiled.map(|compiled| (snapshot, compiled))
+                        },
+                    )
+                }))
+                .await
+                .map_err(ResidentActorWorkbenchError::Join)??;
             let ready = match compiled {
                 CompiledBlock::Rejected(diagnostic) => {
                     // The rejection was derived from `snapshot.view`, taken
@@ -3818,7 +3834,10 @@ where
             .into_iter()
             .next(),
     };
-    if verdict.as_ref().is_none_or(|verdict| verdict.kind != TurnKind::Decl) {
+    if verdict
+        .as_ref()
+        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
+    {
         session.reserve_value_generations_through(generation);
     }
     let retained = session.prepared_retained();
@@ -3859,7 +3878,8 @@ fn compile_fragment_off_checkout(
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
     let prepared = source.prepare(&snapshot.view);
-    let mut templates = resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
+    let mut templates =
+        resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let mut verdict = snapshot.verdict.clone();
     let observation = if let Some(name) = &snapshot.observation_name {
@@ -6742,7 +6762,8 @@ where
         )
         .into();
     }
-    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    if session.machine_disposition()
+        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
     {
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
@@ -6880,7 +6901,8 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    if session.machine_disposition()
+        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
     {
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
@@ -7035,7 +7057,8 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    if session.machine_disposition()
+        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
     {
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
@@ -7074,7 +7097,8 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    if session.machine_disposition() == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+    if session.machine_disposition()
+        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
     {
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
@@ -7690,8 +7714,7 @@ where
     if let Err(error) =
         session.tag_host_text_binding_in(context.placement.lexical_scope, &binder, job.to_owned())
     {
-        let session_root =
-            carrier_mount_session_root(session, context.placement.lexical_scope)?;
+        let session_root = carrier_mount_session_root(session, context.placement.lexical_scope)?;
         session.retire_host_binding_owner(&session_root, &binder);
         return Err(ResidentActorWorkbenchError::Resident(error));
     }
@@ -8627,7 +8650,8 @@ mod request_tests {
     #[test]
     fn ordinary_fragment_split_compile_then_install_matches_single_checkout_begin_fragment() {
         let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
-        let (mut direct_session, direct_context, direct_source, _direct_root) = host_mount_fixture();
+        let (mut direct_session, direct_context, direct_source, _direct_root) =
+            host_mount_fixture();
 
         let block = ParsedBlock {
             ordinal: 1,
@@ -8663,9 +8687,8 @@ mod request_tests {
             }
         };
 
-        let fresh_view =
-            actor_compile_view(&split_session, &split_context, &split_source, &[])
-                .expect("fresh view");
+        let fresh_view = actor_compile_view(&split_session, &split_context, &split_source, &[])
+            .expect("fresh view");
         assert!(
             fresh_view.compile_relevant_eq(&snapshot.view),
             "no mutation happened between snapshot and install: views must still match"
@@ -8729,8 +8752,8 @@ mod request_tests {
     /// `a_mutation_between_split_checkouts_invalidates_the_snapshot_and_
     /// blocks_install` proves for the Job carrier path.
     #[test]
-    fn a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile(
-    ) {
+    fn a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile()
+    {
         let (mut session, context, source, _session_root) = host_mount_fixture();
         let scope = context.placement.lexical_scope;
 
@@ -8776,8 +8799,7 @@ mod request_tests {
         )
         .expect("interloping carrier mounts");
 
-        let fresh_view =
-            actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
         assert!(
             !fresh_view.compile_relevant_eq(&snapshot.view),
             "an interleaved mutation to the same scope must invalidate the snapshot"
@@ -9544,7 +9566,8 @@ mod request_tests {
     #[test]
     fn two_item_bind_cell_split_matches_single_checkout_prepare_cell_in_session() {
         let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
-        let (mut direct_session, direct_context, direct_source, _direct_root) = host_mount_fixture();
+        let (mut direct_session, direct_context, direct_source, _direct_root) =
+            host_mount_fixture();
         let cell = "cellA <- pure (1 :: Int)\ncellB <- pure (cellA + 1)";
 
         let (source, snapshot) = snapshot_cell_split(
@@ -9557,11 +9580,18 @@ mod request_tests {
             None,
         )
         .expect("split snapshot");
-        let checked =
-            check_cell_off_checkout(&snapshot, &source, &split_context.haskell_effects_alias, cell)
-                .expect("split whole-cell check");
+        let checked = check_cell_off_checkout(
+            &snapshot,
+            &source,
+            &split_context.haskell_effects_alias,
+            cell,
+        )
+        .expect("split whole-cell check");
         assert!(
-            checked.items.iter().all(|item| item.verdict.kind != TurnKind::Decl),
+            checked
+                .items
+                .iter()
+                .all(|item| item.verdict.kind != TurnKind::Decl),
             "a two-item bind cell has no declaration item: {checked:?}"
         );
         let reservation = reserve_cell_generations(
@@ -9612,9 +9642,8 @@ mod request_tests {
             panic!("no interleaved mutation: the install must be ready");
         };
 
-        let direct_view =
-            actor_compile_view(&direct_session, &direct_context, &direct_source, &[])
-                .expect("direct compile view");
+        let direct_view = actor_compile_view(&direct_session, &direct_context, &direct_source, &[])
+            .expect("direct compile view");
         let direct_prepared = direct_source.prepare(&direct_view);
         let direct_module = direct_session
             .next_declaration_module()
@@ -9627,8 +9656,7 @@ mod request_tests {
             &direct_context.haskell_effects_alias,
             &direct_prepared.imports,
         );
-        let direct_evidence =
-            cell_check_evidence(&direct_view, &direct_template, &direct_prepared);
+        let direct_evidence = cell_check_evidence(&direct_view, &direct_template, &direct_prepared);
         let direct_include = direct_prepared
             .include
             .iter()
@@ -9690,9 +9718,16 @@ mod request_tests {
         // `prepare_cell`'s retry loop re-clones `self.access.source` every
         // iteration — never from a previous attempt's already-mutated
         // source, which would double up its per-transaction preamble.
-        let (source, snapshot) =
-            snapshot_cell_split(&mut session, &context, base_source.clone(), &[], None, None, None)
-                .expect("snapshot");
+        let (source, snapshot) = snapshot_cell_split(
+            &mut session,
+            &context,
+            base_source.clone(),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot");
         let checked =
             check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
                 .expect("whole-cell check");
@@ -9987,7 +10022,13 @@ mod request_tests {
     async fn cell_split_second_actors_checkout_wait_excludes_first_actors_ghc_compile() {
         let (machines, mut context_a, mut context_b, source, _root) =
             actor_registry_fixture_two_scopes();
-        let workbench = Arc::new(ResidentActorWorkbench::new(machines, source, None, None, vec![]));
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            machines,
+            source,
+            None,
+            None,
+            vec![],
+        ));
 
         context_a.actor = crate::ActorRef::first(crate::ActorId(101));
         context_b.actor = crate::ActorRef::first(crate::ActorId(102));
@@ -10006,7 +10047,8 @@ mod request_tests {
         // Actor A's cell is deliberately larger (three sequential items, each
         // its own whole-cell-check-plus-compile round trip) so its total GHC
         // time dominates the run; actor B's is the smallest possible cell.
-        let cell_a = "wA1 <- pure (1 :: Int)\nwA2 <- pure (wA1 + 1)\nwA3 <- pure (wA2 + 1)".to_string();
+        let cell_a =
+            "wA1 <- pure (1 :: Int)\nwA2 <- pure (wA1 + 1)\nwA3 <- pure (wA2 + 1)".to_string();
         let cell_b = "wB1 <- pure (1 :: Int)".to_string();
 
         let started = std::time::Instant::now();

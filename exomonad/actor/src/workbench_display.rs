@@ -49,7 +49,10 @@ pub(crate) const JOB_BINDING_PLACEHOLDER: &str = "{{job_binding}}";
 /// A no-op when the placeholder is absent (most workbench output never
 /// mentions it), and left unresolved only when no binding was retained for
 /// this step, which should not happen for a command tool's own presenter.
-pub(crate) fn resolve_job_binding_placeholder(output: String, installed_bindings: &[String]) -> String {
+pub(crate) fn resolve_job_binding_placeholder(
+    output: String,
+    installed_bindings: &[String],
+) -> String {
     match installed_bindings.first() {
         Some(binding) if output.contains(JOB_BINDING_PLACEHOLDER) => {
             output.replace(JOB_BINDING_PLACEHOLDER, binding)

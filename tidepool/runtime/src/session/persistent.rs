@@ -248,7 +248,8 @@ impl PersistentSession {
             // from `--inject-val`-style exclusion via `stub_generations` at
             // the exact moment it stops being reachable, matching a real
             // binding's eviction instead of lingering as a phantom stub.
-            if self.is_stub_module(module) && !self.binding_index.is_module_live(&module.module_name())
+            if self.is_stub_module(module)
+                && !self.binding_index.is_module_live(&module.module_name())
             {
                 self.stub_generations.remove(&module.gen().0);
                 self.retired_stub_sources.push(module.gen());

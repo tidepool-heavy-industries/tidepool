@@ -54,13 +54,15 @@ pub(crate) fn visit_agent_roster_state(
     match terminal {
         None => visit_core(table, visitor, "RosterRunning", |_| Ok(())),
         Some(t) => match t.kind {
-            crate::ActorExitKind::Completed => visit_core(table, visitor, "RosterStopped", |_| Ok(())),
-            crate::ActorExitKind::Failed => {
-                visit_core(table, visitor, "RosterFailed", |v| t.summary.visit(table, v))
+            crate::ActorExitKind::Completed => {
+                visit_core(table, visitor, "RosterStopped", |_| Ok(()))
             }
-            crate::ActorExitKind::Cancelled => {
-                visit_core(table, visitor, "RosterCancelled", |v| t.summary.visit(table, v))
-            }
+            crate::ActorExitKind::Failed => visit_core(table, visitor, "RosterFailed", |v| {
+                t.summary.visit(table, v)
+            }),
+            crate::ActorExitKind::Cancelled => visit_core(table, visitor, "RosterCancelled", |v| {
+                t.summary.visit(table, v)
+            }),
         },
     }
 }

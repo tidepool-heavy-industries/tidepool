@@ -6997,8 +6997,11 @@ where
                 .map(|call| call.name.clone())
                 .unwrap_or_else(|| "cell".to_string());
             let (call_actor, call_incarnation) = actor_address(context.actor);
-            let call_scope =
-                crate::call_timing::CallScope::new(call_kind, call_actor as u64, call_incarnation as u64);
+            let call_scope = crate::call_timing::CallScope::new(
+                call_kind,
+                call_actor as u64,
+                call_incarnation as u64,
+            );
             let result = call_scope
                 .run(self.execute_workbench(kernel, &context, request))
                 .await;
@@ -8495,7 +8498,8 @@ mod tests {
     /// covers "no observer").
     #[test]
     fn deployment_channel_applies_backpressure_via_bounded_try_send_not_unbounded_growth() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<crate::LocalResidentDeployment>(1);
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<crate::LocalResidentDeployment>(1);
         let event = |summary: &str| crate::LocalResidentDeployment::Retired {
             actor: ActorRef::first(ActorId(1)),
             terminal: crate::ActorTerminal {
@@ -8524,7 +8528,10 @@ mod tests {
         // Dropping every sender closes the channel; a still-pending event
         // is delivered before the receiver observes the close.
         drop(sender);
-        assert_eq!(receiver.try_recv().expect("third event was queued").kind(), "Retired");
+        assert_eq!(
+            receiver.try_recv().expect("third event was queued").kind(),
+            "Retired"
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)

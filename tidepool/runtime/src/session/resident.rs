@@ -185,7 +185,11 @@ impl HostCarrier {
     /// is the authenticated host surface this binder was compiled against
     /// ([`Self::mount_carrier_in`]'s validation target).
     #[must_use]
-    pub fn from_compiled(binder: &BoundBinder, code: TurnCode<'_>, host_type: HostBindingType) -> Self {
+    pub fn from_compiled(
+        binder: &BoundBinder,
+        code: TurnCode<'_>,
+        host_type: HostBindingType,
+    ) -> Self {
         HostCarrier {
             table: code.table.into_owned(),
             prepared: code.prepared.into_owned(),
@@ -2099,7 +2103,13 @@ where
             root_head: carrier.shape.root_head.clone(),
             host_authority: carrier.shape.host_authority,
         };
-        self.validate_compiled_mount_target(scope, &binder, gen, &carrier.code(), carrier.host_type)?;
+        self.validate_compiled_mount_target(
+            scope,
+            &binder,
+            gen,
+            &carrier.code(),
+            carrier.host_type,
+        )?;
         if carrier.host_type == HostBindingType::TEXT {
             self.validate_text_runtime_constructor(&carrier.code())?;
         }
