@@ -63,12 +63,12 @@ fixes the run motivated are in git history. Open items:
 - **Briefs with split ownership.** "This file is yours" together with "its
   public signatures belong to the lead" made a leaf ask instead of act, then
   wait. A brief should say which of the two wins.
-- **Two extractor memo modes fail on main.** `--prepared-session` (missing
-  `tidepool-prepared-interface-elided ... reason=no-later-home-importer`) and
-  `--validation-memo` (missing `front_compiles=1 core_compiles=1
-  prepared_compiles=1`) fail with the same messages at aad52db33, before the
-  content-keyed memo (e3ca7803d). Its own `--path-insensitive-witness` mode and
-  `--untracked-compile-time` pass. Root cause not yet found.
+- **Declaration cells still compile under the machine checkout.** Cells with
+  no declaration compile off it (`prepare_cell`'s split path); a cell with a
+  declaration keeps the single-checkout path because staging writes and
+  validates the next `Lib.G<g>` module in the shared session root. Revisit only
+  if a wave shows declaration cells blocking other actors; it needs a private
+  path per staged candidate.
 - **Operator input.** In a Codex pane, Enter steers a running turn; Tab queues
   until the turn ends, which can be many minutes.
 
