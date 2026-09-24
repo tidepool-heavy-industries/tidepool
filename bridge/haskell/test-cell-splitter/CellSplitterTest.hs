@@ -52,6 +52,7 @@ main = do
       prologuePlans flags
       automaticGenericPlans flags
       noStandaloneDerivingLeavesCellUntouched flags
+      danglingOperatorCells flags
   interfaceMeasurementDiagnostics
   getArgs >>= \case
     [] -> pure ()
@@ -894,6 +895,42 @@ noStandaloneDerivingLeavesCellUntouched flags = do
       [ "{-# LANGUAGE NoStandaloneDeriving #-}"
       , "data Local = Local Int"
       ]
+
+-- | A display-expression cell whose last real token is an infix operator
+-- (e.g. a model typo like @respond ("...") .@) must be rejected with a
+-- direct diagnostic at check time, before 'renderExecutable' would wrap it
+-- in a synthesized left section and turn the missing operand into a
+-- confusing type error instead of a clear syntax error. A trailing operator
+-- that is followed by more of the SAME item on a later line (a legitimate
+-- multi-line operator chain, operator leading or trailing) must not be
+-- rejected.
+danglingOperatorCells :: DynFlags -> IO ()
+danglingOperatorCells flags = do
+  assertDangling "trailing dot" "." "respond (x) .\n"
+  assertDangling "trailing dollar" "$" "f $\n"
+  assertDangling "trailing backquoted operator" "`elem`" "x `elem`\n"
+  assertNotDangling "leading-operator continuation line" (unlines
+    [ "f x"
+    , "  . g y"
+    ])
+  assertNotDangling "trailing-operator continuation line" (unlines
+    [ "f x ."
+    , "  g y"
+    ])
+  where
+    assertDangling label operatorText source = do
+      result <- analyzeCellWithFlags flags checkTemplate source
+      case result of
+        Left (CellDanglingOperatorFailure _ actualOperatorText) ->
+          assertEqual (label ++ " operator text") operatorText actualOperatorText
+        other -> fail (label ++ ": expected a dangling-operator rejection, got " ++ show other)
+    assertNotDangling label source = do
+      result <- analyzeCellWithFlags flags checkTemplate source
+      case result of
+        Right plan -> case cellPlanItems plan of
+          [item] -> assertEqual (label ++ " verdict") KExpr (sbKind (cellAnalysisVerdict item))
+          items -> fail (label ++ ": expected exactly one item, got " ++ show (length items))
+        Left failure -> fail (label ++ ": expected acceptance, got " ++ renderCellSplitError failure)
 
 prologuePlans :: DynFlags -> IO ()
 prologuePlans flags = do

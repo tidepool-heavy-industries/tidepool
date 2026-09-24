@@ -75,7 +75,7 @@ import GHC.Parser.Lexer
   )
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
-import GHC.Data.FastString (mkFastString)
+import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
@@ -243,12 +243,19 @@ data CellSourceSpan = CellSourceSpan
 data CellSourceItem = CellSourceItem
   { cellSourceSpan :: CellSourceSpan
   , cellSourceText :: String
+  -- | The rendered operator text (e.g. @"."@, @"$"@, or @"`elem`"@) when this
+  -- item's last non-comment token is an infix operator with nothing after it
+  -- in the item. 'Nothing' when the item's last token is anything else,
+  -- including when a trailing operator is followed by more of the same item
+  -- on a later line (a legitimate multi-line operator chain).
+  , cellSourceDanglingOperator :: Maybe String
   } deriving (Eq, Show)
 
 data CellSplitError
   = CellLexFailure
   | CellPrologueFailure CellSourceSpan String
   | CellHeaderFailure String
+  | CellDanglingOperatorFailure CellSourceSpan String
   deriving (Eq, Show)
 
 renderCellSplitError :: CellSplitError -> String
@@ -256,6 +263,10 @@ renderCellSplitError CellLexFailure = "<cell>:1:1: GHC could not lex the noteboo
 renderCellSplitError (CellPrologueFailure sourceSpan message) =
   "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
     ++ ": " ++ message
+renderCellSplitError (CellDanglingOperatorFailure sourceSpan operatorText) =
+  "<cell>:" ++ show (cellEndLine sourceSpan) ++ ":" ++ show (cellEndColumn sourceSpan)
+    ++ ": cell ends with a dangling operator `" ++ operatorText
+    ++ "`: remove it or supply its right operand"
 renderCellSplitError (CellHeaderFailure message) =
   "cell check template header: " ++ message
 
@@ -508,8 +519,8 @@ analyzeCellWithFlags dflags template source = do
           [] -> maxBound
         bodySource = blankBeforeLine firstBodyLine source
     body <- splitCellWithFlags effective bodySource
-    let classified = zipWith (classify effective) [length headerItems..] body
-        genericAlias = freshAlias "TidepoolCompilerGeneric" source
+    classified <- traverse (uncurry (classify effective)) (zip [length headerItems..] body)
+    let genericAlias = freshAlias "TidepoolCompilerGeneric" source
         displayAlias = freshAlias "TidepoolCompilerDisplay" source
         generated = automaticGenericDeclarations effective genericAlias classified
         grouped = groupDeclarations headerItems classified ""
@@ -536,21 +547,32 @@ analyzeCellWithFlags dflags template source = do
     freshAlias candidate authoredSource
       | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
       | otherwise = candidate
+    -- A KExpr item is spliced into a synthesized left section by
+    -- 'renderExecutable' (wrapped as @(\x -> ...) (\n <item> \n)@), so a
+    -- trailing dangling operator that would otherwise be a clear syntax
+    -- error instead becomes a legal, meaningless left section — GHC then
+    -- reports a confusing type error over the whole expression instead of
+    -- the real problem. Reject it here, before any such wrapping, with a
+    -- diagnostic that names the actual operator. Other verdicts (KBind,
+    -- KDecl) are spliced without an enclosing section and are not at risk.
     classify effective ordinal item =
       let verdict = classifyWithFlagsExact effective (cellSourceText item)
-       in CellAnalysisItem
-      { cellAnalysisSpan = cellSourceSpan item
-      , cellAnalysisSource = cellSourceText item
-      , cellAnalysisVerdict = verdict
-      , cellAnalysisSourceItems =
-          [ CellAnalysisSourceItem
-              { cellAnalysisSourceOrdinal = ordinal
-              , cellAnalysisSourceSpan = cellSourceSpan item
-              , cellAnalysisSourceKind = sbKind verdict
+       in case (sbKind verdict, cellSourceDanglingOperator item) of
+            (KExpr, Just operatorText) ->
+              Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
+            _ -> Right CellAnalysisItem
+              { cellAnalysisSpan = cellSourceSpan item
+              , cellAnalysisSource = cellSourceText item
+              , cellAnalysisVerdict = verdict
+              , cellAnalysisSourceItems =
+                  [ CellAnalysisSourceItem
+                      { cellAnalysisSourceOrdinal = ordinal
+                      , cellAnalysisSourceSpan = cellSourceSpan item
+                      , cellAnalysisSourceKind = sbKind verdict
+                      }
+                  ]
+              , cellAnalysisPrologueOnly = False
               }
-          ]
-      , cellAnalysisPrologueOnly = False
-      }
     groupDeclarations headerItems classified generated =
       case partition isDeclaration classified of
         ([], executable) | null headerItems -> executable
@@ -787,10 +809,9 @@ splitCellWithFlags dflags0 source =
     PFailed _ -> Left CellLexFailure
     POk _ tokens ->
       let locatedTokens = mapMaybe realTokenSpan tokens
-          tokenSpans = map fst locatedTokens
           boundaryLines = reverse (snd (foldl boundary (0 :: Int, []) locatedTokens))
           starts = nub (sort boundaryLines)
-       in Right (mapMaybe (sourceItem tokenSpans) (zip starts (drop 1 starts ++ [maxBound])))
+       in Right (mapMaybe (sourceItem locatedTokens) (zip starts (drop 1 starts ++ [maxBound])))
   where
     popts = initParserOpts dflags0
     buffer = stringToStringBuffer source
@@ -818,9 +839,15 @@ splitCellWithFlags dflags0 source =
       not ("{-#" `isPrefixOf` raw)
     ordinaryComment _ = False
 
-    sourceItem tokenSpans (startLine, nextLine) = do
-      firstSpan <- firstAtOrAfter startLine tokenSpans
-      lastSpan <- lastBefore nextLine tokenSpans
+    sourceItem locatedTokens (startLine, nextLine) = do
+      let itemTokens =
+            [ pair
+            | pair@(tokenSpan, _) <- locatedTokens
+            , srcSpanStartLine tokenSpan >= startLine
+            , srcSpanStartLine tokenSpan < nextLine
+            ]
+      firstSpan <- fmap fst (safeHead itemTokens)
+      lastSpan <- fmap fst (safeLast itemTokens)
       let startOffset = lineOffset source startLine
           endOffset =
             if nextLine == maxBound
@@ -834,13 +861,8 @@ splitCellWithFlags dflags0 source =
             , cellEndColumn = srcSpanEndCol lastSpan
             }
         , cellSourceText = take (endOffset - startOffset) (drop startOffset source)
+        , cellSourceDanglingOperator = trailingOperatorText (reverse itemTokens)
         }
-
-    firstAtOrAfter line =
-      safeHead . filter ((>= line) . srcSpanStartLine)
-
-    lastBefore line =
-      safeLast . filter ((< line) . srcSpanStartLine)
 
     safeHead [] = Nothing
     safeHead (value : _) = Just value
@@ -856,6 +878,43 @@ lineOffset source targetLine = go 1 0 source
     go _ offset [] = offset
     go line offset ('\n' : rest) = go (line + 1) (offset + 1) rest
     go line offset (_ : rest) = go line (offset + 1) rest
+
+-- | Whether an item's REVERSED token list ends with an infix operator that
+-- has nothing after it: a plain symbolic operator (@.@, @$@, @<>@, ...) or a
+-- backquoted identifier (@`elem`@). @reversedItemTokens@ is the item's own
+-- tokens (not the whole cell's) in reverse source order, so the head is the
+-- item's last token and the second element, when present, is its
+-- second-to-last.
+--
+-- Deliberately narrow: a trailing operator followed by more of the same item
+-- on a later line is not the item's LAST token, so it never reaches here —
+-- 'splitCellWithFlags' only calls this on the tokens already isolated to one
+-- item.
+trailingOperatorText :: [(RealSrcSpan, Token)] -> Maybe String
+trailingOperatorText reversedItemTokens = case reversedItemTokens of
+  (_, ITbackquote) : (_, nameToken) : _
+    | Just name <- backquotedOperandText nameToken -> Just ("`" ++ name ++ "`")
+  (_, token) : _ -> symbolicOperatorText token
+  [] -> Nothing
+  where
+    backquotedOperandText = \case
+      ITvarid fastString -> Just (unpackFS fastString)
+      ITconid fastString -> Just (unpackFS fastString)
+      ITqvarid (qualifier, fastString) -> Just (unpackFS qualifier ++ "." ++ unpackFS fastString)
+      ITqconid (qualifier, fastString) -> Just (unpackFS qualifier ++ "." ++ unpackFS fastString)
+      _ -> Nothing
+
+    symbolicOperatorText = \case
+      ITvarsym fastString -> Just (unpackFS fastString)
+      ITconsym fastString -> Just (unpackFS fastString)
+      ITqvarsym (qualifier, fastString) -> Just (unpackFS qualifier ++ "." ++ unpackFS fastString)
+      ITqconsym (qualifier, fastString) -> Just (unpackFS qualifier ++ "." ++ unpackFS fastString)
+      -- '.' lexes as its own reserved token (disambiguated from module
+      -- qualification by the lexer, which folds a qualifier straight into
+      -- 'ITqvarid'/'ITqvarsym' with no separate '.'), but it is still the
+      -- ordinary composition operator wherever it stands alone.
+      ITdot -> Just "."
+      _ -> Nothing
 
 -- | Which wrapper template a verdict selects — a refinement of 'TurnKind': a
 -- 'KBind' verdict maps to one of two distinct template shapes depending on

@@ -148,6 +148,10 @@ throwCellSplitError errorValue = case errorValue of
   CellLexFailure ->
     throwIO (LocatedCellRejection (CellSourceSpan 1 1 1 1)
       "GHC could not lex the notebook cell")
+  CellDanglingOperatorFailure sourceSpan operatorText ->
+    throwIO (LocatedCellRejection sourceSpan
+      ("cell ends with a dangling operator `" ++ operatorText
+        ++ "`: remove it or supply its right operand"))
   CellHeaderFailure message -> fail ("cell check template header: " ++ message)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
