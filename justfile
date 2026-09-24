@@ -152,5 +152,9 @@ exomonad-harness *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-harness"
 
 # Pre-review gate: check, suite registration, fixtures; all run, all failures reported.
+# Build the deployable extractor package exactly as redeploy will.
+deploy-check:
+    nix build .#tidepool-extract --no-link
+
 verify:
     {{ nix }} scripts/verify.sh

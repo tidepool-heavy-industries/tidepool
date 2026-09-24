@@ -56,12 +56,20 @@ fi
 #   Skippable with --no-extract (stdlib-only changes don't need this).
 
 if [ "$NO_EXTRACT" -eq 0 ]; then
-  step "Step 2: nix profile upgrade tidepool-extract"
-  echo "  \$ nix profile upgrade tidepool-extract"
+  step "Step 2: build tidepool-extract from this checkout and point the profile at it"
+  # Build first, then swap the profile entry to the built store path: a failed
+  # build leaves the previous entry in place, and the entry never stays bound
+  # to the flake URL of whichever checkout first installed it.
+  echo "  \$ nix build .#tidepool-extract --no-link --print-out-paths"
   if [ "$DRY" -eq 0 ]; then
-    if ! nix profile upgrade tidepool-extract; then
-      echo "hint: not yet in nix profile — install with:"
-      echo "  nix profile install .#tidepool-extract"
+    built="$(nix build .#tidepool-extract --no-link --print-out-paths)" || {
+      echo "error: nix build .#tidepool-extract failed; profile left unchanged" >&2
+      exit 1
+    }
+    echo "  built: $built"
+    nix profile remove tidepool-extract >/dev/null 2>&1 || true
+    if ! nix profile add "$built"; then
+      echo "error: could not add $built to the nix profile" >&2
       exit 1
     fi
     # Post-upgrade probe: a broken wrapper would otherwise surface only at

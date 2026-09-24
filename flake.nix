@@ -273,27 +273,23 @@
                     export PATH="${ghcEnv}/bin:$PATH"
                   '';
                 });
-            # This crate has an independent minimal lockfile so Nix vendors
-            # its actual graph rather than the whole workspace graph.
-            frontend = pkgs.rustPlatform.buildRustPackage {
+            # Built from the workspace source with the workspace lockfile, the
+            # same way `exomonad-unwrapped` is, so every in-workspace
+            # convention (inherited lints, parity tests that read the Haskell
+            # sources) holds here too and the deploy cannot drift from what
+            # `just verify` checked.
+            frontend = tidepoolRustPlatform.buildRustPackage {
               pname = "tidepool-extract-frontend";
               version = "0.1.0";
-              src = ./tidepool/extract-cmd;
-              cargoLock.lockFile = ./tidepool/extract-cmd/Cargo.lock;
-              # The frontend builds outside the Cargo workspace; its manifest
-              # inherits the workspace lint table, which has no root here.
-              # Lints shape clippy and rustc diagnostics, not the artifact,
-              # and `just lint` runs them in-workspace, so drop the table.
-              postPatch = ''
-                sed -i '/^\[lints\]/,/^$/d' Cargo.toml
-              '';
-              # Its unit tests read the Haskell protocol sources by relative
-              # path for tag parity; they run in-workspace under `just`, not
-              # against this standalone tree.
-              doCheck = false;
+              src = exomonadSource;
+              cargoLock.lockFile = ./Cargo.lock;
+              cargoBuildFlags = [ "-p" "tidepool-extract-cmd" ];
+              cargoInstallFlags = [ "-p" "tidepool-extract-cmd" ];
               # The daemon integration test needs the separately packaged GHC
               # worker; the final wrapper is exercised by the repository battery.
-              cargoTestFlags = [ "--lib" ];
+              cargoTestFlags = [ "-p" "tidepool-extract-cmd" "--lib" ];
+              nativeBuildInputs = [ pkgs.pkg-config ];
+              buildInputs = [ pkgs.openssl ];
             };
           in
           pkgs.runCommand "tidepool-extract" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
