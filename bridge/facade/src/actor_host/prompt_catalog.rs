@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 30;
+    pub(super) const CATALOG_VERSION: u32 = 31;
 
     /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
@@ -18,7 +18,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "1664e1763f7d9dd5a69ce601676ff23662556241527b892ee49905ea3e9644b0";
+        "c3c44368a73cf2d0a327ec5971ee8cb175b6c4a1b7d8a16792c7269c9da8655e";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
