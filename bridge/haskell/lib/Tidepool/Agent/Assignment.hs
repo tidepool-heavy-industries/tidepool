@@ -3,7 +3,7 @@
 -- | Data shared by a child launch and a request to an existing actor.
 module Tidepool.Agent.Assignment
   ( Label
-  , NameError (..)
+  , NameError (..), validateKebabSegment, renderNameError
   , labelFromText
   , labelText
   , Assignment (..)
@@ -16,7 +16,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Prelude
 
-import Tidepool.Agent.Assignment.Internal (Label, NameError (..), labelFromText, labelText)
+import Tidepool.Agent.Assignment.Internal (Label, NameError (..), labelFromText, labelText, renderNameError, validateKebabSegment)
 import Tidepool.Duration (Duration)
 import Tidepool.Effects.Core (Model (..))
 

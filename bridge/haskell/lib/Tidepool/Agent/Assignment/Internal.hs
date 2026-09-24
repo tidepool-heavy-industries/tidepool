@@ -5,6 +5,8 @@ module Tidepool.Agent.Assignment.Internal
   , NameError (..)
   , labelFromText
   , labelText
+  , validateKebabSegment
+  , renderNameError
   , IsWatchLabel (..)
   ) where
 
@@ -31,14 +33,32 @@ data NameError = EmptyName | InvalidKebabName Text | NameTooLong Text
   deriving (Show, Eq)
 
 labelFromText :: Text -> Either NameError Label
-labelFromText value
+labelFromText = fmap Label . validateKebabSegment
+
+-- | The one validator for a label segment: lowercase ASCII, digits and single
+-- hyphens, at most 48 characters. Every label-shaped name (labels, campaign
+-- and fork-group segments) goes through here.
+validateKebabSegment :: Text -> Either NameError Text
+validateKebabSegment value
   | Text.null value = Left EmptyName
   | Text.length value > 48 = Left (NameTooLong value)
   | Text.head value == '-' || Text.last value == '-' = Left (InvalidKebabName value)
   | "--" `Text.isInfixOf` value = Left (InvalidKebabName value)
-  | Text.all valid value = Right (Label value)
+  | Text.all valid value = Right value
   | otherwise = Left (InvalidKebabName value)
   where valid character = isAsciiLower character || isDigit character || character == '-'
+
+-- | What a model needs to fix the name, not only that it failed. A value
+-- carrying a slash is the common mistake: a group path pasted where one
+-- segment belongs.
+renderNameError :: NameError -> Text
+renderNameError EmptyName = "label is empty; give one kebab-case segment such as parser or wave-1"
+renderNameError (NameTooLong value) = "label " <> Text.pack (show value) <> " is longer than 48 characters"
+renderNameError (InvalidKebabName value)
+  | "/" `Text.isInfixOf` value =
+      "label " <> Text.pack (show value) <> " is a path, not a label: a label is one lowercase kebab-case segment. `subgroup` is already relative to your own path, so pass only the new segment; a two-segment path is built with `batch campaign group`"
+  | otherwise =
+      "label " <> Text.pack (show value) <> " is not kebab-case: lowercase ASCII letters, digits and single hyphens only, not starting or ending with a hyphen"
 
 labelText :: Label -> Text
 labelText (Label value) = value

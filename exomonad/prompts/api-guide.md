@@ -27,6 +27,8 @@ waits for a later cell:
   <*> child @Text (coding currentCheckout (assignment [label|consumer|] consumerTask))
   <*> child @Text (researching currentCheckout (assignment [label|contract-review|] reviewTask))
 ```
+A later wave from the same actor uses `subgroup "wave-2"`: it nests under
+your own path, so you pass only the new segment, never your full path.
 
 End the turn. Each child's settlement notice wakes you with its reply; read
 the full value with `pollResponse` only when the notice's preview is absent

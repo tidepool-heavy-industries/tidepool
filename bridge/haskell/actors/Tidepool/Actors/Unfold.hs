@@ -89,7 +89,6 @@ module Tidepool.Actors.Unfold
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
-import Data.Char (isAsciiLower, isDigit)
 import Data.Kind (Type)
 import Data.String (IsString (fromString))
 import Data.Text (Text)
@@ -100,7 +99,7 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
 import Tidepool.Agent.Watch (Settlement, Watch, WatchLabel, Watches, awaitSettled, watch)
 import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
-import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), SettlementReporting, assignment, labelText)
+import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), SettlementReporting, assignment, labelText, renderNameError, validateKebabSegment)
 import Tidepool.Agent.Watch.Internal (WatchLabel (..))
 import Tidepool.Agent.Launch
   ( ActorPath (..), GitBranchPrefix (..), ForkRole (..)
@@ -175,7 +174,7 @@ instance IsString ForkGroupLabel where
 
 
 validatedLiteral :: (Text -> Either NameError label) -> String -> label
-validatedLiteral validate = either (error . show) id . validate . Text.pack
+validatedLiteral validate = either (error . Text.unpack . renderNameError) id . validate . Text.pack
 
 campaignLabel :: Text -> Either NameError CampaignLabel
 campaignLabel = fmap CampaignLabel . validateSegment
@@ -183,23 +182,20 @@ campaignLabel = fmap CampaignLabel . validateSegment
 forkGroupLabel :: Text -> Either NameError ForkGroupLabel
 forkGroupLabel = fmap ForkGroupLabel . validateSegment
 
+-- | A fresh two-segment path, @campaign/group@, for a wave that starts a
+-- campaign of its own.
 batch :: CampaignLabel -> ForkGroupLabel -> ForkGroupPath
 batch (CampaignLabel campaignName) (ForkGroupLabel groupName) =
   ForkGroupPath False (campaignName <> "/" <> groupName)
 
+-- | A path nested under the calling actor's OWN path: pass only the new
+-- segment (@subgroup "wave-2"@), never your full path, which the engine
+-- already knows.
 subgroup :: ForkGroupLabel -> ForkGroupPath
 subgroup (ForkGroupLabel groupName) = ForkGroupPath True groupName
 
 validateSegment :: Text -> Either NameError Text
-validateSegment value
-  | Text.null value = Left EmptyName
-  | Text.length value > 48 = Left (NameTooLong value)
-  | Text.head value == '-' || Text.last value == '-' = Left (InvalidKebabName value)
-  | "--" `Text.isInfixOf` value = Left (InvalidKebabName value)
-  | Text.all valid value = Right value
-  | otherwise = Left (InvalidKebabName value)
-  where
-    valid character = isAsciiLower character || isDigit character || character == '-'
+validateSegment = validateKebabSegment
 
 data WorktreeSeed
   = WorktreeSeed WorktreeSource DirtyPolicy
