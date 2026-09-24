@@ -7,6 +7,7 @@
 module Project.JevChecks (investigation, review, reflex) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.Maybe (isNothing)
 import qualified Data.Text as Text
 import Tidepool.Check
 
@@ -87,4 +88,4 @@ reflex = do
     (fmap (\entry -> (reflexClass entry, reflexNext entry)) successful
       == Just ("green", Proceed))
   check "unknown failure remains unclassified for the Jev fallback"
-    (unknown == Nothing)
+    (isNothing unknown)

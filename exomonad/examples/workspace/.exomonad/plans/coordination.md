@@ -53,7 +53,7 @@ alternatives and a decision to make without a transcript:
 let slot = DesignSlot
       { specialistPlan = planPath task
       , specialistGroup = batch "design" "wrapper-lifetime"
-      , specialistLabel = "wrapper-lifetime"
+      , specialistLabel = [label|wrapper-lifetime|]
       , specialistWatch = "wrapper-answer"
       , specialistModel = "planner"
       , specialistEffort = Medium

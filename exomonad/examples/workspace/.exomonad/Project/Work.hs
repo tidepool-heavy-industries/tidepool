@@ -177,10 +177,16 @@ commitReviewContext review = Text.unlines
 -- as reviewCandidate (fixed Medium, same effect constraints); if the
 -- reviewer accepts, it builds its own Task for the ReviewedCandidate it
 -- returns -- the `task` defaults constructor makes that a one-liner.
+--
+-- Takes its own campaign label rather than nesting under the caller's path
+-- (subgroup): the root itself has no allocated actor path to nest under
+-- (Task's batch/"work" split has the same shape, one level up -- see
+-- Project.Types's task constructor), and a caller-supplied label keeps
+-- concurrent reviewCommit calls from the same actor in separate groups.
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewCommit commit accept owned owner = unfold (subgroup "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
+  => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewCommit reviewLabel commit accept owned owner = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected commitReviewContext) $
   withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid commit)))

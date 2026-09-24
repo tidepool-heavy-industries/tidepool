@@ -6,10 +6,12 @@ description: Commission independent review and repair of exact Exomonad candidat
 Use review when independent judgment helps the owning integration decision.
 The reviewer is seeded at the exact candidate commit, so it can run the
 candidate's own tests. From any actor, root included, with a commit, its
-acceptance and its owned paths:
+acceptance and its owned paths, pass a label naming this review's own
+campaign -- reviewCommit unfolds an absolute group path from it rather than
+nesting under your own (root has no allocated actor path to nest under):
 
 ```haskell
-(reviewer, reviewProgress) <- reviewCommit commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
+(reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
 ```
 
 Inside a request whose `sessionInput :: Task` describes the work, with your

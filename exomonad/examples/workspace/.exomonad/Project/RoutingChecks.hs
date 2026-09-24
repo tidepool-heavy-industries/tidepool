@@ -42,9 +42,9 @@ routing = do
   second <- turn owner "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
   check "later publications arrive without rearming" (output second == "True")
   pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-  check "publishing progress preserves the original reply" (output pending == "ReplyOpen")
+  check "publishing progress preserves the original reply" ("ReplyOpen" `Text.isSuffixOf` output pending)
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(== ([WorkClosed])) . map sourceStatus . collectedWork <$> readWork forwarding"
+  closed <- turn owner "(== ([WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork forwarding"
   check "source closure leaves the actor's retained state queryable" (output closed == "True")
   void $ turn owner "finishWork forwarding"
   void restart

@@ -25,7 +25,8 @@ after checked incorporation there and an explicit next-swarm selection.
 `[haskell].checks` in config.toml names ordinary Haskell entry points. Keep these
 separate from `[haskell].modules`, which are imported into working actors. The
 prepared checks live in Project.Checks, Project.CollaborationChecks and
-Project.RoutingChecks; their notebook cells are adjacent in .exomonad/checks.
+Project.RoutingChecks; their notebook cells are adjacent in
+.exomonad/workspace/checks.
 Edit a helper, its guidance and its checks together, then run:
 
 ```sh
@@ -45,7 +46,8 @@ a named fact. present/notPresented/unconfirmed exercise the existing native upda
 presentation seam. restart deliberately closes the model-free swarm and captures
 the changed package; old CheckActor values cannot address the new swarm.
 
-`script actor name` in Project.Checks runs the corresponding .exomonad/checks/name.hs
+`script actor name` in Project.Checks runs the corresponding
+.exomonad/workspace/checks/name.hs
 expression file. Most checks are ordinary function calls, Haskell assertions and
 small turns over retained values. awaitOutput polls a retained observation while
 an automatic callback finishes; it never launches replacement work. No project

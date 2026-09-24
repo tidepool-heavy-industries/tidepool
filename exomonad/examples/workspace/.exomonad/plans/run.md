@@ -41,7 +41,7 @@ runs as the router, not as the capturing model.
 import qualified Tidepool.Actor as Actor
 let campaign = "current-goal" :: CampaignLabel
 let owners = "owners" :: ForkGroupLabel
-let label = "component-a" :: Label
+let label = [label|component-a|]
 let group = batch campaign owners
 let task = Task
       { taskGroup = group
@@ -83,7 +83,7 @@ repair. Its attempt settles; the lead's delivery stays open. After local repair 
 checks, bind `revised :: Candidate` and reuse the retained reviewer:
 
 ```haskell
-let retryLabel = "review-repaired" :: Label
+let retryLabel = [label|review-repaired|]
 (attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
 retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork me (workMessage reviewSummary))
 ```

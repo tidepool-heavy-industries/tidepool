@@ -37,10 +37,18 @@ skills = do
   void $ example (checkActor worker) "exomonad-coordinate" 0
   observed <- example owner "exomonad-coordinate" 1
   check "compact snapshot shows candidate and pending result" (baseline `Text.isInfixOf` output observed && "result pending" `Text.isInfixOf` output observed)
-  void $ example (checkActor worker) "exomonad-review" 0
+  -- Block 0 is reviewCommit's own root recipe: run it from the actual root
+  -- actor (owner), not a forked child, so a regression to a relative
+  -- subgroup path (which only a child with an allocated parent path can
+  -- resolve) fails this turn instead of passing unnoticed.
+  void $ turn owner ("let commit = " <> gitOidLiteral baseline)
+  void $ example owner "exomonad-review" 0
+  commitReviewer <- activation
+  check "root review-by-commit forks a fresh Luna reviewer with no parent path" (checkModel commitReviewer == Just "gpt-6-luna")
+  void $ example (checkActor worker) "exomonad-review" 1
   reviewer <- activation
   void $ turn (checkActor reviewer) "let checks = [\"fixture review\"] :: [Text]\nlet scope = \"skill composition only\" :: Text"
-  replied <- example (checkActor reviewer) "exomonad-review" 1
+  replied <- example (checkActor reviewer) "exomonad-review" 2
   check "successful reply explicitly reports submission" ("Reply submitted." `Text.isInfixOf` output replied)
   void $ turn (checkActor worker) "respond (Produced candidate)"
   final <- awaitOutput owner "state <- readWork router\ninspectFull (workSnapshotSummary candidateSummary state)" (not . Text.isInfixOf "result pending")
