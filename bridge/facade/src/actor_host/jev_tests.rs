@@ -1900,3 +1900,99 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+/// `Project.Watchdog.watchBy` forwards a finished call's own displayed text
+/// into its own Jev ask (`rawState`'s `result` field, and each entry of
+/// `recent_calls`). Before `Watchdog.hs`'s `boundedEvidence`, that text was
+/// unbounded, and `park_suspension`
+/// (`tidepool/runtime/src/session/prepared.rs`) observes a suspended
+/// effect's own request in full to classify and dispatch it -- so a long,
+/// non-trivial `bash` result (shown raw and whole with no
+/// `max_output_bytes`, per
+/// `template_bash_shows_any_length_output_raw_without_focus`) blew the
+/// ~100 KB observation budget materializing the SLOT's OWN Jev request, not
+/// the tool's own output or display. That surfaced as a `[after-tool]`
+/// failure line on the model's result, live-log evidence in
+/// `8a782b2b-d7fb-4827-af5a-8e21366549b5.log`. `resident_actor.rs`'s
+/// `annotate_tool_result` now treats that one failure class as a silent
+/// abstention (see `ResidentActorWorkbenchError::is_observation_budget_exhausted`),
+/// and `Watchdog.hs` bounds what it sends Jev in the first place, so the
+/// slot both never fails the hook and still reaches a real judgement.
+#[tokio::test]
+async fn a_watchdogs_own_jev_ask_survives_a_result_past_the_observation_budget() {
+    let backend = Arc::new(ScriptedNoulJev {
+        requests: Mutex::new(Vec::new()),
+        likelihood: 0.0,
+    });
+    let mut campaign = campaign_with(Arc::clone(&backend)).await;
+    let policy = campaign.root_installation.policy.clone();
+    let invoked_policy = Arc::clone(&policy);
+
+    // Comfortably past the ~100 KB observation budget, and far more than
+    // `rawLineThreshold` (15) lines, so `trivialCall` does not abstain by
+    // inspection before `watchBy` ever asks Jev.
+    let command_output: String = (1..=20_000).map(|line| format!("line-{line}\n")).collect();
+    let mut invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            invoked_policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "seq 1 20000",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": null,
+                "intent": null
+            }),
+        )
+        .await
+    });
+    let commands = TestCommands::completed(&command_output);
+    let request = tokio::select! {
+        request = backend_request(&mut campaign) => request,
+        result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
+    };
+    request.supply(Ok(commands));
+    let response = invoked.await.unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(
+        !output.contains("[after-tool]"),
+        "a result too large for the slot to relay through its own Jev ask must not surface \
+         as a hook failure: {output}"
+    );
+
+    {
+        let requests = backend.requests.lock();
+        assert!(
+            !requests.is_empty(),
+            "a long, non-trivial, non-destructive call must still reach the heuristics battery"
+        );
+        for request in requests.iter() {
+            let size = request.to_string().len();
+            assert!(
+                size < 20_000,
+                "the slot's own Jev request must stay a bounded excerpt, not the whole \
+                 result: {size} bytes"
+            );
+        }
+    }
+
+    let status = dispatch_structured_tool(
+        policy.as_ref(),
+        "status",
+        serde_json::json!({"view": "detailed"}),
+    )
+    .await
+    .to_string();
+    assert!(
+        !status.contains("observation budget"),
+        "the slot must never fail on a result too large to relay: {status}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

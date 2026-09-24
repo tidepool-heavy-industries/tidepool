@@ -138,13 +138,36 @@ recentToolActivity = do
       object
         [ "availability" .= ("completed turns only; current turn excluded" :: Text)
         , "calls" .=
-            [ object ["tool" .= name, "arguments" .= arguments, "result" .= out]
+            [ object ["tool" .= name, "arguments" .= arguments, "result" .= boundedEvidence out]
             | t <- ts
             , TurnToolCall callId name arguments <- turnItems t
             , TurnToolResult callId' out <- turnItems t
             , callId == callId'
             ]
         ]
+
+-- | How much of a result's displayed text 'boundedEvidence' keeps. Enough
+-- for Jev to judge a heuristic from; never the whole of a result large
+-- enough to test the observation budget that materializing this effect's
+-- own request runs under (that budget counts the request Jev is actually
+-- asked with, not just what is later displayed).
+evidenceChars :: Int
+evidenceChars = 8000
+
+-- | An evidence-sized excerpt of a tool result's displayed text, used
+-- everywhere a result's text is folded into what 'watchBy' asks Jev
+-- (the current call's own result, and each result in @recent_calls@): never
+-- the raw, unbounded text a giant command's stdout can carry. A result this
+-- module only forwards, rather than judges by inspection, has no business
+-- costing the slot's own effect request more than a bounded slice of it.
+boundedEvidence :: Text -> Text
+boundedEvidence text
+  | T.length text <= evidenceChars = text
+  | otherwise =
+      T.take evidenceChars text
+        <> "\n[truncated; "
+        <> T.pack (show (T.length text - evidenceChars))
+        <> " more characters omitted]"
 
 -- | A deterministic pre-Jev gate: a plain 'Maybe Text' rather than an effect,
 -- so a workspace can reuse, tighten, or replace it without touching
@@ -267,7 +290,7 @@ watchBy heuristicsFor call result = do
             (J.rawState (object
               [ "tool" .= toolCallName call
               , "arguments" .= toolCallArguments call
-              , "result" .= toolResultOutput result
+              , "result" .= boundedEvidence (toolResultOutput result)
               , "recent_calls" .= recentCalls
               ]))
             (#heuristics J.:= J.each heuristicName (\h ->

@@ -1907,6 +1907,23 @@ pub enum ResidentActorWorkbenchError {
     ToolDeclarations(serde_json::Error),
 }
 
+impl ResidentActorWorkbenchError {
+    /// Whether this failure is only an observation budget running out
+    /// somewhere in the turn, rather than a fault in the program, the heap,
+    /// the value, or the actor protocol around it. `Resident` and
+    /// `Delivered` are the two shapes that wrap a `ResidentError`, at
+    /// either position (before or after an effect's answer was consumed);
+    /// every other variant reports something that is actually wrong.
+    pub(crate) fn is_observation_budget_exhausted(&self) -> bool {
+        match self {
+            Self::Resident(error) | Self::Delivered(error) => {
+                error.is_observation_budget_exhausted()
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Render an actor's ordered include roots for the `compile_blocking` span,
 /// in search order, so a diagnostic reader sees the exact search path a
 /// compile ran against without cross-referencing the actor registry.

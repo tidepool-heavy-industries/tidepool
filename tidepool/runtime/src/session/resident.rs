@@ -769,6 +769,19 @@ pub enum ResidentError {
     Prepared(#[from] PreparedRuntimeError),
 }
 
+impl ResidentError {
+    /// Whether this failure is only an observation budget running out
+    /// somewhere in the turn — materializing a display value, or observing a
+    /// suspended effect's own request so it can be classified and dispatched
+    /// — rather than a fault in the program, the heap, or the value. A
+    /// caller that only needs to know whether the size limit tripped (as
+    /// opposed to reading the specific failure) uses this instead of
+    /// matching the `Prepared`/`Run`/`Observation` chain itself.
+    pub fn is_observation_budget_exhausted(&self) -> bool {
+        matches!(self, Self::Prepared(error) if is_observation_budget_exhausted(error))
+    }
+}
+
 /// A failed continuation response classified by the parked frame's ground
 /// truth. `Rejected` leaves the original frame available for retry or abort;
 /// `Consumed` means delivery crossed the continuation boundary before the

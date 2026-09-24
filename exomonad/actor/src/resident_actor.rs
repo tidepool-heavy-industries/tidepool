@@ -5229,6 +5229,24 @@ where
                         reason,
                     )
                 }
+                // A request or a display value too large to materialize says
+                // nothing about the tool result itself: the slot's own
+                // relay of it (to Jev, to a binding) hit the same size limit
+                // that display already tolerates elsewhere in a turn. The
+                // model asked for a judgement it happens not to be able to
+                // get, not a broken judgement, so this is a non-decision
+                // like any other abstention rather than a failure line
+                // repeated on every large tool result. Bounding what the
+                // slot itself sends through an effect (`Watchdog.hs`) is the
+                // real fix; this keeps the hook from failing regardless.
+                Some(Err(error)) if error.is_observation_budget_exhausted() => (
+                    output,
+                    Disposition::Abstained(
+                        "tool result too large for the slot to relay through its own effects"
+                            .into(),
+                    ),
+                    String::new(),
+                ),
                 Some(Err(error)) => {
                     let reason = crate::after_tool::compact_reason(&error.to_string());
                     let notice = self.after_tool.notice(ordinal, &reason);
