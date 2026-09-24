@@ -1,6 +1,7 @@
+{-# LANGUAGE QuasiQuotes #-}
 let designCampaign = "declared-design" :: CampaignLabel
 let designWave = "architecture" :: ForkGroupLabel
-let designLabel = "boundary-question" :: Label
+let designLabel = [label|boundary-question|]
 let designWatch = "design-answer" :: WatchLabel
 let slot = DesignSlot "plans/current/architecture.md" (batch designCampaign designWave) designLabel designWatch "planner" Medium
 let WatchReady repairedResult = state

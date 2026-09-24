@@ -17,7 +17,7 @@ Availability of the names below:
   `R.forwardResult`, `requestWithProgressInto`, `LocalEffects`, `ActorSpec`,
   `Handler`, `Actor.Selected`, `knownEffects`, `Replies`, `Actor`,
   `Notifications`.
-- **Example-only** — defined in `exomonad/examples/workspace/.exomonad/Project`, and
+- **Example-only** — defined in `.exomonad/workspace/Project`, and
   **not in scope in a fresh project**: `coordinationActor` and
   `CoordinationEffects` (`Project.Actors`), `Outcome` and `Candidate`
   (`Project.Types`). The examples here use them because this workspace ships

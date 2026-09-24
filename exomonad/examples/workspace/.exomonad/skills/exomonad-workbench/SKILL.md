@@ -14,7 +14,7 @@ displays its value; declarations and bindings persist into later cells.
 Everything named in this skill is **shipped**: it is in scope in any Exomonad cell
 with no project module and no import. The two exceptions are marked where they
 appear — `Jev` and `Commands` (effect types from `Tidepool.Effects.Core`) need
-an import line. Names from `exomonad/examples/workspace/.exomonad/Project`, such as
+an import line. Names from `.exomonad/workspace/Project`, such as
 `coordinationActor`, `Outcome` and `Candidate`, are **example-only** and are
 not used here.
 
@@ -25,6 +25,19 @@ render finding = findingPath finding <> ":" <> T.pack (show (findingLine finding
 let findings = [Finding "src/Retry.hs" 12, Finding "src/Fetch.hs" 44]
 map render findings
 ```
+
+## Look up a name from a cell
+
+The hosted `lookup` tool is not a Haskell function. Import the raw lookup API,
+then use its default request constructor:
+
+```haskell
+import Tidepool.Lookup (lookupRaw, lookupRequest)
+lookupRaw (lookupRequest ["Cmd.quiet"])
+```
+
+`lookupRequest` uses the shipped hosted tool's defaults; use `LookupRequest`
+directly when a request needs custom discovery, view, candidate limit, or references.
 
 Leading `LANGUAGE` and `OPTIONS_GHC` pragmas apply to this cell only and must
 come first; imports persist. No pragmas or imports after executable source, no

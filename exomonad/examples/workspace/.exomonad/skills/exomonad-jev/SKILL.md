@@ -16,7 +16,7 @@ Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.askWith`,
 `J.resolvedModel`, `J.lenient`, `J.careful`, `J.strict`. The one exception is
 the **effect type** `Jev`, which a record actor's row must name and which is not
 re-exported by the workbench surface: `import Tidepool.Effects.Core (Jev)`.
-Nothing from `exomonad/examples/workspace/.exomonad/Project` appears here.
+Nothing from `.exomonad/workspace/Project` appears here.
 
 `import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
 unqualified.

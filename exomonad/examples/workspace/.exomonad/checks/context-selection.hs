@@ -1,0 +1,10 @@
+import Project.ContextSelection (SelectionConfig (..), defaultSelectionConfig, numberedChunks, selectionConfigIssue)
+let contextSelectionChunks = numberedChunks 2 "alpha\nbeta\ngamma\ndelta\nepsilon"
+check "context selection preserves one-based line ranges" (map (\(start, end, _) -> (start, end)) contextSelectionChunks == [(1, 2), (3, 4), (5, 5)])
+check "context selection prefixes retained lines" (case contextSelectionChunks of { ((_, _, first) : _) -> first == "1: alpha\n2: beta\n"; _ -> False })
+check "an invalid chunk size produces no selection candidates" (null (numberedChunks 0 "alpha"))
+check "default context selection config is valid" (selectionConfigIssue defaultSelectionConfig == Nothing)
+check "non-positive counts are rejected" (case selectionConfigIssue defaultSelectionConfig { minimumLines = 0 } of { Just _ -> True; Nothing -> False })
+check "non-finite thresholds are rejected" (case selectionConfigIssue defaultSelectionConfig { evidenceFloor = 0 / 0 } of { Just _ -> True; Nothing -> False })
+check "out-of-range thresholds are rejected" (case selectionConfigIssue defaultSelectionConfig { relevanceFloor = 1.1 } of { Just _ -> True; Nothing -> False })
+check "overlapping relevance bands are rejected" (case selectionConfigIssue defaultSelectionConfig { irrelevanceCeiling = 0.7 } of { Just _ -> True; Nothing -> False })

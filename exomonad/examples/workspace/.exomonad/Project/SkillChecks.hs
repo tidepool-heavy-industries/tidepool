@@ -14,7 +14,7 @@ import Tidepool.Aeson (Value)
 -- Execute the skill's actual code blocks, not separately maintained copies.
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
 example actor skill index = do
-  body <- readFile actor (".exomonad/skills/" <> skill <> "/SKILL.md")
+  body <- readFile actor (".exomonad/workspace/skills/" <> skill <> "/SKILL.md")
   let blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" body))
   turn actor (blocks !! index)
 
@@ -22,7 +22,7 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".exomonad/skills/exomonad-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
+  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".exomonad/workspace/skills/exomonad-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
   void $ example owner "exomonad-fork" 0
   worker <- activation
   check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)

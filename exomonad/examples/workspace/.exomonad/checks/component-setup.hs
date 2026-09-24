@@ -1,5 +1,6 @@
+{-# LANGUAGE QuasiQuotes #-}
 let campaign = "delivery-package" :: CampaignLabel
-let leadLabel = "projection-lead" :: Label
+let leadLabel = [label|projection-lead|]
 let Right task = component campaign RelationProjection baseline
 before <- snapshot
 leadWork <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom leadLabel projectHead task))))

@@ -21,8 +21,8 @@ badly, the outcome it had just been shown. Starting that actor was four calls.
 
 **This is a pattern to copy into your own `.exomonad/Project`, not a library.**
 Nothing below is importable. Paste it, rename it, cut the seams you do not
-need. `exomonad/examples/workspace/.exomonad/checks/review-continuation.hs` is the
-executable precedent for the review → repair → re-review half of it.
+need. `.exomonad/workspace/checks/review-continuation.hs` is the executable
+precedent for the review → repair → re-review half of it.
 
 Availability of the names used here:
 

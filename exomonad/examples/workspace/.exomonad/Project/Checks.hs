@@ -14,7 +14,7 @@ import qualified Data.Text as Text
 import Tidepool.Check
 
 script :: Member RecipeCheck effects => CheckActor -> Text -> Eff effects ()
-script actor name = readFile actor (".exomonad/checks/" <> name <> ".hs") >>= void . turn actor
+script actor name = readFile actor (".exomonad/workspace/checks/" <> name <> ".hs") >>= void . turn actor
 
 context :: Member RecipeCheck effects => Eff effects ()
 context = void startComponent
