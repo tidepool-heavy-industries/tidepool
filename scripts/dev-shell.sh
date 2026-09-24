@@ -56,7 +56,38 @@ if [[ ${TIDEPOOL_DEV_SHELL:-} == "$selection" &&
   exec "$@"
 fi
 # Retain cwd and CARGO_TARGET_DIR: only the environment comes from the flake.
-exec nix develop "$selection" --command bash -c '
+#
+# `nix develop --command CMD` builds its own NIX_BUILD_TOP with
+# `mktemp -d -t nix-shell.XXXXXX` inside a generated rc script, then execve's
+# CMD in place of that script's shell. The execve discards the process before
+# any trap the rc script set can remove NIX_BUILD_TOP, so every invocation
+# leaks a /tmp/nix-shell.XXXXXX directory (and its nix-develop-*/
+# nix-git-submodules.* siblings); this happens inside nix itself, not in
+# anything this script execs, so it cannot be fixed by avoiding exec here.
+# Give nix's mktemp a private TMPDIR we control instead, and remove that
+# whole directory ourselves once the command exits, keeping its exit status
+# (nix propagates signal-terminated commands as the usual 128+signal status).
+dev_shell_tmp=$(mktemp -d -t tidepool-dev-shell.XXXXXX)
+cleanup_dev_shell_tmp() {
+  local dir=$1 pid
+  # A command run in this shell can start a detached process that outlives
+  # this script (e.g. `just daemon-start`'s setsid'd persistent compile
+  # daemon keeper) and inherits this TMPDIR. Removing the directory under a
+  # still-running process would break it, so only remove it when no live
+  # process still has it as $TMPDIR; otherwise leave it for a later
+  # invocation to collect once nothing references it any more.
+  for pid in /proc/[0-9]*; do
+    pid=${pid#/proc/}
+    [[ $pid == "$$" ]] && continue
+    [[ -r /proc/$pid/environ ]] || continue
+    if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qxF "TMPDIR=$dir"; then
+      return 0
+    fi
+  done
+  rm -rf "$dir"
+}
+trap 'cleanup_dev_shell_tmp "$dev_shell_tmp"' EXIT
+TMPDIR="$dev_shell_tmp" nix develop "$selection" --command bash -c '
   export TIDEPOOL_DEV_SHELL="$1"
   export TIDEPOOL_DEV_GHC="$(command -v ghc)"
   export TIDEPOOL_DEV_RUSTC="$(command -v rustc)"

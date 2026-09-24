@@ -48,6 +48,10 @@ test-lib crate filter="":
 test-toolchain-scripts:
     {{ nix }} python3 scripts/tests/test_lib_extract.py -v
 
+# Regression check: dev-shell.sh must not leak nix's own /tmp dirs.
+test-dev-shell:
+    python3 scripts/tests/test_dev_shell.py -v
+
 # Start (or reuse) the persistent compile daemon; battery/suite/check reuse it automatically.
 daemon-start:
     {{ nix }} bash -c 'set -euo pipefail; source scripts/lib-extract.sh && resolve_tidepool_extract && daemon_start_persistent'
