@@ -26,11 +26,6 @@ invariant is dead or covered elsewhere.
   `arbitrary_precision` to the values that need it (`RawValue`/`Number`
   wrappers) instead of the whole workspace.
 
-- **Compile memo is path-sensitive.** Recommendation in
-  [compile-memo-evidence.md](compile-memo-evidence.md): compare direct
-  dependencies by content fingerprint while keeping `HomeDependency` (module
-  name and source kind) as identity. The five-tree reproduction and GC cost
-  attribution from the original brief were not run.
 - **Typed errors.** About 245 `io::Error::other(format!(..))` domain errors and
   about 871 text-matching test assertions. Convert crate by crate as typed
   error enums land.
@@ -43,19 +38,35 @@ invariant is dead or covered elsewhere.
 - **Launcher TODOs.** `bridge/handlers/src/handlers/exec.rs` and
   `bridge/facade/src/exomonad.rs` spawn processes outside the launcher; each
   site carries a `TODO(launcher)` allow reason (`grep -rn "TODO(launcher)"`).
-- **Failed launches leave state a retry trips over.** Seen on 2026-09-23
-  starting the exomonad-harness wave: (1) `exomonad init --recreate` on a
-  session whose first host failed before the root ever bound reads the stale
-  `.exomonad/sessions/<name>/root-binding.json` and fails with "cannot resume
-  the requested root conversation" instead of starting fresh; (2) a host
-  launched through `systemd-run` outlives `tmux kill-session` and keeps the
-  workspace's `actor-worktrees/<hash>/bindings/.owner.lock`, so the next run
-  fails with "another process already owns this binding". Class: a failed or
-  killed run must release everything a fresh run of the same workspace needs,
-  and a retry must not resume state a failed run never completed.
-- **Memory admission versus compiler workers.** The persistent test daemon's
-  three warm GHC workers (about 5.5 GiB each) plus a run's own daemon left
-  3.4 GiB on a 31 GiB box and the root actor failed admission (7 GiB
-  needed). A run's daemon and the test daemon size themselves independently;
-  one budget should cover both, or a run should refuse to start next to a
-  warm test daemon and say so.
+
+## From the exomonad-harness wave (2026-09-23)
+
+The first build wave outside this repository: a GPT-6 Sol root, a core lead and
+two leaves in `~/dev/exomonad-harness`. Their WIP is kept there on `master` and
+the `exomonad/wave0/*` branches. Every agent was interviewed while paused; the
+fixes the run motivated are in git history. Open items:
+
+- **Host-authored bindings still compile per call.** Naming a hosted tool's
+  command job (`bind_command_job` → `compile_host_binding`) runs GHC every call,
+  now outside the machine checkout (12b90f6ee). Reusing one compiled binder with
+  a relabelled generation does not work: GHC writes a `Val.G<gen>.hi` interface
+  keyed by the exact `--bind-gen`, and later turns import it by that name
+  (`tidepool/runtime/src/session/turn.rs` TurnRequest, `extract-cmd` lib.rs
+  `--session-root`). Removing the compile needs a binding path whose interface
+  does not depend on the generation.
+- **No way to list an actor's live descendants.** The root searched for one to
+  see whether its lead's leaves had started, and found none.
+- **Ending a turn looks like finishing.** A leaf ended its first turn without
+  `respond`, although it knew `respond` settles its assignment: "the normal
+  final-answer UI made the opposite feel plausible in the moment." Deferred to
+  the standalone harness, which owns turns.
+- **Briefs with split ownership.** "This file is yours" together with "its
+  public signatures belong to the lead" made a leaf ask instead of act, then
+  wait. A brief should say which of the two wins.
+- **Operator input.** In a Codex pane, Enter steers a running turn; Tab queues
+  until the turn ends, which can be many minutes.
+
+How the run was observed, for the next one: tmux holds no scrollback for Codex
+panes (alternate screen); each agent's Codex rollout in `~/.codex/sessions`
+is the complete record, and forks carry `parent_thread_id`. Prompt caching
+across forks held at about 99% from a child's first request.
