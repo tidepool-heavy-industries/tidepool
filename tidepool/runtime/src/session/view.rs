@@ -226,6 +226,29 @@ impl SessionCompileView {
         self.next_value_generation
     }
 
+    /// Equality over everything a compiled turn actually depended on:
+    /// session identity, scope, lexical root, imports, visible/injected
+    /// value modules, and shadowing. Deliberately excludes
+    /// `next_value_generation`: a caller that reserved its own generation
+    /// before releasing its checkout (`ResidentSession::
+    /// reserve_value_generations_through`) expects that counter to have
+    /// moved on by the time it re-derives a view to install against, and an
+    /// unrelated concurrent reservation must not by itself invalidate this
+    /// turn's compile.
+    #[must_use]
+    pub fn compile_relevant_eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.lexical_scope == other.lexical_scope
+            && self.root == other.root
+            && self.persistent_imports == other.persistent_imports
+            && self.library == other.library
+            && self.visible_values == other.visible_values
+            && self.visible_value_names == other.visible_value_names
+            && self.injected_values == other.injected_values
+            && self.shadowing == other.shadowing
+            && self.staged_hiding == other.staged_hiding
+    }
+
     /// Use a declaration module that has been validated for a cell but is not
     /// yet committed to the live declaration log.
     #[must_use]
@@ -428,6 +451,55 @@ mod tests {
         let external = SourceImports::from_specs(["Tidepool.Duration (after)"]);
         assert_eq!(view.turn_imports(&external),
             "Tidepool.Duration ()\nData.Set qualified as Set\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5");
+    }
+
+    #[test]
+    fn compile_relevant_eq_ignores_next_value_generation_but_not_visible_values() {
+        let base = SessionCompileView {
+            session: SessionId(4),
+            lexical_scope: ScopeId::ROOT,
+            root: PathBuf::from("/session"),
+            persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
+            library: Some(SessionModule::lib(Generation(3))),
+            visible_values: vec![SessionModule::val(Generation(5))],
+            visible_value_names: Vec::new(),
+            injected_values: vec![SessionModule::val(Generation(5))],
+            next_value_generation: Generation(6),
+            shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
+        }
+        .canonicalize();
+
+        // Only the reserved generation moved forward — the compile-relevant
+        // fields a split compile actually depended on did not change, so a
+        // caller that reserved its own generation before releasing its
+        // checkout must not see this as staleness.
+        let mut reserved_further = base.clone();
+        reserved_further.next_value_generation = Generation(9);
+        assert!(base.compile_relevant_eq(&reserved_further));
+        assert!(reserved_further.compile_relevant_eq(&base));
+
+        // A concurrent write that actually changes what the turn imported
+        // must be caught.
+        let mut visible_changed = base.clone();
+        visible_changed
+            .visible_values
+            .push(SessionModule::val(Generation(7)));
+        assert!(!base.compile_relevant_eq(&visible_changed));
+
+        let mut shadowing_changed = base.clone();
+        shadowing_changed
+            .shadowing
+            .push(super::super::ExportItem::Value {
+                name: "interloper".into(),
+            });
+        assert!(!base.compile_relevant_eq(&shadowing_changed));
+
+        let mut injected_changed = base.clone();
+        injected_changed
+            .injected_values
+            .push(SessionModule::val(Generation(2)));
+        assert!(!base.compile_relevant_eq(&injected_changed));
     }
 
     #[test]

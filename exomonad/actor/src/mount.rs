@@ -193,6 +193,19 @@ impl ActorCompileView {
         self.session.next_value_generation()
     }
 
+    /// Whether `other` still names the same source-side environment this
+    /// view compiled against, ignoring `next_value_generation` (a caller
+    /// that reserved its own generation before releasing its checkout
+    /// expects that counter alone to have moved). A split compile takes this
+    /// view, releases its checkout, compiles off-checkout, then re-derives a
+    /// fresh view on re-checkout; a `false` here means something else wrote
+    /// to a scope this compile actually read from, and the compiled result
+    /// must not be installed.
+    #[must_use]
+    pub fn compile_relevant_eq(&self, other: &Self) -> bool {
+        self.session.compile_relevant_eq(&other.session)
+    }
+
     /// Opaque identity for compiler evidence produced against this exact
     /// immutable source/import/session snapshot.
     #[must_use]

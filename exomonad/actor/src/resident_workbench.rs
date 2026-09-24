@@ -26,6 +26,7 @@ use tidepool_bridge::{BridgeError, FromHaskell, HaskellVisitor, ToHaskell};
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
+use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
@@ -2720,30 +2721,133 @@ where
         })
     }
 
+    /// Bind a Job carrier for `job`, compiling with the resident machine
+    /// checked out only for the two short snapshot/install steps and
+    /// released for the GHC compile in between (Problem 1 of the
+    /// compile-path design note). A stale snapshot — something else wrote to
+    /// a scope this compile actually read from, between release and
+    /// re-checkout — is detected by [`crate::ActorCompileView::
+    /// compile_relevant_eq`] and recompiled against a fresh snapshot, up to
+    /// `MAX_SPLIT_ATTEMPTS` times; beyond that this falls back to the
+    /// original single-checkout path, which cannot itself go stale.
     pub(crate) async fn bind_command_job(
         &self,
         context: crate::ActorSessionContext,
         job: String,
     ) -> Result<String, ResidentActorWorkbenchError> {
+        const MAX_SPLIT_ATTEMPTS: u32 = 3;
+        for _ in 0..MAX_SPLIT_ATTEMPTS {
+            let snapshot_job = job.clone();
+            let snapshot = self
+                .access
+                .with_machine(context.clone(), move |session, context, source| {
+                    let scope = context.placement.lexical_scope;
+                    if let Some(binding) = session.host_text_binding_in(scope, &snapshot_job) {
+                        return Ok(BindJobSnapshot::AlreadyBound(binding));
+                    }
+                    let binding = fresh_job_binding_name(session, scope);
+                    let view = actor_compile_view(session, context, source, &[])?;
+                    let generation = view.next_value_generation();
+                    // Reserve the generation now, under this checkout, so no
+                    // concurrent compile can ever mint the same one — this
+                    // makes generation collision impossible without holding
+                    // the checkout across the GHC call.
+                    session.reserve_value_generations_through(generation);
+                    let retained = session.prepared_retained();
+                    Ok(BindJobSnapshot::Prepare(Box::new(BindJobPrepare {
+                        view,
+                        generation,
+                        retained,
+                        binding,
+                    })))
+                })
+                .await?;
+
+            let (view, generation, retained, binding) = match snapshot {
+                BindJobSnapshot::AlreadyBound(binding) => return Ok(binding),
+                BindJobSnapshot::Prepare(prepare) => {
+                    let BindJobPrepare {
+                        view,
+                        generation,
+                        retained,
+                        binding,
+                    } = *prepare;
+                    (view, generation, retained, binding)
+                }
+            };
+
+            // No checkout held here: the GHC compile runs concurrently with
+            // every other actor's turn against this session.
+            let effects = context.haskell_effects_alias.clone();
+            let source = self.access.source.clone();
+            let compile_binding = binding.clone();
+            let compiled = spawn_blocking_in_span(move || {
+                compile_host_binding_off_checkout(
+                    &view,
+                    &source,
+                    &effects,
+                    generation,
+                    &compile_binding,
+                    COMMAND_JOB_TYPE_NAME,
+                    COMMAND_JOB_ANCHOR,
+                    command_job_carrier_imports(),
+                    true,
+                    &retained,
+                )
+                .map(|(binder, compiled)| (view, binder, compiled))
+            })
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+            let (view, binder, compiled) = compiled;
+
+            let install_job = job.clone();
+            let install_binding = binding.clone();
+            let outcome = self
+                .access
+                .with_machine(context.clone(), move |session, context, source| {
+                    let scope = context.placement.lexical_scope;
+                    if let Some(binding) = session.host_text_binding_in(scope, &install_job) {
+                        return Ok(BindJobInstall::AlreadyBound(binding));
+                    }
+                    let fresh_view = actor_compile_view(session, context, source, &[])?;
+                    if !fresh_view.compile_relevant_eq(&view) {
+                        return Ok(BindJobInstall::Stale);
+                    }
+                    install_command_job_binder(
+                        session,
+                        context,
+                        binder,
+                        compiled,
+                        generation,
+                        &install_job,
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::InputMount(format!(
+                            "command {install_job} remains owned, but its automatic binding \
+                             failed: {error}"
+                        ))
+                    })?;
+                    Ok(BindJobInstall::Installed(install_binding))
+                })
+                .await?;
+            match outcome {
+                BindJobInstall::Installed(binding) | BindJobInstall::AlreadyBound(binding) => {
+                    return Ok(binding)
+                }
+                BindJobInstall::Stale => continue,
+            }
+        }
+
+        // Contention exhausted the bounded split-compile retries — fall back
+        // to the original single-checkout path, whose one exclusive borrow
+        // cannot itself observe a stale view.
         self.access
             .with_machine(context, move |session, context, source| {
                 let scope = context.placement.lexical_scope;
                 if let Some(binding) = session.host_text_binding_in(scope, &job) {
                     return Ok(binding);
                 }
-                let names: Vec<_> = session
-                    .workbench_bindings_in(scope)
-                    .into_iter()
-                    .map(|binding| binding.name)
-                    .collect();
-                let mut index = session.val_gen().0;
-                let binding = loop {
-                    let name = format!("job{index}");
-                    if !names.contains(&name) {
-                        break name;
-                    }
-                    index += 1;
-                };
+                let binding = fresh_job_binding_name(session, scope);
                 mount_command_job(session, context, source, &binding, &job).map_err(|error| {
                     ResidentActorWorkbenchError::InputMount(format!(
                         "command {job} remains owned, but its automatic binding failed: {error}"
@@ -2858,6 +2962,59 @@ where
                 settle_fragment(session, context, fragment, outcome)
             })
             .await
+    }
+}
+
+/// A short-checkout snapshot for `bind_command_job`'s split compile: either
+/// the job is already bound (no compile needed), or a fresh binding name and
+/// reserved generation to compile off-checkout against `view`.
+enum BindJobSnapshot {
+    AlreadyBound(String),
+    Prepare(Box<BindJobPrepare>),
+}
+
+/// The `Prepare` payload of [`BindJobSnapshot`], boxed so the much smaller
+/// `AlreadyBound` case doesn't pay for its size.
+struct BindJobPrepare {
+    view: crate::ActorCompileView,
+    generation: tidepool_repr::Generation,
+    retained: Vec<(SymbolIdentity, u64)>,
+    binding: String,
+}
+
+/// The outcome of `bind_command_job`'s re-checkout install step.
+enum BindJobInstall {
+    Installed(String),
+    /// Another checkout bound this exact job while we were compiling.
+    AlreadyBound(String),
+    /// The re-derived view no longer matches the one this compile ran
+    /// against; the caller must recompile against a fresh snapshot.
+    Stale,
+}
+
+/// A binding name for a fresh Job carrier, not already used by a workbench
+/// binding in `scope`. Shared by `bind_command_job`'s split and
+/// single-checkout fallback paths so both name bindings the same way.
+fn fresh_job_binding_name<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+) -> String
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let names: Vec<_> = session
+        .workbench_bindings_in(scope)
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect();
+    let mut index = session.val_gen().0;
+    loop {
+        let name = format!("job{index}");
+        if !names.contains(&name) {
+            return name;
+        }
+        index += 1;
     }
 }
 
@@ -5857,15 +6014,45 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let view = actor_compile_view(session, context, source, type_modules)?
-        .with_workbench_imports(&imports);
+    let view = actor_compile_view(session, context, source, type_modules)?;
     let generation = view.next_value_generation();
-    let prepared = source.prepare(&view);
-    let templates = resident_workbench_templates(
-        &prepared.preamble,
+    let retained = session.prepared_retained();
+    let (binder, compiled) = compile_host_binding_off_checkout(
+        &view,
+        source,
         &context.haskell_effects_alias,
-        &prepared.imports,
-    );
+        generation,
+        binding,
+        type_name,
+        anchor,
+        imports,
+        retain_text_constructor,
+        &retained,
+    )?;
+    Ok((binder, compiled, generation))
+}
+
+/// The GHC-compile half of [`compile_host_binding`], run against one
+/// already-taken `view` with no session or checkout held. A split compile
+/// (see `bind_command_job`) snapshots `view` and reserves `generation` under
+/// a short checkout, calls this off-checkout, then re-checks out only to
+/// revalidate ([`crate::ActorCompileView::compile_relevant_eq`]) and install.
+#[allow(clippy::too_many_arguments)]
+fn compile_host_binding_off_checkout(
+    view: &crate::ActorCompileView,
+    source: &ActorWorkbenchSource,
+    effects: &str,
+    generation: tidepool_repr::Generation,
+    binding: &str,
+    type_name: &str,
+    anchor: &str,
+    imports: SourceImports,
+    retain_text_constructor: bool,
+    retained_imports: &[(SymbolIdentity, u64)],
+) -> Result<(BoundBinder, CompiledTurn), ResidentActorWorkbenchError> {
+    let view = view.clone().with_workbench_imports(&imports);
+    let prepared = source.prepare(&view);
+    let templates = resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
     let (turn, expected_binders) = if retain_text_constructor {
@@ -5882,7 +6069,6 @@ where
             vec![binding.to_owned()],
         )
     };
-    let retained = session.prepared_retained();
     let result = run_turn(TurnRequest {
         turn_text: &turn,
         templates: &templates,
@@ -5892,7 +6078,7 @@ where
         gen: generation.0,
         verdict: Some(generated_binds_verdict(&expected_binders)),
         target: None,
-        retained_imports: &retained,
+        retained_imports,
     })
     .map_err(|failure| {
         ResidentActorWorkbenchError::InputMount(
@@ -5924,7 +6110,7 @@ where
             "host interface returned an unexpected binder shape for `{binding}`"
         )));
     }
-    Ok((bound.remove(0), compiled, generation))
+    Ok((bound.remove(0), compiled))
 }
 
 struct MountedHostInput {
@@ -6050,6 +6236,22 @@ where
         .expect("unbounded internal host binding namespace")
 }
 
+/// The Job carrier's own import set and type/anchor pair, shared by
+/// [`mount_command_job`]'s single-checkout path and `bind_command_job`'s
+/// split compile-then-install path so the two can never drift.
+fn command_job_carrier_imports() -> SourceImports {
+    SourceImports::from_specs([
+        "qualified Tidepool.Command.Types as TidepoolHostJob",
+        "qualified Data.Text as TidepoolHostText",
+        "qualified Data.Text.Internal as TidepoolHostTextInternal",
+        "qualified GHC.Exts as TidepoolHostExts",
+        "qualified Tidepool.Aeson as TidepoolHostJson",
+    ])
+}
+
+const COMMAND_JOB_TYPE_NAME: &str = "TidepoolHostJob.Job";
+const COMMAND_JOB_ANCHOR: &str = "TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length)";
+
 fn mount_command_job<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6067,17 +6269,30 @@ where
         source,
         &[],
         binding,
-        "TidepoolHostJob.Job",
-        "TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length)",
-        SourceImports::from_specs([
-            "qualified Tidepool.Command.Types as TidepoolHostJob",
-            "qualified Data.Text as TidepoolHostText",
-            "qualified Data.Text.Internal as TidepoolHostTextInternal",
-            "qualified GHC.Exts as TidepoolHostExts",
-            "qualified Tidepool.Aeson as TidepoolHostJson",
-        ]),
+        COMMAND_JOB_TYPE_NAME,
+        COMMAND_JOB_ANCHOR,
+        command_job_carrier_imports(),
         true,
     )?;
+    install_command_job_binder(session, context, binder, compiled, generation, job)
+}
+
+/// Install an already-compiled Job carrier. Split out of
+/// [`mount_command_job`] so a split compile-then-install path (see
+/// `bind_command_job`) can share the exact install/tag/retire-on-error
+/// sequence used by the direct single-checkout path, with no GHC call here.
+fn install_command_job_binder<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    binder: BoundBinder,
+    compiled: CompiledTurn,
+    generation: tidepool_repr::Generation,
+    job: &str,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
     session
         .mount_typed_binding_in(
             context.placement.lexical_scope,
@@ -6786,6 +7001,146 @@ mod request_tests {
             "Text/Job result: {text_display}"
         );
         session.retire_host_binding_owner(&input.binder);
+    }
+
+    /// Problem 1 of the compile-path design note: a split compile takes its
+    /// `ActorCompileView` snapshot, compiles off-checkout, then re-derives a
+    /// fresh view before installing. With no mutation in between, the split
+    /// path must bind exactly what `mount_command_job`'s single-checkout
+    /// path binds.
+    #[test]
+    fn command_job_split_compile_then_install_binds_the_same_as_mount_command_job() {
+        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let scope = context.placement.lexical_scope;
+
+        let view = actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+        let generation = view.next_value_generation();
+        session.reserve_value_generations_through(generation);
+        let retained = session.prepared_retained();
+
+        let (binder, compiled) = compile_host_binding_off_checkout(
+            &view,
+            &source,
+            &context.haskell_effects_alias,
+            generation,
+            "job_binding",
+            COMMAND_JOB_TYPE_NAME,
+            COMMAND_JOB_ANCHOR,
+            command_job_carrier_imports(),
+            true,
+            &retained,
+        )
+        .expect("job carrier compiles off-checkout");
+
+        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        assert!(
+            fresh_view.compile_relevant_eq(&view),
+            "no mutation happened between snapshot and install: views must still match"
+        );
+
+        install_command_job_binder(
+            &mut session,
+            &context,
+            binder,
+            compiled,
+            generation,
+            "command job",
+        )
+        .expect("job carrier installs after revalidation");
+
+        assert_eq!(
+            session.host_text_binding_in(scope, "command job"),
+            Some("job_binding".into())
+        );
+    }
+
+    /// A write to the same scope between a split compile's snapshot and its
+    /// re-checkout (here, another mount standing in for a concurrent
+    /// actor's install) must be detected by `compile_relevant_eq` before
+    /// installing the stale compile, and a fresh snapshot must still recover.
+    #[test]
+    fn a_mutation_between_split_checkouts_invalidates_the_snapshot_and_blocks_install() {
+        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let scope = context.placement.lexical_scope;
+
+        let view = actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+        let generation = view.next_value_generation();
+        session.reserve_value_generations_through(generation);
+        let retained = session.prepared_retained();
+
+        let (binder, compiled) = compile_host_binding_off_checkout(
+            &view,
+            &source,
+            &context.haskell_effects_alias,
+            generation,
+            "job_binding",
+            COMMAND_JOB_TYPE_NAME,
+            COMMAND_JOB_ANCHOR,
+            command_job_carrier_imports(),
+            true,
+            &retained,
+        )
+        .expect("job carrier compiles off-checkout");
+
+        // Stand in for another actor writing to this exact scope while this
+        // compile ran off-checkout: mount an unrelated Text carrier, which
+        // changes `visible_values`/`shadowing`.
+        mount_text_binding(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            "interloper",
+            "interloper text",
+        )
+        .expect("interloping carrier mounts");
+
+        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        assert!(
+            !fresh_view.compile_relevant_eq(&view),
+            "an interleaved mutation to the same scope must invalidate the snapshot"
+        );
+
+        // The split path must refuse to install against a stale view — the
+        // binder never reaches the persistent binding store.
+        assert!(session
+            .workbench_bindings_in(scope)
+            .into_iter()
+            .all(|binding| binding.name != "job_binding"));
+        drop((binder, compiled, generation));
+
+        // A fresh snapshot recompiles and installs cleanly — the
+        // bounded-retry fallback `bind_command_job` relies on.
+        let retry_view = actor_compile_view(&session, &context, &source, &[]).expect("retry view");
+        let retry_generation = retry_view.next_value_generation();
+        session.reserve_value_generations_through(retry_generation);
+        let retry_retained = session.prepared_retained();
+        let (retry_binder, retry_compiled) = compile_host_binding_off_checkout(
+            &retry_view,
+            &source,
+            &context.haskell_effects_alias,
+            retry_generation,
+            "job_binding2",
+            COMMAND_JOB_TYPE_NAME,
+            COMMAND_JOB_ANCHOR,
+            command_job_carrier_imports(),
+            true,
+            &retry_retained,
+        )
+        .expect("recompile against the fresh snapshot succeeds");
+        install_command_job_binder(
+            &mut session,
+            &context,
+            retry_binder,
+            retry_compiled,
+            retry_generation,
+            "retry command job",
+        )
+        .expect("recompiled carrier installs");
+        assert_eq!(
+            session.host_text_binding_in(scope, "retry command job"),
+            Some("job_binding2".into())
+        );
     }
 
     fn introspection_error_table() -> DataConTable {
