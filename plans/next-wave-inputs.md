@@ -15,17 +15,6 @@ invariant is dead or covered elsewhere.
   `Project.RebaseRouter`. Decide one owner for the Project modules and checks
   and make the other a derived copy or a pointer.
 
-- **Internally tagged serde enums with floats fail to decode.** The workspace
-  enables `serde_json`'s `arbitrary_precision` (root `Cargo.toml`, required by
-  `bridge/mcp` and `tidepool/bridge`); Cargo feature unification applies it to
-  every crate. Under it, a `#[serde(tag = "...")]` enum containing an `f64`
-  field fails to decode ordinary JSON (`invalid type: map, expected f64`).
-  `exomonad/jev-integration/src/interpret.rs` was fixed by hand in 4df6dbbe1;
-  28 other `#[serde(tag = ...)]` sites across 20 files are unaudited. Class
-  fix: a test that round-trips every tagged wire enum with a float, or scope
-  `arbitrary_precision` to the values that need it (`RawValue`/`Number`
-  wrappers) instead of the whole workspace.
-
 - **Typed errors.** About 245 `io::Error::other(format!(..))` domain errors and
   about 871 text-matching test assertions. Convert crate by crate as typed
   error enums land.
