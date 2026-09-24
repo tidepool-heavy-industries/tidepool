@@ -5,7 +5,7 @@ use exomonad_agent::{
     InteractiveInputError, InteractiveNativeToolPolicy, InteractivePolicyMount,
 };
 use exomonad_tool::{HostedTool, ToolInvocation};
-use tidepool_runtime::session::ModuleEnv;
+use tidepool_runtime::session::{fresh_session_id, ModuleEnv};
 use tokio::sync::Semaphore;
 
 const URL: &str = "http://localhost/v1/dynamic-tools";
