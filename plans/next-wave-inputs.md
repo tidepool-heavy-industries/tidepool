@@ -20,8 +20,6 @@ invariant is dead or covered elsewhere.
   error enums land.
 - **Timeout policy.** Deadlines are chosen per call site; give each subsystem
   one named budget set.
-- **Unbounded deployments channel** (`exomonad/actor/src/resident_actor.rs`)
-  and **cleanup guard without expiry** (`exomonad/actor/src/request.rs`).
 - **Retirement deadline** (`bridge/facade/src/actor_host/scoped_custody.rs`):
   recovery can consume the whole budget and leave none for finalize.
 - **Launcher TODOs.** `bridge/handlers/src/handlers/exec.rs` and
