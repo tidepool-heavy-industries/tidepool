@@ -574,11 +574,27 @@ fn command_for(
     command.args(["-c", "tool_output_token_limit=16384"]);
     // The host owns the actor tree and reply routing. Native collaboration
     // would create a second, unrelated tree inside this actor's provider thread.
+    // `agents.enabled = false` is the authority both multi-agent versions
+    // consult (multi_agent_version_override in vendor/codex's config/mod.rs):
+    // a model that declares multi-agent V2 support in its own metadata falls
+    // back to it when neither `--disable` flag applies, so disabling the
+    // feature flags alone does not stop spawn_agent for every model. The
+    // `--disable` flags below still matter for models that never reach the
+    // override (feature-flag path only) and for code_mode/apps, which are
+    // not covered by `agents.enabled`.
+    command.arg("-c").arg("agents.enabled=false");
     for feature in [
         "multi_agent",
         "multi_agent_v2",
         "code_mode",
         "code_mode_only",
+        // codex_apps_mcp: the connectors MCP surface (gmail, sites, etc.)
+        // exposed by codex-mcp/src/codex_apps.rs, gated on
+        // `features.enabled(Feature::Apps)` (vendor/codex/codex-rs/features/
+        // src/lib.rs, feature key "apps", stable and default-enabled). The
+        // host supplies its own tool surface; the native connectors have no
+        // Exomonad actor to route through.
+        "apps",
     ] {
         command.arg("--disable").arg(feature);
     }
@@ -1172,12 +1188,16 @@ mod tests {
                 .get("tool_output_token_limit")
                 .and_then(|value| value.as_integer())
                 == Some(16384)));
-            for feature in ["multi_agent", "multi_agent_v2"] {
+            for feature in ["multi_agent", "multi_agent_v2", "apps"] {
                 assert!(command
                     .args
                     .windows(2)
                     .any(|args| args == ["--disable", feature]));
             }
+            assert!(command
+                .args
+                .windows(2)
+                .any(|args| args == ["-c", "agents.enabled=false"]));
         }
         let mut requested = spec(InteractiveLaunchMode::Fresh);
         requested.base_instructions_file = "relative.md".into();
@@ -1211,12 +1231,16 @@ mod tests {
             requested.model = Some("gpt-6-sol".into());
             requested.effort = Some(ReasoningEffort::Low);
             let command = command_for(&installation(), &requested).unwrap();
-            for feature in ["multi_agent", "multi_agent_v2"] {
+            for feature in ["multi_agent", "multi_agent_v2", "apps"] {
                 assert!(command
                     .args
                     .windows(2)
                     .any(|args| args == ["--disable", feature]));
             }
+            assert!(command
+                .args
+                .windows(2)
+                .any(|args| args == ["-c", "agents.enabled=false"]));
             assert!(command
                 .args
                 .windows(2)
