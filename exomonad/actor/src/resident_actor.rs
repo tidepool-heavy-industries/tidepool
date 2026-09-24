@@ -2159,18 +2159,40 @@ where
         } else {
             None
         };
-        // Left as a hard gate, not converted to a transfer: no launch mints a
-        // child session independent of its parent yet (that is per-actor
-        // machines parcel 7). A child's placement always names the same
-        // session as its parent today, so this can never fire in production;
-        // once parcel 7 lets a child actually start on a session of its own,
-        // there is a real destination machine to evacuate the child's entry
-        // value into and this gate becomes a transfer like the mailbox sites.
-        if descriptor.placement().session != context.placement.session {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "child actor entry crossed a resident machine boundary".into(),
-            ));
-        }
+        // A launch whose descriptor still names the launching session (the
+        // common case: ineligible, or `InheritedContext`) needs nothing
+        // further — the entry is already resident there. An eligible
+        // `SelectedContext` launch's descriptor names a freshly minted
+        // session instead (`child_session_eligibility`/`capture_decoded`):
+        // provision that session's own dedicated machine now (build,
+        // bootstrap with the run's shared program, install the shared
+        // image registry, mint its own lexical scope), then cross the
+        // entry into it with the same transfer primitive every other
+        // resident-machine-boundary site already uses
+        // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
+        // any step here leaves the launching session untouched and starts
+        // nothing.
+        let entry = if descriptor.placement().session == context.placement.session {
+            entry
+        } else {
+            let child_session = descriptor.placement().session;
+            let lexical_scope = self
+                .environment
+                .runner
+                .provision_child_session(child_session)
+                .await
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            descriptor = descriptor.with_lexical_scope(lexical_scope);
+            self.environment
+                .runner
+                .transfer_custody(
+                    entry,
+                    context.placement.session,
+                    child_session,
+                    descriptor.placement().resource_scope,
+                )
+                .await?
+        };
         // The checkout this child is launched with is settled here — a
         // context-fork workspace has already been admitted above — so this is
         // the last moment before the child exists, and the only honest place
@@ -7919,6 +7941,22 @@ where
                 .actor_stopped(kernel.identity(), terminal);
             self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
+            // A dedicated child session (`crate::start::CapturedEntry::Crossing`)
+            // is a no-op check for every actor that never got one (the
+            // shared session is never a member). One bounded checkout, no
+            // wait for whoever still needs this machine's output — see
+            // `ResidentActorRunner::retire_child_session`'s doc comment.
+            if let Err(error) = self
+                .environment
+                .runner
+                .retire_child_session(self.descriptor.placement().session)
+                .await
+            {
+                tracing::warn!(
+                    actor = ?kernel.identity(), session = ?self.descriptor.placement().session,
+                    %error, "dedicated child session teardown check failed"
+                );
+            }
         })
     }
 
@@ -8094,6 +8132,35 @@ where
         factory: crate::resident_workbench::ChildSessionFactory<H, O>,
     ) -> Self {
         self.environment.runner = self.environment.runner.with_child_session_factory(factory);
+        self
+    }
+
+    /// Install this run's shared [`tidepool_runtime::session::ImageRegistry`],
+    /// applied to every session's engine (root and any child alike) on its
+    /// later checkouts — see [`ResidentActorRunner::with_image_registry`].
+    /// Omitted, every session compiles its own images, unchanged.
+    #[must_use]
+    pub fn with_image_registry(
+        mut self,
+        registry: std::sync::Arc<tidepool_runtime::session::ImageRegistry>,
+    ) -> Self {
+        self.environment.runner = self.environment.runner.with_image_registry(registry);
+        self
+    }
+
+    /// Install the compiled turn a fresh child session bootstraps with —
+    /// see [`crate::resident_workbench::ResidentActorRunner::with_child_bootstrap_program`].
+    /// Required, alongside [`Self::with_child_session_factory`], for an
+    /// eligible `SelectedContext` launch's own machine to actually come up.
+    #[must_use]
+    pub fn with_child_bootstrap_program(
+        mut self,
+        program: Arc<tidepool_runtime::session::CompiledTurn>,
+    ) -> Self {
+        self.environment.runner = self
+            .environment
+            .runner
+            .with_child_bootstrap_program(program);
         self
     }
 

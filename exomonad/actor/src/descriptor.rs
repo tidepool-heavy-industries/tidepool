@@ -239,6 +239,19 @@ impl ActorDescriptor {
         self
     }
 
+    /// Replace the placement's lexical scope alone, after construction — for
+    /// a launch whose entry crossed to a fresh child session
+    /// (`crate::start::CapturedEntry::Crossing`): the scope minted at
+    /// capture time belonged to the PARENT's scope forest, never valid on
+    /// the child's own session, so the child's actual lexical scope (minted
+    /// on the child, once it exists) replaces it here before the actor
+    /// admits. Every other placement field is unaffected.
+    #[must_use]
+    pub(crate) fn with_lexical_scope(mut self, scope: tidepool_codegen::scope::ScopeId) -> Self {
+        self.placement.lexical_scope = scope;
+        self
+    }
+
     #[must_use]
     pub fn source_layer(&self) -> &[std::path::PathBuf] {
         &self.source_layer

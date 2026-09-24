@@ -2041,7 +2041,7 @@ pub(crate) async fn run(
         exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
-    let (source, root, program, child_session_factory) = compile_root(
+    let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
         &run_root,
         worktrees.clone(),
@@ -2095,7 +2095,9 @@ pub(crate) async fn run(
             application_owners.clone(),
             backend.clone(),
         ))
-        .with_child_session_factory(child_session_factory);
+        .with_child_session_factory(child_session_factory)
+        .with_child_bootstrap_program(Arc::clone(&program))
+        .with_image_registry(image_registry);
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
@@ -2913,6 +2915,7 @@ type CompiledRoot = (
     ExomonadRoot,
     Arc<tidepool_runtime::session::CompiledTurn>,
     exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
+    Arc<tidepool_runtime::session::ImageRegistry>,
 );
 
 fn compile_root(
@@ -3005,6 +3008,12 @@ fn compile_root(
     let child_journal = journal.clone();
     let child_worktree_handler = worktree_handler.clone();
     let child_run_root = run_root.to_path_buf();
+    // This run's one shared image cache: installed on the forest
+    // (`ResidentForest::with_image_registry`) so it is applied to every
+    // session's engine, root and child alike, from that session's second
+    // install onward (its own bootstrap install is unavoidably fresh — see
+    // `ResidentMachineAccess::image_registry`'s doc comment).
+    let image_registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
         CapturedOutput,
@@ -3147,6 +3156,7 @@ fn compile_root(
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),
         child_session_factory,
+        image_registry,
     ))
 }
 
