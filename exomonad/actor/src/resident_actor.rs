@@ -8081,6 +8081,20 @@ where
         self
     }
 
+    /// Install the composition root's [`crate::ChildSessionFactory`]. Omitted,
+    /// every launch keeps running on the session that admitted it — today's
+    /// behavior, unchanged. Call this before any actor is admitted: it
+    /// replaces `environment.runner` outright, so a clone taken beforehand
+    /// (e.g. by an already-admitted actor's workbench) would not see it.
+    #[must_use]
+    pub fn with_child_session_factory(
+        mut self,
+        factory: crate::resident_workbench::ChildSessionFactory<H, O>,
+    ) -> Self {
+        self.environment.runner = self.environment.runner.with_child_session_factory(factory);
+        self
+    }
+
     /// Declare that an actor host answers `LocalResidentDeployment::ReleaseAwait`.
     /// From now on a stop reports `StoppedNow` only once that host has released
     /// the actor's interactive resources.

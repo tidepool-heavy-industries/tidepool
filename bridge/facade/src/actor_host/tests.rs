@@ -131,6 +131,53 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
     campaign.hosted.await.unwrap();
 }
 
+/// The composition root's `ChildSessionFactory` (installed on `forest` in
+/// `actor_host.rs::compile_root`/`run`, per-actor-machines parcel 2) builds a
+/// session that can actually run a cell — not just an idle placeholder. This
+/// runs the SAME compiled driver turn the root itself bootstraps with
+/// (`campaign.program`), directly against a factory-built machine, mirroring
+/// `compile_root`'s own bootstrap sequence exactly. Nothing here goes through
+/// `capture_decoded`/`child_session_eligibility` (that wiring is a later
+/// parcel); this only proves the factory itself, called directly, produces a
+/// working machine.
+#[tokio::test]
+async fn composition_root_child_session_factory_runs_a_cell() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let child_session_id = tidepool_runtime::session::fresh_session_id();
+    let mut child_machine = (campaign.child_session_factory)(child_session_id)
+        .expect("the composition root's factory builds a fresh session");
+
+    child_machine.set_effect_execution(
+        EffectRunPolicy::HandleOrSuspend,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let lexical_scope = child_machine.mint_isolated_scope();
+    child_machine
+        .set_actor_execution(
+            tidepool_runtime::session::SessionRunContext {
+                lexical_scope,
+                resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            },
+            EffectRunPolicy::HandleOrSuspend,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .expect("a freshly bootstrapped machine accepts actor execution context");
+    let outcome = child_machine
+        .run_with_sites("exomonad_root_driver", campaign.program.code())
+        .expect("the driver cell the root itself bootstraps with also runs on a child machine");
+    assert!(
+        matches!(
+            outcome,
+            tidepool_runtime::session::ResidentOutcome::Suspended { .. }
+        ),
+        "expected the driver cell to suspend attaching its permanent application, got {outcome:?}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 // `descendants_observe.hs` composes existing primitives — `actorContext`
 // (self identity), `snapshot`/`listAgentsFull` (the same registry
 // `observeAgent` reads), and `creationTree` (a pure roster filter by

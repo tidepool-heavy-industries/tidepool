@@ -96,7 +96,8 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
     ActorWorktreeGrant, ActorWorktreeHandler, ActorWorktreeIntegrationHandler,
-    ActorWorktreeRegistryHandler, EventConfig, RepoEventHandler, WorktreeHandler,
+    ActorWorktreeRegistryHandler, EventConfig, InertObservationSource, RepoEventHandler,
+    WorktreeHandler,
 };
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::session::{
@@ -2040,7 +2041,7 @@ pub(crate) async fn run(
         exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
-    let (source, root, program) = compile_root(
+    let (source, root, program, child_session_factory) = compile_root(
         &config,
         &run_root,
         worktrees.clone(),
@@ -2093,7 +2094,8 @@ pub(crate) async fn run(
         .with_conversation_reader(conversation_reader(
             application_owners.clone(),
             backend.clone(),
-        ));
+        ))
+        .with_child_session_factory(child_session_factory);
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
@@ -2902,6 +2904,17 @@ fn compile_driver(
     })
 }
 
+/// [`compile_root`]'s output: the workbench source template, the bootstrapped
+/// root actor, its compiled driver turn (reused as-is by a factory-built
+/// child machine — see the composite facade test), and the composition
+/// root's one [`exomonad_actor::ChildSessionFactory`].
+type CompiledRoot = (
+    ActorWorkbenchSource,
+    ExomonadRoot,
+    Arc<tidepool_runtime::session::CompiledTurn>,
+    exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
+);
+
 fn compile_root(
     config: &ActorHostConfig,
     run_root: &Path,
@@ -2909,14 +2922,7 @@ fn compile_root(
     worktree_authority: ActorWorktreeAuthority,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     host_incarnation: exomonad_actor::Incarnation,
-) -> Result<
-    (
-        ActorWorkbenchSource,
-        ExomonadRoot,
-        Arc<tidepool_runtime::session::CompiledTurn>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let CompiledExomonadDriver {
         preamble,
         include,
@@ -2979,6 +2985,66 @@ fn compile_root(
             host_incarnation.0,
         )?
     };
+    // The composition root's `ChildSessionFactory`: builds a fresh, idle
+    // `ResidentSession` with the SAME compiled workspace/bootstrap as the
+    // root machine below, for a `SelectedContext` launch this host has
+    // decided deserves its own machine (`start.rs::child_session_eligibility`
+    // is the one caller that will consult this once a later parcel wires it
+    // into `capture_decoded`; installing it here only makes it callable).
+    //
+    // `RepoEventHandler` cannot be shared or cloned across two live
+    // machines (per-heap mailboxes/subscription registry, and its
+    // `EventJournal` enforces one lifetime-owned writer), so each child gets
+    // its own, built over `InertObservationSource` -- the fixed handler
+    // hlist type still needs a slot here, but an eligible launch's resolved
+    // effect row never dispatches to it (see
+    // `bridge/handlers/src/handlers/event.rs`).
+    let child_workspace_inputs = config.workspace_inputs.clone();
+    let child_include = include.clone();
+    let child_source_service = source.cloned();
+    let child_journal = journal.clone();
+    let child_worktree_handler = worktree_handler.clone();
+    let child_run_root = run_root.to_path_buf();
+    let child_session_factory: exomonad_actor::ChildSessionFactory<
+        ExomonadHandlerStack,
+        CapturedOutput,
+    > = Arc::new(move |child_session_id| {
+        let child_declarations = exomonad_effect_declarations();
+        let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
+            &child_declarations,
+            false,
+            tidepool_mcp::CompanionImports::Omit,
+            EXOMONAD_REPLACED_EFFECT_NAMES,
+        );
+        if let Some(inputs) = &child_workspace_inputs {
+            module_env.imports.extend(inputs.imports());
+        }
+        let session_root = child_run_root
+            .join("haskell-session-children")
+            .join(child_session_id.0.to_string());
+        let library = SessionLib::open(child_session_id, &session_root, module_env)
+            .map_err(|error| format!("child session declaration plane: {error}"))?
+            .with_validation_include(child_include.clone());
+        let child_event_handler =
+            RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
+        let child_worktree_handler = child_worktree_handler.clone();
+        let machine = ResidentSession::unbootstrapped(
+            hlist![
+                source_handler(child_source_service.as_ref()),
+                child_journal.clone(),
+                child_event_handler,
+                ActorBoundWorktreeHandler::new(child_worktree_handler.clone()),
+                ActorWorktreeRegistryHandler::new(child_worktree_handler.clone()),
+                ActorWorktreeAllocationHandler::new(child_worktree_handler.clone()),
+                ActorWorktreeIntegrationHandler::new(child_worktree_handler.clone()),
+                child_worktree_handler,
+            ],
+            CapturedOutput::new(),
+            DEFAULT_NURSERY_SIZE,
+            Some(library),
+        );
+        Ok(Box::new(machine))
+    });
     let mut machine = ResidentSession::unbootstrapped(
         hlist![
             source_handler(source),
@@ -3080,6 +3146,7 @@ fn compile_root(
             ),
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),
+        child_session_factory,
     ))
 }
 

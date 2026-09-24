@@ -1,5 +1,5 @@
 //! B1: the real prepared engine driven through `SessionRegistry` (via its
-//! [`SingleSlot`] facade), proving rungs 2-5 of the acceptance ladder work
+//! keyed by one session id), proving rungs 2-5 of the acceptance ladder work
 //! TOGETHER through the real session/registry substrate rather than each in
 //! isolation the way `prepared_execution.rs`'s own tests pin them one at a
 //! time:
@@ -17,7 +17,7 @@
 //!   scope — retiring one via `close_realm` must never disturb the other's
 //!   still-live state.
 //!
-//! `SingleSlot<M, H>`'s own checkout/settle protocol is already tested
+//! `SessionRegistry<M, H>`'s own checkout/settle protocol is already tested
 //! generically in `tidepool/runtime/src/session/registry.rs` against a
 //! `FakeMachine`; this file's whole point is proving the REAL production
 //! machine type (`tidepool_codegen::prepared_program::PreparedMachine`, the
@@ -29,10 +29,10 @@
 //! `H` here is a plain `(RealmId, PreparedHandle)` tuple: this test never
 //! calls `PreparedMachine::park` (that mechanism belongs to a suspended
 //! *effect* continuation, not to a retained Send value moving across a
-//! checkout boundary) — the "hole" carried by `SingleSlot` across a turn is
+//! checkout boundary) — the "hole" carried by the registry across a turn is
 //! just a Send-safe handle correlated with the realm it is live under, which
-//! a `Copy` tuple already satisfies (`SingleSlot`'s own bound is `H: Clone +
-//! PartialEq + Debug`).
+//! a `Copy` tuple already satisfies (`SessionRegistry`'s own bound is `H:
+//! Clone + PartialEq + Debug`).
 //!
 //! Helpers below duplicate small pieces of `prepared_execution.rs`
 //! (`requirements`, `top_named`, `take_managed`, the freer-resume resume
@@ -58,7 +58,7 @@ use tidepool_repr::freer_names::{
     find_declared, E_DEFINING_MODULE, UNION_DEFINING_MODULE, VAL_DEFINING_MODULE,
 };
 use tidepool_repr::{DataConId, SessionId};
-use tidepool_runtime::session::registry::SingleSlot;
+use tidepool_runtime::session::registry::SessionRegistry;
 
 // ---- fixtures -------------------------------------------------------------
 
@@ -414,7 +414,7 @@ fn drive_to_val_in(
     }
 }
 
-/// B1: rungs 2-5 driven TOGETHER through `SingleSlot<PreparedMachine,
+/// B1: rungs 2-5 driven TOGETHER through `SessionRegistry<PreparedMachine,
 /// (RealmId, PreparedHandle)>` -- the composite proof no single-rung test
 /// above attempts.
 #[test]
@@ -458,16 +458,16 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     // SessionId(pub u64)`, per `tidepool-repr::session_ids`) -- every other
     // integration test in this crate that needs one just picks a literal.
     let session_id = SessionId(910_001);
-    let slot: SingleSlot<PreparedMachine<'static>, (RealmId, PreparedHandle)> = SingleSlot::new();
-    slot.install(session_id, machine)
-        .unwrap_or_else(|_| panic!("install must succeed against a freshly constructed slot"));
+    let slot: SessionRegistry<PreparedMachine<'static>, (RealmId, PreparedHandle)> =
+        SessionRegistry::new();
+    slot.insert_idle(session_id, Box::new(machine));
 
     // ==== Turn 1 -- incarnation A: bind + import + cross-program call =====
     // Everything this turn leases (the two S6 imports) is scoped to
     // `realm_a`, the resource scope standing in for incarnation A's own
     // actor-shaped lifetime.
     let checkout = slot
-        .checkout_run()
+        .checkout_run(session_id)
         .expect("the freshly installed session is Idle");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -513,7 +513,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
 
     slot.settle_suspended(receipt, machine, Vec::new());
     assert_eq!(
-        slot.kind(),
+        slot.kind(session_id),
         Some(tidepool_runtime::session::registry::SlotKind::Idle),
         "turn 1 parked nothing, so the slot settles back to Idle"
     );
@@ -522,7 +522,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     // A second, independent program (freer-resume, no imports) installed on
     // the SAME machine, run to its first suspension under `realm_a`.
     let checkout = slot
-        .checkout_run()
+        .checkout_run(session_id)
         .expect("turn 2 checks out the idle session");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -566,7 +566,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     // UNRELATED work, not resuming A's hole. The registry's own doc on
     // `checkout_run` says a fresh turn over parked frames is ordinary.
     let checkout = slot
-        .checkout_run()
+        .checkout_run(session_id)
         .expect("checkout_run also admits a turn over a Suspended slot");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -592,7 +592,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
 
     // ==== Turn 4 -- resume A's hole out of order, to completion ===========
     let checkout = slot
-        .checkout_resume(&hole_a)
+        .checkout_resume(session_id, &hole_a)
         .expect("hole_a is a member of the suspended slot's parked holes");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -604,7 +604,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     // ==== Turn 5 -- realm-scoped cancellation on B, then resume to
     //      completion =======================================================
     let checkout = slot
-        .checkout_run()
+        .checkout_run(session_id)
         .expect("checkout_run also admits a turn over hole_b's suspended slot");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -711,7 +711,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
 
     // ==== Turn 6 -- retirement: close each realm independently ============
     let checkout = slot
-        .checkout_run()
+        .checkout_run(session_id)
         .expect("final checkout for realm retirement");
     let (mut machine, receipt) = checkout.into_parts();
 
@@ -757,8 +757,8 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     // Tear the session down fully: nothing is left to resume.
     slot.settle_retire(receipt, "test retirement");
     assert_eq!(
-        slot.current_id(),
+        slot.kind(session_id),
         None,
-        "settle_retire clears SingleSlot's current entry"
+        "settle_retire removes the registry's only entry"
     );
 }

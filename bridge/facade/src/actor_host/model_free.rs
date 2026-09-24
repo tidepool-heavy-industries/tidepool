@@ -12,6 +12,11 @@ pub(super) struct ModelFreeSession {
     pub actor: exomonad_actor::LocalActorRef,
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub _program: Arc<tidepool_runtime::session::CompiledTurn>,
+    /// The same [`exomonad_actor::ChildSessionFactory`] installed on `forest`
+    /// — kept accessible for tests that call it directly rather than
+    /// through the (still-unwired) launch path.
+    pub _child_session_factory:
+        exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
     pub hosted: tokio::task::JoinHandle<()>,
     pub deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
     pub root_installation: exomonad_actor::LocalResidentInstallation,
@@ -45,7 +50,7 @@ impl ModelFreeSession {
             Arc::clone(&bindings),
         );
         let source_layers = super::source_service(config, session_root.path(), worktrees.clone());
-        let (source, root, program) = compile_root(
+        let (source, root, program, child_session_factory) = compile_root(
             config,
             session_root.path(),
             worktrees.clone(),
@@ -68,9 +73,12 @@ impl ModelFreeSession {
             exomonad_actor::Incarnation::FIRST,
             Some(worker_launch_resolver(config)),
         );
-        let mut forest = forest.with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
-            &config.workspace,
-        )?);
+        let returned_child_session_factory = Arc::clone(&child_session_factory);
+        let mut forest = forest
+            .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
+                &config.workspace,
+            )?)
+            .with_child_session_factory(child_session_factory);
         forest.set_jev_backend(super::jev_backend(config));
         if let Some(layers) = &source_layers {
             forest.set_source_layers(layers.clone());
@@ -101,6 +109,7 @@ impl ModelFreeSession {
             actor,
             forest,
             _program: program,
+            _child_session_factory: returned_child_session_factory,
             hosted,
             deployments,
             root_installation: *root_installation,
