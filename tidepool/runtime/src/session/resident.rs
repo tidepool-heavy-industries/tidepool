@@ -1391,6 +1391,24 @@ where
         self.state.stage_declarations_in(scope, receipt, imports)
     }
 
+    /// The checkout-only half of staging a declaration off-checkout: see
+    /// [`PersistentSession::render_declaration_candidate_in`].
+    pub fn render_declaration_candidate_in(
+        &self,
+        scope: ScopeId,
+        receipt: &super::DeclarationReceipt,
+        imports: &super::SourceImports,
+    ) -> Result<
+        (
+            super::DeclarationCandidateRender,
+            Vec<(tidepool_repr::SessionVarId, String)>,
+        ),
+        SessionError,
+    > {
+        self.state
+            .render_declaration_candidate_in(scope, receipt, imports)
+    }
+
     pub fn commit_declaration_receipt_in(
         &mut self,
         scope: ScopeId,

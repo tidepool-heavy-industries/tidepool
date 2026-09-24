@@ -21,14 +21,20 @@ use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::{
-    ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
-    SourceImports,
+    DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
+    SessionError, SessionLib, SourceImports,
 };
 
 /// Render the unqualified imports for the exact names visible from each live
 /// value interface. A generated `Val.G` module can export helpers that have
 /// not entered the binding table yet, so importing the module wholesale would
 /// publish those helpers through later declaration modules.
+/// [`PersistentSession::declaration_staging_context_in`]'s result: the
+/// persistent imports a candidate compiles against, the value-interface
+/// import specs its render pulls in, and the live-value environment (var id,
+/// module name) a later adopt must still match.
+type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
+
 fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
     let mut grouped = Vec::<(SessionModule, Vec<String>)>::new();
     for (name, module) in entries {
@@ -755,21 +761,23 @@ impl PersistentSession {
             .map(|receipt| receipt.generation)
     }
 
-    /// Render and validate the exact next declaration module without changing
-    /// the live log, scope tip, recovery manifest, or binding store.
-    pub fn stage_declarations_in(
+    /// The shared prefix of [`Self::stage_declarations_in`] and
+    /// [`Self::render_declaration_candidate_in`]: the persistent imports a
+    /// candidate compiles against and the exact live-value environment
+    /// visible from `scope` once `receipt`'s names have taken over — the
+    /// value plane's half of what makes a later `adopt` stale, alongside the
+    /// declaration plane's own generation/tip check.
+    fn declaration_staging_context_in(
         &self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
-    ) -> Result<super::StagedDeclaration, SessionError> {
+    ) -> Result<DeclarationStagingContext, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         let mut persistent_imports = external.clone();
         persistent_imports.extend(&self.workbench_imports_in(scope));
-        #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
         let replaced_names = receipt
             .items
             .iter()
@@ -794,6 +802,21 @@ impl PersistentSession {
                 .iter()
                 .map(|(name, entry)| (name.0.clone(), entry.module)),
         );
+        Ok((persistent_imports, import_modules, visible_values))
+    }
+
+    /// Render and validate the exact next declaration module without changing
+    /// the live log, scope tip, recovery manifest, or binding store.
+    pub fn stage_declarations_in(
+        &self,
+        scope: ScopeId,
+        receipt: &super::DeclarationReceipt,
+        external: &SourceImports,
+    ) -> Result<super::StagedDeclaration, SessionError> {
+        let (persistent_imports, import_modules, visible_values) =
+            self.declaration_staging_context_in(scope, receipt, external)?;
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let lib = self.lib.as_ref().expect("decl plane present");
         lib.stage_batch_with_receipt_and_vals_in(
             scope,
             &persistent_imports,
@@ -802,6 +825,34 @@ impl PersistentSession {
             &self.live_val_modules(),
         )
         .map(|staged| staged.with_visible_values(visible_values))
+    }
+
+    /// The pure half of a split cell preparation's declaration staging:
+    /// render the next candidate module and capture the exact live-value
+    /// environment it must still match at adopt time, without writing to
+    /// disk, invoking GHC, or changing any live session state. Pair with
+    /// [`super::validate_declaration_candidate`] off-checkout (attach the
+    /// returned `visible_values` to its `StagedDeclaration` via
+    /// [`super::StagedDeclaration::with_visible_values`]) and
+    /// [`Self::adopt_staged_declaration_in`] on a later checkout.
+    pub fn render_declaration_candidate_in(
+        &self,
+        scope: ScopeId,
+        receipt: &super::DeclarationReceipt,
+        external: &SourceImports,
+    ) -> Result<(DeclarationCandidateRender, Vec<(SessionVarId, String)>), SessionError> {
+        let (persistent_imports, import_modules, visible_values) =
+            self.declaration_staging_context_in(scope, receipt, external)?;
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let lib = self.lib.as_ref().expect("decl plane present");
+        let candidate = lib.render_candidate_in(
+            scope,
+            &persistent_imports,
+            receipt,
+            &import_modules,
+            &self.live_val_modules(),
+        );
+        Ok((candidate, visible_values))
     }
 
     /// Adopt a declaration candidate which this session already rendered and

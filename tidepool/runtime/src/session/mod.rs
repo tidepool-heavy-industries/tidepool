@@ -371,6 +371,14 @@ pub struct StagedDeclaration {
     import_modules: Vec<String>,
     inject_modules: Vec<String>,
     visible_values: Vec<(SessionVarId, String)>,
+    /// The exact bytes GHC validated. Installing this candidate ([`SessionLib::
+    /// adopt_staged_batch_with_receipt_and_vals_in`]) writes precisely these
+    /// bytes into the shared session root — never a re-render — so what lands
+    /// in the include tree is provably what GHC already checked, whether that
+    /// validation ran under this session's checkout (the single-checkout path)
+    /// or off it, against a private candidate directory (a split cell
+    /// preparation).
+    rendered: RenderedModule,
 }
 
 impl StagedDeclaration {
@@ -394,9 +402,57 @@ impl StagedDeclaration {
     pub fn items(&self) -> &[ExportItem] {
         &self.turn.items
     }
-    pub(crate) fn with_visible_values(mut self, values: Vec<(SessionVarId, String)>) -> Self {
+    /// Attach the live-value environment a candidate was rendered against, so
+    /// [`SessionLib::adopt_staged_batch_with_receipt_and_vals_in`] can detect
+    /// a binding change since. A split cell preparation calls this itself,
+    /// off-checkout, after [`validate_declaration_candidate`] returns —
+    /// [`PersistentSession::stage_declarations_in`] does the equivalent for
+    /// the single-checkout path.
+    #[must_use]
+    pub fn with_visible_values(mut self, values: Vec<(SessionVarId, String)>) -> Self {
         self.visible_values = values;
         self
+    }
+}
+
+/// A pure render of the next declaration candidate for `scope`: the exact
+/// generation, module identity, rendered `.hs` text, and the log/binding
+/// baseline it was rendered against — everything [`validate_declaration_candidate`]
+/// needs to write and GHC-validate the candidate **off** the machine
+/// checkout, and everything [`SessionLib::adopt_staged_batch_with_receipt_and_vals_in`]
+/// needs to detect that baseline moving before installing it. Building this
+/// touches no disk and runs no compiler; it is a pure function of
+/// [`SessionLib`]'s in-memory log, so it is cheap enough to compute under a
+/// checkout that is released immediately after.
+#[derive(Clone, Debug)]
+pub struct DeclarationCandidateRender {
+    session_id: SessionId,
+    root: PathBuf,
+    extra_include: Vec<PathBuf>,
+    pragmas: String,
+    scope: ScopeId,
+    base_generation: Generation,
+    base_tip: Generation,
+    generation: Generation,
+    rendered: RenderedModule,
+    turn: DeclTurn,
+    receipt: DeclarationReceipt,
+    import_modules: Vec<String>,
+    inject_modules: Vec<String>,
+}
+
+impl DeclarationCandidateRender {
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[must_use]
+    pub fn module(&self) -> SessionModule {
+        self.rendered.module
+    }
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
     }
 }
 
@@ -1013,18 +1069,22 @@ impl SessionLib {
         Ok(gen)
     }
 
-    pub(crate) fn stage_batch_with_receipt_and_vals_in(
+    /// The pure half of declaration staging: render the next candidate
+    /// module against a cloned log, without writing it to disk or invoking
+    /// GHC. Cheap enough to run under a checkout that is released
+    /// immediately after — see [`DeclarationCandidateRender`].
+    pub(crate) fn render_candidate_in(
         &self,
         scope: ScopeId,
         external: &SourceImports,
         receipt: &DeclarationReceipt,
         import_modules: &[String],
         inject_modules: &[String],
-    ) -> Result<StagedDeclaration, SessionError> {
+    ) -> DeclarationCandidateRender {
         let sources = vec![receipt.source.replay_source(external)];
         let workbench_imports = receipt.source.prologue.workbench_imports();
         let mut log = self.log.clone();
-        let mut turn = DeclTurn {
+        let turn = DeclTurn {
             normalized: receipt.source.clone(),
             external_imports: external.clone(),
             sources,
@@ -1036,29 +1096,38 @@ impl SessionLib {
         };
         let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
-        self.write_module(&rendered)?;
-        turn.value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules)
-        {
-            Ok(types) => types,
-            Err(error) => {
-                self.discard_module_artifacts(rendered.module);
-                return Err(error);
-            }
-        };
-        Ok(StagedDeclaration {
-            generation,
-            module: rendered.module,
-            receipt: receipt.clone(),
+        DeclarationCandidateRender {
             session_id: self.id,
             root: self.root.clone(),
+            extra_include: self.extra_include.clone(),
+            pragmas: self.env.pragmas.clone(),
             scope,
             base_generation: self.log.generation(),
             base_tip: self.scope_tip(scope),
+            generation,
+            rendered,
             turn,
+            receipt: receipt.clone(),
             import_modules: import_modules.to_vec(),
             inject_modules: inject_modules.to_vec(),
-            visible_values: Vec::new(),
-        })
+        }
+    }
+
+    pub(crate) fn stage_batch_with_receipt_and_vals_in(
+        &self,
+        scope: ScopeId,
+        external: &SourceImports,
+        receipt: &DeclarationReceipt,
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<StagedDeclaration, SessionError> {
+        let candidate =
+            self.render_candidate_in(scope, external, receipt, import_modules, inject_modules);
+        // Writing and validating directly into `self.root` (rather than a
+        // private candidate directory) is exactly today's single-checkout
+        // behavior: the whole call happens under one exclusive checkout, so
+        // there is no concurrent reader to shield from a half-written module.
+        validate_declaration_candidate(candidate, &self.root)
     }
 
     pub(crate) fn adopt_staged_batch_with_receipt_and_vals_in(
@@ -1076,6 +1145,13 @@ impl SessionLib {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        // Install exactly the bytes GHC already validated — never a
+        // re-render — into the shared session root. For the single-checkout
+        // caller this rewrites the same bytes already written there at stage
+        // time; for a split cell preparation this is the FIRST time the
+        // candidate touches the shared root, moving it out of the private
+        // directory it was validated against.
+        self.write_module(&staged.rendered)?;
         let generation = self.push_turn_in(staged.scope, staged.turn.clone());
         if staged.scope == ScopeId::ROOT {
             self.record_recovery_turn(recovery::RecoveryTurn::new(
@@ -1095,21 +1171,11 @@ impl SessionLib {
             && staged.base_generation == self.log.generation()
             && staged.generation == self.log.generation().next()
         {
-            self.discard_module_artifacts(staged.module);
-        }
-    }
-
-    /// Remove an unpublished module's source and session-local compiler products.
-    /// Shared compiler caches own their own content-based invalidation.
-    fn discard_module_artifacts(&self, module: SessionModule) {
-        let source = self.root.join(module.relative_hs_path());
-        for extension in ["hs", "hi", "dyn_hi", "o", "dyn_o", "hie"] {
-            let path = source.with_extension(extension);
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(path = %path.display(), %error, "could not remove unpublished declaration artifact");
-                }
-            }
+            // A no-op when the candidate was validated off-checkout, against
+            // a private directory this session root never received — there
+            // is nothing here to remove; the caller owns that directory's
+            // lifetime (e.g. a `tempfile::TempDir` cleaned up on drop).
+            remove_module_artifacts(&self.root, staged.module);
         }
     }
 
@@ -1243,120 +1309,234 @@ impl SessionLib {
         inject_modules: &[String],
     ) -> Result<BTreeMap<String, String>, SessionError> {
         let stdlib_include = stdlib_include_for_validation(&self.extra_include)?;
-        let mut includes = vec![self.root.as_path()];
-        includes.extend(self.extra_include.iter().map(PathBuf::as_path));
-        if let Some(stdlib) = stdlib_include.as_deref() {
+        let mut includes = vec![self.root.clone()];
+        includes.extend(self.extra_include.iter().cloned());
+        if let Some(stdlib) = stdlib_include {
             includes.push(stdlib);
         }
-        let mut values = Vec::new();
-        for item in items {
-            let term_names: &[String] = match item {
-                ExportItem::Value { name } => std::slice::from_ref(name),
-                ExportItem::Type { cons, .. } => cons,
-                ExportItem::Class { methods, .. } => methods,
-            };
-            for name in term_names {
-                if !values.contains(name) {
-                    values.push(name.clone());
-                }
-            }
-        }
-        let expressions = if values.is_empty() {
-            vec!["()".to_owned()]
-        } else {
-            values
-                .iter()
-                .map(|name| {
-                    let occurrence = name
-                        .strip_prefix('(')
-                        .and_then(|name| name.strip_suffix(')'))
-                        .unwrap_or(name);
-                    match occurrence.chars().next() {
-                        Some(c) if c.is_alphanumeric() || c == '_' => {
-                            format!("TidepoolCandidate.{occurrence}")
-                        }
-                        _ => format!("(TidepoolCandidate.{occurrence})"),
-                    }
-                })
-                .collect()
-        };
-        let queries = expressions
-            .iter()
-            .cloned()
-            .map(InspectionQuery::TypeOf)
-            .collect::<Vec<_>>();
-        let imports = format!(
-            "{}\nqualified {} as TidepoolCandidate\n",
-            rendered.module.module_name(),
-            rendered.module.module_name()
-        );
-        let preamble = format!(
-            "{}\nmodule TidepoolDeclarationTypes where\n",
-            self.env.pragmas
-        );
-        let results = match inspection::run_inspections_strict(InspectionRequest {
-            preamble: &preamble,
-            imports: &imports,
-            include: &includes,
-            session_root: &self.root,
+        validate_rendered_module(
+            rendered,
+            items,
             inject_modules,
-            queries: &queries,
-            effects: None,
-        }) {
-            Ok(results) => results,
-            Err(crate::CompileError::Diagnostics(diagnostics)) => {
-                let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
-                    rendered.body_line
-                } else {
-                    0
-                };
-                return Err(SessionError::ValidationFailed(
-                    DeclarationValidationFailure {
-                        diagnostics,
-                        anchor: rendered.module.relative_hs_path(),
-                        line_offset,
-                        source: rendered.source.clone(),
-                    },
-                ));
-            }
-            Err(error) => return Err(SessionError::Compile(error)),
-        };
-
-        let mut types = BTreeMap::new();
-        for (index, result) in results.into_iter().enumerate() {
-            match result {
-                InspectionResult::Type { display, .. } if index < values.len() => {
-                    types.insert(values[index].clone(), display);
-                }
-                InspectionResult::Type { .. } => {}
-                InspectionResult::Rejected { diagnostic } => {
-                    return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
-                        format!("strict declaration type capture was rejected: {diagnostic}"),
-                    )));
-                }
-                other => {
-                    return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
-                        format!("declaration type capture returned {}", other.render()),
-                    )));
-                }
-            }
-        }
-        Ok(types)
+            &includes,
+            &self.root,
+            &self.env.pragmas,
+        )
     }
 
     /// Atomically write a rendered module to its place in the include tree.
     /// Best-effort (no fsync): this is a regenerable compile artifact, not
     /// durable state — a write lost to a crash just recompiles on next use.
     fn write_module(&self, rendered: &RenderedModule) -> Result<(), SessionError> {
-        let rel = rendered.module.relative_hs_path();
-        let path = self.root.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        tidepool_atomic_write::write_best_effort(&path, rendered.source.as_bytes())
-            .map_err(|e| SessionError::Io(e.source))?;
-        Ok(())
+        write_module_at(&self.root, rendered)
     }
+}
+
+/// [`SessionLib::write_module`], generalized to an explicit root so a split
+/// cell preparation can write a candidate into a private directory instead of
+/// the shared session root.
+fn write_module_at(root: &Path, rendered: &RenderedModule) -> Result<(), SessionError> {
+    let rel = rendered.module.relative_hs_path();
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    tidepool_atomic_write::write_best_effort(&path, rendered.source.as_bytes())
+        .map_err(|e| SessionError::Io(e.source))?;
+    Ok(())
+}
+
+/// [`SessionLib`]'s unpublished-artifact cleanup, generalized to an explicit
+/// root. Shared compiler caches own their own content-based invalidation;
+/// this only removes the source and any session-local compiler products
+/// written beside it.
+fn remove_module_artifacts(root: &Path, module: SessionModule) {
+    let source = root.join(module.relative_hs_path());
+    for extension in ["hs", "hi", "dyn_hi", "o", "dyn_o", "hie"] {
+        let path = source.with_extension(extension);
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %path.display(), %error, "could not remove unpublished declaration artifact");
+            }
+        }
+    }
+}
+
+/// GHC-validate one already-rendered candidate module: importing it forces
+/// GHC to check the complete module (no executable target is produced), and
+/// this also captures each declared value's compiler-rendered type. `includes`
+/// is the exact, ordered search path — callers assemble it (a private
+/// candidate directory ahead of the session root and any extra include dirs,
+/// or just the session root itself for the single-checkout caller) because
+/// this function has no [`SessionLib`] of its own to derive one from.
+/// `session_root` is separate from `includes`: it is where already-committed
+/// `Tidepool.Session.Val.G<g>` interfaces live for `--inject-val` lookup, and
+/// stays the session's real root even when `includes`' primary entry is a
+/// private candidate directory — a candidate never has value interfaces of
+/// its own.
+fn validate_rendered_module(
+    rendered: &RenderedModule,
+    items: &[ExportItem],
+    inject_modules: &[String],
+    includes: &[PathBuf],
+    session_root: &Path,
+    pragmas: &str,
+) -> Result<BTreeMap<String, String>, SessionError> {
+    let mut values = Vec::new();
+    for item in items {
+        let term_names: &[String] = match item {
+            ExportItem::Value { name } => std::slice::from_ref(name),
+            ExportItem::Type { cons, .. } => cons,
+            ExportItem::Class { methods, .. } => methods,
+        };
+        for name in term_names {
+            if !values.contains(name) {
+                values.push(name.clone());
+            }
+        }
+    }
+    let expressions = if values.is_empty() {
+        vec!["()".to_owned()]
+    } else {
+        values
+            .iter()
+            .map(|name| {
+                let occurrence = name
+                    .strip_prefix('(')
+                    .and_then(|name| name.strip_suffix(')'))
+                    .unwrap_or(name);
+                match occurrence.chars().next() {
+                    Some(c) if c.is_alphanumeric() || c == '_' => {
+                        format!("TidepoolCandidate.{occurrence}")
+                    }
+                    _ => format!("(TidepoolCandidate.{occurrence})"),
+                }
+            })
+            .collect()
+    };
+    let queries = expressions
+        .iter()
+        .cloned()
+        .map(InspectionQuery::TypeOf)
+        .collect::<Vec<_>>();
+    let imports = format!(
+        "{}\nqualified {} as TidepoolCandidate\n",
+        rendered.module.module_name(),
+        rendered.module.module_name()
+    );
+    let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
+    let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let results = match inspection::run_inspections_strict(InspectionRequest {
+        preamble: &preamble,
+        imports: &imports,
+        include: &include_refs,
+        session_root,
+        inject_modules,
+        queries: &queries,
+        effects: None,
+    }) {
+        Ok(results) => results,
+        Err(crate::CompileError::Diagnostics(diagnostics)) => {
+            let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
+                rendered.body_line
+            } else {
+                0
+            };
+            return Err(SessionError::ValidationFailed(
+                DeclarationValidationFailure {
+                    diagnostics,
+                    anchor: rendered.module.relative_hs_path(),
+                    line_offset,
+                    source: rendered.source.clone(),
+                },
+            ));
+        }
+        Err(error) => return Err(SessionError::Compile(error)),
+    };
+
+    let mut types = BTreeMap::new();
+    for (index, result) in results.into_iter().enumerate() {
+        match result {
+            InspectionResult::Type { display, .. } if index < values.len() => {
+                types.insert(values[index].clone(), display);
+            }
+            InspectionResult::Type { .. } => {}
+            InspectionResult::Rejected { diagnostic } => {
+                return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                    format!("strict declaration type capture was rejected: {diagnostic}"),
+                )));
+            }
+            other => {
+                return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                    format!("declaration type capture returned {}", other.render()),
+                )));
+            }
+        }
+    }
+    Ok(types)
+}
+
+/// Write `candidate`'s rendered module into `primary_root` and GHC-validate
+/// it there — with `candidate`'s own session root and extra include dirs
+/// available afterward on the search path (in that order) so prior
+/// generations and configured vocabulary still resolve. Runs no checkout and
+/// needs none: everything it reads is already owned by `candidate`.
+///
+/// `primary_root` may be a private, per-attempt directory (a split cell
+/// preparation validating off-checkout) or the session's own root (the
+/// single-checkout caller, where this is the whole of staging). Either way,
+/// nothing is written to the *session's* root unless `primary_root` already
+/// **is** that root — a private candidate never touches the shared include
+/// tree; installing it for real is
+/// [`SessionLib::adopt_staged_batch_with_receipt_and_vals_in`]'s job, from the
+/// exact bytes recorded on the returned [`StagedDeclaration`].
+pub fn validate_declaration_candidate(
+    candidate: DeclarationCandidateRender,
+    primary_root: &Path,
+) -> Result<StagedDeclaration, SessionError> {
+    write_module_at(primary_root, &candidate.rendered)?;
+
+    let mut includes = vec![primary_root.to_path_buf()];
+    if primary_root != candidate.root {
+        includes.push(candidate.root.clone());
+    }
+    includes.extend(candidate.extra_include.iter().cloned());
+    if let Some(stdlib) = stdlib_include_for_validation(&candidate.extra_include)? {
+        includes.push(stdlib);
+    }
+
+    let value_types = match validate_rendered_module(
+        &candidate.rendered,
+        &candidate.turn.items,
+        &candidate.inject_modules,
+        &includes,
+        &candidate.root,
+        &candidate.pragmas,
+    ) {
+        Ok(types) => types,
+        Err(error) => {
+            remove_module_artifacts(primary_root, candidate.rendered.module);
+            return Err(error);
+        }
+    };
+
+    let mut turn = candidate.turn;
+    turn.value_types = value_types;
+    Ok(StagedDeclaration {
+        generation: candidate.generation,
+        module: candidate.rendered.module,
+        receipt: candidate.receipt,
+        session_id: candidate.session_id,
+        root: candidate.root,
+        scope: candidate.scope,
+        base_generation: candidate.base_generation,
+        base_tip: candidate.base_tip,
+        turn,
+        import_modules: candidate.import_modules,
+        inject_modules: candidate.inject_modules,
+        visible_values: Vec::new(),
+        rendered: candidate.rendered,
+    })
 }
 
 #[cfg(test)]

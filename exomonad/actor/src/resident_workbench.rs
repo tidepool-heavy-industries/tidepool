@@ -32,12 +32,12 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, BoundBinder, CellCheck, CellCheckRequest, CheckedBinderPin,
-    CheckedExpressionPlan, CompiledTurn, DeclarationReceipt, ExpressionPresentation,
-    HostBindingAuthority, HostBindingType, HostCarrier, HostPayload, InspectionQuery,
-    InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
-    TurnRequest, TurnResult,
+    run_turn_pinned, validate_declaration_candidate, BoundBinder, CellCheck, CellCheckRequest,
+    CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
+    DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
+    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SourceImports, StagedDeclaration, TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -2705,21 +2705,25 @@ where
     }
 
     /// Prepare one resident cell, splitting `check_cell` (GHC) and every
-    /// per-item compile off the machine checkout when the cell has no
-    /// `Decl` item — mirroring [`Self::begin_fragment_split`]/
-    /// [`Self::bind_command_job`] (Problem 1 of the compile-path design
-    /// note): snapshot under a short checkout
-    /// ([`snapshot_cell_split`]), check and compile off-checkout
-    /// ([`check_cell_off_checkout`], [`compile_cell_items_off_checkout`]),
-    /// re-checkout only to reserve generations
-    /// ([`reserve_cell_generations`]) and to revalidate and install
-    /// ([`finalize_cell_install`]), each re-checkout detecting a stale
-    /// snapshot via [`crate::ActorCompileView::compile_relevant_eq`] and an
-    /// unchanged `next_declaration_module()`, up to `MAX_SPLIT_ATTEMPTS`
-    /// times. A cell with a `Decl` item, or one that exhausts its retries,
-    /// falls back to [`Self::prepare_cell_single_checkout`]: declaration
-    /// staging writes and validates the next Lib module in the shared
-    /// session root and stays fully serialized.
+    /// per-item compile off the machine checkout — mirroring
+    /// [`Self::begin_fragment_split`]/[`Self::bind_command_job`] (Problem 1
+    /// of the compile-path design note): snapshot under a short checkout
+    /// ([`snapshot_cell_split`]), check off-checkout
+    /// ([`check_cell_off_checkout`]), re-checkout to reserve generations and,
+    /// for a cell with a `Decl` item, render its next declaration candidate
+    /// ([`reserve_cell_generations`]), GHC-validate that candidate
+    /// off-checkout against a private directory nobody else's compile has on
+    /// its include path and compile every other item against it
+    /// ([`validate_declaration_candidate`], [`compile_cell_items_off_checkout`]),
+    /// then re-checkout once more to revalidate and install — writing the
+    /// already-validated declaration into the shared session root for the
+    /// first time only now ([`finalize_cell_install`]). Each re-checkout
+    /// detects a stale snapshot via
+    /// [`crate::ActorCompileView::compile_relevant_eq`] and an unchanged
+    /// `next_declaration_module()`, up to `MAX_SPLIT_ATTEMPTS` times. Only
+    /// once those bounded retries are exhausted does this fall back to
+    /// [`Self::prepare_cell_single_checkout`], whose one exclusive checkout
+    /// stays held across its own declaration staging and every item compile.
     pub(crate) async fn prepare_cell(
         &self,
         context: crate::ActorSessionContext,
@@ -2826,29 +2830,30 @@ where
                 .await
                 .map_err(ResidentActorWorkbenchError::Join)??;
 
-            let has_declaration = checked
+            let declaration_index = checked
                 .items
                 .iter()
-                .any(|item| item.verdict.kind == TurnKind::Decl);
-            if has_declaration {
-                // Declaration staging writes and validates the next Lib
-                // module in the shared session root: that must stay fully
-                // serialized, so abandon the split and run the original
-                // single-checkout path (which repeats the whole-cell check,
-                // and mounts its own request input, under its own
-                // checkout).
-                if let Some(guard) = leased_input.take() {
-                    guard.retire(&self.access).await;
+                .position(|item| item.verdict.kind == TurnKind::Decl);
+            let declaration_receipt = declaration_index.map(|index| {
+                let item = &checked.items[index];
+                DeclarationReceipt {
+                    binders: item.verdict.binders.clone(),
+                    items: item.verdict.items.clone(),
+                    source: tidepool_runtime::session::DeclarationSource {
+                        prologue: checked.prologue.clone(),
+                        body: item.source.clone(),
+                    },
                 }
-                cancel_on_drop.0 = None;
-                return self
-                    .prepare_cell_single_checkout(context, cell_source)
-                    .await;
-            }
+            });
+            let value_item_count = checked
+                .items
+                .iter()
+                .filter(|item| item.verdict.kind != TurnKind::Decl)
+                .count();
 
             let reserve_source = source.clone();
             let reserve_type_modules = Arc::clone(&type_modules);
-            let item_count = checked.items.len();
+            let reserve_receipt = declaration_receipt;
             let (snapshot, reservation) = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
@@ -2858,36 +2863,87 @@ where
                         &reserve_source,
                         &reserve_type_modules,
                         &snapshot,
-                        item_count,
+                        value_item_count,
+                        reserve_receipt.as_ref(),
                     )
                     .map(|reservation| (snapshot, reservation))
                 })
                 .await?;
-            let (c_view, retained, visible_names) = match reservation {
+            let (c_view, retained, visible_names, declaration_candidate) = match reservation {
                 CellReservation::Stale => continue,
                 CellReservation::Ready(ready) => {
                     let CellReservationReady {
                         view,
                         retained,
                         visible_names,
+                        declaration,
                     } = *ready;
-                    (view, retained, visible_names)
+                    (view, retained, visible_names, declaration)
                 }
             };
 
             // No checkout held here either: every item's GHC compile also
-            // runs with the machine released.
+            // runs with the machine released — including, for a cell with a
+            // `Decl` item, GHC-validating that declaration against a private
+            // candidate directory nobody else's compile has on its include
+            // path (`validate_declaration_candidate`), never the shared
+            // session root.
             let compile_source = source.clone();
             let compile_effects = effects.clone();
             let compile_cell_source = cell_source.clone();
             let compile_context = context.clone();
             let compile_view = c_view.clone();
             let compile_cancellation = cancellation.clone();
-            let (checked, outcome) =
+            let (checked, outcome, staged) =
                 crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                     tidepool_runtime::with_compiler_transaction_cancellable(
                         compile_cancellation,
                         || {
+                            let candidate_dir = declaration_candidate
+                                .is_some()
+                                .then(tempfile::tempdir)
+                                .transpose()
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::CompileInfrastructure(format!(
+                                        "declaration candidate directory: {error}"
+                                    ))
+                                })?;
+                            let staged = match (declaration_candidate, &candidate_dir) {
+                                (Some((candidate, visible_values)), Some(candidate_dir)) => {
+                                    match validate_declaration_candidate(
+                                        candidate,
+                                        candidate_dir.path(),
+                                    ) {
+                                        Ok(staged) => {
+                                            Some(staged.with_visible_values(visible_values))
+                                        }
+                                        Err(error)
+                                            if classify_session(&error).class
+                                                == FailureClass::UserHaskell =>
+                                        {
+                                            let diagnostic =
+                                                classify_session(&error).message.into();
+                                            let index = declaration_index.unwrap_or(0);
+                                            return Ok((
+                                                checked,
+                                                CellItemsOutcome::Rejected { index, diagnostic },
+                                                None,
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            return Err(ResidentActorWorkbenchError::Resident(
+                                                ResidentError::Session(error),
+                                            ))
+                                        }
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let compile_view = match &staged {
+                                Some(staged) => compile_view
+                                    .with_staged_library(staged.module(), staged.items()),
+                                None => compile_view,
+                            };
                             let outcome = compile_cell_items_off_checkout(
                                 &compile_context,
                                 &compile_source,
@@ -2897,8 +2953,10 @@ where
                                 compile_view,
                                 &retained,
                                 &visible_names,
+                                staged.as_ref(),
+                                candidate_dir.as_ref().map(|dir| dir.path()),
                             );
-                            outcome.map(|outcome| (checked, outcome))
+                            outcome.map(|outcome| (checked, outcome, staged))
                         },
                     )
                 }))
@@ -2915,7 +2973,10 @@ where
                     // attempt must recompile against a fresh snapshot,
                     // exactly as `begin_fragment_split`'s off-checkout
                     // rejection and this same split's install-time mismatch
-                    // already do.
+                    // already do. A rejected declaration item's own candidate
+                    // was validated against a private directory dropped when
+                    // this compile finished, so there is nothing further to
+                    // discard here.
                     let revalidate_source = source.clone();
                     let revalidate_type_modules = Arc::clone(&type_modules);
                     let revalidate_against = c_view.clone();
@@ -2949,6 +3010,7 @@ where
             let install_type_modules = Arc::clone(&type_modules);
             let candidate_module = snapshot.candidate_module;
             let install_view = c_view;
+            let install_checked = checked.clone();
             let install = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
@@ -2959,7 +3021,9 @@ where
                         &install_type_modules,
                         candidate_module,
                         &install_view,
+                        &install_checked,
                         items,
+                        staged,
                     )
                 })
                 .await?;
@@ -6875,6 +6939,15 @@ struct CellReservationReady {
     view: crate::ActorCompileView,
     retained: Vec<(SymbolIdentity, u64)>,
     visible_names: Vec<String>,
+    /// The pure render of this cell's declaration item, and the live-value
+    /// environment it was rendered against — `None` for a cell with no `Decl`
+    /// item. Off-checkout, GHC-validating this against a private candidate
+    /// directory produces the [`StagedDeclaration`]
+    /// [`compile_cell_items_off_checkout`] and [`finalize_cell_install`] need.
+    declaration: Option<(
+        DeclarationCandidateRender,
+        Vec<(tidepool_repr::SessionVarId, String)>,
+    )>,
 }
 
 enum CellReservation {
@@ -6887,7 +6960,13 @@ enum CellReservation {
 /// once, before releasing the checkout again for the per-item compiles.
 /// Reserving the whole run's generations here (rather than one at a time, as
 /// the single-checkout path does per item) keeps the per-item compiles
-/// entirely off-checkout.
+/// entirely off-checkout. `value_item_count` counts only the items that
+/// actually consume a value generation — a cell's `Decl` item never does (its
+/// identity lives in the Lib module, not a `Val.G` interface), so a caller
+/// with a declaration passes the count of every OTHER item, which may be
+/// zero. `declaration_receipt` is the cell's own `Decl` item (if it has one),
+/// already reduced to the exact GHC receipt used everywhere else a
+/// declaration is staged.
 #[allow(clippy::too_many_arguments)]
 fn reserve_cell_generations<H, O>(
     session: &mut ResidentSession<H, O>,
@@ -6895,7 +6974,8 @@ fn reserve_cell_generations<H, O>(
     source: &ActorWorkbenchSource,
     type_modules: &[String],
     snapshot: &CellSplitSnapshot,
-    item_count: usize,
+    value_item_count: usize,
+    declaration_receipt: Option<&DeclarationReceipt>,
 ) -> Result<CellReservation, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -6912,9 +6992,21 @@ where
     {
         return Ok(CellReservation::Stale);
     }
-    let g0 = fresh_view.next_value_generation();
-    let through = g0.0.saturating_add((item_count.max(1) - 1) as u64);
-    session.reserve_value_generations_through(tidepool_repr::Generation(through));
+    if value_item_count > 0 {
+        let g0 = fresh_view.next_value_generation();
+        let through = g0.0.saturating_add((value_item_count - 1) as u64);
+        session.reserve_value_generations_through(tidepool_repr::Generation(through));
+    }
+    let declaration = declaration_receipt
+        .map(|receipt| {
+            session.render_declaration_candidate_in(
+                context.placement.lexical_scope,
+                receipt,
+                &fresh_view.workbench_imports(),
+            )
+        })
+        .transpose()
+        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
     let retained = session.prepared_retained();
     let visible_names = session
         .workbench_bindings_in(context.placement.lexical_scope)
@@ -6925,6 +7017,7 @@ where
         view: fresh_view,
         retained,
         visible_names,
+        declaration,
     })))
 }
 
@@ -6942,9 +7035,14 @@ enum CellItemsOutcome {
 /// The per-item compile half of a split cell preparation: everything
 /// [`reserve_cell_generations`]'s checkout-only prerequisites make possible
 /// once they are already in hand. No session or checkout touched here;
-/// mirrors the non-declaration half of `prepare_cell_in_session`'s item
-/// loop, folding `with_staged_values` exactly as that loop does so each
-/// later item sees the ones compiled before it in this same cell.
+/// mirrors `prepare_cell_in_session`'s item loop, folding `with_staged_values`
+/// exactly as that loop does so each later item sees the ones compiled before
+/// it in this same cell. `staged` and `candidate_dir` are `Some` together,
+/// for a cell with a `Decl` item: `staged` supplies that item's already-GHC-
+/// validated receipt directly (no compile needed — its GHC work already ran
+/// producing `staged`), and `candidate_dir` is the private directory it was
+/// validated against, prepended to every OTHER item's own include path so
+/// those items resolve the not-yet-installed declaration module.
 #[allow(clippy::too_many_arguments)]
 fn compile_cell_items_off_checkout(
     context: &crate::ActorSessionContext,
@@ -6955,15 +7053,30 @@ fn compile_cell_items_off_checkout(
     mut compile_view: crate::ActorCompileView,
     retained: &[(SymbolIdentity, u64)],
     visible_names: &[String],
+    staged: Option<&StagedDeclaration>,
+    candidate_dir: Option<&std::path::Path>,
 ) -> Result<CellItemsOutcome, ResidentActorWorkbenchError> {
     let mut result = Vec::with_capacity(checked.items.len());
     let mut staged_names: Vec<String> = Vec::new();
+    let declaration_imports = compile_view.workbench_imports();
     for (index, item) in checked.items.iter().enumerate() {
-        debug_assert_ne!(
-            item.verdict.kind,
-            TurnKind::Decl,
-            "declaration cells never reach the split item compile"
-        );
+        if item.verdict.kind == TurnKind::Decl {
+            let staged = staged.ok_or_else(|| {
+                ResidentActorWorkbenchError::CompileInfrastructure(
+                    "cell declaration item has no staged declaration module".into(),
+                )
+            })?;
+            result.push(PreparedCellItem {
+                ready: PreparedCellStep::Executable(Box::new(ReadyBlock {
+                    result: TurnResult::Decl(staged.receipt().clone()),
+                    generation: compile_view.next_value_generation(),
+                    declaration_source: item.source.clone(),
+                    declaration_imports: declaration_imports.clone(),
+                    observation: None,
+                })),
+            });
+            continue;
+        }
         let pins = (item.verdict.kind == TurnKind::Bind)
             .then(|| checked.pins_for_item(index))
             .transpose()
@@ -6997,6 +7110,7 @@ fn compile_cell_items_off_checkout(
             expression_plan.as_ref(),
             retained,
             visible_names,
+            candidate_dir,
         )?;
         let ready = match compiled {
             CompiledBlock::Ready(ready) => *ready,
@@ -7083,6 +7197,14 @@ enum CellInstall {
 /// view [`compile_cell_items_off_checkout`] compiled against, lease the
 /// visible bindings a later item in this same cell might still depend on,
 /// and hand back a ready [`PreparedCell`].
+/// `staged` is `Some` exactly when this cell has a `Decl` item: the
+/// already-GHC-validated candidate [`compile_cell_items_off_checkout`] built
+/// against `candidate_dir`. Installing it here — [`session.
+/// adopt_staged_declaration_in`](ResidentSession::adopt_staged_declaration_in)
+/// — is the first time it touches the shared session root; a stale adopt
+/// (something else took this same generation since) is just another
+/// `CellInstall::Stale`, same as every other freshness check this function
+/// already makes.
 #[allow(clippy::too_many_arguments)]
 fn finalize_cell_install<H, O>(
     session: &mut ResidentSession<H, O>,
@@ -7091,7 +7213,9 @@ fn finalize_cell_install<H, O>(
     type_modules: &[String],
     candidate_module: tidepool_repr::SessionModule,
     compiled_against: &crate::ActorCompileView,
-    items: Vec<PreparedCellItem>,
+    checked: &CellCheck,
+    mut items: Vec<PreparedCellItem>,
+    staged: Option<StagedDeclaration>,
 ) -> Result<CellInstall, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -7107,6 +7231,40 @@ where
         || session.next_declaration_module() != Some(candidate_module)
     {
         return Ok(CellInstall::Stale);
+    }
+    if let Some(staged) = staged {
+        let declaration_index = checked
+            .items
+            .iter()
+            .position(|item| item.verdict.kind == TurnKind::Decl)
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::CompileInfrastructure(
+                    "staged declaration but no Decl item in the checked cell".into(),
+                )
+            })?;
+        let expected_generation = staged.generation();
+        let generation = match session.adopt_staged_declaration_in(staged) {
+            Ok(commit) => commit.generation,
+            Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration) => {
+                return Ok(CellInstall::Stale)
+            }
+            Err(error) => {
+                return Err(ResidentActorWorkbenchError::Resident(
+                    ResidentError::Session(error),
+                ))
+            }
+        };
+        if generation != expected_generation {
+            return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                "cell declaration generation changed during split installation".into(),
+            ));
+        }
+        let declaration = &checked.items[declaration_index].verdict;
+        items[declaration_index].ready = PreparedCellStep::Declaration {
+            generation,
+            binders: declaration.binders.clone(),
+            prologue_only: checked.items[declaration_index].prologue_only,
+        };
     }
     let visible = session.visible_binding_ids_in(context.placement.lexical_scope);
     let dependencies = session.lease_bindings(&visible);
@@ -7852,6 +8010,7 @@ where
         expression_plan,
         &retained,
         &visible_names,
+        None,
     )
 }
 
@@ -7880,6 +8039,7 @@ fn compile_block_off_checkout(
     expression_plan: Option<&CheckedExpressionPlan>,
     retained: &[(SymbolIdentity, u64)],
     visible_names: &[String],
+    candidate_dir: Option<&std::path::Path>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
     let pin_heads = pins
         .into_iter()
@@ -7906,6 +8066,17 @@ fn compile_block_off_checkout(
     }
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
+    // A declaration staged for this cell but not yet installed lives only in
+    // `candidate_dir` — the shared session root does not have it yet (that
+    // only happens at `finalize_cell_install`'s `adopt_staged_declaration_in`).
+    // Search it ahead of every other root so `import Tidepool.Session.Lib.G<g>`
+    // resolves against the exact candidate this cell's `Decl` item validated,
+    // without touching `compile_view`'s own `root` — that stays the real
+    // session root, so a later `compile_relevant_eq` against a freshly
+    // re-derived view is unaffected by this private, per-attempt directory.
+    if let Some(candidate_dir) = candidate_dir {
+        prepared.include.insert(0, candidate_dir.to_path_buf());
+    }
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let mut verdict = verdict.cloned();
     let observation = if verdict
@@ -9601,6 +9772,7 @@ mod request_tests {
             &[],
             &snapshot,
             checked.items.len(),
+            None,
         )
         .expect("reserve generations");
         let CellReservation::Ready(ready) = reservation else {
@@ -9610,6 +9782,7 @@ mod request_tests {
             view,
             retained,
             visible_names,
+            declaration: _,
         } = *ready;
         let outcome = compile_cell_items_off_checkout(
             &split_context,
@@ -9620,6 +9793,8 @@ mod request_tests {
             view.clone(),
             &retained,
             &visible_names,
+            None,
+            None,
         )
         .expect("split item compile");
         let CellItemsOutcome::Ready(items) = outcome else {
@@ -9632,7 +9807,9 @@ mod request_tests {
             &[],
             snapshot.candidate_module,
             &view,
+            &checked,
             items,
+            None,
         )
         .expect("finalize install");
         let CellInstall::Ready(PreparedCell::Ready {
@@ -9738,6 +9915,7 @@ mod request_tests {
             &[],
             &snapshot,
             checked.items.len(),
+            None,
         )
         .expect("reserve generations");
         let CellReservation::Ready(ready) = reservation else {
@@ -9747,6 +9925,7 @@ mod request_tests {
             view,
             retained,
             visible_names,
+            declaration: _,
         } = *ready;
         let outcome = compile_cell_items_off_checkout(
             &context,
@@ -9757,6 +9936,8 @@ mod request_tests {
             view.clone(),
             &retained,
             &visible_names,
+            None,
+            None,
         )
         .expect("item compile");
         let CellItemsOutcome::Ready(items) = outcome else {
@@ -9783,7 +9964,9 @@ mod request_tests {
             &[],
             snapshot.candidate_module,
             &view,
+            &checked,
             items,
+            None,
         )
         .expect("finalize install");
         assert!(
@@ -9811,6 +9994,7 @@ mod request_tests {
             &[],
             &retry_snapshot,
             retry_checked.items.len(),
+            None,
         )
         .expect("retry reserve generations");
         let CellReservation::Ready(retry_ready) = retry_reservation else {
@@ -9820,6 +10004,7 @@ mod request_tests {
             view: retry_view,
             retained: retry_retained,
             visible_names: retry_visible_names,
+            declaration: _,
         } = *retry_ready;
         let retry_outcome = compile_cell_items_off_checkout(
             &context,
@@ -9830,6 +10015,8 @@ mod request_tests {
             retry_view.clone(),
             &retry_retained,
             &retry_visible_names,
+            None,
+            None,
         )
         .expect("retry item compile");
         let CellItemsOutcome::Ready(retry_items) = retry_outcome else {
@@ -9842,7 +10029,9 @@ mod request_tests {
             &[],
             retry_snapshot.candidate_module,
             &retry_view,
+            &retry_checked,
             retry_items,
+            None,
         )
         .expect("retry finalize install");
         assert!(matches!(
@@ -9898,21 +10087,25 @@ mod request_tests {
     }
 
     /// `ResidentActorWorkbench::prepare_cell` must detect a `Decl` item from
-    /// its off-checkout whole-cell check and fall back to
-    /// `prepare_cell_single_checkout` — the exact path
-    /// `same_cell_redeclaration_and_use_needs_hiding_to_resolve` (below)
-    /// exercises directly against `prepare_cell_in_session` — rather than
-    /// installing a declaration through the split's own item loop.
+    /// its off-checkout whole-cell check and stage it through the split
+    /// (`reserve_cell_generations`'s `render_declaration_candidate_in` plus
+    /// `validate_declaration_candidate` against a private candidate
+    /// directory, then `finalize_cell_install`'s `adopt_staged_declaration_in`)
+    /// rather than falling back to `prepare_cell_single_checkout` — the exact
+    /// path `same_cell_redeclaration_and_use_needs_hiding_to_resolve` (below)
+    /// exercises directly against `prepare_cell_in_session`, and still the
+    /// one this cell's session-root include tree must end up looking exactly
+    /// as if it had run.
     #[tokio::test]
-    async fn cell_split_falls_back_to_single_checkout_for_a_declaration_cell() {
-        let (machines, context, source, _root) = actor_registry_fixture();
+    async fn cell_split_installs_a_declaration_cell_through_the_split() {
+        let (machines, context, source, root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
         let cell = "declaredFn args = length (args :: [Int])".to_string();
 
         let (checked, prepared) = workbench
             .prepare_cell(context, cell)
             .await
-            .expect("a declaration cell prepares via the single-checkout fallback");
+            .expect("a declaration cell prepares through the split");
         assert!(
             checked
                 .items
@@ -9925,7 +10118,132 @@ mod request_tests {
         };
         assert!(
             matches!(items.remove(0).ready, PreparedCellStep::Declaration { .. }),
-            "the declaration item must use the declaration plane, not the split's item compile"
+            "the declaration item must use the declaration plane"
+        );
+        // The split never writes a candidate into the shared session root
+        // until `finalize_cell_install` adopts it; the first (only)
+        // generation installed here must be the one, real `.hs` file on
+        // disk, with no leftover candidate artifact from an earlier,
+        // privately-validated attempt.
+        let lib_dir = root.path().join("Tidepool/Session/Lib");
+        let entries = std::fs::read_dir(&lib_dir)
+            .expect("the declaration plane wrote its include tree")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec!["G1.hs".to_string()],
+            "exactly one installed generation, no orphaned candidate: {entries:?}"
+        );
+    }
+
+    /// A cell with both a `Decl` item and a later item that uses it must
+    /// come out identically whether `prepare_cell` takes the split path
+    /// (GHC-validating the declaration off-checkout, against a private
+    /// candidate directory, then installing it in
+    /// `finalize_cell_install`) or `prepare_cell_single_checkout` (the
+    /// original, fully-serialized path `same_cell_redeclaration_and_use_
+    /// needs_hiding_to_resolve` exercises). Two independent sessions run the
+    /// exact same cell through each path and must land the same Lib
+    /// generation, the same declared binders, and — since
+    /// [`render::render_module_with_vals`](tidepool_runtime::session) is a
+    /// pure function of the declaration log/generation/env — byte-identical
+    /// generated module source.
+    #[tokio::test]
+    async fn cell_split_and_single_checkout_declare_the_same_generation_exports_and_binders() {
+        let (machines_split, context_split, source_split, root_split) = actor_registry_fixture();
+        let workbench_split =
+            ResidentActorWorkbench::new(machines_split, source_split, None, None, vec![]);
+        let (machines_single, context_single, source_single, root_single) =
+            actor_registry_fixture();
+        let workbench_single =
+            ResidentActorWorkbench::new(machines_single, source_single, None, None, vec![]);
+        let cell =
+            "equivDeclFn args = length (args :: [Int])\nequivBound <- pure (equivDeclFn [1, 2, 3])"
+                .to_string();
+
+        let (checked_split, prepared_split) = workbench_split
+            .prepare_cell(context_split, cell.clone())
+            .await
+            .expect("the split prepares the declaration+bind cell");
+        let (checked_single, prepared_single) = workbench_single
+            .prepare_cell_single_checkout(context_single, cell)
+            .await
+            .expect("single-checkout prepares the declaration+bind cell");
+
+        assert_eq!(checked_split.items.len(), 2, "{checked_split:?}");
+        assert_eq!(checked_single.items.len(), 2, "{checked_single:?}");
+
+        let PreparedCell::Ready {
+            items: mut items_split,
+            ..
+        } = prepared_split
+        else {
+            panic!("the split cell should prepare as Ready");
+        };
+        let PreparedCell::Ready {
+            items: mut items_single,
+            ..
+        } = prepared_single
+        else {
+            panic!("the single-checkout cell should prepare as Ready");
+        };
+        assert_eq!(items_split.len(), 2);
+        assert_eq!(items_single.len(), 2);
+
+        let declaration_step = |item: PreparedCellItem| match item.ready {
+            PreparedCellStep::Declaration {
+                generation,
+                binders,
+                prologue_only,
+            } => (generation, binders, prologue_only),
+            _ => panic!("the declaration item must use the declaration plane"),
+        };
+        let (generation_split, binders_split, prologue_only_split) =
+            declaration_step(items_split.remove(0));
+        let (generation_single, binders_single, prologue_only_single) =
+            declaration_step(items_single.remove(0));
+        assert_eq!(
+            generation_split, generation_single,
+            "both paths declare against an empty session, so both must land at generation 1"
+        );
+        assert_eq!(binders_split, binders_single);
+        assert_eq!(prologue_only_split, prologue_only_single);
+
+        // The bind item's value module number must also line up: the `Decl`
+        // item must not have consumed a value generation in either path —
+        // `reserve_cell_generations`'s `value_item_count` (the split) and
+        // `compile_block_in_view`'s own Decl-skips-reservation check (the
+        // single-checkout path) must agree.
+        let bind_module = |item: PreparedCellItem| {
+            let PreparedCellStep::Executable(ready) = item.ready else {
+                panic!("the bind item must compile through the ordinary item path");
+            };
+            let tidepool_runtime::session::TurnResult::Bind { bound, .. } = ready.result else {
+                panic!("the second item must be a bind result");
+            };
+            bound
+                .first()
+                .map(|binder| binder.module.clone())
+                .expect("the bind produced at least one binder")
+        };
+        assert_eq!(
+            bind_module(items_split.remove(0)),
+            bind_module(items_single.remove(0)),
+            "the bind item after the declaration must land at the same value module in both paths"
+        );
+
+        let split_module =
+            std::fs::read_to_string(root_split.path().join("Tidepool/Session/Lib/G1.hs"))
+                .expect("the split installed generation 1");
+        let single_module =
+            std::fs::read_to_string(root_single.path().join("Tidepool/Session/Lib/G1.hs"))
+                .expect("single-checkout installed generation 1");
+        assert_eq!(
+            split_module, single_module,
+            "the generated module is a pure function of the log/generation/env, so an identical \
+             cell against an identical empty session must render identical source"
         );
     }
 
@@ -10119,6 +10437,95 @@ mod request_tests {
         );
     }
 
+    /// A declaration cell's own GHC validation runs off-checkout, against a
+    /// private candidate directory — so two actors declaring concurrently,
+    /// in the SAME lexical scope (unlike
+    /// [`actor_registry_fixture_two_scopes`], which deliberately isolates
+    /// scopes to avoid this exact contention), must race for the one shared
+    /// `next_declaration_module()` generation: whichever installs second sees
+    /// its candidate go stale at `finalize_cell_install` and retries against
+    /// a fresh snapshot ([`Self::prepare_cell`]'s bounded
+    /// `MAX_SPLIT_ATTEMPTS` loop). Both must still land, with two DISTINCT
+    /// generations, and — the property this split exists to preserve — the
+    /// shared session root must end up with exactly those two real, complete
+    /// modules: no half-written or overwritten candidate from the loser's
+    /// discarded attempt, because a candidate never touches the root until
+    /// its own `adopt_staged_declaration_in` succeeds.
+    #[tokio::test]
+    async fn cell_split_concurrent_declarations_in_one_scope_retry_without_a_torn_lib_module() {
+        let (machines, context_a, source, root) = actor_registry_fixture();
+        let mut context_b = context_a.clone();
+        let mut context_a = context_a;
+        context_a.actor = crate::ActorRef::first(crate::ActorId(301));
+        context_b.actor = crate::ActorRef::first(crate::ActorId(302));
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            machines,
+            source,
+            None,
+            None,
+            vec![],
+        ));
+
+        let wb_a = Arc::clone(&workbench);
+        let wb_b = Arc::clone(&workbench);
+        let cell_a = "concurrentDeclA x = x + (1 :: Int)".to_string();
+        let cell_b = "concurrentDeclB x = x * (2 :: Int)".to_string();
+
+        let (result_a, result_b) = tokio::join!(
+            wb_a.prepare_cell(context_a, cell_a),
+            wb_b.prepare_cell(context_b, cell_b)
+        );
+        let (checked_a, prepared_a) = result_a.expect("actor A's declaration prepares");
+        let (checked_b, prepared_b) = result_b.expect("actor B's declaration prepares");
+        assert!(checked_a
+            .items
+            .iter()
+            .any(|item| item.verdict.kind == TurnKind::Decl));
+        assert!(checked_b
+            .items
+            .iter()
+            .any(|item| item.verdict.kind == TurnKind::Decl));
+
+        let generation_of = |prepared: PreparedCell| {
+            let PreparedCell::Ready { mut items, .. } = prepared else {
+                panic!("a declaration cell should prepare as Ready");
+            };
+            match items.remove(0).ready {
+                PreparedCellStep::Declaration { generation, .. } => generation,
+                _ => panic!("the declaration item must use the declaration plane"),
+            }
+        };
+        let generation_a = generation_of(prepared_a);
+        let generation_b = generation_of(prepared_b);
+        assert_ne!(
+            generation_a, generation_b,
+            "two concurrent declarations in one scope must land at distinct generations"
+        );
+
+        let lib_dir = root.path().join("Tidepool/Session/Lib");
+        let mut entries = std::fs::read_dir(&lib_dir)
+            .expect("the declaration plane wrote its include tree")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["G1.hs".to_string(), "G2.hs".to_string()],
+            "exactly the two installed generations, no torn or orphaned candidate: {entries:?}"
+        );
+        let g1 = std::fs::read_to_string(lib_dir.join("G1.hs")).expect("G1.hs is a real file");
+        let g2 = std::fs::read_to_string(lib_dir.join("G2.hs")).expect("G2.hs is a real file");
+        assert!(
+            g1.contains("concurrentDeclA") || g2.contains("concurrentDeclA"),
+            "concurrentDeclA must appear in exactly one installed generation: G1={g1:?} G2={g2:?}"
+        );
+        assert!(
+            g1.contains("concurrentDeclB") || g2.contains("concurrentDeclB"),
+            "concurrentDeclB must appear in exactly one installed generation: G1={g1:?} G2={g2:?}"
+        );
+    }
+
     /// A rejection `revalidate_cell_rejection` was produced against — the
     /// exact `c_view` `compile_cell_items_off_checkout` compiled against —
     /// must not be trusted once another binding invalidates that view before
@@ -10153,6 +10560,7 @@ mod request_tests {
             &[],
             &snapshot,
             checked.items.len(),
+            None,
         )
         .expect("reserve generations");
         let CellReservation::Ready(ready) = reservation else {
@@ -10224,6 +10632,7 @@ mod request_tests {
             &[],
             &retry_snapshot,
             retry_checked.items.len(),
+            None,
         )
         .expect("retry reserve generations");
         let CellReservation::Ready(retry_ready) = retry_reservation else {
@@ -10233,6 +10642,7 @@ mod request_tests {
             view: retry_view,
             retained: retry_retained,
             visible_names: retry_visible_names,
+            declaration: _,
         } = *retry_ready;
         let retry_outcome = compile_cell_items_off_checkout(
             &context,
@@ -10243,6 +10653,8 @@ mod request_tests {
             retry_view.clone(),
             &retry_retained,
             &retry_visible_names,
+            None,
+            None,
         )
         .expect("retry item compile");
         let CellItemsOutcome::Ready(retry_items) = retry_outcome else {
@@ -10255,7 +10667,9 @@ mod request_tests {
             &[],
             retry_snapshot.candidate_module,
             &retry_view,
+            &retry_checked,
             retry_items,
+            None,
         )
         .expect("retry finalize install");
         assert!(
