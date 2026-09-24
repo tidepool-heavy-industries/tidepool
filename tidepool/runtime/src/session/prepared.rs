@@ -236,6 +236,8 @@ impl PreparedRuntimeError {
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::ForeignExternals
+                // An evacuation refusal leaves both machines as they were.
+                | ExecutionError::Evacuation(_)
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
                 | ExecutionError::Answer(_)
