@@ -699,14 +699,36 @@ fn host_carrier_mounts_two_json_payloads_from_one_compile() {
     //
     // NOTE: reading the carried `Aeson.Value`s back with a `case` pattern
     // match on their constructor (`Aeson.Object fields -> ...`) reliably
-    // produces a JIT `CaseMiss` here, even though `Aeson.Object`'s stable
-    // constructor id (`Tidepool.Identity.varId`'s data-con path, itself a
-    // `stableVarId` over the constructor's work-id name -- deterministic,
-    // not generation-salted) should be identical however the value's
-    // program was installed. This reproduces regardless of which
-    // generation the mount targets, including the anchor's own generation,
-    // so it is not a generation mismatch. It was NOT root-caused in this
-    // pass -- see the task report. Until it is, do not read a
+    // produces a JIT `CaseMiss` here. Root-caused to this precise scope by a
+    // set of control experiments (see the task report for the full trail):
+    //   - the retained-generation LINK itself is correct: the consumer
+    //     turn's own `GlobalDecl` for the mounted name has the exact
+    //     identity (unit, module, occurrence) and `required_generation`
+    //     `bind_prepared` stored, and the `Object` constructor's `host_id`
+    //     the carrier used to BUILD the value is byte-identical to the one
+    //     the consumer's own compile declares for its `case`;
+    //   - reusing the SAME cloned carrier `table`/`prepared` through
+    //     `mount_json_binding_in` directly, with the REAL extract-minted
+    //     binder (module injected normally via `--inject-val`), reads back
+    //     correctly -- ruling out `HostCarrier`'s clone-and-reinstall of
+    //     `table`/`prepared` as the cause;
+    //   - going through `mount_carrier_in` with a binder whose name and
+    //     `var_id` exactly match the anchor's own (so the ONLY change from
+    //     the working case is that the mount excludes the generation from
+    //     `--inject-val` and relies on the hand-written `Val.G<gen>.hs`
+    //     stub on the include path) still `CaseMiss`es identically.
+    // So the break is specific to a retained-generation value whose
+    // defining module is compiled as an EXTRA home module alongside the
+    // reference turn (the hand-written stub), as opposed to injected via
+    // `--inject-val`: something about that path causes the constructor
+    // descriptor the value was built with and the one the reference turn's
+    // `case` dispatch compares against to diverge at the machine level,
+    // despite agreeing on `host_id`. This needs either a fix on the GHC
+    // extractor side (`ExecutionProjection.hs`'s per-home-module
+    // constructor-descriptor emission) or deeper investigation of
+    // `tidepool-codegen`'s descriptor interner
+    // (`prepared_program/interner.rs`, `machine.rs::install_staged`) by
+    // someone with more context there. Until it is fixed, do not read a
     // `HostCarrier`-mounted `Aeson.Value` back with a constructor `case` in
     // production code.
     let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view(
