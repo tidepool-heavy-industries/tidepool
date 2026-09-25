@@ -25,6 +25,7 @@ fn unacknowledged_rows_survive_reopen_and_sequences_continue() {
             payload: "two".to_string(),
             publication: None,
             receipt_context: None,
+            redelivery: None,
         }]
     );
     assert_eq!(reopened.publish("three".into()).unwrap().sequence, 3);
@@ -711,3 +712,96 @@ fn legacy_pending_cannot_expose_tracked_payload_before_or_after_restart() {
 #[cfg(target_os = "linux")]
 #[path = "strict_faults.rs"]
 mod strict_faults;
+
+#[test]
+fn redelivery_keeps_payload_and_provenance_and_fences_the_retired_sequence() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let context: String = "run-a/inbox/actor-7.1".into();
+    let stuck = inbox
+        .publish_tracked("fenced message".into(), context.clone())
+        .unwrap();
+    let later = inbox
+        .publish_tracked("later message".into(), context.clone())
+        .unwrap();
+    inbox
+        .begin_tracked_delivery(stuck.sequence)
+        .unwrap()
+        .unconfirmed()
+        .unwrap();
+    assert!(matches!(
+        inbox.redeliver_withdrawn(later.sequence, &context, false),
+        Err(InboxError::ReceiptTransition { .. })
+    ));
+    assert!(matches!(
+        inbox.redeliver_withdrawn(stuck.sequence, &"other".into(), false),
+        Err(InboxError::ReceiptContextMismatch { .. })
+    ));
+
+    let redelivered = inbox
+        .redeliver_withdrawn(stuck.sequence, &context, true)
+        .unwrap();
+    assert_eq!(redelivered.sequence, 3);
+    assert_eq!(redelivered.payload, "fenced message");
+    assert_eq!(redelivered.receipt_context.as_ref(), Some(&context));
+    assert_eq!(
+        redelivered.redelivery,
+        Some(Redelivery {
+            of: stuck.sequence,
+            possibly_seen: true,
+        })
+    );
+    assert_eq!(phase(&inbox, stuck.sequence), DeliveryPhase::Withdrawn);
+    assert_eq!(phase(&inbox, redelivered.sequence), DeliveryPhase::Accepted);
+    assert_eq!(inbox.cursor(), stuck.sequence);
+    assert!(inbox.begin_tracked_delivery(stuck.sequence).is_err());
+    assert!(inbox
+        .redeliver_withdrawn(stuck.sequence, &context, true)
+        .is_err());
+    drop(inbox);
+
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Withdrawn);
+    assert_eq!(reopened.cursor(), stuck.sequence);
+    assert_eq!(
+        reopened.front_pending().unwrap().unwrap().sequence,
+        later.sequence
+    );
+    assert!(reopened.begin_tracked_delivery(stuck.sequence).is_err());
+}
+
+#[test]
+fn redelivery_after_a_lost_retirement_write_does_not_queue_twice() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let context: String = "run-a/inbox/actor-7.1".into();
+    let stuck = inbox
+        .publish_tracked("fenced message".into(), context.clone())
+        .unwrap();
+    inbox
+        .begin_tracked_delivery(stuck.sequence)
+        .unwrap()
+        .unconfirmed()
+        .unwrap();
+    // The replacement row reached the log; the retirement checkpoint did not.
+    inbox
+        .publish_inner(
+            "fenced message".into(),
+            None,
+            Some(context.clone()),
+            Some(Redelivery {
+                of: stuck.sequence,
+                possibly_seen: false,
+            }),
+        )
+        .unwrap();
+    drop(inbox);
+
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Unconfirmed);
+    let redelivered = reopened
+        .redeliver_withdrawn(stuck.sequence, &context, false)
+        .unwrap();
+    assert_eq!(redelivered.sequence, 2);
+    assert_eq!(reopened.watermark(), 2);
+    assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Withdrawn);
+    assert_eq!(reopened.front_pending().unwrap().unwrap().sequence, 2);
+}

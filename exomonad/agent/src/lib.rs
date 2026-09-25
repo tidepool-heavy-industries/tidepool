@@ -35,7 +35,7 @@ pub use interactive::{
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
     InteractiveSessionBinding, InteractiveShellTools, NativeApplicationInstance,
     NativeCommandOperation, NativeCommandReply, NativeSessionGeneration, QueueReadyThread,
-    MAX_INTERACTIVE_INPUT_BYTES,
+    INPUT_CONTROL_DEADLINE, MAX_INTERACTIVE_INPUT_BYTES,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,

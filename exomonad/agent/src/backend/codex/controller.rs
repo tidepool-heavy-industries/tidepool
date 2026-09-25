@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::{InteractiveSessionBinding, QueueReadyThread};
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
-const OPERATION_DEADLINE: Duration = Duration::from_secs(35);
+const OPERATION_DEADLINE: Duration = crate::interactive::INPUT_CONTROL_DEADLINE;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum Failure {

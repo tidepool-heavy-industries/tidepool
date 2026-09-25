@@ -29,6 +29,20 @@ pub struct DurableEnvelope<T, R = ()> {
         deserialize_with = "deserialize_receipt_context"
     )]
     pub receipt_context: Option<R>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redelivery: Option<Redelivery>,
+}
+
+/// Marks a tracked row that carries the payload and provenance of an earlier
+/// row whose native input was withdrawn (see `DurableInbox::redeliver_withdrawn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Redelivery {
+    /// The retired sequence this row replaces.
+    pub of: u64,
+    /// Native input control had admitted the retired row and could not say
+    /// whether it reached the model, so the recipient may have seen it.
+    pub possibly_seen: bool,
 }
 
 fn deserialize_receipt_context<'de, D, R>(deserializer: D) -> Result<Option<R>, D::Error>
@@ -370,7 +384,7 @@ where
     }
 
     pub fn publish(&self, payload: T) -> Result<DurableEnvelope<T, R>, InboxError> {
-        self.publish_inner(payload, None, None)?
+        self.publish_inner(payload, None, None, None)?
             .ok_or_else(|| InboxError::Corrupt("unkeyed publication was deduplicated".into()))
     }
     pub fn publish_latest(
@@ -379,15 +393,90 @@ where
         revision: u64,
         payload: T,
     ) -> Result<Option<DurableEnvelope<T, R>>, InboxError> {
-        self.publish_inner(payload, Some(PublicationStamp { stream, revision }), None)
+        self.publish_inner(
+            payload,
+            Some(PublicationStamp { stream, revision }),
+            None,
+            None,
+        )
     }
     pub fn publish_tracked(
         &self,
         payload: T,
         context: R,
     ) -> Result<DurableEnvelope<T, R>, InboxError> {
-        self.publish_inner(payload, None, Some(context))?
+        self.publish_inner(payload, None, Some(context), None)?
             .ok_or_else(|| InboxError::Corrupt("tracked publication was deduplicated".into()))
+    }
+
+    /// Retire the tracked front row `sequence`, whose native input was
+    /// withdrawn, and queue its payload and provenance again as a new tracked
+    /// row at the back of the queue. The retired sequence becomes `Withdrawn`
+    /// and acknowledged, so it can never be sent again; the new row starts
+    /// `Accepted` under a fresh sequence. With `possibly_seen` the native side
+    /// had admitted the retired input without proving whether the model saw
+    /// it; `Withdrawn` then records only that it will not be dispatched again.
+    ///
+    /// The append precedes the retirement. If the retirement write is lost,
+    /// a repeated call finds the already-queued replacement and only retires,
+    /// so a crash between the two writes never queues the payload twice.
+    pub fn redeliver_withdrawn(
+        &self,
+        sequence: u64,
+        context: &R,
+        possibly_seen: bool,
+    ) -> Result<DurableEnvelope<T, R>, InboxError> {
+        let (payload, existing) = {
+            let state = lock_state(&self.state);
+            healthy(&state)?;
+            let evidence = state
+                .checkpoint
+                .receipts
+                .get(&sequence)
+                .ok_or(InboxError::ReceiptUnavailable { sequence })?;
+            if &evidence.context != context {
+                return Err(InboxError::ReceiptContextMismatch { sequence });
+            }
+            if !matches!(
+                evidence.phase,
+                DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed
+            ) {
+                return Err(InboxError::ReceiptTransition {
+                    sequence,
+                    phase: evidence.phase,
+                });
+            }
+            let front = state
+                .pending
+                .front()
+                .filter(|row| row.sequence == sequence)
+                .ok_or(InboxError::TrackedBarrier { sequence })?;
+            let existing = state
+                .pending
+                .iter()
+                .find(|row| {
+                    row.redelivery
+                        .is_some_and(|redelivery| redelivery.of == sequence)
+                })
+                .cloned();
+            (front.payload.clone(), existing)
+        };
+        let envelope = match existing {
+            Some(envelope) => envelope,
+            None => self
+                .publish_inner(
+                    payload,
+                    None,
+                    Some(context.clone()),
+                    Some(Redelivery {
+                        of: sequence,
+                        possibly_seen,
+                    }),
+                )?
+                .ok_or_else(|| InboxError::Corrupt("redelivery was deduplicated".into()))?,
+        };
+        self.transition_exact(sequence, context, DeliveryPhase::Withdrawn)?;
+        Ok(envelope)
     }
 
     fn publish_inner(
@@ -395,6 +484,7 @@ where
         payload: T,
         publication: Option<PublicationStamp>,
         context: Option<R>,
+        redelivery: Option<Redelivery>,
     ) -> Result<Option<DurableEnvelope<T, R>>, InboxError> {
         let mut state = lock_state(&self.state);
         healthy(&state)?;
@@ -416,6 +506,7 @@ where
             payload,
             publication,
             receipt_context: context,
+            redelivery,
         };
         let line = serde_json::to_string(&envelope).map_err(corrupt)?;
         if let Some(context) = &envelope.receipt_context {
