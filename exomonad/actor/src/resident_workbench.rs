@@ -3196,16 +3196,21 @@ where
     /// first time only now ([`finalize_cell_install`]). Each re-checkout
     /// detects a stale snapshot via
     /// [`crate::ActorCompileView::compile_relevant_eq`] and an unchanged
-    /// `next_declaration_module()`, up to `MAX_SPLIT_ATTEMPTS` times. Only
-    /// once those bounded retries are exhausted does this fall back to
-    /// [`Self::prepare_cell_single_checkout`], whose one exclusive checkout
-    /// stays held across its own declaration staging and every item compile.
+    /// `next_declaration_module()` ([`split_staleness`]).
+    ///
+    /// The split is attempted once. The first stale re-checkout falls
+    /// straight through to [`Self::prepare_cell_single_checkout`], whose one
+    /// exclusive checkout stays held across its own declaration staging and
+    /// every item compile and so cannot go stale. An inherited-context fork
+    /// shares its parent's scope chain, and a parent committing cells goes
+    /// stale faster than a split compile completes: a second split attempt
+    /// would repeat the same GHC work against a view the parent is still
+    /// moving, not wait for it to settle.
     pub(crate) async fn prepare_cell(
         &self,
         context: crate::ActorSessionContext,
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
-        const MAX_SPLIT_ATTEMPTS: u32 = 3;
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
@@ -3259,7 +3264,7 @@ where
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
 
-        for _ in 0..MAX_SPLIT_ATTEMPTS {
+        let (stage, changed) = 'split: {
             let snapshot_source = self.access.source.clone();
             let snapshot_type_modules = Arc::clone(&type_modules);
             let snapshot_response = response.clone();
@@ -3358,7 +3363,7 @@ where
                 })
                 .await?;
             let (c_view, retained, visible_names, declaration_candidate) = match reservation {
-                CellReservation::Stale => continue,
+                CellReservation::Stale(changed) => break 'split ("reservation", changed),
                 CellReservation::Ready(ready) => {
                     let CellReservationReady {
                         view,
@@ -3492,14 +3497,12 @@ where
                     // the machine was released for this compile. Re-derive
                     // the view once more before trusting it: if something
                     // else wrote to a scope this compile actually read from
-                    // in the meantime, the rejection is stale and this
-                    // attempt must recompile against a fresh snapshot,
-                    // exactly as `begin_fragment_split`'s off-checkout
-                    // rejection and this same split's install-time mismatch
-                    // already do. A rejected declaration item's own candidate
-                    // was validated against a private directory dropped when
-                    // this compile finished, so there is nothing further to
-                    // discard here.
+                    // in the meantime, the rejection is stale and the cell
+                    // recompiles under one checkout, exactly as this same
+                    // split's install-time mismatch does. A rejected
+                    // declaration item's own candidate was validated against
+                    // a private directory dropped when this compile
+                    // finished, so there is nothing further to discard here.
                     let revalidate_source = source.clone();
                     let revalidate_type_modules = Arc::clone(&type_modules);
                     let revalidate_against = c_view.clone();
@@ -3517,18 +3520,24 @@ where
                             )
                         })
                         .await?;
-                    if matches!(revalidation, CellRejectionRevalidation::StillCurrent) {
-                        if let Some(guard) = leased_input.take() {
-                            guard.retire(&self.access).await;
+                    match revalidation {
+                        CellRejectionRevalidation::StillCurrent => {
+                            if let Some(guard) = leased_input.take() {
+                                guard.retire(&self.access).await;
+                            }
+                            cancel_on_drop.0 = None;
+                            return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
                         }
-                        cancel_on_drop.0 = None;
-                        return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
+                        CellRejectionRevalidation::Stale(changed) => {
+                            break 'split ("rejection revalidation", changed)
+                        }
                     }
-                    continue;
                 }
                 CellItemsOutcome::Ready(items) => items,
             };
 
+            #[cfg(test)]
+            split_probe::before_install().await;
             let install_source = source.clone();
             let install_type_modules = Arc::clone(&type_modules);
             let candidate_module = snapshot.candidate_module;
@@ -3558,13 +3567,16 @@ where
                     cancel_on_drop.0 = None;
                     return Ok((checked, prepared));
                 }
-                CellInstall::Stale => continue,
+                CellInstall::Stale(changed) => ("install", changed),
             }
-        }
+        };
 
-        // Contention exhausted the bounded split-compile retries — fall
-        // back to the original single-checkout path, whose one exclusive
-        // borrow cannot itself observe a stale view.
+        tracing::info!(
+            actor = context.actor.id.0,
+            stage,
+            changed = ?changed,
+            "split cell compile went stale; compiling under one checkout"
+        );
         if let Some(guard) = leased_input.take() {
             guard.retire(&self.access).await;
         }
@@ -3574,16 +3586,16 @@ where
     }
 
     /// The original, unsplit whole-cell preparation: one exclusive machine
-    /// checkout for the whole-cell check and every item's compile. Cells
-    /// with a `Decl` item always run this path — declaration staging writes
-    /// and validates the next Lib module in the shared session root, which
-    /// must stay serialized. [`Self::prepare_cell`]'s bounded split-compile
-    /// retries also fall back here when they run out.
+    /// checkout for the whole-cell check and every item's compile, so it
+    /// cannot observe a stale view. [`Self::prepare_cell`] falls back here
+    /// when its one split attempt goes stale.
     async fn prepare_cell_single_checkout(
         &self,
         context: crate::ActorSessionContext,
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
+        #[cfg(test)]
+        split_probe::single_checkout();
         let json_input = self.json_input.clone();
         let response = self.response.clone();
         let request = self.request;
@@ -8231,7 +8243,7 @@ struct CellSplitSnapshot {
 
 /// Take the checkout-scoped snapshot a split cell preparation needs, then
 /// release the checkout. The request's JSON input carrier, when present, is
-/// mounted once by the caller before the retry loop begins (`prepare_cell`)
+/// mounted once by the caller before the split begins (`prepare_cell`)
 /// and stays leased and un-retired across every checkout this split releases
 /// and re-acquires — this only extends `source`'s imports/preamble to name
 /// the already-mounted binding, so a later checkout's fresh view still
@@ -8414,7 +8426,7 @@ fn fold_result_matches_generation(
 /// The outcome of [`reserve_cell_generations`]'s re-checkout: either the
 /// snapshot is still fresh and every item's value generation is reserved, or
 /// something else wrote to a scope this compile actually read from and the
-/// caller must retry from a fresh snapshot.
+/// caller must discard the split and compile under one checkout.
 struct CellReservationReady {
     view: crate::ActorCompileView,
     retained: Vec<(SymbolIdentity, u64)>,
@@ -8432,7 +8444,49 @@ struct CellReservationReady {
 
 enum CellReservation {
     Ready(Box<CellReservationReady>),
-    Stale,
+    Stale(SplitStaleView),
+}
+
+/// Which part of the session a split-compile re-checkout found changed since
+/// the snapshot it compiled against. Named in the INFO line
+/// [`ResidentActorWorkbench::prepare_cell`] logs when it falls back to the
+/// single-checkout compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitStaleView {
+    /// [`crate::ActorCompileView::compile_relevant_eq`] failed: a scope this
+    /// cell reads (for an inherited-context fork, usually the parent's)
+    /// committed a value, import, or declaration.
+    CompileView,
+    /// The session-wide declaration log's next module advanced, so this
+    /// cell's declaration candidate names a generation someone else took.
+    DeclarationModule,
+    /// Adopting the already-validated declaration candidate lost the race
+    /// for its generation.
+    StagedDeclaration,
+}
+
+/// The freshness check every split-compile re-checkout makes: the compile
+/// view first, then (when this cell's work depends on it) the declaration
+/// log's next module.
+fn split_staleness<H, O>(
+    session: &ResidentSession<H, O>,
+    fresh: &crate::ActorCompileView,
+    compiled_against: &crate::ActorCompileView,
+    candidate_module: Option<tidepool_repr::SessionModule>,
+) -> Option<SplitStaleView>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if !fresh.compile_relevant_eq(compiled_against) {
+        return Some(SplitStaleView::CompileView);
+    }
+    match candidate_module {
+        Some(candidate) if session.next_declaration_module() != Some(candidate) => {
+            Some(SplitStaleView::DeclarationModule)
+        }
+        _ => None,
+    }
 }
 
 /// Re-checkout after the whole-cell check to revalidate `snapshot` and
@@ -8480,10 +8534,9 @@ where
     // every actor's declaration as invalidating every other actor's
     // in-flight split compile, which is what produced the stale-retry
     // storm the split compile exists to avoid.
-    let candidate_stale = declaration_receipt.is_some()
-        && session.next_declaration_module() != Some(snapshot.candidate_module);
-    if !fresh_view.compile_relevant_eq(&snapshot.view) || candidate_stale {
-        return Ok(CellReservation::Stale);
+    let candidate = declaration_receipt.map(|_| snapshot.candidate_module);
+    if let Some(changed) = split_staleness(session, &fresh_view, &snapshot.view, candidate) {
+        return Ok(CellReservation::Stale(changed));
     }
     if value_item_count > 0 {
         let g0 = fresh_view.next_value_generation();
@@ -8638,11 +8691,11 @@ fn compile_cell_items_off_checkout(
 
 /// The outcome of [`revalidate_cell_rejection`]'s re-checkout: either the
 /// view [`compile_cell_items_off_checkout`] rejected against is still
-/// current, so the rejection stands, or the caller must retry the whole
-/// split from a fresh snapshot instead of trusting a stale rejection.
+/// current, so the rejection stands, or the caller must discard the split
+/// and compile under one checkout instead of trusting a stale rejection.
 enum CellRejectionRevalidation {
     StillCurrent,
-    Stale,
+    Stale(SplitStaleView),
 }
 
 /// Re-checkout after an off-checkout item compile rejects, to check whether
@@ -8670,20 +8723,23 @@ where
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
-    if !fresh_view.compile_relevant_eq(compiled_against)
-        || session.next_declaration_module() != Some(candidate_module)
-    {
-        return Ok(CellRejectionRevalidation::Stale);
+    if let Some(changed) = split_staleness(
+        session,
+        &fresh_view,
+        compiled_against,
+        Some(candidate_module),
+    ) {
+        return Ok(CellRejectionRevalidation::Stale(changed));
     }
     Ok(CellRejectionRevalidation::StillCurrent)
 }
 
 /// The outcome of [`finalize_cell_install`]'s re-checkout: either the
 /// snapshot the items compiled against is still fresh and the cell installs,
-/// or the caller must retry the whole split from a fresh snapshot.
+/// or the caller must discard the split and compile under one checkout.
 enum CellInstall {
     Ready(PreparedCell),
-    Stale,
+    Stale(SplitStaleView),
 }
 
 /// Re-checkout after every item compiled to revalidate against the exact
@@ -8720,10 +8776,13 @@ where
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
-    if !fresh_view.compile_relevant_eq(compiled_against)
-        || session.next_declaration_module() != Some(candidate_module)
-    {
-        return Ok(CellInstall::Stale);
+    if let Some(changed) = split_staleness(
+        session,
+        &fresh_view,
+        compiled_against,
+        Some(candidate_module),
+    ) {
+        return Ok(CellInstall::Stale(changed));
     }
     if let Some(staged) = staged {
         let declaration_index = checked
@@ -8739,7 +8798,7 @@ where
         let generation = match session.adopt_staged_declaration_in(staged) {
             Ok(commit) => commit.generation,
             Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration) => {
-                return Ok(CellInstall::Stale)
+                return Ok(CellInstall::Stale(SplitStaleView::StagedDeclaration))
             }
             Err(error) => {
                 return Err(ResidentActorWorkbenchError::Resident(
@@ -9918,6 +9977,49 @@ fn projected_binding_receipt(
         receipt.push_str(&output.join("\n"));
     }
     Ok(receipt)
+}
+
+/// Test-only observation of [`ResidentActorWorkbench::prepare_cell`]: a
+/// task-local probe (absent outside a test's `scope`) that counts split
+/// install checkouts and single-checkout compiles, and can hold the first
+/// install checkout until the test has mutated the session.
+#[cfg(test)]
+mod split_probe {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    pub(super) struct SplitProbe {
+        pub(super) install_checkouts: AtomicUsize,
+        pub(super) single_checkout_compiles: AtomicUsize,
+        pub(super) install_reached: tokio::sync::Notify,
+        pub(super) resume_install: tokio::sync::Notify,
+    }
+
+    tokio::task_local! {
+        pub(super) static PROBE: Arc<SplitProbe>;
+    }
+
+    /// Count this install checkout; hold the first one until resumed.
+    pub(super) async fn before_install() {
+        let Ok(probe) = PROBE.try_with(Arc::clone) else {
+            return;
+        };
+        if probe.install_checkouts.fetch_add(1, Ordering::SeqCst) == 0 {
+            probe.install_reached.notify_one();
+            probe.resume_install.notified().await;
+        }
+    }
+
+    pub(super) fn single_checkout() {
+        PROBE
+            .try_with(|probe| {
+                probe
+                    .single_checkout_compiles
+                    .fetch_add(1, Ordering::SeqCst)
+            })
+            .ok();
+    }
 }
 
 #[cfg(test)]
@@ -11522,8 +11624,7 @@ mod request_tests {
         let cell = "onlyItem <- pure (1 :: Int)";
 
         // Each attempt snapshots from the pristine base source, exactly as
-        // `prepare_cell`'s retry loop re-clones `self.access.source` every
-        // iteration — never from a previous attempt's already-mutated
+        // `prepare_cell` clones `self.access.source` for its snapshot — never from a previous attempt's already-mutated
         // source, which would double up its per-transaction preamble.
         let (source, snapshot) = snapshot_cell_split(
             &mut session,
@@ -11600,12 +11701,11 @@ mod request_tests {
         )
         .expect("finalize install");
         assert!(
-            matches!(install, CellInstall::Stale),
+            matches!(install, CellInstall::Stale(SplitStaleView::CompileView)),
             "an interleaved mutation must invalidate the snapshot"
         );
 
-        // A fresh snapshot recompiles and installs cleanly — the
-        // bounded-retry recovery `prepare_cell` relies on. Snapshots again
+        // A fresh snapshot recompiles and installs cleanly. Snapshots again
         // from the pristine base source, not the mutated one above.
         let (source, retry_snapshot) =
             snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
@@ -12553,7 +12653,7 @@ mod request_tests {
 
     /// A request workbench's mounted JSON input must stay resolvable across
     /// every checkout `prepare_cell`'s split releases and re-acquires: the
-    /// input is mounted once, before the retry loop, and must not be
+    /// input is mounted once, before the split, and must not be
     /// retired until every off-checkout step that reads it (the whole-cell
     /// check and each item's compile) has finished. A two-item bind cell
     /// with one item reading `input` reproduces the exact shape that used
@@ -12705,6 +12805,72 @@ mod request_tests {
             scope.compile_count(),
             2,
             "a declaration cell is unaffected by the fold"
+        );
+    }
+
+    /// An inherited-context fork's parent can commit between the split's
+    /// off-checkout compile and its install checkout. The first stale
+    /// install must fall straight through to the single-checkout compile:
+    /// one split compile (the folded check), one install checkout, one
+    /// single-checkout compile, and no second split attempt.
+    #[tokio::test]
+    async fn stale_split_install_falls_back_to_one_single_checkout_compile() {
+        use std::sync::atomic::Ordering;
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let actor_id = context.actor.id.0;
+        let actor_incarnation = context.actor.incarnation.0;
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "answer <- pure (1 :: Int)".to_string();
+
+        let probe = Arc::new(split_probe::SplitProbe::default());
+        let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
+        let prepare = split_probe::PROBE.scope(
+            Arc::clone(&probe),
+            scope.run(workbench.prepare_cell(context.clone(), cell)),
+        );
+        // Stand in for the parent committing a binding in the scope this
+        // cell reads while the split's compile is off-checkout.
+        let interlope = async {
+            probe.install_reached.notified().await;
+            let interloper_source = workbench.access.source.clone();
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    mount_text_binding(
+                        session,
+                        context,
+                        &interloper_source,
+                        &[],
+                        "interloper",
+                        "interloper text",
+                        None,
+                    )
+                })
+                .await
+                .expect("interloping binding mounts");
+            probe.resume_install.notify_one();
+        };
+        let (prepared, ()) = tokio::join!(prepare, interlope);
+        let (checked, prepared) = prepared.expect("the cell prepares after the stale split");
+        assert_eq!(checked.items.len(), 1, "{checked:?}");
+        assert!(
+            matches!(prepared, PreparedCell::Ready { .. }),
+            "the single-checkout fallback prepares the cell"
+        );
+        assert_eq!(
+            probe.install_checkouts.load(Ordering::SeqCst),
+            1,
+            "exactly one split attempt reached its install checkout"
+        );
+        assert_eq!(
+            scope.compile_count(),
+            1,
+            "only the first split attempt's folded compile ran off-checkout"
+        );
+        assert_eq!(
+            probe.single_checkout_compiles.load(Ordering::SeqCst),
+            1,
+            "the stale install falls through to exactly one single-checkout compile"
         );
     }
 
@@ -12957,9 +13123,8 @@ mod request_tests {
     /// [`actor_registry_fixture_two_scopes`], which deliberately isolates
     /// scopes to avoid this exact contention), must race for the one shared
     /// `next_declaration_module()` generation: whichever installs second sees
-    /// its candidate go stale at `finalize_cell_install` and retries against
-    /// a fresh snapshot ([`Self::prepare_cell`]'s bounded
-    /// `MAX_SPLIT_ATTEMPTS` loop). Both must still land, with two DISTINCT
+    /// its candidate go stale at `finalize_cell_install` and falls back to
+    /// [`Self::prepare_cell_single_checkout`]. Both must still land, with two DISTINCT
     /// generations, and — the property this split exists to preserve — the
     /// shared session root must end up with exactly those two real, complete
     /// modules: no half-written or overwritten candidate from the loser's
@@ -13046,9 +13211,7 @@ mod request_tests {
     /// the revalidation checkout runs: it must be reported `Stale`, exactly
     /// as `finalize_cell_install`'s own revalidation already is proven by
     /// `cell_split_scope_mutation_before_final_checkout_forces_a_recompile`.
-    /// A fresh snapshot recompiles and installs cleanly afterward — the
-    /// bounded-retry recovery `prepare_cell` relies on when a rejection
-    /// turns out stale.
+    /// A fresh snapshot recompiles and installs cleanly afterward.
     #[test]
     fn cell_split_item_rejection_before_revalidation_checkout_is_retried_on_a_stale_view() {
         let (mut session, context, base_source, _root) = host_mount_fixture();
@@ -13121,13 +13284,15 @@ mod request_tests {
         )
         .expect("revalidate against the mutated view");
         assert!(
-            matches!(revalidation, CellRejectionRevalidation::Stale),
+            matches!(
+                revalidation,
+                CellRejectionRevalidation::Stale(SplitStaleView::CompileView)
+            ),
             "an interleaved mutation must invalidate the rejected view, not settle it as current"
         );
 
-        // A fresh snapshot recompiles and installs cleanly — the
-        // bounded-retry recovery `prepare_cell` relies on once a rejection
-        // is found stale. Snapshots again from the pristine base source, not
+        // A fresh snapshot recompiles and installs cleanly. Snapshots
+        // again from the pristine base source, not
         // the mutated one above.
         let (source, retry_snapshot) =
             snapshot_cell_split(&mut session, &context, base_source, &[], None, None, None)
