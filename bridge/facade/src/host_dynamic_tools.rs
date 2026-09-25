@@ -39,7 +39,7 @@ pub(crate) fn validate_operation_recovery(path: PathBuf) -> Result<(), String> {
 
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
-const DESCRIPTION_LIMIT: usize = 1024;
+pub(crate) const DESCRIPTION_LIMIT: usize = 1024;
 pub(crate) const MODEL_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
