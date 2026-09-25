@@ -5484,7 +5484,7 @@ where
 
 #[cfg(test)]
 mod activation_preview_tests {
-    use super::{bounded_activation_text, declaration_worth_showing};
+    use super::{bounded_activation_text, declaration_worth_showing, ACTIVATION_INPUT_LIMIT};
 
     #[test]
     fn library_reply_type_declaration_is_not_worth_showing() {
@@ -5526,12 +5526,42 @@ mod activation_preview_tests {
         );
         assert_eq!(
             bounded_activation_text("aλz".into(), 2, true, "inspectFull sessionInput"),
-            "a\n<additional detail omitted; expand with `inspectFull sessionInput`>"
+            "a\n<additional detail omitted past the 2 bytes cap; expand with `inspectFull sessionInput`>"
         );
         assert_eq!(
             bounded_activation_text("data R".into(), 4, false, "lookup R"),
-            "data\n<additional detail omitted; expand with `lookup R`>"
+            "data\n<additional detail omitted past the 4 bytes cap; expand with `lookup R`>"
         );
+    }
+
+    #[test]
+    fn activation_renders_a_whole_task_and_names_the_cap_past_it() {
+        let task = format!(
+            "Task {{taskGroup = ForkGroupPath False \"wave/lane\", planPath = \"plans/x.md\", \
+             taskSource = GitOid \"3454b78\", obligation = \"{}\", rationale = \"r\", \
+             ownedPaths = [\"src/a.rs\"], acceptance = [\"tests pass\"], decisions = []}}",
+            "o".repeat(4 * 1024)
+        );
+        assert_eq!(
+            bounded_activation_text(
+                task.clone(),
+                ACTIVATION_INPUT_LIMIT,
+                false,
+                "inspectFull sessionInput"
+            ),
+            task
+        );
+        let oversized = "x".repeat(ACTIVATION_INPUT_LIMIT + 1);
+        let rendered = bounded_activation_text(
+            oversized,
+            ACTIVATION_INPUT_LIMIT,
+            false,
+            "inspectFull sessionInput",
+        );
+        assert!(rendered.starts_with(&"x".repeat(ACTIVATION_INPUT_LIMIT)));
+        assert!(rendered.ends_with(
+            "\n<additional detail omitted past the 32 KiB cap; expand with `inspectFull sessionInput`>"
+        ));
     }
 }
 
@@ -5543,9 +5573,10 @@ fn declaration_worth_showing(module: &str, workspace_modules: &[String]) -> bool
     module.starts_with("Tidepool.Session.") || workspace_modules.iter().any(|known| known == module)
 }
 
-// Bound the demanded character prefix as well as the rendered UTF-8 bytes.
-// The final byte clipping can shorten a multibyte prefix further.
-const ACTIVATION_INPUT_LIMIT: usize = 16 * 1024;
+// An assignment renders whole up to this cap. It bounds the demanded
+// character prefix as well as the rendered UTF-8 bytes; the final byte
+// clipping can shorten a multibyte prefix further.
+const ACTIVATION_INPUT_LIMIT: usize = 32 * 1024;
 
 fn bounded_activation_text(
     mut text: String,
@@ -5562,8 +5593,13 @@ fn bounded_activation_text(
         omitted = true;
     }
     if omitted {
+        let cap = if maximum.is_multiple_of(1024) {
+            format!("{} KiB", maximum / 1024)
+        } else {
+            format!("{maximum} bytes")
+        };
         text.push_str(&format!(
-            "\n<additional detail omitted; expand with `{expansion}`>"
+            "\n<additional detail omitted past the {cap} cap; expand with `{expansion}`>"
         ));
     }
     text

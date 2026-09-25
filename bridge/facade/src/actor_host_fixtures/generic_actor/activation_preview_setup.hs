@@ -7,3 +7,5 @@ let textPreview = "first line\nλ second line" :: Text
 type AssignmentText = Text
 let longTextPreview = T.pack (replicate 2000 'x') <> "\nFINAL-ACCEPTANCE-CONDITION" :: AssignmentText
 let oversizedTextPreview = T.pack (replicate 20000 'λ') <> "\nRETAINED-ASSIGNMENT-TAIL" :: Text
+data TaskPreview = TaskPreview { previewObligation :: Text, previewAcceptance :: [Text] } deriving Show
+let taskPreview = TaskPreview (T.pack (replicate 3000 'o')) ["STRUCTURED-ACCEPTANCE-TAIL"]

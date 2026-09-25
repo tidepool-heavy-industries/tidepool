@@ -3293,6 +3293,104 @@ async fn socket_postsubmission_error_and_retirement_report_retention() {
     }
 }
 
+/// A selected-context child inherits no model context, but it still has a
+/// supervisor: `parentAgent` names it, and `sendMessage` to that handle lands
+/// in the supervisor's tracked inbox.
+#[tokio::test]
+async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let root_id = campaign.actor.identity();
+    let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+    assert_eq!(setup["status"], "committed", "{setup:?}");
+    let child = campaign
+        .next_deployment(
+            "selected-context child policy",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    assert_eq!(child.context_parent, None, "startAgent selects its context");
+    assert_eq!(child.supervisor_parent, Some(root_id));
+    campaign
+        .next_deployment(
+            "selected-context child activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+    let supervisor = dispatch_haskell_script(
+        child.policy.as_ref(),
+        &format!(
+            "fmap (\\c -> contextSupervisorId c == Just {} && contextSupervisorIncarnation c == Just {}) actorContext",
+            root_id.id.0, root_id.incarnation.0
+        ),
+    )
+    .await;
+    assert_eq!(supervisor["status"], "committed", "{supervisor:?}");
+    assert_eq!(supervisor["items"][0]["output"], "True", "{supervisor:?}");
+    let policy = child.policy.clone();
+    let send = tokio::spawn(async move {
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "Just parent <- parentAgent\nRight receipt <- sendMessage parent \"checkpoint\"",
+        )
+        .await
+    });
+    let command = campaign
+        .next_deployment(
+            "child notification to its supervisor",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                other => Err(other),
+            },
+        )
+        .await;
+    assert_eq!(command.owner(), child.actor.identity());
+    assert_eq!(command.target(), root_id);
+    let directory = tempfile::tempdir().unwrap();
+    let inbox = ActorInbox::open(
+        directory.path().join("rows"),
+        directory.path().join("cursor"),
+    )
+    .unwrap();
+    let inbox_key = "supervisor-inbox";
+    admit_notification(&command, inbox_key.into(), &inbox);
+    let sent = send.await.unwrap();
+    assert_eq!(sent["status"], "committed", "{sent:?}");
+    let policy = child.policy.clone();
+    let poll = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+    });
+    let poll_command = campaign
+        .next_deployment(
+            "child notification poll",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::NotificationPoll(command) => Ok(command),
+                other => Err(other),
+            },
+        )
+        .await;
+    let result = observe_notification_receipt(&poll_command, root_id, inbox_key, &inbox);
+    assert_eq!(result, Ok(exomonad_actor::NotificationState::Accepted));
+    poll_command.observed(result);
+    let observed = poll.await.unwrap();
+    assert!(
+        observed.to_string().contains("NotificationAccepted"),
+        "{observed:?}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 #[tokio::test]
 async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     let mut campaign = test_campaign::TestCampaign::start().await;
