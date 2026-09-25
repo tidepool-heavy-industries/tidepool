@@ -676,3 +676,12 @@ plans/wave6-root-interview-digest.md)
   Host window, so the root's own decisions are data instead of pane text.
   Interim: the root writes its checkpoint into NEXT.md's obligations table
   (wave6-prompts-2).
+- **Turn ends without respond (seen in waves 0 and 6):** workspace code
+  cannot observe it; the only slot is `afterTool` (Contract.hs ~690-713),
+  and turn completion is engine-only (`ProviderTurnState::Succeeded` in
+  runtime_observation.rs; request openness in request.rs `OwnerState`).
+  Card: an `onTurnEnd` spec slot with its own dispatcher entry, fired from
+  the provider-turn completion in actor_host.rs, is the idle hook the
+  goal-style mechanism needs; wait for the new harness. Interim (lane
+  turn-end-reminder): the host itself pushes one line when a provider turn
+  ends with the actor's own request still open.
