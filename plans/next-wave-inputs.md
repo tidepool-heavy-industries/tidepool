@@ -426,3 +426,9 @@ Deferred, one card each:
   - `exomonad_control_contract::fork_options_are_optional...`: ForksStartWith
     has 16 arguments, the test expects 15; predates today's work.
   The notification-barrier regression (473a76215) is fixed in 8dfa4f6ba.
+- Flaky under load (2026-09-25): extractor daemon test
+  `an_idle_pooled_slot_pre_warms_from_the_first_requests_include_set`
+  polls for a pre-warm compile against a deadline; it failed the redeploy's
+  Nix build once while recipe runs loaded the host, with no daemon code
+  change since the wave-4 deploy. Wait on the pre-warm's completion event
+  instead of a deadline.
