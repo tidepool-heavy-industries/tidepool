@@ -25,3 +25,14 @@ configured finalize tool was fixed (dd3907b); the root scaffolded the
 offline release-gate test module (a6ac194) and forked the vertical-gate leaf
 plus an independent audit. That is the release test itself, the last step of
 the slice. No delta worth a note; the root is on the critical path.
+
+## 15:49Z wake
+
+Alive; 8.9 GiB available; 7 windows; no latched machine; no rejections; one
+nudge. Runtime fine (177 calls, wait p50 0, max 2.9 s; slowest compile
+8.4 s). No master commits in 30 minutes. The vertical release gate has a
+leaf, an audit, a review and a separate "fallback review" (two reviewers on
+one candidate), and the root is 25 minutes into one turn running cargo
+tests, past its own 15-minute rule, so the gate's replies wait unseen in its
+queue. Costliest delta: the root's long turn. Sent one note into the root's
+pane (lands after its next tool call): end the turn; keep one reviewer.
