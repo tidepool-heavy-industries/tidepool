@@ -432,15 +432,54 @@ Deferred, one card each:
   Nix build once while recipe runs loaded the host, with no daemon code
   change since the wave-4 deploy. Wait on the pre-warm's completion event
   instead of a deadline.
-- Delivery fence on a failed steer (wave 5 stall, 2026-09-25): a message
-  submitted while the target is inside a long tool call times out at 35 s,
-  Codex marks the host-input row Unknown and never claims it again, and the
-  Tidepool pump fences every later message behind it forever (1 s silent
-  re-query, deduped WARN, no withdraw, no Unknown branch). Fix on both
-  sides: Codex returns a steer failure as NotSubmitted (or keeps the row
-  claimable) instead of Unknown; the pump re-queries on turn completion and
-  idle, and after the target completes a turn that began after the submit
-  with the row still Unknown, withdraws it and resubmits labeled "possibly
-  already seen" (LateUpdateEvidence::Unconfirmed already fits); the WARN
-  repeats with a count. Also: a /goal-style standing objective the runtime
-  re-asserts on idle, mined from Codex.
+- Delivery fence on a hosted input during a computing cell (wave 5 stall,
+  2026-09-25; corrected after reading Codex's queue db: no host-input row
+  was ever admitted for core-lead, so the earlier "Codex marked it Unknown"
+  reading was wrong). Chain, verified in code and evidence:
+  1. The pump submits every tracked message as StartOrSteer through the
+     TUI's input-control socket with a 35 s operation deadline
+     (`exomonad/agent/src/backend/codex/controller.rs`).
+  2. The TUI's `control` handler runs `InputSettlementGate::before_input`
+     before admitting the input. When a `haskell` dynamic tool call is
+     active it does not queue behind it: it cancels it
+     (`tui/src/host_dynamic_tools/cancellation.rs`, `cancel_before_input`)
+     and waits for the call to reach a terminal settlement.
+  3. The host answers the cancel of a computing (not sleeping) cell with
+     NotSleeping (`exomonad/actor/src/resident_tools.rs`,
+     `cancel_workbench`), so the TUI parks in AwaitingTerminal.
+  4. Nothing ever records the terminal: `ActiveHostedCall::complete_from_call`
+     has no production caller; the normal completion path
+     (`tui/src/app/event_dispatch.rs`, DynamicToolCallCompleted) only calls
+     `finish_cancellable_call`, which resolves a Terminal phase and clears
+     the gate but never notifies a waiter. The exchange hangs forever, so the
+     input is never admitted. Only the sleeping-cell path (Cancelled/Expired)
+     records a terminal and works.
+  5. The host stops waiting at 35 s but deliberately leaves the connection
+     open (7ca95b644), marks the durable row Unconfirmed, and re-queries
+     every 1 s. Codex answers EvidenceUnavailable (no row); the host maps
+     both EvidenceUnavailable and Unknown to `InputAdmission::Unknown`
+     (`exomonad/agent/src/backend/codex/input_control.rs`), which the pump
+     treats as "still pending" with no withdraw and no timeout. Every later
+     tracked message, including child replies, sits behind it; only
+     settlement/watch notices overtake (8dfa4f6ba).
+  Trigger condition: a tracked message reaches an actor while that actor is
+  inside a `haskell` cell that is computing rather than sleeping and that
+  outlives the exchange. Bash cells are not gated (actor 3 recovered).
+  Fix without a Codex rebuild (host side only):
+  - The pump defers a Submit while the target's active workbench execution
+    is a computing cell (the host owns `active_workbench` and its phase);
+    a sleeping cell is still interrupted as designed.
+  - The host stops collapsing EvidenceUnavailable into Unknown; after a
+    grace period (2x the deadline) with no evidence it withdraws: a
+    Tombstoned withdrawal proves the input was never admitted, so the row is
+    confirmed withdrawn and the payload re-delivered under a fresh sequence;
+    an Unknown(record) withdrawal re-delivers labeled "possibly already
+    seen" (LateUpdateEvidence::Unconfirmed fits).
+  - The WARN repeats with a count and age instead of deduping forever.
+  Codex-side follow-up for the fork (later, needs a rebuild): the normal
+  completion must call `complete_from_call` so a parked cancel wakes.
+  In-run recovery used tonight: an operator paste into the fenced actor's
+  composer with the fenced payloads (scratchpad wave5/poke-core-lead.txt);
+  the actor's outbound path is unaffected, its inbound stays fenced for the
+  run. Also: a /goal-style standing objective the runtime re-asserts on
+  idle, mined from Codex.

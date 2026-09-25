@@ -29,3 +29,28 @@ a5bbb3b; record in plans/wave5-launch-record.md. Observer checklist:
   The model never saw the message ("Plan accepted" absent from its
   transcript). Every later message to core-lead, including the root's
   03:29 check-in, sits behind it. Only actor 2 is fenced.
+
+## 03:45Z correction and unstick
+
+The 03:15 reading above is wrong in one step: Codex never marked the row
+Unknown, because the input was never admitted. `~/.codex/queue_1.sqlite`
+has host-input rows for actor 3 (both presented) and none for actor 2. The
+TUI's input-control handler cancels an active `haskell` call before
+admitting hosted input; the host answered NotSleeping for the computing
+39 s fork cell; the TUI then waited for a terminal settlement that the
+normal completion path never records (`complete_from_call` has no
+production caller), so the exchange hung, the host's 35 s deadline
+expired, and every 1 s query since returns EvidenceUnavailable, which the
+host reports as Unknown. Full chain and the host-only fix are in
+next-wave-inputs.md. No cancel line appears in the host log (the cancel
+route does not log), and the Codex session log shows no StartOrSteer
+submission for actor 2 at any time.
+
+State at 03:42Z: every pane idle; the whole run had been quiet since the
+root's 03:29 check-in. Actor 2's two Lunas had both finished (b: a1f976f
+committed; c-contract review returned) and their results sat fenced in
+actor 2's inbox with five root messages. Unstick: pasted the seven fenced
+payloads into actor 2's composer as an operator note telling it not to
+wait for or fork further children and to reply to root through its
+intact outbound path. Actor 2 resumed (tests, cells) within seconds and
+root was working again by 03:47Z.
