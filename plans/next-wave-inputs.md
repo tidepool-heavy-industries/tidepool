@@ -541,3 +541,16 @@ Twelve answers, mapped to lanes. Quotes are the root's.
 - **Review pattern**: independent review of a findings-only probe would be
   waste; inline inspection of (b) was "weaker than an independent review,
   not equivalent". Skill text, not code.
+
+Round 2 (harness master 95daec8, "Round 2: shapes"): the root sketched the
+types for each card above: `MessageState`/`messageState` (A), `replaceMessage`
+returning Replaced or LinkedCorrection (B), `AssignmentDelta` with a
+`CellBoundary` effective-from and two acks (C), `forkBatch` returning
+`Admitted` with a retained `providerReady` (D), `Goal`/`GoalTrigger`/
+`Reminder` (E), `CandidateView` with a cumulative parent-view diff and the
+stage machine committed → reviewed → merged → verified (F), `DiscardIntent`
+required before history-discarding Git operations, refusal text included
+(G), and the exact per-child status line (H). Sol owns these shapes; engine
+work implements what they need. Sequence: F and G first (no overlap with the
+delivery lanes), A/B/C after the delivery-fence lane lands (same inbox
+rows), D with per-actor machines, E as its own design.
