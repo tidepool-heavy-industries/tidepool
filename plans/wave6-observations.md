@@ -45,3 +45,24 @@ co-resident contention at 16 actors, as expected without fresh machines.
 Trial 2 held: the red-review reviewer named the failing test as the
 expected red and refused to call it product verification. Trials 1, 3, 4:
 no evidence yet.
+
+## 05:46Z wake
+
+Alive; 6 GiB free but swap 21 GiB; 18 windows (about 22 actors); no
+Failed/Retired, no latched machine. Root mid-cell. Master since 05:16Z:
+the root's interview answers (ddacd42, 260b694), the schemars scaffold
+(c427057), plus the operator's prompt merges. run-map: 26@1
+(core-here-snapshot) shows a submitted row with host_input=ready since
+05:36, in flight not fenced. Rejections: UpdatePending x2 on 9@1 and 18@1
+(no loops); one after-tool nudge on 2@1 at 05:28. One cancellation at
+05:16:19: the root's cell answered NotSleeping when the operator interview
+paste arrived (the composer path, which completes normally). Contention is
+now severe: 228 calls since 05:16 with checkout_wait p50 3.7 s and max
+161 s; the core lead's fork cell took 271 s (143 s wait, 66 s hold, 49 s
+compile over 8 compiles) and an item2 cell 218 s. Causes: 22 co-resident
+actors on one machine, plus the operator's ten engine lanes compiling in
+worktrees on the same box (swap). No intervention by the observer rule
+(memory above 3 GiB, root not stuck), but the wave is past its useful load
+and is due to be wound down. Trial 4: the core lead sent admission and
+settlement checkpoints (root interview); the root itself did not. Trial 3:
+no real fence yet.
