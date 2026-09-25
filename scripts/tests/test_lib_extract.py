@@ -94,7 +94,10 @@ class ExtractHelpers(unittest.TestCase):
         self.assertIn("--persistent", (self.root / "daemon.pid.argv").read_text().splitlines())
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="extract helpers ")
+        # A short base keeps fixture socket paths under the AF_UNIX limit even
+        # when the dev shell's TMPDIR is deeply nested.
+        self.temp = tempfile.TemporaryDirectory(prefix="extract helpers ",
+                                                dir="/tmp" if os.path.isdir("/tmp") else None)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "bin").mkdir()
@@ -120,7 +123,9 @@ class ExtractHelpers(unittest.TestCase):
         self.env.update(PATH=f"{self.root / 'bin'}:{os.environ['PATH']}",
                         FRONTEND_FIXTURE=str(self.frontend), TEST_WORKER=str(self.worker),
                         DAEMON_PID_FILE=str(self.root / "daemon.pid"),
-                        TIDEPOOL_ALLOW_STALE_EXTRACT="1", TMPDIR=str(self.root))
+                        TIDEPOOL_ALLOW_STALE_EXTRACT="1", TMPDIR=str(self.root),
+                        # Never observe the host's persistent compile daemon.
+                        XDG_CACHE_HOME=str(self.root / "cache"))
 
     def executable(self, name, source):
         path = self.root / "bin" / name
@@ -432,6 +437,69 @@ class ExtractHelpers(unittest.TestCase):
         self.assertIn("OWNED=1", result.stdout)
         self.assertNotIn(f"SOCK={persistent_sock}", result.stdout)
         # The persistent daemon itself is left running untouched.
+        os.kill(int((daemon_dir / "daemon.pid").read_text()), 0)
+
+    def git_checkout(self):
+        # The producer-source fingerprint reads the checkout through Git.
+        git = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@invalid")
+        self.env.update(git)
+        (self.root / ".gitignore").write_text("bin/\ncache/\ntarget/\ndaemon.pid*\ntidepool-*\n")
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"]):
+            subprocess.run(["git", *args], cwd=self.root, env=self.env, check=True)
+
+    def start_recorded_persistent_daemon(self, env):
+        # Built from this checkout, so daemon_start_persistent records its
+        # producer-source fingerprint and worker.
+        self.run_shell('resolve_tidepool_extract\ndaemon_start_persistent',
+                       **{k: v for k, v in env.items() if k != "TIDEPOOL_EXTRACT"})
+        self.addCleanup(lambda: self.run_shell('daemon_stop_persistent', **env))
+        daemon_dir = self.persistent_dir()
+        self.assertEqual(len((daemon_dir / "sources").read_text().strip()), 64)
+        self.assertEqual((daemon_dir / "daemon.worker").read_text().strip(), str(self.worker))
+        return daemon_dir
+
+    def test_matching_producer_sources_reuse_the_persistent_daemon(self):
+        self.git_checkout()
+        env = self.persistent_env()
+        daemon_dir = self.start_recorded_persistent_daemon(env)
+        pid = (daemon_dir / "daemon.pid").read_text()
+        # Uncommitted edits outside the producer sources keep the match; a
+        # failing cargo proves the checkout does not build its own extractor.
+        (self.root / "notes.md").write_text("unrelated edit")
+        # A linked worktree's files are newer than the adopted worker; content,
+        # not file times, decides the match.
+        os.utime(self.worker, (1_700_000_000, 1_700_000_000))
+        result = self.run_shell(
+            'resolve_tidepool_extract --prefer-persistent-daemon\n'
+            'trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'
+            'printf "OWNED=%s\\nSOCK=%s\\nEXE=%s\\nWORKER=%s\\n" "$BATTERY_DAEMON_OWNED" '
+            '"$TIDEPOOL_EXTRACT_DAEMON_SOCKET" "$TIDEPOOL_EXTRACT" "$TIDEPOOL_EXTRACT_WORKER"',
+            **{k: v for k, v in env.items() if k != "TIDEPOOL_EXTRACT"}, FAIL_CARGO="1",
+            TIDEPOOL_ALLOW_STALE_EXTRACT="0")
+        sock = daemon_dir / "extract.sock"
+        self.assertIn(f"reusing persistent compile daemon at {sock} (producer sources match)", result.stderr)
+        self.assertIn("OWNED=0", result.stdout)
+        self.assertIn(f"SOCK={sock}", result.stdout)
+        self.assertIn(f"EXE={(daemon_dir / 'daemon.exe').read_text().strip()}", result.stdout)
+        self.assertIn(f"WORKER={self.worker}", result.stdout)
+        self.assertEqual((daemon_dir / "daemon.pid").read_text(), pid)
+
+    def test_differing_producer_sources_start_a_one_worker_daemon(self):
+        self.git_checkout()
+        env = self.persistent_env()
+        daemon_dir = self.start_recorded_persistent_daemon(env)
+        (self.root / "tidepool/extract-cmd/src/main.rs").write_text("// changed frontend\n")
+        result = self.run_shell(
+            'resolve_tidepool_extract --prefer-persistent-daemon\n'
+            'trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'
+            'printf "OWNED=%s\\n" "$BATTERY_DAEMON_OWNED"',
+            **{k: v for k, v in env.items() if k != "TIDEPOOL_EXTRACT"}, PRODUCER_BYTE="1")
+        self.assertIn("stale (producer sources differ from this checkout)", result.stderr)
+        self.assertIn("with one GHC worker", result.stderr)
+        self.assertIn("OWNED=1", result.stdout)
+        argv = (self.root / "daemon.pid.argv").read_text().splitlines()
+        self.assertEqual(argv[argv.index("--workers") + 1], "1")
         os.kill(int((daemon_dir / "daemon.pid").read_text()), 0)
 
 

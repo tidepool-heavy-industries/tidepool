@@ -270,7 +270,7 @@ def main():
         return subprocess.run([
             "bash", "-c",
             'source scripts/lib-extract.sh\n'
-            'resolve_tidepool_extract\n'
+            'resolve_tidepool_extract --prefer-persistent-daemon\n'
             'trap teardown_battery_daemon EXIT INT TERM\n'
             'start_battery_daemon\n'
             '"$@"',
