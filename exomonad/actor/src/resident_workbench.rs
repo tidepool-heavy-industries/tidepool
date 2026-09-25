@@ -3198,14 +3198,15 @@ where
     /// [`crate::ActorCompileView::compile_relevant_eq`] and an unchanged
     /// `next_declaration_module()` ([`split_staleness`]).
     ///
-    /// The split is attempted once. The first stale re-checkout falls
-    /// straight through to [`Self::prepare_cell_single_checkout`], whose one
-    /// exclusive checkout stays held across its own declaration staging and
-    /// every item compile and so cannot go stale. An inherited-context fork
-    /// shares its parent's scope chain, and a parent committing cells goes
-    /// stale faster than a split compile completes: a second split attempt
-    /// would repeat the same GHC work against a view the parent is still
-    /// moving, not wait for it to settle.
+    /// A stale re-checkout discards the attempt and runs the whole split
+    /// again from a fresh snapshot, still off the checkout, up to
+    /// [`OFF_CHECKOUT_ATTEMPTS`] attempts. Only then does the cell fall back
+    /// to [`Self::prepare_cell_single_checkout`], whose one exclusive
+    /// checkout stays held across its own declaration staging and every item
+    /// compile and so cannot go stale. An inherited-context fork shares its
+    /// parent's scope chain, and a parent committing cells can go stale
+    /// faster than a split compile completes; the bound keeps such a fork
+    /// from retrying against a view the parent is still moving.
     pub(crate) async fn prepare_cell(
         &self,
         context: crate::ActorSessionContext,
@@ -3264,314 +3265,329 @@ where
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
 
-        let (stage, changed) = 'split: {
-            let snapshot_source = self.access.source.clone();
-            let snapshot_type_modules = Arc::clone(&type_modules);
-            let snapshot_response = response.clone();
-            let snapshot_mounted_input = leased_input
-                .as_ref()
-                .map(|guard| guard.mounted_input().clone());
-            let (source, snapshot) = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_cell_split(
-                        session,
-                        context,
-                        snapshot_source,
-                        &snapshot_type_modules,
-                        snapshot_response.as_ref(),
-                        request,
-                        snapshot_mounted_input.as_ref(),
-                    )
-                })
-                .await?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let (stage, changed) = 'split: {
+                let snapshot_source = self.access.source.clone();
+                let snapshot_type_modules = Arc::clone(&type_modules);
+                let snapshot_response = response.clone();
+                let snapshot_mounted_input = leased_input
+                    .as_ref()
+                    .map(|guard| guard.mounted_input().clone());
+                let (source, snapshot) = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        snapshot_cell_split(
+                            session,
+                            context,
+                            snapshot_source,
+                            &snapshot_type_modules,
+                            snapshot_response.as_ref(),
+                            request,
+                            snapshot_mounted_input.as_ref(),
+                        )
+                    })
+                    .await?;
 
-            // No checkout held here: the GHC whole-cell check runs
-            // concurrently with every other actor's turn against this
-            // session.
-            let check_source = source.clone();
-            let check_effects = effects.clone();
-            let check_cell_source = cell_source.clone();
-            let check_cancellation = cancellation.clone();
-            let (snapshot, checked, folded) =
-                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    tidepool_runtime::with_compiler_transaction_cancellable(
-                        check_cancellation,
-                        || {
-                            let checked = check_cell_off_checkout(
-                                &snapshot,
-                                &check_source,
-                                &check_effects,
-                                &check_cell_source,
-                            );
-                            checked.map(|(checked, folded)| (snapshot, checked, folded))
-                        },
-                    )
-                }))
-                .await
-                .map_err(ResidentActorWorkbenchError::Join)??;
-
-            let declaration_index = checked
-                .items
-                .iter()
-                .position(|item| item.verdict.kind == TurnKind::Decl);
-            // Trust the speculative fold only when the check's OWN
-            // classification confirms the shape it was built for: exactly
-            // one item, and it's a bind (never a declaration — which stages
-            // through a private candidate this fold never touched — and
-            // never a bare expression, whose install goes through an
-            // observation wrapper this fold does not build; see
-            // `check_cell_off_checkout`'s doc comment).
-            let folded = folded.filter(|_| {
-                declaration_index.is_none()
-                    && checked.items.len() == 1
-                    && checked.items[0].verdict.kind == TurnKind::Bind
-            });
-            let declaration_receipt = declaration_index.map(|index| {
-                let item = &checked.items[index];
-                DeclarationReceipt {
-                    binders: item.verdict.binders.clone(),
-                    items: item.verdict.items.clone(),
-                    source: tidepool_runtime::session::DeclarationSource {
-                        prologue: checked.prologue.clone(),
-                        body: item.source.clone(),
-                    },
-                }
-            });
-            let value_item_count = checked
-                .items
-                .iter()
-                .filter(|item| item.verdict.kind != TurnKind::Decl)
-                .count();
-
-            let reserve_source = source.clone();
-            let reserve_type_modules = Arc::clone(&type_modules);
-            let reserve_receipt = declaration_receipt;
-            let (snapshot, reservation) = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    reserve_cell_generations(
-                        session,
-                        context,
-                        &reserve_source,
-                        &reserve_type_modules,
-                        &snapshot,
-                        value_item_count,
-                        reserve_receipt.as_ref(),
-                    )
-                    .map(|reservation| (snapshot, reservation))
-                })
-                .await?;
-            let (c_view, retained, visible_names, declaration_candidate) = match reservation {
-                CellReservation::Stale(changed) => break 'split ("reservation", changed),
-                CellReservation::Ready(ready) => {
-                    let CellReservationReady {
-                        view,
-                        retained,
-                        visible_names,
-                        declaration,
-                    } = *ready;
-                    (view, retained, visible_names, declaration)
-                }
-            };
-
-            // No checkout held here either: every item's GHC compile also
-            // runs with the machine released — including, for a cell with a
-            // `Decl` item, GHC-validating that declaration against a private
-            // candidate directory nobody else's compile has on its include
-            // path (`validate_declaration_candidate`), never the shared
-            // session root.
-            let (checked, outcome, staged) = match folded {
-                // The whole-cell check already produced this item's compiled
-                // artifact (`check_cell_off_checkout`'s fold): no further
-                // GHC round trip for this attempt. Still validate its
-                // module against THIS reservation's generation — the fold
-                // compiled against the pre-check snapshot's generation,
-                // which only still matches when nothing else wrote to this
-                // scope between the check and `reserve_cell_generations`
-                // above; a mismatch here means the two disagree despite
-                // `compile_relevant_eq` passing (should not happen, but is
-                // cheap to guard) and this attempt falls back to an
-                // ordinary compile rather than installing a wrong binder.
-                Some(folded)
-                    if fold_result_matches_generation(&folded, c_view.next_value_generation()) =>
-                {
-                    let ready = ReadyBlock {
-                        result: folded,
-                        generation: c_view.next_value_generation(),
-                        declaration_source: checked.items[0].source.clone(),
-                        declaration_imports: c_view.workbench_imports(),
-                        observation: None,
-                    };
-                    (
-                        checked,
-                        CellItemsOutcome::Ready(vec![PreparedCellItem {
-                            ready: PreparedCellStep::Executable(Box::new(ready)),
-                        }]),
-                        None,
-                    )
-                }
-                _ => {
-                    let compile_source = source.clone();
-                    let compile_effects = effects.clone();
-                    let compile_cell_source = cell_source.clone();
-                    let compile_context = context.clone();
-                    let compile_view = c_view.clone();
-                    let compile_cancellation = cancellation.clone();
+                // No checkout held here: the GHC whole-cell check runs
+                // concurrently with every other actor's turn against this
+                // session.
+                let check_source = source.clone();
+                let check_effects = effects.clone();
+                let check_cell_source = cell_source.clone();
+                let check_cancellation = cancellation.clone();
+                let (snapshot, checked, folded) =
                     crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                         tidepool_runtime::with_compiler_transaction_cancellable(
-                            compile_cancellation,
+                            check_cancellation,
                             || {
-                                let candidate_dir = declaration_candidate
-                                    .is_some()
-                                    .then(tempfile::tempdir)
-                                    .transpose()
-                                    .map_err(|error| {
-                                        ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                                            "declaration candidate directory: {error}"
-                                        ))
-                                    })?;
-                                let staged = match (declaration_candidate, &candidate_dir) {
-                                    (Some((candidate, visible_values)), Some(candidate_dir)) => {
-                                        match validate_declaration_candidate(
-                                            candidate,
-                                            candidate_dir.path(),
-                                        ) {
-                                            Ok(staged) => {
-                                                Some(staged.with_visible_values(visible_values))
-                                            }
-                                            Err(error)
-                                                if classify_session(&error).class
-                                                    == FailureClass::UserHaskell =>
-                                            {
-                                                let diagnostic =
-                                                    classify_session(&error).message.into();
-                                                let index = declaration_index.unwrap_or(0);
-                                                return Ok((
-                                                    checked,
-                                                    CellItemsOutcome::Rejected {
-                                                        index,
-                                                        diagnostic,
-                                                    },
-                                                    None,
-                                                ));
-                                            }
-                                            Err(error) => {
-                                                return Err(ResidentActorWorkbenchError::Resident(
-                                                    ResidentError::Session(error),
-                                                ))
-                                            }
-                                        }
-                                    }
-                                    _ => None,
-                                };
-                                let compile_view = match &staged {
-                                    Some(staged) => compile_view
-                                        .with_staged_library(staged.module(), staged.items()),
-                                    None => compile_view,
-                                };
-                                let outcome = compile_cell_items_off_checkout(
-                                    &compile_context,
-                                    &compile_source,
-                                    &compile_effects,
-                                    &checked,
-                                    &compile_cell_source,
-                                    compile_view,
-                                    &retained,
-                                    &visible_names,
-                                    staged.as_ref(),
-                                    candidate_dir.as_ref().map(|dir| dir.path()),
+                                let checked = check_cell_off_checkout(
+                                    &snapshot,
+                                    &check_source,
+                                    &check_effects,
+                                    &check_cell_source,
                                 );
-                                outcome.map(|outcome| (checked, outcome, staged))
+                                checked.map(|(checked, folded)| (snapshot, checked, folded))
                             },
                         )
                     }))
                     .await
-                    .map_err(ResidentActorWorkbenchError::Join)??
-                }
-            };
+                    .map_err(ResidentActorWorkbenchError::Join)??;
 
-            let items = match outcome {
-                CellItemsOutcome::Rejected { index, diagnostic } => {
-                    // The rejection was derived from `c_view`, taken before
-                    // the machine was released for this compile. Re-derive
-                    // the view once more before trusting it: if something
-                    // else wrote to a scope this compile actually read from
-                    // in the meantime, the rejection is stale and the cell
-                    // recompiles under one checkout, exactly as this same
-                    // split's install-time mismatch does. A rejected
-                    // declaration item's own candidate was validated against
-                    // a private directory dropped when this compile
-                    // finished, so there is nothing further to discard here.
-                    let revalidate_source = source.clone();
-                    let revalidate_type_modules = Arc::clone(&type_modules);
-                    let revalidate_against = c_view.clone();
-                    let revalidate_candidate_module = snapshot.candidate_module;
-                    let revalidation = self
-                        .access
-                        .with_machine(context.clone(), move |session, context, _| {
-                            revalidate_cell_rejection(
-                                session,
-                                context,
-                                &revalidate_source,
-                                &revalidate_type_modules,
-                                revalidate_candidate_module,
-                                &revalidate_against,
+                let declaration_index = checked
+                    .items
+                    .iter()
+                    .position(|item| item.verdict.kind == TurnKind::Decl);
+                // Trust the speculative fold only when the check's OWN
+                // classification confirms the shape it was built for: exactly
+                // one item, and it's a bind (never a declaration — which stages
+                // through a private candidate this fold never touched — and
+                // never a bare expression, whose install goes through an
+                // observation wrapper this fold does not build; see
+                // `check_cell_off_checkout`'s doc comment).
+                let folded = folded.filter(|_| {
+                    declaration_index.is_none()
+                        && checked.items.len() == 1
+                        && checked.items[0].verdict.kind == TurnKind::Bind
+                });
+                let declaration_receipt = declaration_index.map(|index| {
+                    let item = &checked.items[index];
+                    DeclarationReceipt {
+                        binders: item.verdict.binders.clone(),
+                        items: item.verdict.items.clone(),
+                        source: tidepool_runtime::session::DeclarationSource {
+                            prologue: checked.prologue.clone(),
+                            body: item.source.clone(),
+                        },
+                    }
+                });
+                let value_item_count = checked
+                    .items
+                    .iter()
+                    .filter(|item| item.verdict.kind != TurnKind::Decl)
+                    .count();
+
+                let reserve_source = source.clone();
+                let reserve_type_modules = Arc::clone(&type_modules);
+                let reserve_receipt = declaration_receipt;
+                let (snapshot, reservation) = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        reserve_cell_generations(
+                            session,
+                            context,
+                            &reserve_source,
+                            &reserve_type_modules,
+                            &snapshot,
+                            value_item_count,
+                            reserve_receipt.as_ref(),
+                        )
+                        .map(|reservation| (snapshot, reservation))
+                    })
+                    .await?;
+                let (c_view, retained, visible_names, declaration_candidate) = match reservation {
+                    CellReservation::Stale(changed) => break 'split ("reservation", changed),
+                    CellReservation::Ready(ready) => {
+                        let CellReservationReady {
+                            view,
+                            retained,
+                            visible_names,
+                            declaration,
+                        } = *ready;
+                        (view, retained, visible_names, declaration)
+                    }
+                };
+
+                // No checkout held here either: every item's GHC compile also
+                // runs with the machine released — including, for a cell with a
+                // `Decl` item, GHC-validating that declaration against a private
+                // candidate directory nobody else's compile has on its include
+                // path (`validate_declaration_candidate`), never the shared
+                // session root.
+                let (checked, outcome, staged) = match folded {
+                    // The whole-cell check already produced this item's compiled
+                    // artifact (`check_cell_off_checkout`'s fold): no further
+                    // GHC round trip for this attempt. Still validate its
+                    // module against THIS reservation's generation — the fold
+                    // compiled against the pre-check snapshot's generation,
+                    // which only still matches when nothing else wrote to this
+                    // scope between the check and `reserve_cell_generations`
+                    // above; a mismatch here means the two disagree despite
+                    // `compile_relevant_eq` passing (should not happen, but is
+                    // cheap to guard) and this attempt falls back to an
+                    // ordinary compile rather than installing a wrong binder.
+                    Some(folded)
+                        if fold_result_matches_generation(
+                            &folded,
+                            c_view.next_value_generation(),
+                        ) =>
+                    {
+                        let ready = ReadyBlock {
+                            result: folded,
+                            generation: c_view.next_value_generation(),
+                            declaration_source: checked.items[0].source.clone(),
+                            declaration_imports: c_view.workbench_imports(),
+                            observation: None,
+                        };
+                        (
+                            checked,
+                            CellItemsOutcome::Ready(vec![PreparedCellItem {
+                                ready: PreparedCellStep::Executable(Box::new(ready)),
+                            }]),
+                            None,
+                        )
+                    }
+                    _ => {
+                        let compile_source = source.clone();
+                        let compile_effects = effects.clone();
+                        let compile_cell_source = cell_source.clone();
+                        let compile_context = context.clone();
+                        let compile_view = c_view.clone();
+                        let compile_cancellation = cancellation.clone();
+                        crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                            tidepool_runtime::with_compiler_transaction_cancellable(
+                                compile_cancellation,
+                                || {
+                                    let candidate_dir = declaration_candidate
+                                        .is_some()
+                                        .then(tempfile::tempdir)
+                                        .transpose()
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::CompileInfrastructure(
+                                                format!("declaration candidate directory: {error}"),
+                                            )
+                                        })?;
+                                    let staged = match (declaration_candidate, &candidate_dir) {
+                                        (
+                                            Some((candidate, visible_values)),
+                                            Some(candidate_dir),
+                                        ) => {
+                                            match validate_declaration_candidate(
+                                                candidate,
+                                                candidate_dir.path(),
+                                            ) {
+                                                Ok(staged) => {
+                                                    Some(staged.with_visible_values(visible_values))
+                                                }
+                                                Err(error)
+                                                    if classify_session(&error).class
+                                                        == FailureClass::UserHaskell =>
+                                                {
+                                                    let diagnostic =
+                                                        classify_session(&error).message.into();
+                                                    let index = declaration_index.unwrap_or(0);
+                                                    return Ok((
+                                                        checked,
+                                                        CellItemsOutcome::Rejected {
+                                                            index,
+                                                            diagnostic,
+                                                        },
+                                                        None,
+                                                    ));
+                                                }
+                                                Err(error) => {
+                                                    return Err(
+                                                        ResidentActorWorkbenchError::Resident(
+                                                            ResidentError::Session(error),
+                                                        ),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    let compile_view = match &staged {
+                                        Some(staged) => compile_view
+                                            .with_staged_library(staged.module(), staged.items()),
+                                        None => compile_view,
+                                    };
+                                    let outcome = compile_cell_items_off_checkout(
+                                        &compile_context,
+                                        &compile_source,
+                                        &compile_effects,
+                                        &checked,
+                                        &compile_cell_source,
+                                        compile_view,
+                                        &retained,
+                                        &visible_names,
+                                        staged.as_ref(),
+                                        candidate_dir.as_ref().map(|dir| dir.path()),
+                                    );
+                                    outcome.map(|outcome| (checked, outcome, staged))
+                                },
                             )
-                        })
-                        .await?;
-                    match revalidation {
-                        CellRejectionRevalidation::StillCurrent => {
-                            if let Some(guard) = leased_input.take() {
-                                guard.retire(&self.access).await;
+                        }))
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)??
+                    }
+                };
+
+                let items = match outcome {
+                    CellItemsOutcome::Rejected { index, diagnostic } => {
+                        // The rejection was derived from `c_view`, taken before
+                        // the machine was released for this compile. Re-derive
+                        // the view once more before trusting it: if something
+                        // else wrote to a scope this compile actually read from
+                        // in the meantime, the rejection is stale and the cell
+                        // recompiles under one checkout, exactly as this same
+                        // split's install-time mismatch does. A rejected
+                        // declaration item's own candidate was validated against
+                        // a private directory dropped when this compile
+                        // finished, so there is nothing further to discard here.
+                        let revalidate_source = source.clone();
+                        let revalidate_type_modules = Arc::clone(&type_modules);
+                        let revalidate_against = c_view.clone();
+                        let revalidate_candidate_module = snapshot.candidate_module;
+                        let revalidation = self
+                            .access
+                            .with_machine(context.clone(), move |session, context, _| {
+                                revalidate_cell_rejection(
+                                    session,
+                                    context,
+                                    &revalidate_source,
+                                    &revalidate_type_modules,
+                                    revalidate_candidate_module,
+                                    &revalidate_against,
+                                )
+                            })
+                            .await?;
+                        match revalidation {
+                            CellRejectionRevalidation::StillCurrent => {
+                                if let Some(guard) = leased_input.take() {
+                                    guard.retire(&self.access).await;
+                                }
+                                cancel_on_drop.0 = None;
+                                return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
                             }
-                            cancel_on_drop.0 = None;
-                            return Ok((checked, PreparedCell::Rejected { index, diagnostic }));
-                        }
-                        CellRejectionRevalidation::Stale(changed) => {
-                            break 'split ("rejection revalidation", changed)
+                            CellRejectionRevalidation::Stale(changed) => {
+                                break 'split ("rejection revalidation", changed)
+                            }
                         }
                     }
+                    CellItemsOutcome::Ready(items) => items,
+                };
+
+                #[cfg(test)]
+                split_probe::before_install().await;
+                let install_source = source.clone();
+                let install_type_modules = Arc::clone(&type_modules);
+                let candidate_module = snapshot.candidate_module;
+                let install_view = c_view;
+                let install_checked = checked.clone();
+                let install = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        finalize_cell_install(
+                            session,
+                            context,
+                            &install_source,
+                            &install_type_modules,
+                            candidate_module,
+                            &install_view,
+                            &install_checked,
+                            items,
+                            staged,
+                        )
+                    })
+                    .await?;
+                match install {
+                    CellInstall::Ready(prepared) => {
+                        if let Some(guard) = leased_input.take() {
+                            guard.retire(&self.access).await;
+                        }
+                        cancel_on_drop.0 = None;
+                        return Ok((checked, prepared));
+                    }
+                    CellInstall::Stale(changed) => ("install", changed),
                 }
-                CellItemsOutcome::Ready(items) => items,
             };
-
-            #[cfg(test)]
-            split_probe::before_install().await;
-            let install_source = source.clone();
-            let install_type_modules = Arc::clone(&type_modules);
-            let candidate_module = snapshot.candidate_module;
-            let install_view = c_view;
-            let install_checked = checked.clone();
-            let install = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    finalize_cell_install(
-                        session,
-                        context,
-                        &install_source,
-                        &install_type_modules,
-                        candidate_module,
-                        &install_view,
-                        &install_checked,
-                        items,
-                        staged,
-                    )
-                })
-                .await?;
-            match install {
-                CellInstall::Ready(prepared) => {
-                    if let Some(guard) = leased_input.take() {
-                        guard.retire(&self.access).await;
-                    }
-                    cancel_on_drop.0 = None;
-                    return Ok((checked, prepared));
-                }
-                CellInstall::Stale(changed) => ("install", changed),
+            log_split_stale("cell", &context, stage, changed, attempt);
+            if attempt >= OFF_CHECKOUT_ATTEMPTS {
+                break;
             }
-        };
+        }
 
-        log_split_fallback("cell", &context, stage, changed);
         if let Some(guard) = leased_input.take() {
             guard.retire(&self.access).await;
         }
@@ -3583,7 +3599,7 @@ where
     /// The original, unsplit whole-cell preparation: one exclusive machine
     /// checkout for the whole-cell check and every item's compile, so it
     /// cannot observe a stale view. [`Self::prepare_cell`] falls back here
-    /// when its one split attempt goes stale.
+    /// when every one of its split attempts goes stale.
     async fn prepare_cell_single_checkout(
         &self,
         context: crate::ActorSessionContext,
@@ -4088,10 +4104,10 @@ where
     /// install-and-run step, released for the GHC compile in between. The
     /// same split [`Self::bind_command_job`] applies to the Job carrier
     /// compile (Problem 1 of the compile-path design note), reusing
-    /// [`split_staleness`] to detect a stale snapshot. The split is attempted
-    /// once; a stale snapshot falls straight through to the original
-    /// single-checkout [`begin_fragment`], for the reason
-    /// [`Self::prepare_cell`] gives.
+    /// [`split_staleness`] to detect a stale snapshot. A stale snapshot
+    /// recompiles off-checkout against a fresh one, up to
+    /// [`OFF_CHECKOUT_ATTEMPTS`] attempts, before the single-checkout
+    /// [`begin_fragment`], for the reason [`Self::prepare_cell`] gives.
     pub(crate) async fn begin_fragment_split(
         &self,
         context: crate::ActorSessionContext,
@@ -4107,141 +4123,148 @@ where
         // rather than leaving it to finish unobserved.
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-        let (stage, changed) = 'split: {
-            let snapshot_source = source.clone();
-            let snapshot_type_modules = type_modules.clone();
-            let snapshot_block = block.clone();
-            let snapshot_verdict = verdict.clone();
-            let snapshot = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_fragment_compile(
-                        session,
-                        context,
-                        &snapshot_source,
-                        &snapshot_type_modules,
-                        &snapshot_block,
-                        snapshot_verdict.as_ref(),
-                    )
-                })
-                .await?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let (stage, changed) = 'split: {
+                let snapshot_source = source.clone();
+                let snapshot_type_modules = type_modules.clone();
+                let snapshot_block = block.clone();
+                let snapshot_verdict = verdict.clone();
+                let snapshot = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        snapshot_fragment_compile(
+                            session,
+                            context,
+                            &snapshot_source,
+                            &snapshot_type_modules,
+                            &snapshot_block,
+                            snapshot_verdict.as_ref(),
+                        )
+                    })
+                    .await?;
 
-            // No checkout held here: the GHC compile runs concurrently with
-            // every other actor's turn against this session.
-            let compile_source = source.clone();
-            let compile_block_text = block.clone();
-            let effects = context.haskell_effects_alias.clone();
-            let compile_cancellation = cancellation.clone();
-            let (snapshot, compiled) =
-                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    tidepool_runtime::with_compiler_transaction_cancellable(
-                        compile_cancellation,
-                        || {
-                            let compiled = compile_fragment_off_checkout(
-                                &snapshot,
-                                &compile_source,
-                                &effects,
-                                &compile_block_text,
-                            );
-                            compiled.map(|compiled| (snapshot, compiled))
-                        },
-                    )
-                }))
-                .await
-                .map_err(ResidentActorWorkbenchError::Join)??;
-            let ready = match compiled {
-                CompiledBlock::Rejected(diagnostic) => {
-                    // The rejection was derived from `snapshot.view`, taken
-                    // before the machine was released for this compile.
-                    // Re-derive the view once more before trusting it: if
-                    // something else wrote to a scope this compile actually
-                    // read from in the meantime, the rejection is stale and
-                    // the fragment recompiles under one checkout, exactly as
-                    // an install-time mismatch does.
-                    let revalidate_source = source.clone();
-                    let revalidate_type_modules = type_modules.clone();
-                    let revalidate_against = snapshot.view.clone();
-                    let stale = self
-                        .access
-                        .with_machine(context.clone(), move |session, context, _| {
-                            if session.machine_disposition()
+                // No checkout held here: the GHC compile runs concurrently with
+                // every other actor's turn against this session.
+                let compile_source = source.clone();
+                let compile_block_text = block.clone();
+                let effects = context.haskell_effects_alias.clone();
+                let compile_cancellation = cancellation.clone();
+                let (snapshot, compiled) =
+                    crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                        tidepool_runtime::with_compiler_transaction_cancellable(
+                            compile_cancellation,
+                            || {
+                                let compiled = compile_fragment_off_checkout(
+                                    &snapshot,
+                                    &compile_source,
+                                    &effects,
+                                    &compile_block_text,
+                                );
+                                compiled.map(|compiled| (snapshot, compiled))
+                            },
+                        )
+                    }))
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Join)??;
+                let ready = match compiled {
+                    CompiledBlock::Rejected(diagnostic) => {
+                        // The rejection was derived from `snapshot.view`, taken
+                        // before the machine was released for this compile.
+                        // Re-derive the view once more before trusting it: if
+                        // something else wrote to a scope this compile actually
+                        // read from in the meantime, the rejection is stale and
+                        // the fragment recompiles under one checkout, exactly as
+                        // an install-time mismatch does.
+                        let revalidate_source = source.clone();
+                        let revalidate_type_modules = type_modules.clone();
+                        let revalidate_against = snapshot.view.clone();
+                        let stale =
+                            self.access
+                                .with_machine(context.clone(), move |session, context, _| {
+                                    if session.machine_disposition()
                                 == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
                             {
                                 return Err(ResidentActorWorkbenchError::MachineLost);
                             }
-                            let fresh_view = actor_compile_view(
-                                session,
-                                context,
-                                &revalidate_source,
-                                &revalidate_type_modules,
-                            )?;
-                            Ok(split_staleness(
-                                session,
-                                &fresh_view,
-                                &revalidate_against,
-                                None,
-                            ))
-                        })
-                        .await?;
-                    match stale {
-                        None => {
-                            cancel_on_drop.0 = None;
-                            return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+                                    let fresh_view = actor_compile_view(
+                                        session,
+                                        context,
+                                        &revalidate_source,
+                                        &revalidate_type_modules,
+                                    )?;
+                                    Ok(split_staleness(
+                                        session,
+                                        &fresh_view,
+                                        &revalidate_against,
+                                        None,
+                                    ))
+                                })
+                                .await?;
+                        match stale {
+                            None => {
+                                cancel_on_drop.0 = None;
+                                return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+                            }
+                            Some(changed) => break 'split ("rejection revalidation", changed),
                         }
-                        Some(changed) => break 'split ("rejection revalidation", changed),
                     }
+                    CompiledBlock::Ready(ready) => *ready,
+                };
+
+                // Revalidate the GHC-compiled `ready` against the current
+                // source-side view in one short checkout, then hand off to
+                // `begin_ready_block_split` for the JIT
+                // install: that keeps this split's own Cranelift compile off
+                // any checkout too, exactly as `begin_prepared_cell_item`
+                // already does for a split cell's item install, instead of
+                // running it under the checkout this closure used to hold for
+                // `begin_ready_block`'s whole install-and-run.
+                let install_source = source.clone();
+                let install_type_modules = type_modules.clone();
+                let stale = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        if session.machine_disposition()
+                            == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+                        {
+                            return Err(ResidentActorWorkbenchError::MachineLost);
+                        }
+                        let fresh_view = actor_compile_view(
+                            session,
+                            context,
+                            &install_source,
+                            &install_type_modules,
+                        )?;
+                        Ok(split_staleness(session, &fresh_view, &snapshot.view, None))
+                    })
+                    .await?;
+                if let Some(changed) = stale {
+                    break 'split ("install", changed);
                 }
-                CompiledBlock::Ready(ready) => *ready,
-            };
-
-            // Revalidate the GHC-compiled `ready` against the current
-            // source-side view in one short checkout, then hand off to
-            // `begin_ready_block_split` for the JIT
-            // install: that keeps this split's own Cranelift compile off
-            // any checkout too, exactly as `begin_prepared_cell_item`
-            // already does for a split cell's item install, instead of
-            // running it under the checkout this closure used to hold for
-            // `begin_ready_block`'s whole install-and-run.
-            let install_source = source.clone();
-            let install_type_modules = type_modules.clone();
-            let stale = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    if session.machine_disposition()
-                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
-                    {
-                        return Err(ResidentActorWorkbenchError::MachineLost);
-                    }
-                    let fresh_view = actor_compile_view(
-                        session,
-                        context,
-                        &install_source,
-                        &install_type_modules,
-                    )?;
-                    Ok(split_staleness(session, &fresh_view, &snapshot.view, None))
-                })
+                let install_source = source.clone();
+                let install_type_modules = type_modules.clone();
+                let install_block = block.clone();
+                let step = begin_ready_block_split(
+                    &self.access,
+                    context.clone(),
+                    install_source,
+                    install_type_modules,
+                    install_block,
+                    ready,
+                    8192,
+                )
                 .await?;
-            if let Some(changed) = stale {
-                break 'split ("install", changed);
+                cancel_on_drop.0 = None;
+                return Ok(step);
+            };
+            log_split_stale("fragment", &context, stage, changed, attempt);
+            if attempt >= OFF_CHECKOUT_ATTEMPTS {
+                break;
             }
-            let install_source = source.clone();
-            let install_type_modules = type_modules.clone();
-            let install_block = block.clone();
-            let step = begin_ready_block_split(
-                &self.access,
-                context.clone(),
-                install_source,
-                install_type_modules,
-                install_block,
-                ready,
-                8192,
-            )
-            .await?;
-            cancel_on_drop.0 = None;
-            return Ok(step);
-        };
+        }
 
-        log_split_fallback("fragment", &context, stage, changed);
         cancel_on_drop.0 = None;
         let step = self
             .access
@@ -4392,7 +4415,8 @@ where
 /// machine released for both compiles: the GHC compile of the display
 /// bundle and its Cranelift install compile. See
 /// [`render_observation_off_checkout`] for the checkouts one attempt takes.
-/// A stale attempt falls back to the single-checkout
+/// A stale attempt renders again from a fresh snapshot, up to
+/// [`OFF_CHECKOUT_ATTEMPTS`] attempts, before the single-checkout
 /// [`render_cell_observation`]. A render failure never loses the value: the
 /// receipt says the display failed and names the still-bound observation.
 async fn settle_observation_render_split<H, O>(
@@ -4454,21 +4478,29 @@ where
 
     let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
     let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-    let attempt = render_observation_off_checkout(access, &context, &request, &cancellation).await;
-    let changed = match attempt {
-        Ok(DisplayRenderAttempt::Rendered(receipt)) => {
-            cancel_on_drop.0 = None;
-            return Ok(committed(receipt));
-        }
-        Ok(DisplayRenderAttempt::Stale(changed)) => changed,
-        Err(error) if display_error_is_fatal(&error) => return Err(error),
-        Err(error) => {
-            cancel_on_drop.0 = None;
-            return Ok(committed(request.failed(&error)));
-        }
-    };
+    for attempt in 1..=OFF_CHECKOUT_ATTEMPTS {
+        let changed = match render_observation_off_checkout(
+            access,
+            &context,
+            &request,
+            &cancellation,
+        )
+        .await
+        {
+            Ok(DisplayRenderAttempt::Rendered(receipt)) => {
+                cancel_on_drop.0 = None;
+                return Ok(committed(receipt));
+            }
+            Ok(DisplayRenderAttempt::Stale(changed)) => changed,
+            Err(error) if display_error_is_fatal(&error) => return Err(error),
+            Err(error) => {
+                cancel_on_drop.0 = None;
+                return Ok(committed(request.failed(&error)));
+            }
+        };
+        log_split_stale("observation render", &context, "install", changed, attempt);
+    }
 
-    log_split_fallback("observation render", &context, "install", changed);
     cancel_on_drop.0 = None;
     let receipt = access
         .with_machine(context, move |session, context, _| {
@@ -5185,11 +5217,12 @@ enum PreparedSnapshotAttempt {
 /// call's `compile_ms` bucket rather than `checkout_hold_ms`), then
 /// revalidate and install under a fresh checkout
 /// ([`ResidentSession::revalidate_and_run_prepared`]). An import that
-/// changed between snapshot and revalidation (`Ok(None)`), or a session with
-/// no machine yet, falls straight through to the original single-checkout
-/// install-and-run, unchanged from [`begin_ready_block`]. The split is
-/// attempted once, for the reason
-/// [`ResidentActorWorkbench::prepare_cell`] gives.
+/// changed between snapshot and revalidation (`Ok(None)`) relinks and
+/// recompiles the same GHC output off-checkout from a fresh snapshot, up to
+/// [`OFF_CHECKOUT_ATTEMPTS`] attempts; after that, or for a session with no
+/// machine yet, the turn installs and runs under one checkout, unchanged
+/// from [`begin_ready_block`]. A completed observation display renders
+/// off-checkout too ([`settle_deferred_display`]).
 async fn begin_ready_block_split<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: crate::ActorSessionContext,
@@ -5286,7 +5319,7 @@ where
     };
     let warnings = compiled_turn.warnings.warnings.clone();
 
-    'split: {
+    'split: for install_attempt in 1..=OFF_CHECKOUT_ATTEMPTS {
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
         let attempt = access
@@ -5352,12 +5385,14 @@ where
             return Ok(step);
         }
         // Revalidation found a stale import: another actor's turn changed
-        // a shared binding between the snapshot and this checkout.
-        log_split_fallback(
+        // a shared binding between the snapshot and this checkout. The
+        // GHC-compiled turn is still current; relink and recompile it.
+        log_split_stale(
             "prepared install",
             &context,
             "install",
             SplitStaleView::PreparedImports,
+            install_attempt,
         );
     }
 
@@ -8611,8 +8646,7 @@ enum CellReservation {
 
 /// Which part of the session a split-compile re-checkout found changed since
 /// the snapshot it compiled against. Named in the INFO line
-/// [`ResidentActorWorkbench::prepare_cell`] logs when it falls back to the
-/// single-checkout compile.
+/// [`log_split_stale`] writes for every stale attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitStaleView {
     /// [`crate::ActorCompileView::compile_relevant_eq`] failed: a scope this
@@ -8630,22 +8664,45 @@ enum SplitStaleView {
     PreparedImports,
 }
 
-/// Every split compile path makes one attempt; when it goes stale it falls
-/// through to its single-checkout path and logs this one line naming the
-/// path, the stage that found the snapshot stale, and what changed.
-fn log_split_fallback(
+/// How many off-checkout attempts every split compile path makes before its
+/// single-checkout fallback. A stale attempt re-snapshots and recompiles off
+/// the checkout once against the new view; only a second stale attempt
+/// compiles under one checkout, which cannot go stale. An inherited-context
+/// fork whose parent commits faster than a split compiles can go stale
+/// every time, so this stays small: a stale attempt costs the actor its own
+/// compile time, while the checkout fallback costs every actor on the
+/// session.
+const OFF_CHECKOUT_ATTEMPTS: usize = 2;
+
+/// One INFO line per stale split attempt, naming the path, the stage that
+/// found the snapshot stale, what changed, and whether the path recompiles
+/// off-checkout or falls back to its single-checkout compile.
+fn log_split_stale(
     path: &'static str,
     context: &crate::ActorSessionContext,
     stage: &'static str,
     changed: SplitStaleView,
+    attempt: usize,
 ) {
-    tracing::info!(
-        actor = context.actor.id.0,
-        path,
-        stage,
-        changed = ?changed,
-        "split compile went stale; compiling under one checkout"
-    );
+    if attempt < OFF_CHECKOUT_ATTEMPTS {
+        tracing::info!(
+            actor = context.actor.id.0,
+            path,
+            stage,
+            changed = ?changed,
+            attempt,
+            "split compile went stale; recompiling off-checkout against a fresh snapshot"
+        );
+    } else {
+        tracing::info!(
+            actor = context.actor.id.0,
+            path,
+            stage,
+            changed = ?changed,
+            attempt,
+            "split compile went stale; compiling under one checkout"
+        );
+    }
 }
 
 /// The freshness check every split-compile re-checkout makes: the compile
@@ -10173,6 +10230,9 @@ mod split_probe {
 
     #[derive(Default)]
     pub(super) struct SplitProbe {
+        /// How many install checkouts, from the first, wait for
+        /// `resume_install` after signalling `install_reached`.
+        pub(super) held_installs: usize,
         pub(super) install_checkouts: AtomicUsize,
         pub(super) single_checkout_compiles: AtomicUsize,
         pub(super) install_reached: tokio::sync::Notify,
@@ -10183,12 +10243,13 @@ mod split_probe {
         pub(super) static PROBE: Arc<SplitProbe>;
     }
 
-    /// Count this install checkout; hold the first one until resumed.
+    /// Count this install checkout; hold the first `held_installs` until
+    /// each is resumed.
     pub(super) async fn before_install() {
         let Ok(probe) = PROBE.try_with(Arc::clone) else {
             return;
         };
-        if probe.install_checkouts.fetch_add(1, Ordering::SeqCst) == 0 {
+        if probe.install_checkouts.fetch_add(1, Ordering::SeqCst) < probe.held_installs {
             probe.install_reached.notify_one();
             probe.resume_install.notified().await;
         }
@@ -12999,13 +13060,12 @@ mod request_tests {
         );
     }
 
-    /// An inherited-context fork's parent can commit between the split's
-    /// off-checkout compile and its install checkout. The first stale
-    /// install must fall straight through to the single-checkout compile:
-    /// one split compile (the folded check), one install checkout, one
-    /// single-checkout compile, and no second split attempt.
-    #[tokio::test]
-    async fn stale_split_install_falls_back_to_one_single_checkout_compile() {
+    /// Prepare a one-bind cell while a stand-in parent commits a binding in
+    /// the cell's scope during each of the first `stale_installs` split
+    /// attempts, between the off-checkout compile and the install checkout.
+    /// Returns (install checkouts reached, compile round trips,
+    /// single-checkout compiles).
+    async fn prepare_cell_with_stale_installs(stale_installs: usize) -> (usize, u64, usize) {
         use std::sync::atomic::Ordering;
         let (machines, context, source, _root) = actor_registry_fixture();
         let actor_id = context.actor.id.0;
@@ -13013,55 +13073,79 @@ mod request_tests {
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
         let cell = "answer <- pure (1 :: Int)".to_string();
 
-        let probe = Arc::new(split_probe::SplitProbe::default());
+        let probe = Arc::new(split_probe::SplitProbe {
+            held_installs: stale_installs,
+            ..Default::default()
+        });
         let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
         let prepare = split_probe::PROBE.scope(
             Arc::clone(&probe),
             scope.run(workbench.prepare_cell(context.clone(), cell)),
         );
-        // Stand in for the parent committing a binding in the scope this
-        // cell reads while the split's compile is off-checkout.
         let interlope = async {
-            probe.install_reached.notified().await;
-            let interloper_source = workbench.access.source.clone();
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    mount_text_binding(
-                        session,
-                        context,
-                        &interloper_source,
-                        &[],
-                        "interloper",
-                        "interloper text",
-                        None,
-                    )
-                })
-                .await
-                .expect("interloping binding mounts");
-            probe.resume_install.notify_one();
+            for index in 0..stale_installs {
+                probe.install_reached.notified().await;
+                let interloper_source = workbench.access.source.clone();
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        mount_text_binding(
+                            session,
+                            context,
+                            &interloper_source,
+                            &[],
+                            &format!("interloper{index}"),
+                            "interloper text",
+                            None,
+                        )
+                    })
+                    .await
+                    .expect("interloping binding mounts");
+                probe.resume_install.notify_one();
+            }
         };
         let (prepared, ()) = tokio::join!(prepare, interlope);
-        let (checked, prepared) = prepared.expect("the cell prepares after the stale split");
+        let (checked, prepared) = prepared.expect("the cell prepares after a stale split");
         assert_eq!(checked.items.len(), 1, "{checked:?}");
         assert!(
             matches!(prepared, PreparedCell::Ready { .. }),
-            "the single-checkout fallback prepares the cell"
+            "the cell prepares"
         );
-        assert_eq!(
+        (
             probe.install_checkouts.load(Ordering::SeqCst),
-            1,
-            "exactly one split attempt reached its install checkout"
-        );
-        assert_eq!(
             scope.compile_count(),
-            1,
-            "only the first split attempt's folded compile ran off-checkout"
-        );
-        assert_eq!(
             probe.single_checkout_compiles.load(Ordering::SeqCst),
-            1,
-            "the stale install falls through to exactly one single-checkout compile"
+        )
+    }
+
+    /// An inherited-context fork's parent can commit between the split's
+    /// off-checkout compile and its install checkout. The stale install
+    /// recompiles off-checkout once against the new view and installs: two
+    /// split attempts, each one folded compile, and no compile under the
+    /// checkout.
+    #[tokio::test]
+    async fn stale_split_install_recompiles_off_checkout_once() {
+        let (install_checkouts, compiles, single_checkout) =
+            prepare_cell_with_stale_installs(1).await;
+        assert_eq!(install_checkouts, 2, "the retry reached its own install");
+        assert_eq!(
+            compiles, 2,
+            "each attempt's folded compile ran off-checkout"
+        );
+        assert_eq!(single_checkout, 0, "nothing compiled under the checkout");
+    }
+
+    /// When the retry goes stale as well, the cell compiles under one
+    /// checkout exactly once, and no third split attempt runs.
+    #[tokio::test]
+    async fn twice_stale_split_install_falls_back_to_one_single_checkout_compile() {
+        let (install_checkouts, compiles, single_checkout) =
+            prepare_cell_with_stale_installs(OFF_CHECKOUT_ATTEMPTS).await;
+        assert_eq!(install_checkouts, OFF_CHECKOUT_ATTEMPTS);
+        assert_eq!(compiles, OFF_CHECKOUT_ATTEMPTS as u64);
+        assert_eq!(
+            single_checkout, 1,
+            "the last stale install falls through to exactly one single-checkout compile"
         );
     }
 
