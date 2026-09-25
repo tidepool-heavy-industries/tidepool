@@ -55,6 +55,7 @@ from total duration alone.
 |---|---|---|
 | Express dependencies once and advance ready work without routine model turns | Typed settlements, persistent record actors, WorkSink, retained review/repair composition | Discoverability and production use of the authored flow; automatic admission must preserve exact source and failures |
 | Child asks a typed question; parent chooses code, semantic judgment or model attention | Typed requests, effects, Jev, parent notifications | A uniform authored decision route and its authority/lifetime contract; do not invent another scheduler |
+| Runtime observations work for arbitrary project contracts | Generic actor/request identity and typed input, authored Display | Status currently parses the project-specific taskSource spelling; investigate authored typed observation metadata instead of teaching Rust each project record |
 | Run inspects evidence and tests a policy change next wave | Source reload, typed tools/hooks, trace artifacts and RSI prompt | Reliable evidence selection and exposure tracking; historical log availability is not yet a typed query interface |
 
 These are directions for experiments, not assertions that all parts work today.
@@ -97,3 +98,55 @@ durable store or long-lived compatibility framework around the current backend.
   reply seen/unseen provenance. The wave assignment now preserves that distinction.
 - Independent Sol review inspected the typed provenance diff and continuation
   composition; no build was claimed by that reviewer.
+
+### Check preparation evidence
+
+- Direct deployed checks initially used cold compiler endpoints; supervisor
+  interrupted both own process trees after repeated cold compiles. Incomplete,
+  not failed assertion evidence.
+- Reusing the wave8 daemon with the deployed binary reached a startup failure:
+  MissingPreparedTop Project.Watchdog.coreHeuristics1, before provenance assertions.
+  Log: /tmp/rsi-review-provenance-warm.log. Cause not established; no daemon restart.
+- Switched to the repository's matched local build/check wrapper, which reused
+  the persistent battery daemon. This is an explicit build/exposure change.
+
+### Resource cleanup and launch policy
+
+- User explicitly authorized stopping all unused processes. Stopped completed
+  wave8 and two old TUI hosts through exomonad stop, the persistent test daemon
+  through just daemon-stop, and an orphaned fixture daemon. Source, worktrees and
+  evidence retained. Available RAM increased from about 5 GiB to 23 GiB.
+- Run launches previously left compiler pool size to available memory. Preparing
+  explicit --workers 1 and --rss-ceiling-mb 7168 with the owning launch test,
+  so freeing memory cannot silently increase a run's worker count. The RSS
+  threshold rotates between requests; it is not a hard process memory limit.
+- The first private check daemon inherited a 2 GiB default budget at startup
+  under pressure and rotated on almost every compile. It reached real candidate
+  activation and correct base/HEAD assertions. A fresh 7 GiB one-worker check
+  with existing memo/recovery diagnostics tests the intended warm configuration.
+
+### Verified preparation
+
+- Workspace `c6d3104` published on integrate-ws2, pinned/template-synced in
+  Tidepool `522dad4fb`; typed review provenance recipe: **4/4 passed** on fresh
+  one-worker, 7168 MiB threshold daemon. It executed the published skill call and
+  acceptance snippet, checked actual reviewer HEAD and distinct base/tip.
+- Launch policy `20887af2d`: final focused facade test **1/1 passed**, 485 skipped;
+  Rust formatting (edition 2021), template byte equality for all seven changed
+  workspace files, and diff checks passed. No full gate claimed.
+- Redundant cold check stopped after three assertions once the warm check passed
+  all four; no result attributed to its unexecuted remainder.
+- Detailed logs retained under target/tidepool-test-runs/rsi-iteration-1/.
+  Earlier retained-daemon failures are unresolved compiler-state evidence, not
+  reproduced by the successful fresh warm check. No speculative engine fix landed.
+
+### Automatic review preflight verdict
+
+Project.RoutingChecks.automaticReview failed before its assertions, on generated
+wrapper lines: Project.Routing.WorkEffects is not exported, and
+Control.Monad.Freer.State.State is not imported. Exact log retained as
+target/tidepool-test-runs/rsi-iteration-1/automatic-review.log. This corroborates
+the earlier wrapper type-pin defect. Wave 9 uses ordinary reviewed delivery;
+automatic review is blocked, not exercised or successful. No fixed-whitelist
+workaround was added. The frontier question is how the workbench preserves
+inferred types without emitting names unavailable to authored source.

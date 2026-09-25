@@ -58,8 +58,9 @@ The target evolves alongside the system. Keep observations, interpretations and
 proposals distinct. Measure product progress and orchestration improvements
 separately, carry unresolved questions forward, and judge changes by subsequent
 behavior. Useful procedures become authored programs; missing capabilities can
-justify new primitives. [The current iteration](plans/rsi-iteration-1.md) records
-the experiments and evidence.
+justify new primitives. [The RSI loop](docs/rsi-loop.md) describes the working
+pattern; [the current iteration](plans/rsi-iteration-1.md) records experiments
+and evidence.
 
 ## System 1 is a program, not another chat
 
