@@ -41,7 +41,11 @@ shared services and use the repository's matched build/check entry points.
 ## 3. Run and observe
 
 The Exomonad root owns assignment, integration and product delivery. The external
-supervisor owns the experiment and observation. Use existing traces, retained
+supervisor owns the experiment and observation. Operator and developer experience
+is part of the same experiment: retain build, launch, monitoring, recovery and
+cleanup friction encountered by the supervisor, with the same evidence standards
+as actor friction. Track preparation and supervision costs separately from the
+product run; either may motivate the next improvement. Use existing traces, retained
 outputs, commits and typed results. Interview at meaningful boundaries. Avoid
 creating an observer management tree or waking actors just to collect status.
 

@@ -1,7 +1,9 @@
-# RSI iteration 2 / wave 10 — proposal
+# RSI iteration 2 / wave 10
 
-Planning, not a launch instruction. Product work remains owned by the harness
-wave; the external supervisor prepares Exomonad, observes, and evaluates.
+Launch authorized by Inanna on 2026-09-25 with ordinary event-driven review.
+The committed harness NEXT.md and docs/rsi-iteration-2.md at 076684b are the
+execution brief. Product work remains owned by the harness wave; the external
+supervisor prepares Exomonad, observes, and evaluates.
 
 ## What wave 9 taught us
 
@@ -30,6 +32,11 @@ beyond wave 9: implement and integrate the complete lifecycle below, with shared
 contracts and production consumers. Faster successful execution is welcome.
 
 ## Preparation improvements
+
+The review-basis fix is the intervention shipped for wave 10. The launch packet
+explicitly assigns Outcome Candidate to bounded implementation children. The
+wrapper repair and automatic composition below remain follow-ups, not launch
+prerequisites. The user accepted ordinary event-driven review for this wave.
 
 1. Make project implementation admission preserve its result stage. Reuse the
    existing `implement` owner in Project.Work; inspect its fixed model selection
@@ -126,3 +133,26 @@ turns, rejected cells, result-stage mismatches, idle polling, stale source repai
 and integrated failure paths. Report preparation separately from run execution.
 Interview on what required judgment and what repeated work could become authored
 code. A shorter-than-expected successful wave is not a failure.
+
+## Operator launch friction
+
+The supervisor is also an Exomonad user; these are RSI findings.
+
+- Initial attempt b48bf7e2-a7c5-4eef-875a-19b3f5eddc6b passed preflight but
+  failed at the workspace binding lock held by completed wave 9. Explicitly
+  stopping wave 9 through the CLI released it. Consider detecting the actual
+  lock owner before allocating a new run, with actionable retained-run status.
+- That attempt auto-retried before ever binding a root; after the lock cleared,
+  it failed with `recovered host has no actor lifecycle journal`. Investigate
+  consistency between the no-root fresh-start decision and lifecycle recovery.
+- `exomonad stop` then failed because its systemd unit was already gone, leaving
+  the compiler tmux window. Plain init refused the existing session. The documented
+  `init --recreate` path failed on the same absent-unit condition. After verifying
+  the unit was inactive/not-found and only the compiler pane remained, the
+  supervisor sent SIGTERM to that exact compiler PID; tmux closed and a fresh
+  init was started. Cleanup should handle
+  an absent host unit while still deliberately releasing remaining run resources.
+- No native model task started in that failed attempt. This is launch friction,
+  not a harness-product failure. Logs: /tmp/rsi-wave10-launch.log,
+  /tmp/rsi-wave10-launch-retry.log, /tmp/rsi-wave10-recreate.log; durable initial
+  host log in harness .exomonad/logs/b48bf7e2-a7c5-4eef-875a-19b3f5eddc6b.log.
