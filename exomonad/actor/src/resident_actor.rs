@@ -8415,6 +8415,14 @@ where
         self.environment.requests.retains_watch(owner, watch)
     }
 
+    /// The request presented to `actor` that it has not begun replying to,
+    /// while it waits on nothing it owns. The facade reminds an actor whose
+    /// provider turn went idle with this request still open.
+    #[must_use]
+    pub fn open_request_without_reply(&self, actor: ActorRef) -> Option<crate::RequestId> {
+        self.environment.requests.open_without_reply(actor)
+    }
+
     /// Read whether `owner` has already observed `watch` (via `ObserveWatch`
     /// or `pollWatch`) settled Ready or Unavailable at or after
     /// `occurred_at_unix_ms`.

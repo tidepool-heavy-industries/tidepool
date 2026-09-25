@@ -2487,6 +2487,93 @@ async fn queued_watch_notice_already_observed_by_the_owner_is_acknowledged_witho
 }
 
 #[tokio::test]
+async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
+    use exomonad_agent::{
+        BackendThreadId, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba3".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(false),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let request = exomonad_actor::RequestId(4);
+    let runtime = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let turn = |turn: &str, revision, state| ProviderObservation {
+        turn: Some(ProviderTurnObservation {
+            thread: "thread".into(),
+            turn: turn.into(),
+            revision,
+            state,
+        }),
+        ..Default::default()
+    };
+    let poll = u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap();
+    let mut reminded = None;
+    macro_rules! remind {
+        ($open:expr, $now:expr) => {
+            remind_turn_ended_without_respond(
+                actor,
+                &thread,
+                &backend,
+                "/",
+                &runtime.snapshot(),
+                || $open,
+                &mut reminded,
+                $now,
+            )
+            .await
+            .unwrap()
+        };
+    }
+    let expected = "Your request 4 is still open. End with respond (Produced ...) or respond (Blocked reason evidence); a turn that ends in prose settles nothing.";
+
+    runtime.publish_provider_observation(turn("t1", 1, ProviderTurnState::Active));
+    remind!(Some(request), u64::MAX);
+    runtime.publish_provider_observation(turn("t1", 2, ProviderTurnState::Succeeded));
+    let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    // The poll that first sees the turn idle leaves the model room to respond.
+    remind!(Some(request), idle);
+    assert!(backend.messages.lock().unwrap().is_empty());
+    remind!(Some(request), idle + poll);
+    assert_eq!(*backend.messages.lock().unwrap(), vec![expected.to_owned()]);
+    remind!(Some(request), idle + 2 * poll);
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+
+    runtime.publish_provider_observation(turn("t2", 3, ProviderTurnState::Active));
+    remind!(Some(request), idle + 3 * poll);
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    runtime.publish_provider_observation(turn("t2", 4, ProviderTurnState::Succeeded));
+    let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    remind!(Some(request), idle + poll);
+    remind!(Some(request), idle + 2 * poll);
+    assert_eq!(
+        *backend.messages.lock().unwrap(),
+        vec![expected.to_owned(), expected.to_owned()]
+    );
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    runtime.publish_provider_observation(turn("t3", 5, ProviderTurnState::Succeeded));
+    let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    remind!(None, idle + poll);
+    assert_eq!(backend.messages.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn queued_watch_notice_observed_before_the_transition_is_not_suppressed() {
     use exomonad_agent::BackendThreadId;
 

@@ -862,6 +862,35 @@ impl RequestRegistry {
         (current, queued)
     }
 
+    /// The lowest request presented to `target` whose owner still observes
+    /// it and whose reply has not begun (`Settling` means a reply is in
+    /// flight). `None` while `target` itself waits on a response or watch it
+    /// owns: that settlement starts its next turn, so an idle turn is not
+    /// yet a turn that ended without replying.
+    pub(crate) fn open_without_reply(&self, target: ActorRef) -> Option<RequestId> {
+        let state = self.state.lock();
+        let waiting =
+            state.requests.values().any(|record| {
+                record.owner == target && record.owner_state == OwnerState::Observing
+            }) || state
+                .watches
+                .values()
+                .any(|record| record.owner == target && record.state == WatchState::Pending);
+        if waiting {
+            return None;
+        }
+        state
+            .requests
+            .iter()
+            .filter(|(_, record)| {
+                record.target == target
+                    && record.target_state == TargetState::Presented
+                    && record.owner_state == OwnerState::Observing
+            })
+            .map(|(request, _)| *request)
+            .min()
+    }
+
     pub(crate) fn status_for(&self, owner: ActorRef) -> ActorRequestStatus {
         let state = self.state.lock();
         let mut status = ActorRequestStatus {
@@ -2261,6 +2290,30 @@ mod tests {
         registry.present(target, request).unwrap();
         assert_eq!(registry.received_counts(target), (1, 0));
         assert_eq!(registry.received_counts(owner), (0, 0));
+    }
+
+    #[test]
+    fn open_without_reply_is_the_presented_request_until_a_reply_begins() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        assert_eq!(registry.open_without_reply(target), None);
+        registry.mark_queued(owner, target, request).unwrap();
+        assert_eq!(registry.open_without_reply(target), None);
+        registry.present(target, request).unwrap();
+        assert_eq!(registry.open_without_reply(target), Some(request));
+        assert_eq!(registry.open_without_reply(owner), None);
+
+        let grandchild = registry.reserve(target, actor(3));
+        assert_eq!(registry.open_without_reply(target), None);
+        registry.mark_target_unavailable(target, grandchild);
+        assert_eq!(registry.open_without_reply(target), Some(request));
+
+        registry.begin_reply(target, request).unwrap();
+        assert_eq!(registry.open_without_reply(target), None);
+        registry.finish_reply(request, None);
+        assert_eq!(registry.open_without_reply(target), None);
     }
 
     #[test]
