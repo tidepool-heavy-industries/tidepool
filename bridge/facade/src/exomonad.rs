@@ -1243,18 +1243,19 @@ async fn run_host(
                 ))
             },
         )?;
+        let unavailable_names = predecessors.unavailable_names();
         if !predecessors.root_available() {
             return Err(runtime_error(format!(
                 "host recovery cannot prove the predecessor root stopped; actor remains unavailable: {}",
-                predecessors.unavailable.join(", ")
+                unavailable_names.join(", ")
             )));
         }
-        let unavailable = if predecessors.unavailable.is_empty() {
+        let unavailable = if unavailable_names.is_empty() {
             "none".into()
         } else {
-            predecessors.unavailable.join(", ")
+            unavailable_names.join(", ")
         };
-        unavailable_actors = predecessors.unavailable.clone();
+        unavailable_actors = unavailable_names.clone();
         let notice = format!(
             "Recovery notice [{}:{}]. Restored accepted source {}. Live Haskell computations, requests, watches, and bindings from the prior host were lost. Native work was interrupted. The recorded conversation is being resumed without replaying unresolved tool calls. Unavailable predecessor actors: {unavailable}. Inspect Exomonad status and retained command jobs before starting new work.",
             options.run_id,
@@ -1268,7 +1269,7 @@ async fn run_host(
         tracing::info!(
             host_generation,
             stopped = predecessors.stopped,
-            unavailable = ?predecessors.unavailable,
+            unavailable = ?unavailable_names,
             "predecessor native applications reconciled"
         );
     }

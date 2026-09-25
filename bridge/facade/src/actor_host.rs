@@ -501,6 +501,8 @@ pub struct ActorHostConfig {
 }
 
 const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
+// The local forest admits its root first, before any child actor identities.
+const ROOT_ACTOR_ID: exomonad_actor::ActorId = exomonad_actor::ActorId(1);
 
 fn hosted_operation_journal(run_root: &Path, actor: exomonad_actor::ActorId) -> PathBuf {
     run_root
@@ -531,13 +533,43 @@ struct ProcessRecoveryCheckpoint {
 
 pub(crate) struct PredecessorRecovery {
     pub(crate) stopped: usize,
-    pub(crate) unavailable: Vec<String>,
+    unavailable: Vec<UnavailablePredecessor>,
+}
+
+struct UnavailablePredecessor {
+    actor: ActorRef,
+    directory: String,
 }
 
 impl PredecessorRecovery {
     pub(crate) fn root_available(&self) -> bool {
-        !self.unavailable.iter().any(|actor| actor.starts_with("1-"))
+        !self
+            .unavailable
+            .iter()
+            .any(|entry| entry.actor.id == ROOT_ACTOR_ID)
     }
+
+    pub(crate) fn unavailable_names(&self) -> Vec<String> {
+        self.unavailable
+            .iter()
+            .map(|entry| entry.directory.clone())
+            .collect()
+    }
+
+    fn mark_unavailable(&mut self, actor: ActorRef, directory: &str) {
+        self.unavailable.push(UnavailablePredecessor {
+            actor,
+            directory: directory.to_owned(),
+        });
+    }
+}
+
+fn actor_ref_from_directory(name: &str) -> Option<ActorRef> {
+    let (id, incarnation) = name.split_once('-')?;
+    Some(ActorRef {
+        id: exomonad_actor::ActorId(id.parse().ok()?),
+        incarnation: exomonad_actor::Incarnation(incarnation.parse().ok()?),
+    })
 }
 
 /// Stop each predecessor whose exact supervisor identity remains provable.
@@ -556,22 +588,14 @@ pub(crate) fn stop_predecessor_processes(
             continue;
         }
         let actor_name = actor.file_name().to_string_lossy().into_owned();
-        let mut components = actor_name.split('-');
-        let actor_directory = components
-            .next()
-            .is_some_and(|part| part.parse::<u64>().is_ok())
-            && components
-                .next()
-                .is_some_and(|part| part.parse::<u64>().is_ok())
-            && components.next().is_none();
-        if !actor_directory {
+        let Some(actor_ref) = actor_ref_from_directory(&actor_name) else {
             continue;
-        }
+        };
         let record_path = actor.path().join(PROCESS_RECOVERY_RECORD);
         let bytes = match std::fs::read(&record_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                report.unavailable.push(actor_name);
+                report.mark_unavailable(actor_ref, &actor_name);
                 continue;
             }
             Err(error) => return Err(error),
@@ -580,12 +604,12 @@ pub(crate) fn stop_predecessor_processes(
             Ok(record) => record,
             Err(error) => {
                 tracing::warn!(actor = %actor_name, %error, "corrupt predecessor evidence");
-                report.unavailable.push(actor_name);
+                report.mark_unavailable(actor_ref, &actor_name);
                 continue;
             }
         };
         if record.version != 1 {
-            report.unavailable.push(actor_name);
+            report.mark_unavailable(actor_ref, &actor_name);
             continue;
         }
         if record.retired {
@@ -638,7 +662,7 @@ pub(crate) fn stop_predecessor_processes(
             Ok(terminal) => terminal,
             Err(error) => {
                 tracing::warn!(actor = %actor_name, %error, "predecessor actor remains unavailable");
-                report.unavailable.push(actor_name);
+                report.mark_unavailable(actor_ref, &actor_name);
                 continue;
             }
         };
@@ -647,7 +671,7 @@ pub(crate) fn stop_predecessor_processes(
             exomonad_node::ProcessSupervisorObservation::ProcessStopped
                 | exomonad_node::ProcessSupervisorObservation::NotSpawned
         ) {
-            report.unavailable.push(actor_name);
+            report.mark_unavailable(actor_ref, &actor_name);
             continue;
         }
         record.retired = true;
@@ -662,8 +686,8 @@ pub(crate) fn stop_predecessor_processes(
         // but it does not reconstruct a child actor's lost Haskell state,
         // lineage, or mailbox. Keep that child visible as unavailable until an
         // actor-owned durable record can restore those identities.
-        if !actor_name.starts_with("1-") {
-            report.unavailable.push(actor_name);
+        if actor_ref.id != ROOT_ACTOR_ID {
+            report.mark_unavailable(actor_ref, &actor_name);
         }
     }
     Ok(report)

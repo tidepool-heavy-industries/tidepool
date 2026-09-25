@@ -1334,7 +1334,7 @@ fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {
 
     let report = stop_predecessor_processes(run.path()).unwrap();
     assert!(report.root_available());
-    assert_eq!(report.unavailable, vec!["2-1"]);
+    assert_eq!(report.unavailable_names(), vec!["2-1"]);
 }
 
 #[test]
@@ -1343,7 +1343,18 @@ fn recovery_fails_closed_when_root_process_evidence_is_missing() {
     std::fs::create_dir_all(run.path().join("1-1")).unwrap();
     let report = stop_predecessor_processes(run.path()).unwrap();
     assert!(!report.root_available());
-    assert_eq!(report.unavailable, vec!["1-1"]);
+    assert_eq!(report.unavailable_names(), vec!["1-1"]);
+}
+
+#[test]
+fn recovery_treats_a_numeric_root_directory_with_leading_zero_as_root() {
+    let run = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(run.path().join("01-2")).unwrap();
+    std::fs::create_dir_all(run.path().join("notes-2")).unwrap();
+
+    let report = stop_predecessor_processes(run.path()).unwrap();
+    assert!(!report.root_available());
+    assert_eq!(report.unavailable_names(), vec!["01-2"]);
 }
 
 #[test]
@@ -1397,7 +1408,7 @@ fn recovery_reports_a_stopped_child_until_its_actor_state_can_be_rebuilt() {
     let report = stop_predecessor_processes(run.path()).unwrap();
     assert!(report.root_available());
     assert_eq!(report.stopped, 1);
-    assert_eq!(report.unavailable, vec!["2-1"]);
+    assert_eq!(report.unavailable_names(), vec!["2-1"]);
     assert!(!socket_root.exists());
 }
 
