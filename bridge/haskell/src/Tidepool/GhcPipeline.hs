@@ -2181,25 +2181,17 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     requestTargetsRef <- liftIO (newIORef Set.empty)
-    requestIncarnationRef <- liftIO (newIORef Nothing)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
       let finishRequest = do
             targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
-            incarnation <- readIORef requestIncarnationRef
             forM_ (Set.toList targets) $ \targetModName' -> do
-              sanitizeMemo targetModName' incarnation memoRef
+              sanitizeMemo targetModName' memoRef
               evictRecovery targetModName'
           compile :: Word64 -> ResidentCompiler
           compile requestIdentity selection retained purpose mscope path extraIncludes buildProductsDir = do
             targetModName' <- targetModuleNameFor path
             modifyIORef' requestTargetsRef (Set.insert targetModName')
-            -- A transaction's every compile call shares one caller and one
-            -- session, so the last call's incarnation (if any) is this
-            -- transaction's incarnation -- 'writeIORef', not a fold, is
-            -- correct here for the same reason 'retainedRef' below is
-            -- plain-written per call rather than accumulated.
-            writeIORef requestIncarnationRef (mscope >>= ssIncarnation)
             -- The target's parsed tree depends on the compile purpose (for
             -- example, lookup compilation normalizes wildcards). Source and
             -- dependency hashes cannot distinguish those variants, so never
@@ -2277,32 +2269,30 @@ sessionMemoCap :: Int
 sessionMemoCap = 8000
 
 -- | Strip transaction-scoped entries from the shared 'GutsMemo' after a
--- compiler transaction: always the target module compiled by it, and any
--- @Tidepool.Session.*@ module ('parseSessionModule' recognizes both @Val@
--- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
--- rather than a second hand-rolled prefix check) UNLESS this transaction
--- carried a session incarnation identity (@incarnation@, from
--- 'ssIncarnation'), in which case a session entry is left in place instead.
--- That is safe, not just faster: 'lookupValidMemo' additionally requires a
--- session entry's own recorded 'memoIncarnation' to match the CURRENT
--- request's incarnation before ever reusing it, so a same-named module from
--- a different incarnation (a restart, whose generation counter restarts at
--- 0, or a different session on the same warm daemon) still misses by
--- construction — this eviction only stops discarding what a LATER request
--- in the SAME incarnation could safely reuse. 'incarnation = Nothing' (an
--- older caller with no incarnation field, or a one-shot compile) keeps the
--- original unconditional eviction exactly as before this parameter existed.
+-- compiler transaction: always the target module compiled by it, and every
+-- @Tidepool.Session.*@ entry ('parseSessionModule' recognizes both @Val@ and
+-- @Lib@ kinds) that was produced without a session incarnation identity.
+-- Such an entry can never be reused: 'lookupValidMemo' requires a session
+-- entry's recorded 'memoIncarnation' to equal the CURRENT request's
+-- incarnation, and an absent identity never matches. An entry recorded under
+-- an incarnation stays, whatever the finishing transaction carried: the same
+-- lookup check already keeps a same-named module from another incarnation (a
+-- restart, whose generation counter restarts at 0, or another session on the
+-- same warm daemon) from reusing it, so a transaction with no incarnation
+-- (a lookup, a plain eval, a one-shot compile) must not discard what a later
+-- request in a live incarnation will reuse.
 -- Reusable library entries stay warm either way; capped by recency
 -- ('gmeCycle', the request identity that produced or last reused an entry)
 -- once retained session entries exceed 'sessionMemoCap', so an unbounded
 -- accumulation across a long-lived session or several concurrent
 -- incarnations cannot grow the memo forever.
-sanitizeMemo :: ModuleName -> Maybe String -> IORef GutsMemo -> IO ()
-sanitizeMemo targetModName' incarnation memoRef =
+sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
+sanitizeMemo targetModName' memoRef =
   modifyIORef' memoRef $ capSessionEntries . Map.filterWithKey keep
   where
-    keep mn _ = mn /= targetModName'
-      && (isJust incarnation || isNothing (parseSessionModule (moduleNameString mn)))
+    keep mn entry = mn /= targetModName'
+      && (isNothing (parseSessionModule (moduleNameString mn))
+          || isJust (memoIncarnation (gmeValidity entry)))
     capSessionEntries memo =
       let (sessionEntries, otherEntries) = Map.partitionWithKey
             (\mn _ -> isJust (parseSessionModule (moduleNameString mn))) memo
