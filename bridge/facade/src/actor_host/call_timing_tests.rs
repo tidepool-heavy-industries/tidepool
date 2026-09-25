@@ -215,3 +215,92 @@ async fn second_cell_install_compiles_off_checkout() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+/// A six-unit cell (three binds, three expressions) run after a warm-up
+/// cell has bootstrapped the machine. Every unit's compile -- GHC through
+/// the daemon and the Cranelift install, including each expression's
+/// display render -- runs with the resident machine released, so every
+/// prepared install after the warm-up reports `compiled_off_checkout=true`.
+/// The cell's `checkout_hold_ms`/`compile_ms` are printed for measurement;
+/// wall-time figures are not asserted.
+#[tokio::test]
+async fn six_unit_cell_compiles_every_unit_off_checkout() {
+    // Global default for the same reason `second_cell_install_compiles_off_checkout`
+    // gives: install lines are emitted from the blocking pool.
+    let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(log.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("first global subscriber in this test process");
+
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let log_len = || {
+        log.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    };
+    let log_since = |start: usize| {
+        let bytes = log
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[start..]
+            .to_vec();
+        String::from_utf8(bytes)
+            .expect("captured log is UTF-8")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>()
+    };
+
+    // Warm-up: bootstraps the machine and the display renderer.
+    super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n").await;
+
+    let mut failures = Vec::new();
+    for (round, names) in [("a", ["hA", "hB", "hC"]), ("b", ["kA", "kB", "kC"])] {
+        let [a, b, c] = names;
+        let script = format!(
+            "{a} <- pure (1 :: Int)\n{a} + 1\n{b} <- pure ({a} * 2)\n{b} + {a}\n\
+             {c} <- pure [{a}, {b}]\nlength {c}\n"
+        );
+        let start = log_len();
+        let receipt = super::tests::dispatch_haskell_script(policy.as_ref(), &script).await;
+        assert_eq!(receipt["status"], "committed", "{receipt}");
+        let lines = log_since(start);
+        let timing = lines
+            .iter()
+            .find(|value| {
+                value["fields"]["message"].as_str() == Some("call timing")
+                    && value["fields"]["tool"].as_str() == Some("cell")
+            })
+            .unwrap_or_else(|| panic!("no cell \"call timing\" line: {lines:?}"));
+        eprintln!("six-unit cell round {round}: {}", timing["fields"]);
+        let installs = lines
+            .iter()
+            .filter(|value| value["target"].as_str() == Some("tidepool_runtime::prepared_install"))
+            .collect::<Vec<_>>();
+        assert!(!installs.is_empty(), "no prepared installs: {lines:?}");
+        let under_checkout = installs
+            .iter()
+            .filter(|line| {
+                let value = &line["fields"]["compiled_off_checkout"];
+                value.as_bool() != Some(true) && value.as_str() != Some("true")
+            })
+            .collect::<Vec<_>>();
+        if !under_checkout.is_empty() {
+            failures.push(format!(
+                "round {round}: {} of {} installs compiled under the checkout: {under_checkout:?}",
+                under_checkout.len(),
+                installs.len()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

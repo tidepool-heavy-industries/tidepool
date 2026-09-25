@@ -932,6 +932,41 @@ impl PendingPreparedInstall {
     }
 }
 
+/// Everything [`ResidentSession::snapshot_display_bundle`] produces under a
+/// machine checkout for a display bundle's off-checkout Cranelift compile;
+/// the display counterpart of [`PendingPreparedInstall`].
+pub struct PendingDisplayInstall {
+    snapshot: super::prepared::InstallSnapshot,
+    provenance: Arc<ProgramProvenance>,
+    generation: Generation,
+}
+
+impl PendingDisplayInstall {
+    /// Step (b): compile the bundle's linked program off any checkout.
+    pub fn compile_off_checkout(
+        &mut self,
+    ) -> Result<
+        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        tidepool_codegen::prepared_program::CompileError,
+    > {
+        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    }
+}
+
+/// A display bundle's three binders come from one compiler value module.
+fn check_display_bundle_binders(
+    page: &BoundBinder,
+    metadata: &BoundBinder,
+    alias: &BoundBinder,
+) -> Result<(), ResidentError> {
+    if page.module != metadata.module || page.module != alias.module {
+        return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+            "display bundle binders do not share one compiler value module".into(),
+        ))));
+    }
+    Ok(())
+}
+
 /// The `Send` projection of one prepared run that crosses the eval thread:
 /// handles are ids, the observed value is an owned tree.
 pub(crate) enum PreparedRun {
@@ -3915,11 +3950,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
-        if page.module != metadata.module || page.module != alias.module {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                "display bundle binders do not share one compiler value module".into(),
-            ))));
-        }
+        check_display_bundle_binders(page, metadata, alias)?;
         let prepared = code.prepared;
         let provenance = self.provenance_for(&code.sites)?;
         self.state
@@ -3935,6 +3966,89 @@ where
             install_prepared_started.elapsed(),
             0,
         );
+        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+    }
+
+    /// Step (a) of the off-checkout split for a display bundle, the
+    /// counterpart of [`Self::snapshot_run_prepared`]: merge `code`'s table,
+    /// claim `generation`, and resolve and link the install without the
+    /// Cranelift compile. Compile the result with
+    /// [`PendingDisplayInstall::compile_off_checkout`] with no checkout
+    /// held, then finish through [`Self::revalidate_and_run_display_bundle`].
+    /// The caller checks [`Self::prepared_machine_ready`] first; a session
+    /// with no machine is refused with `MachineNotInstalled`.
+    pub fn snapshot_display_bundle(
+        &mut self,
+        code: TurnCode<'static>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+    ) -> Result<PendingDisplayInstall, ResidentError> {
+        check_display_bundle_binders(page, metadata, alias)?;
+        let prepared = code.prepared;
+        let provenance = self.provenance_for(&code.sites)?;
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        self.state.set_val_gen(generation);
+        let snapshot = self
+            .state
+            .snapshot_install_prepared(prepared.into_owned())?
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        Ok(PendingDisplayInstall {
+            snapshot,
+            provenance,
+            generation,
+        })
+    }
+
+    /// Step (c) of the display-bundle split: revalidate `pending`'s imports
+    /// under this checkout and, when still current, install `compiled` and
+    /// run the bundle exactly as [`Self::run_display_bundle_with_sites`]
+    /// does. `Ok(None)` means an import changed (or the machine went away)
+    /// since the snapshot; the caller recompiles from a fresh snapshot.
+    pub fn revalidate_and_run_display_bundle(
+        &mut self,
+        pending: PendingDisplayInstall,
+        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        page: &BoundBinder,
+        alias: &BoundBinder,
+    ) -> Result<Option<ResidentDisplayBundle>, ResidentError> {
+        let PendingDisplayInstall {
+            snapshot,
+            provenance,
+            generation,
+        } = pending;
+        let install_started = std::time::Instant::now();
+        let Some(program) = self
+            .state
+            .revalidate_and_install_prepared(snapshot, compiled)?
+        else {
+            return Ok(None);
+        };
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_INSTALL_PREPARED,
+            install_started.elapsed(),
+            0,
+        );
+        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+            .map(Some)
+    }
+
+    /// Run an installed (and pinned) display-bundle program and settle its
+    /// three fields: the page is bound before metadata is forced, then the
+    /// `cellDisplay` alias is published over the page's root.
+    fn run_installed_display_bundle(
+        &mut self,
+        program: ProgramId,
+        provenance: Arc<ProgramProvenance>,
+        page: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+    ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
         let park = ParkPolicy {

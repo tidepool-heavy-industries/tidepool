@@ -3205,7 +3205,8 @@ where
     /// shares its parent's scope chain, and a parent committing cells goes
     /// stale faster than a split compile completes: a second split attempt
     /// would repeat the same GHC work against a view the parent is still
-    /// moving, not wait for it to settle.
+    /// moving, not wait for it to settle (see [`CHEAP_RETRY_ATTEMPTS`] for
+    /// the paths whose retry is cheap enough to make).
     pub(crate) async fn prepare_cell(
         &self,
         context: crate::ActorSessionContext,
@@ -3570,8 +3571,8 @@ where
                 CellInstall::Stale(changed) => ("install", changed),
             }
         };
+        log_split_stale("cell", &context, stage, changed, false);
 
-        log_split_fallback("cell", &context, stage, changed);
         if let Some(guard) = leased_input.take() {
             guard.retire(&self.access).await;
         }
@@ -4240,11 +4241,12 @@ where
             cancel_on_drop.0 = None;
             return Ok(step);
         };
+        log_split_stale("fragment", &context, stage, changed, false);
 
-        log_split_fallback("fragment", &context, stage, changed);
         cancel_on_drop.0 = None;
-        self.access
-            .with_machine(context, move |session, context, _| {
+        let step = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
                 begin_fragment(
                     session,
                     context,
@@ -4259,7 +4261,8 @@ where
                     verdict.as_ref(),
                 )
             })
-            .await
+            .await?;
+        settle_deferred_display(&self.access, context, step).await
     }
 
     /// Service structured inspection without holding the resident machine
@@ -4360,7 +4363,7 @@ where
     ///
     /// A completed fragment whose display is an
     /// [`WorkbenchDisplay::Observation`] takes the off-checkout split
-    /// ([`Self::settle_observation_render_split`]): `settle_fragment`'s
+    /// ([`settle_observation_render_split`]): `settle_fragment`'s
     /// render otherwise runs a full GHC-then-Cranelift round trip
     /// (`render_cell_observation`, measured at 5.0-6.5s) inside the one
     /// checkout this method would otherwise hold for the whole call. Every
@@ -4375,9 +4378,7 @@ where
         if let (ResidentOutcome::Completed { .. }, WorkbenchDisplay::Observation { .. }) =
             (&outcome, &fragment.display)
         {
-            return self
-                .settle_observation_render_split(context, fragment, outcome)
-                .await;
+            return settle_observation_render_split(&self.access, context, fragment, outcome).await;
         }
         self.access
             .with_machine(context, move |session, context, _| {
@@ -4385,250 +4386,411 @@ where
             })
             .await
     }
+}
 
-    /// The off-checkout split counterpart of `settle_fragment`'s
-    /// `Observation` branch: snapshot under a short checkout
-    /// ([`snapshot_display_compile`]), compile the display bundle with no
-    /// checkout held ([`compile_block_off_checkout`]), then re-checkout
-    /// only to revalidate and run the compiled bundle
-    /// ([`ResidentSession::run_display_bundle_with_sites`], which executes
-    /// the already-compiled page and must stay under checkout). A stale
-    /// snapshot ([`split_staleness`] against a freshly re-derived view) falls
-    /// straight through to the original single-checkout
-    /// `render_cell_observation`, exactly as
-    /// `prepare_cell`/`begin_fragment_split` fall back to their own
-    /// single-checkout paths after one attempt.
-    async fn settle_observation_render_split(
-        &self,
-        context: crate::ActorSessionContext,
-        mut fragment: ResidentWorkbenchFragment,
-        outcome: ResidentOutcome,
-    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Completed { output, result: _ } = &outcome else {
-            unreachable!("caller matched ResidentOutcome::Completed");
-        };
-        fragment.output.extend(output.clone());
-        let WorkbenchDisplay::Observation {
-            name,
-            budget,
-            presentation,
-            source,
-            type_modules,
-        } = fragment.display
-        else {
-            unreachable!("caller matched WorkbenchDisplay::Observation");
-        };
-        let installed_bindings = vec![name.clone()];
-        let effective_budget = budget.saturating_sub(
+/// Settle a completed fragment whose display is an
+/// [`WorkbenchDisplay::Observation`], rendering the display page with the
+/// machine released for both compiles: the GHC compile of the display
+/// bundle and its Cranelift install compile. See
+/// [`render_observation_off_checkout`] for the checkouts one attempt takes.
+/// A stale attempt renders again from a fresh snapshot, up to
+/// [`CHEAP_RETRY_ATTEMPTS`] attempts, before the single-checkout
+/// [`render_cell_observation`]. Any render failure, including a lost machine
+/// or checkout, becomes a "Display failed" receipt: the value is already
+/// bound and committed, as the in-checkout render always reported it. A render failure never loses the value: the
+/// receipt says the display failed and names the still-bound observation.
+async fn settle_observation_render_split<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: crate::ActorSessionContext,
+    mut fragment: ResidentWorkbenchFragment,
+    outcome: ResidentOutcome,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let ResidentOutcome::Completed { output, result: _ } = outcome else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "observation render settled an outcome that did not complete".into(),
+        ));
+    };
+    fragment.output.extend(output);
+    let WorkbenchDisplay::Observation {
+        name,
+        budget,
+        presentation,
+        source,
+        type_modules,
+    } = fragment.display
+    else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "observation render settled a fragment with no observation display".into(),
+        ));
+    };
+    let mut installed_bindings = vec![name.clone()];
+    installed_bindings.append(&mut fragment.recovered_jobs);
+    let request = ObservationRender {
+        source,
+        type_modules,
+        budget: budget.saturating_sub(
             fragment
                 .output
                 .iter()
                 .map(|text| text.chars().count())
                 .sum::<usize>(),
-        );
-        let transcript_prefix = fragment.output.join("\n");
-        let warnings = fragment.warnings;
-        let presented = fragment.presented;
+        ),
+        presented: fragment.presented,
+        presentation,
+        name,
+    };
+    let committed = |receipt: String| {
+        let mut output = fragment.output.join("\n");
+        if !output.is_empty() && !receipt.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&receipt);
+        ResidentWorkbenchStep::Committed {
+            output,
+            warnings: fragment.warnings,
+            installed_bindings,
+        }
+    };
 
-        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-        let changed = 'split: {
-            let snapshot_source = source.clone();
-            let snapshot_type_modules = type_modules.clone();
-            let snapshot = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_display_compile(
-                        session,
-                        context,
-                        &snapshot_source,
-                        &snapshot_type_modules,
-                    )
-                })
-                .await?;
-            let generation = snapshot.view.next_value_generation().0;
-            let page_name = format!("__tidepoolPage{generation}");
-            let metadata_name = format!("__tidepoolDisplayMetadata{generation}");
-            let block = observation_display_block(
-                &page_name,
-                &metadata_name,
-                &context.haskell_effects_alias,
-                &name,
-                effective_budget,
-                &presented,
-                presentation,
-            );
-
-            // No checkout held here: the GHC-then-Cranelift compile runs
-            // concurrently with every other actor's turn against this
-            // session.
-            let compile_context = context.clone();
-            let compile_source = source.clone();
-            let compile_effects = context.haskell_effects_alias.clone();
-            let compile_view = snapshot.view.clone();
-            let compile_retained = snapshot.retained.clone();
-            let compile_visible_names = snapshot.visible_names.clone();
-            let compile_page_name = page_name.clone();
-            let compile_metadata_name = metadata_name.clone();
-            let compile_cancellation = cancellation.clone();
-            let compiled = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(
-                    compile_cancellation,
-                    || {
-                        compile_block_off_checkout(
-                            &compile_context,
-                            &compile_source,
-                            &compile_effects,
-                            &block,
-                            None,
-                            compile_view,
-                            &[],
-                            Some(&generated_binds_verdict(&[
-                                compile_page_name,
-                                compile_metadata_name,
-                                "cellDisplay".into(),
-                            ])),
-                            None,
-                            None,
-                            &compile_retained,
-                            &compile_visible_names,
-                            None,
-                        )
-                    },
-                )
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
-            let ready = match compiled {
-                CompiledBlock::Ready(ready) => *ready,
-                CompiledBlock::Rejected(diagnostic) => {
-                    // Same shape as `begin_fragment_split`'s own rejection
-                    // handling: the rejection was derived from a snapshot
-                    // taken before this checkout was released, so a fresh
-                    // view might no longer agree it applies. Report it as a
-                    // failed display, not a fallback target — a genuine
-                    // Haskell error in the rendering path is not the
-                    // transient staleness this split guards against, and
-                    // `render_cell_observation`'s own single-checkout path
-                    // has never distinguished the two either.
-                    cancel_on_drop.0 = None;
-                    let mut output = transcript_prefix;
-                    let receipt = format!(
-                        "Display failed: {}\nValue remains bound as {name}. Inspect a \
-                         smaller field or projection; execution was not repeated.",
-                        ResidentActorWorkbenchError::Inspection(diagnostic.output)
-                    );
-                    if !output.is_empty() && !receipt.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&receipt);
-                    return Ok(ResidentWorkbenchStep::Committed {
-                        output,
-                        warnings,
-                        installed_bindings,
-                    });
-                }
-            };
-
-            let install_source = source.clone();
-            let install_type_modules = type_modules.clone();
-            let install_name = name.clone();
-            let install_page_name = page_name.clone();
-            let install_metadata_name = metadata_name.clone();
-            let install_snapshot_view = snapshot.view.clone();
-            let receipt = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    if session.machine_disposition()
-                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
-                    {
-                        return Err(ResidentActorWorkbenchError::MachineLost);
-                    }
-                    let fresh_view = actor_compile_view(
-                        session,
-                        context,
-                        &install_source,
-                        &install_type_modules,
-                    )?;
-                    if let Some(changed) =
-                        split_staleness(session, &fresh_view, &install_snapshot_view, None)
-                    {
-                        return Ok(Err(changed));
-                    }
-                    let TurnResult::Bind {
-                        bound, compiled, ..
-                    } = ready.result
-                    else {
-                        return Err(ResidentActorWorkbenchError::Inspection(
-                            "display bundle did not produce bindings".into(),
-                        ));
-                    };
-                    let (page, metadata, cell_display) =
-                        display_bundle_binders(&bound, &install_page_name, &install_metadata_name)?;
-                    let bundle = session
-                        .run_display_bundle_with_sites(
-                            compiled.into_code(),
-                            page,
-                            metadata,
-                            cell_display,
-                            ready.generation,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)?;
-                    decode_display_bundle(&bundle, &install_name).map(Ok)
-                })
-                .await?;
-            let receipt = match receipt {
-                Ok(receipt) => receipt,
-                Err(changed) => break 'split changed,
-            };
-            cancel_on_drop.0 = None;
-            let mut output = transcript_prefix;
-            if !output.is_empty() && !receipt.is_empty() {
-                output.push('\n');
+    let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+    let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+    for attempt in 1..=CHEAP_RETRY_ATTEMPTS {
+        let (stage, changed) = match render_observation_off_checkout(
+            access,
+            &context,
+            &request,
+            &cancellation,
+        )
+        .await
+        {
+            Ok(DisplayRenderAttempt::Rendered(receipt)) => {
+                cancel_on_drop.0 = None;
+                return Ok(committed(receipt));
             }
-            output.push_str(&receipt);
-            return Ok(ResidentWorkbenchStep::Committed {
-                output,
-                warnings,
-                installed_bindings,
-            });
+            Ok(DisplayRenderAttempt::Stale { stage, changed }) => (stage, changed),
+            Err(error) => {
+                cancel_on_drop.0 = None;
+                return Ok(committed(request.failed(&error)));
+            }
         };
+        log_split_stale(
+            "observation render",
+            &context,
+            stage,
+            changed,
+            attempt < CHEAP_RETRY_ATTEMPTS,
+        );
+    }
 
-        log_split_fallback("observation render", &context, "install", changed);
-        cancel_on_drop.0 = None;
-        let fallback_source = source;
-        let fallback_type_modules = type_modules;
-        let fallback_name = name;
-        self.access
-            .with_machine(context, move |session, context, _| {
-                let receipt = match render_cell_observation(
+    cancel_on_drop.0 = None;
+    let fallback = request.clone();
+    let receipt = access
+        .with_machine(context, move |session, context, _| {
+            let request = fallback;
+            Ok(
+                match render_cell_observation(
                     session,
                     context,
-                    &fallback_source,
-                    &fallback_type_modules,
-                    &fallback_name,
-                    effective_budget,
-                    &presented,
-                    presentation,
+                    &request.source,
+                    &request.type_modules,
+                    &request.name,
+                    request.budget,
+                    &request.presented,
+                    request.presentation,
                 ) {
                     Ok(text) => text,
-                    Err(error) => format!(
-                        "Display failed: {error}\nValue remains bound as {fallback_name}. \
-                         Inspect a smaller field or projection; execution was not repeated."
-                    ),
-                };
-                let mut output = transcript_prefix;
-                if !output.is_empty() && !receipt.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&receipt);
-                Ok(ResidentWorkbenchStep::Committed {
-                    output,
-                    warnings,
-                    installed_bindings,
-                })
+                    Err(error) => request.failed(&error),
+                },
+            )
+        })
+        .await
+        .unwrap_or_else(|error| request.failed(&error));
+    Ok(committed(receipt))
+}
+
+/// What one display render needs: the retained observation, the source it
+/// compiles against, and the remaining character budget.
+#[derive(Clone)]
+struct ObservationRender {
+    name: String,
+    source: ActorWorkbenchSource,
+    type_modules: Vec<String>,
+    budget: usize,
+    presented: Vec<String>,
+    presentation: ExpressionPresentation,
+}
+
+impl ObservationRender {
+    /// The receipt for a display that failed after its value was bound.
+    fn failed(&self, error: &ResidentActorWorkbenchError) -> String {
+        format!(
+            "Display failed: {error}\nValue remains bound as {}. Inspect a smaller field or \
+             projection; execution was not repeated.",
+            self.name
+        )
+    }
+}
+
+enum DisplayRenderAttempt {
+    /// The display receipt: a rendered page, or a failed-display receipt
+    /// for a GHC rejection of the display bundle.
+    Rendered(String),
+    /// A view the compiles read changed before the install; `stage` names
+    /// the checkout that found it.
+    Stale {
+        stage: &'static str,
+        changed: SplitStaleView,
+    },
+}
+
+/// One off-checkout display render. Three short checkouts, two compiles
+/// with the machine released:
+///
+/// 1. snapshot the compile view and reserve the bundle's value generation
+///    ([`snapshot_display_compile`]);
+/// 2. GHC-compile the display bundle ([`compile_block_off_checkout`]);
+/// 3. revalidate the view ([`split_staleness`]) and snapshot the install
+///    ([`ResidentSession::snapshot_display_bundle`]);
+/// 4. Cranelift-compile the linked program
+///    ([`tidepool_runtime::session::PendingDisplayInstall::compile_off_checkout`]);
+/// 5. revalidate the view again and the program's imports, install and run
+///    ([`ResidentSession::revalidate_and_run_display_bundle`]).
+///
+/// A session with no machine yet (never the case after a cell item ran)
+/// runs the bundle in step 3's checkout.
+async fn render_observation_off_checkout<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: &crate::ActorSessionContext,
+    request: &ObservationRender,
+    cancellation: &tidepool_runtime::CompilerTransactionCancellation,
+) -> Result<DisplayRenderAttempt, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let snapshot_request = request.clone();
+    let snapshot = access
+        .with_machine(context.clone(), move |session, context, _| {
+            snapshot_display_compile(
+                session,
+                context,
+                &snapshot_request.source,
+                &snapshot_request.type_modules,
+            )
+        })
+        .await?;
+    let generation = snapshot.view.next_value_generation().0;
+    #[cfg(test)]
+    split_probe::record_display_generation(generation);
+    let page_name = format!("__tidepoolPage{generation}");
+    let metadata_name = format!("__tidepoolDisplayMetadata{generation}");
+    let block = observation_display_block(
+        &page_name,
+        &metadata_name,
+        &context.haskell_effects_alias,
+        &request.name,
+        request.budget,
+        &request.presented,
+        request.presentation,
+    );
+
+    // GHC, no checkout held.
+    let compile_context = context.clone();
+    let compile_source = request.source.clone();
+    let compile_view = snapshot.view.clone();
+    let compile_retained = snapshot.retained.clone();
+    let compile_visible_names = snapshot.visible_names.clone();
+    let verdict = generated_binds_verdict(&[
+        page_name.clone(),
+        metadata_name.clone(),
+        "cellDisplay".into(),
+    ]);
+    let compile_cancellation = cancellation.clone();
+    let compiled = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+        tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
+            compile_block_off_checkout(
+                &compile_context,
+                &compile_source,
+                &compile_context.haskell_effects_alias,
+                &block,
+                None,
+                compile_view,
+                &[],
+                Some(&verdict),
+                None,
+                None,
+                &compile_retained,
+                &compile_visible_names,
+                None,
+            )
+        })
+    }))
+    .await
+    .map_err(ResidentActorWorkbenchError::Join)??;
+    let ready = match compiled {
+        CompiledBlock::Ready(ready) => *ready,
+        // A rejection of the generated display bundle is a failed display,
+        // not a staleness to retry: `render_cell_observation` reports it the
+        // same way.
+        CompiledBlock::Rejected(diagnostic) => {
+            return Ok(DisplayRenderAttempt::Rendered(request.failed(
+                &ResidentActorWorkbenchError::Inspection(diagnostic.output),
+            )));
+        }
+    };
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = ready.result
+    else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display bundle did not produce bindings".into(),
+        ));
+    };
+    display_bundle_binders(&bound, &page_name, &metadata_name)?;
+    let bound = Arc::new(bound);
+    let bundle_generation = ready.generation;
+
+    // Revalidate the view the GHC compile read, and snapshot the install.
+    let install_source = request.clone();
+    let install_view = snapshot.view.clone();
+    let install_bound = Arc::clone(&bound);
+    let code = cloned_turn_code(&compiled);
+    let pending = access
+        .with_machine(context.clone(), move |session, context, _| {
+            if session.machine_disposition()
+                == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+            {
+                return Err(ResidentActorWorkbenchError::MachineLost);
+            }
+            let fresh_view = actor_compile_view(
+                session,
+                context,
+                &install_source.source,
+                &install_source.type_modules,
+            )?;
+            if let Some(changed) = split_staleness(session, &fresh_view, &install_view, None) {
+                return Ok(DisplayInstallSnapshot::Stale(changed));
+            }
+
+            let [page, metadata, cell_display] = install_bound.as_slice() else {
+                unreachable!("display_bundle_binders checked three binders");
+            };
+            if !session.prepared_machine_ready() {
+                let bundle = session
+                    .run_display_bundle_with_sites(
+                        code,
+                        page,
+                        metadata,
+                        cell_display,
+                        bundle_generation,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                return decode_display_bundle(&bundle, &install_source.name)
+                    .map(DisplayInstallSnapshot::Rendered);
+            }
+            session
+                .snapshot_display_bundle(code, page, metadata, cell_display, bundle_generation)
+                .map(|pending| DisplayInstallSnapshot::Ready(Box::new(pending)))
+                .map_err(ResidentActorWorkbenchError::Resident)
+        })
+        .await?;
+    let pending = match pending {
+        DisplayInstallSnapshot::Stale(changed) => {
+            return Ok(DisplayRenderAttempt::Stale {
+                stage: "view revalidation",
+                changed,
             })
-            .await
+        }
+        DisplayInstallSnapshot::Rendered(receipt) => {
+            return Ok(DisplayRenderAttempt::Rendered(receipt))
+        }
+        DisplayInstallSnapshot::Ready(pending) => pending,
+    };
+
+    // Cranelift, no checkout held.
+    let (pending, program) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+        let mut pending = pending;
+        let program = pending.compile_off_checkout();
+        (pending, program)
+    }))
+    .await
+    .map_err(ResidentActorWorkbenchError::Join)?;
+    let program = program.map_err(|error| {
+        ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+            PreparedRuntimeError::Compile(error),
+        ))
+    })?;
+
+    #[cfg(test)]
+    split_probe::before_display_install().await;
+    let run_request = request.clone();
+    let run_view = snapshot.view;
+    access
+        .with_machine(context.clone(), move |session, context, _| {
+            if session.machine_disposition()
+                == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
+            {
+                return Err(ResidentActorWorkbenchError::MachineLost);
+            }
+            let fresh_view = actor_compile_view(
+                session,
+                context,
+                &run_request.source,
+                &run_request.type_modules,
+            )?;
+            if let Some(changed) = split_staleness(session, &fresh_view, &run_view, None) {
+                return Ok(DisplayRenderAttempt::Stale {
+                    stage: "install",
+                    changed,
+                });
+            }
+            let [page, _metadata, cell_display] = bound.as_slice() else {
+                unreachable!("display_bundle_binders checked three binders");
+            };
+            match session
+                .revalidate_and_run_display_bundle(*pending, program, page, cell_display)
+                .map_err(ResidentActorWorkbenchError::Resident)?
+            {
+                Some(bundle) => decode_display_bundle(&bundle, &run_request.name)
+                    .map(DisplayRenderAttempt::Rendered),
+                None => Ok(DisplayRenderAttempt::Stale {
+                    stage: "install imports",
+                    changed: SplitStaleView::PreparedImports,
+                }),
+            }
+        })
+        .await
+}
+
+enum DisplayInstallSnapshot {
+    Ready(Box<tidepool_runtime::session::PendingDisplayInstall>),
+    Rendered(String),
+    Stale(SplitStaleView),
+}
+
+/// A step whose observation display was deferred out of the checkout that
+/// ran it ([`settle_fragment`] never renders): render it now, off-checkout.
+/// Every other step passes through unchanged.
+async fn settle_deferred_display<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: crate::ActorSessionContext,
+    step: ResidentWorkbenchStep,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    match step {
+        ResidentWorkbenchStep::Running { fragment, outcome }
+            if matches!(*outcome, ResidentOutcome::Completed { .. }) =>
+        {
+            settle_observation_render_split(access, context, *fragment, *outcome).await
+        }
+        step => Ok(step),
     }
 }
 
@@ -5051,12 +5213,41 @@ enum PreparedSnapshotAttempt {
 /// call's `compile_ms` bucket rather than `checkout_hold_ms`), then
 /// revalidate and install under a fresh checkout
 /// ([`ResidentSession::revalidate_and_run_prepared`]). An import that
-/// changed between snapshot and revalidation (`Ok(None)`), or a session with
-/// no machine yet, falls straight through to the original single-checkout
-/// install-and-run, unchanged from [`begin_ready_block`]. The split is
-/// attempted once, for the reason
-/// [`ResidentActorWorkbench::prepare_cell`] gives.
+/// changed between snapshot and revalidation (`Ok(None)`) relinks and
+/// recompiles the same GHC output off-checkout from a fresh snapshot, up to
+/// [`CHEAP_RETRY_ATTEMPTS`] attempts; after that, or for a session with no
+/// machine yet, the turn installs and runs under one checkout, unchanged
+/// from [`begin_ready_block`]. A completed observation display renders
+/// off-checkout too ([`settle_deferred_display`]).
 async fn begin_ready_block_split<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: crate::ActorSessionContext,
+    turn_source: ActorWorkbenchSource,
+    type_modules: Vec<String>,
+    block: ParsedBlock,
+    compiled: ReadyBlock,
+    display_budget: usize,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let step = run_ready_block_split(
+        access,
+        context.clone(),
+        turn_source,
+        type_modules,
+        block,
+        compiled,
+        display_budget,
+    )
+    .await?;
+    settle_deferred_display(access, context, step).await
+}
+
+/// [`begin_ready_block_split`] up to the step its run produced, with an
+/// observation display still unrendered.
+async fn run_ready_block_split<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: crate::ActorSessionContext,
     turn_source: ActorWorkbenchSource,
@@ -5124,7 +5315,7 @@ where
     };
     let warnings = compiled_turn.warnings.warnings.clone();
 
-    'split: {
+    'split: for install_attempt in 1..=CHEAP_RETRY_ATTEMPTS {
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
         let attempt = access
@@ -5190,12 +5381,14 @@ where
             return Ok(step);
         }
         // Revalidation found a stale import: another actor's turn changed
-        // a shared binding between the snapshot and this checkout.
-        log_split_fallback(
+        // a shared binding between the snapshot and this checkout. The
+        // GHC-compiled turn is still current; relink and recompile it.
+        log_split_stale(
             "prepared install",
             &context,
             "install",
             SplitStaleView::PreparedImports,
+            install_attempt < CHEAP_RETRY_ATTEMPTS,
         );
     }
 
@@ -5347,6 +5540,18 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    // Rendering an observation compiles a display bundle (GHC, then
+    // Cranelift). It never runs inside the checkout that ran the value: the
+    // completed step is handed back unrendered, and the async caller renders
+    // it off-checkout (`settle_deferred_display`, `settle_item`).
+    if let (WorkbenchDisplay::Observation { .. }, ResidentOutcome::Completed { .. }) =
+        (&fragment.display, &outcome)
+    {
+        return Ok(ResidentWorkbenchStep::Running {
+            fragment: Box::new(fragment),
+            outcome: Box::new(outcome),
+        });
+    }
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
@@ -5406,21 +5611,8 @@ where
                     }
                     String::from_value(result.value(), result.table())?
                 }
-                WorkbenchDisplay::Observation {
-                    name,
-                    budget,
-                    presentation,
-                    source,
-                    type_modules,
-                } => {
-                    match render_cell_observation(
-                        session, context, source, type_modules,
-                        name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
-                        *presentation,
-                    ) {
-                        Ok(text) => text,
-                        Err(error) => format!("Display failed: {error}\nValue remains bound as {name}. Inspect a smaller field or projection; execution was not repeated."),
-                    }
+                WorkbenchDisplay::Observation { .. } => {
+                    unreachable!("a completed observation is deferred above")
                 }
             };
             let mut transcript = fragment.output.join("\n");
@@ -5602,7 +5794,7 @@ fn decode_activation_observation(
 /// per generation, minted by the caller from a compile view's next value
 /// generation). Shared by the single-checkout [`render_cell_observation`]
 /// and its off-checkout split counterpart
-/// ([`ResidentActorWorkbench::settle_observation_render_split`]), so both
+/// ([`render_observation_off_checkout`]), so both
 /// request byte-identical source text against identical binder names.
 ///
 /// `T.copy` is load-bearing. `renderTree` may return a slice into a large
@@ -8450,8 +8642,7 @@ enum CellReservation {
 
 /// Which part of the session a split-compile re-checkout found changed since
 /// the snapshot it compiled against. Named in the INFO line
-/// [`ResidentActorWorkbench::prepare_cell`] logs when it falls back to the
-/// single-checkout compile.
+/// [`log_split_stale`] writes for every stale attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitStaleView {
     /// [`crate::ActorCompileView::compile_relevant_eq`] failed: a scope this
@@ -8469,22 +8660,47 @@ enum SplitStaleView {
     PreparedImports,
 }
 
-/// Every split compile path makes one attempt; when it goes stale it falls
-/// through to its single-checkout path and logs this one line naming the
-/// path, the stage that found the snapshot stale, and what changed.
-fn log_split_fallback(
+/// Off-checkout attempts for a split whose retry is cheap: the prepared
+/// install, whose retry relinks and Cranelift-compiles GHC output that is
+/// still current, and the display render, whose GHC part is one small
+/// generated bundle. A stale first attempt re-snapshots and compiles again
+/// with the machine released; only a second stale attempt runs under one
+/// checkout.
+///
+/// The cell split and the fragment (tool-installer) split make one attempt.
+/// Their retry would repeat several GHC round trips, and an inherited-context
+/// fork whose parent commits every few seconds makes a second attempt of
+/// that length stale too; they fall straight through to their
+/// single-checkout path instead.
+const CHEAP_RETRY_ATTEMPTS: usize = 2;
+
+/// One INFO line per stale split attempt, naming the path, the stage that
+/// found the snapshot stale, what changed, and whether the path recompiles
+/// off-checkout (`retrying`) or falls back to its single-checkout compile.
+fn log_split_stale(
     path: &'static str,
     context: &crate::ActorSessionContext,
     stage: &'static str,
     changed: SplitStaleView,
+    retrying: bool,
 ) {
-    tracing::info!(
-        actor = context.actor.id.0,
-        path,
-        stage,
-        changed = ?changed,
-        "split compile went stale; compiling under one checkout"
-    );
+    if retrying {
+        tracing::info!(
+            actor = context.actor.id.0,
+            path,
+            stage,
+            changed = ?changed,
+            "split compile went stale; recompiling off-checkout against a fresh snapshot"
+        );
+    } else {
+        tracing::info!(
+            actor = context.actor.id.0,
+            path,
+            stage,
+            changed = ?changed,
+            "split compile went stale; compiling under one checkout"
+        );
+    }
 }
 
 /// The freshness check every split-compile re-checkout makes: the compile
@@ -10012,25 +10228,59 @@ mod split_probe {
 
     #[derive(Default)]
     pub(super) struct SplitProbe {
+        /// How many install checkouts, from the first, wait for
+        /// `resume_install` after signalling `install_reached`.
+        pub(super) held_installs: usize,
         pub(super) install_checkouts: AtomicUsize,
         pub(super) single_checkout_compiles: AtomicUsize,
         pub(super) install_reached: tokio::sync::Notify,
         pub(super) resume_install: tokio::sync::Notify,
+        /// How many display-render install checkouts, from the first, wait
+        /// for `resume_install` after signalling `install_reached`.
+        pub(super) held_display_installs: usize,
+        pub(super) display_installs: AtomicUsize,
+        /// The value generation each display-render attempt reserved.
+        pub(super) display_generations: std::sync::Mutex<Vec<u64>>,
     }
 
     tokio::task_local! {
         pub(super) static PROBE: Arc<SplitProbe>;
     }
 
-    /// Count this install checkout; hold the first one until resumed.
+    /// Count this install checkout; hold the first `held_installs` until
+    /// each is resumed.
     pub(super) async fn before_install() {
         let Ok(probe) = PROBE.try_with(Arc::clone) else {
             return;
         };
-        if probe.install_checkouts.fetch_add(1, Ordering::SeqCst) == 0 {
+        if probe.install_checkouts.fetch_add(1, Ordering::SeqCst) < probe.held_installs {
             probe.install_reached.notify_one();
             probe.resume_install.notified().await;
         }
+    }
+
+    /// Count this display-render install checkout; hold the first
+    /// `held_display_installs` until each is resumed.
+    pub(super) async fn before_display_install() {
+        let Ok(probe) = PROBE.try_with(Arc::clone) else {
+            return;
+        };
+        if probe.display_installs.fetch_add(1, Ordering::SeqCst) < probe.held_display_installs {
+            probe.install_reached.notify_one();
+            probe.resume_install.notified().await;
+        }
+    }
+
+    pub(super) fn record_display_generation(generation: u64) {
+        PROBE
+            .try_with(|probe| {
+                probe
+                    .display_generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(generation)
+            })
+            .ok();
     }
 
     pub(super) fn single_checkout() {
@@ -10534,12 +10784,13 @@ mod request_tests {
 
     /// The same split shape as `ordinary_fragment_split_compile_then_install_
     /// matches_single_checkout_begin_fragment`, but for a display bundle's
-    /// own compile. `settle_observation_render_split` chains, in order,
+    /// own compile. `render_observation_off_checkout` chains, in order,
     /// `snapshot_display_compile` (checkout), then
     /// `observation_display_block` and `compile_block_off_checkout` (no
     /// checkout), then `display_bundle_binders` and
-    /// `run_display_bundle_with_sites` (checkout, to execute the
-    /// already-compiled page), then `decode_display_bundle`. Run directly
+    /// `snapshot_display_bundle` (checkout), the Cranelift compile (no
+    /// checkout), then `revalidate_and_run_display_bundle` (checkout, to
+    /// install and execute the page), then `decode_display_bundle`. Run directly
     /// against those same building blocks, this must render the exact same
     /// text as the single-checkout `render_cell_observation` against an
     /// identically-constructed session, the invariant
@@ -10635,15 +10886,25 @@ mod request_tests {
         let (page, metadata, cell_display) =
             display_bundle_binders(&bound, &page_name, &metadata_name)
                 .expect("expected page/metadata/cellDisplay binder shape");
-        let bundle = split_session
-            .run_display_bundle_with_sites(
-                compiled.into_code(),
+        // The Cranelift half off-checkout too: snapshot the install, compile
+        // with no session borrowed, then revalidate, install and run.
+        assert!(split_session.prepared_machine_ready());
+        let mut pending = split_session
+            .snapshot_display_bundle(
+                cloned_turn_code(&compiled),
                 page,
                 metadata,
                 cell_display,
                 ready.generation,
             )
-            .expect("display bundle runs");
+            .expect("display install snapshot");
+        let program = pending
+            .compile_off_checkout()
+            .expect("display bundle compiles off-checkout");
+        let bundle = split_session
+            .revalidate_and_run_display_bundle(pending, program, page, cell_display)
+            .expect("display bundle runs")
+            .expect("nothing changed between snapshot and install");
         let split_output =
             decode_display_bundle(&bundle, "displaySplitSeen").expect("display bundle decodes");
 
@@ -12831,7 +13092,9 @@ mod request_tests {
     /// off-checkout compile and its install checkout. The first stale
     /// install must fall straight through to the single-checkout compile:
     /// one split compile (the folded check), one install checkout, one
-    /// single-checkout compile, and no second split attempt.
+    /// single-checkout compile, and no second split attempt. Bounded by a
+    /// timeout so a second attempt waiting on the probe fails instead of
+    /// hanging.
     #[tokio::test]
     async fn stale_split_install_falls_back_to_one_single_checkout_compile() {
         use std::sync::atomic::Ordering;
@@ -12841,7 +13104,10 @@ mod request_tests {
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
         let cell = "answer <- pure (1 :: Int)".to_string();
 
-        let probe = Arc::new(split_probe::SplitProbe::default());
+        let probe = Arc::new(split_probe::SplitProbe {
+            held_installs: 1,
+            ..Default::default()
+        });
         let scope = crate::call_timing::CallScope::new("cell", actor_id, actor_incarnation);
         let prepare = split_probe::PROBE.scope(
             Arc::clone(&probe),
@@ -12869,7 +13135,11 @@ mod request_tests {
                 .expect("interloping binding mounts");
             probe.resume_install.notify_one();
         };
-        let (prepared, ()) = tokio::join!(prepare, interlope);
+        let (prepared, ()) = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            tokio::join!(prepare, interlope)
+        })
+        .await
+        .expect("the stale split settles without a second held attempt");
         let (checked, prepared) = prepared.expect("the cell prepares after the stale split");
         assert_eq!(checked.items.len(), 1, "{checked:?}");
         assert!(
@@ -12890,6 +13160,114 @@ mod request_tests {
             probe.single_checkout_compiles.load(Ordering::SeqCst),
             1,
             "the stale install falls through to exactly one single-checkout compile"
+        );
+    }
+
+    /// A display render whose install checkout finds the view changed
+    /// renders again off-checkout, and the retry's page takes a value
+    /// generation above both the first attempt's reservation and the
+    /// interloping binding's: a stale attempt leaves a gap, never a reused
+    /// generation.
+    #[tokio::test]
+    async fn stale_display_render_retries_at_a_fresh_generation() {
+        use std::sync::atomic::Ordering;
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        // Bootstrap the machine, so the expression below is an ordinary
+        // post-bootstrap install.
+        workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "displayRetryWarmup <- pure (0 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .expect("warmup fragment installs");
+
+        let probe = Arc::new(split_probe::SplitProbe {
+            held_display_installs: 1,
+            ..Default::default()
+        });
+        let render = split_probe::PROBE.scope(
+            Arc::clone(&probe),
+            workbench.begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "(41 :: Int) + 1".into(),
+                },
+                None,
+            ),
+        );
+        let interlope = async {
+            probe.install_reached.notified().await;
+            let interloper_source = workbench.access.source.clone();
+            let generation = workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    mount_text_binding(
+                        session,
+                        context,
+                        &interloper_source,
+                        &[],
+                        "displayInterloper",
+                        "interloper text",
+                        None,
+                    )?;
+                    Ok(session
+                        .workbench_bindings_in(context.placement.lexical_scope)
+                        .into_iter()
+                        .find(|binding| binding.name == "displayInterloper")
+                        .and_then(|binding| binding.defining_generation()))
+                })
+                .await
+                .expect("interloping binding mounts")
+                .expect("the interloper has a defining generation");
+            probe.resume_install.notify_one();
+            generation
+        };
+        let (step, interloper) = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            tokio::join!(render, interlope)
+        })
+        .await
+        .expect("the stale render settles");
+        let ResidentWorkbenchStep::Committed { output, .. } = step.expect("the expression commits")
+        else {
+            panic!("the expression did not commit");
+        };
+        assert!(output.contains("42"), "{output}");
+        assert!(!output.contains("Display failed"), "{output}");
+        assert_eq!(
+            probe.display_installs.load(Ordering::SeqCst),
+            2,
+            "the stale render retried off-checkout and reached a second install"
+        );
+        assert_eq!(
+            probe.single_checkout_compiles.load(Ordering::SeqCst),
+            0,
+            "nothing compiled under the checkout"
+        );
+        let generations = probe
+            .display_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let [first, retry] = generations.as_slice() else {
+            panic!("expected two display attempts: {generations:?}");
+        };
+        assert!(
+            retry > first && *retry > interloper,
+            "retry generation {retry} must exceed the first attempt's {first} and the \
+             interloper's {interloper}"
         );
     }
 
