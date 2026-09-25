@@ -150,3 +150,9 @@ the earlier wrapper type-pin defect. Wave 9 uses ordinary reviewed delivery;
 automatic review is blocked, not exercised or successful. No fixed-whitelist
 workaround was added. The frontier question is how the workbench preserves
 inferred types without emitting names unavailable to authored source.
+
+### Wave 9 launched
+
+Run `4778f12e-433e-4dcc-b686-cacff9c81bb2` is ready in tmux wave9. Brief submitted at 2026-09-25T17:56:23.620100+00:00.
+See [launch record](wave9-launch-record.md). Product outcome and live prompt
+trials are pending; automatic review is preflight-blocked.
