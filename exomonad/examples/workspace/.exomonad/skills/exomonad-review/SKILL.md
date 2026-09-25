@@ -57,7 +57,12 @@ scope and does not turn partial work into product completion.
 ## Owner map and repair policy from exact commits
 
 Check ownership in code, not with Jev: an outside-owned-path change is a
-`git diff` fact. Route the verdict with a `J.choice`, naming the base and
+`git diff` fact. Take `changed` from the cumulative diff between the
+assignment base and the exact candidate tip (`git diff <base>...<tip>
+--name-only`), never from the tip commit alone: a tip that looks scoped can
+carry an ancestor commit that edited an unowned path, and the same branch
+can pass the tip check twice while still carrying it. Route the verdict
+with a `J.choice`, naming the base and
 candidate commits it ran at; `insufficient_evidence` means the state was
 incomplete, not that the candidate is a defect — name the missing field
 instead of merging or repairing on a guess:
