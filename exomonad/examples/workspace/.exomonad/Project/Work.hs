@@ -43,7 +43,7 @@ taskContext task = Text.unlines $
   , "Why: " <> rationale task
   , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
   , "Acceptance: " <> acceptance task
-  , "Read this branch's contract and .exomonad/plans/language.md. Relevant operations live in Project.Work; use their supplied examples and the lookup tool (names, modules, or a Hoogle-like type) when you need to check one."
+  , "Read this branch's contract. Relevant operations live in Project.Work; use their supplied examples and the lookup tool (names, modules, or a Hoogle-like type) when you need to check one."
   ] ++ map decisionContext (acceptedDecisions task)
 
 -- Only call after the owning decision and source incorporation have been checked.
