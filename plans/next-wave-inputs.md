@@ -740,3 +740,44 @@ gates, (c) settings items, (d) Compactor.
   Separating the generation from the evidence for non-fold checks would make
   the cache per-scope; the folded bind result is compiled at a generation, so
   only that path needs it.
+
+## Wave 7 (run 26122845): what happened versus what should have
+
+(c) and (d) integrated in 3h31m (wave 6: neither in 3h15m); median checkout
+wait 0 ms. Root interview: harness docs/exomonad-friction.md at 73f3816.
+- **Fast when the rules applied:** reviewed slice to root merge in 89 s
+  (Compactor component), store drop in six minutes. Integrate-first,
+  same-turn slice publication, one reviewer per candidate, and the
+  stranded-branches note are what made it fast (root's own attribution).
+- **The Here seam took 2h40m and three owners.** Ideal: one owner, one
+  review. Causes: the root contract it depended on (`AgentInvocation`
+  identity through the verbs, and "claim settled is not output appended")
+  landed at 03:14, after owners had started; acceptance cases and a
+  deterministic barrier fixture were not in the first packet; two owners ran
+  133- and 120-response turns and never saw their corrections. Levers
+  (harness 7bf6d29): land root contracts before forking seam owners;
+  acceptance cases and explicit-barrier race tests in the first packet;
+  leads stop and reassign a child whose correction stays unpresented.
+- **Turn budget text failed twice** (actors 28 and 34). The root's verdict:
+  "a 15-minute/30-call turn budget must force a checkpoint/wake; text alone
+  failed". Runtime lever, not prompt: in the harness, the loop owns turns
+  (PRD model-stopped and before-request hooks) and can enforce it; on the
+  Codex path the operator relay into the child's pane (composer input is
+  submitted after the next tool call) is the only fast channel. Card.
+- **NEXT.md churn:** 17 docs commits after the rule, because frequent
+  operator notes made frequent turn ends and "commit at turn end" read as
+  required. Rule rewritten (7bf6d29).
+- **Unconditional rebase** pulled a child into another long turn over
+  docs-only commits; task.md now rebases only when code it touches moved.
+- **Checkout tail** (96 s, 61 s holds): long work inside Haskell cells and
+  stale-split fallbacks; stale-view fix merged (7d4a108b4), background
+  jobs merged (fa4a8851b); both ride the next redeploy. Prompt card: run
+  long commands through bash, not inside a cell.
+- **Next milestone, root's proposal:** adapter readiness, first vertical
+  slice = one root actor, one resident Haskell cell Job, one request-boundary
+  operator envelope, one strict typed finalize, all under deterministic
+  replay; critical path = amendment 1 (AtBoundary per request, never cancel a
+  computing cell), the minimal part of amendment 8 (/operator parent, whole
+  first-task contract), and the resident evaluator protocol. Release test:
+  a long cell survives three envelopes at successive request boundaries and
+  yields one strict final result that survives a restart.
