@@ -291,6 +291,7 @@ where
             entry,
             launch_worktrees,
             fork_workspace,
+            seed,
         } = definition.child;
         if launch_worktrees != self.launch_worktrees || fork_workspace.is_some() {
             return Err(reject(
@@ -325,7 +326,11 @@ where
                 let lexical_scope = self
                     .environment
                     .runner
-                    .provision_child_session(child_session, descriptor.placement().resource_scope)
+                    .provision_child_session(
+                        child_session,
+                        descriptor.placement().resource_scope,
+                        seed.as_ref(),
+                    )
                     .await
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 descriptor = descriptor.with_lexical_scope(lexical_scope);

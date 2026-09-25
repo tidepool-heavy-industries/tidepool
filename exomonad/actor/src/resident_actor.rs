@@ -1811,6 +1811,34 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Release every `RootCustody`/`Arc<RootCustody>` this behavior itself
+    /// owns on its own resident session, ahead of the outstanding-custody
+    /// check `stopped` performs right after calling this
+    /// (`ResidentActorRunner::retire_child_session`): every field here that
+    /// can hold one MUST be released, or a dedicated child session never
+    /// reaches zero outstanding custody and its teardown defers forever
+    /// (nothing else ever checks it out again to retry). Called only from
+    /// `stopped`, the terminal kernel hook — `self` is dropped once it
+    /// returns and nothing else calls a method on a stopped behavior
+    /// first, so nothing reads any of these fields again afterwards.
+    fn release_session_state(&mut self) {
+        self.shutdown_hook.take();
+        self.checkpoint.take();
+        self.pending_checkpoint.take();
+        self.active_input.take();
+        self.boot.take();
+        std::mem::take(&mut self.retained_replacements);
+        // `ResidentWorkbenchTools::dispatch` (`resident_workbench.rs`):
+        // every clone of it is scoped to one in-flight tool call
+        // (`execute_workbench`'s own `tool_dispatch`/`hosted_call`/
+        // `cell_call` locals, and `annotate_tool_result`'s `dispatch`
+        // parameter, taken by value and never stored past that one
+        // `async fn` call) — none can be alive once this actor is
+        // terminal, since the kernel admits one turn at a time and
+        // `stopped` only runs once fully quiesced.
+        self.compiled_tools.take();
+    }
+
     /// The workbench a cell, tool call, or lookup should run against right
     /// now, or `None` when nothing is installed to run one. A pending typed
     /// request's `respond`/`sessionReply`/`sessionInput`/`reportProgress`
@@ -2055,6 +2083,7 @@ where
             entry,
             mut launch_worktrees,
             fork_workspace,
+            seed,
         } = child;
         if descriptor.model().is_none() {
             descriptor = descriptor.with_model(self.descriptor.model().cloned());
@@ -2214,7 +2243,11 @@ where
             let lexical_scope = self
                 .environment
                 .runner
-                .provision_child_session(child_session, descriptor.placement().resource_scope)
+                .provision_child_session(
+                    child_session,
+                    descriptor.placement().resource_scope,
+                    seed.as_ref(),
+                )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_lexical_scope(lexical_scope);
@@ -7976,6 +8009,17 @@ where
                 .actor_stopped(kernel.identity(), terminal);
             self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
+            self.release_session_state();
+            // `publish_retired` (above) already marked THIS actor terminal
+            // in the directory, so this scan cannot find itself: any other
+            // entry placed on the same session and still live means an
+            // inherited-context descendant (sharing this session rather
+            // than a dedicated one of its own) is still using it.
+            let session = self.descriptor.placement().session;
+            let other_actor_still_on_session =
+                self.environment.actors.lock().values().any(|record| {
+                    record.descriptor.placement().session == session && record.terminal.is_none()
+                });
             // A no-op check for every actor that never got a dedicated
             // child session (the shared session is never a member). One
             // bounded checkout, no wait for whoever still needs this
@@ -7984,7 +8028,7 @@ where
             if let Err(error) = self
                 .environment
                 .runner
-                .retire_child_session(self.descriptor.placement().session)
+                .retire_child_session(session, other_actor_still_on_session)
                 .await
             {
                 tracing::warn!(

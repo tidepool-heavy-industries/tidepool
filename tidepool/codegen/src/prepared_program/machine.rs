@@ -4212,7 +4212,7 @@ mod tests {
             parcel.bytes() > 0,
             "a heap constructor is copied, not shared"
         );
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports the parcel");
         let after = right
@@ -4280,7 +4280,7 @@ mod tests {
         ));
         let parcel = left.export_parcel(handle).expect("export");
         assert_eq!(parcel.bytes(), 0, "a static value is shared, never copied");
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports a static reference");
         assert_eq!(
@@ -4341,7 +4341,7 @@ mod tests {
         )
         .expect("right installs an unrelated base image");
         let before = right.residency().programs;
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both images");
         assert_eq!(right.residency().programs, before + 2);
@@ -4775,20 +4775,25 @@ mod tests {
 
     #[test]
     fn import_refuses_a_parcel_whose_borrowed_image_this_machine_lacks() {
-        let compiled = field_constructor_program(971);
+        // A constructor's descriptor is no longer the right fixture here:
+        // constructors now travel in the parcel as `ParcelConstructor`
+        // (unowned by design -- an image that declares one shares the
+        // process-wide descriptor), so importing one is legitimately valid
+        // regardless of whether the image itself installs. An unforced
+        // CAF's header, by contrast, is owned by its compiled image alone
+        // and never travels except by that image installing -- and a
+        // BORROWED install (no `Arc<CompiledProgram>` behind it) can never
+        // be named in a parcel's manifest, so this stays a real refusal.
+        let compiled = thunk_to_closure_program();
         let other = CompiledProgram::compile(&base_program(955)).expect("other compiles");
         let options = PreparedMachineOptions {
             nursery_bytes: RunOptions::default().nursery_bytes,
         };
         let (mut left, left_id) = PreparedMachine::from_borrowed(&compiled, options).expect("left");
         let (mut right, _) = PreparedMachine::from_borrowed(&other, options).expect("right");
-        let call = PreparedCallOptions {
-            observation_budget: RunOptions::default().observation_budget,
-            collect_before_observation: false,
-        };
-        left.run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
-            .expect("left runs");
-        let handle = left.retain_top(left_id, ValueId(0)).expect("left retains");
+        let handle = left
+            .retain_top(left_id, ValueId(0))
+            .expect("left retains its unforced CAF, never running it");
         let parcel = left.export_parcel(handle).expect("export");
         assert!(matches!(
             right.import_parcel(parcel, RealmId::ROOT),

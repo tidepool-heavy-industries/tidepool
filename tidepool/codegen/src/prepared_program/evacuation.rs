@@ -110,7 +110,6 @@ impl PreparedMachine<'_> {
             unsafe { entry.slot.current() }
         } as usize;
         let mut roots = vec![value];
-        eprintln!("DIAG export begin: value {value:#x} nursery {:#x}..{:#x}", self.vmctx.alloc_ptr as usize, self.vmctx.alloc_limit as usize);
         let mut images: Vec<(ProgramId, Arc<CompiledProgram>, ParcelImports)> = Vec::new();
         for _ in 0..MANIFEST_ROUNDS {
             let heap = self.export_roots(&roots)?;
@@ -199,7 +198,6 @@ impl PreparedMachine<'_> {
                 images.push((id, image, imports));
             }
             if !grew {
-                eprintln!("DIAG export done: parcel arena {:#x}..+{} images {} constructors {}", heap.root(), heap.bytes(), images.len(), constructors.len());
                 return Ok(Parcel {
                     heap,
                     images: images
@@ -273,12 +271,19 @@ impl PreparedMachine<'_> {
     /// new old-space arena, its payloads become ledger allocations, every
     /// image it names that this machine lacks is installed (bound to the
     /// copies of its import slots), and the returned handle roots the value
-    /// in `realm`.
+    /// in `realm`. The second element is every distinct identity (across
+    /// every newly installed image's `ParcelImports`, deduplicated) paired
+    /// with the handle rooting its copied value — the session layer records
+    /// these in the persistent binding store so a LATER compiled program on
+    /// this machine can resolve the same identity by name and generation,
+    /// exactly as it would on the machine the parcel came from. An identity
+    /// belonging to an image that was already installed here contributes
+    /// nothing (its value already had a live root before this import).
     pub fn import_parcel(
         &mut self,
         parcel: Parcel,
         realm: RealmId,
-    ) -> Result<PreparedHandle, ExecutionError> {
+    ) -> Result<(PreparedHandle, Vec<(SymbolIdentity, PreparedHandle)>), ExecutionError> {
         self.ensure_handle_access()?;
         let _quiescent = self.quiesce()?;
         let Parcel {
@@ -286,7 +291,6 @@ impl PreparedMachine<'_> {
             images,
             constructors,
         } = parcel;
-        eprintln!("DIAG import begin: root {:#x} nursery {:#x}..{:#x}", parcel.root(), self.vmctx.alloc_ptr as usize, self.vmctx.alloc_limit as usize);
         if parcel.root() == 0 {
             return Err(ExecutionError::Evacuation(
                 DescriptorTraceError::TaggedNull { value: 0 },
@@ -323,7 +327,6 @@ impl PreparedMachine<'_> {
                         .any(|descriptor| descriptor.initial_header_word() == header)
                 });
             if !known {
-                eprintln!("DIAG import header check: unknown header {header:#x}");
                 return Err(ExecutionError::Evacuation(
                     DescriptorTraceError::UnknownDescriptor { address: header },
                 ));
@@ -344,12 +347,10 @@ impl PreparedMachine<'_> {
                 header,
                 super::DescriptorMetadata {
                     descriptor: Arc::clone(&entry.descriptor),
-                    meaning: super::DescriptorMeaning::Constructor(
-                        super::ConstructorObservation {
-                            identity: entry.identity,
-                            fields: entry.fields.clone(),
-                        },
-                    ),
+                    meaning: super::DescriptorMeaning::Constructor(super::ConstructorObservation {
+                        identity: entry.identity,
+                        fields: entry.fields.clone(),
+                    }),
                 },
             );
             self.machine
@@ -458,9 +459,10 @@ impl PreparedMachine<'_> {
             outcome?
         };
 
-        eprintln!("DIAG import copied: {} roots, registry {} entries, missing images {}", relocated.len(), self.descriptor_registry.len(), missing.len());
         // Every root gets a handle: the value's for the caller, the imports'
-        // for the installs below (released once the blocks hold them).
+        // for the installs below and the caller after
+        // (`Self::import_parcel`'s own doc comment — kept, not released,
+        // once the blocks hold them too).
         let mut handles = Vec::with_capacity(relocated.len());
         for &pointer in &relocated {
             let slot = self
@@ -494,6 +496,15 @@ impl PreparedMachine<'_> {
             .into_iter()
             .map(|entry| (Arc::clone(&entry.image), entry.imports.clone()))
             .collect();
+        // Kept, not released: the caller (session layer) roots these in the
+        // persistent binding store, so a later compiled program's import
+        // resolves against the SAME live value the images below install
+        // bound to. An index not named by any kept identity (a duplicate
+        // root two images both import) is released with the rest below.
+        let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
+        let mut kept_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut seen_identities: std::collections::BTreeSet<SymbolIdentity> =
+            std::collections::BTreeSet::new();
         for (image, imports) in missing {
             let mut bindings = ImportBindings::new();
             for (identity, index) in imports {
@@ -503,14 +514,19 @@ impl PreparedMachine<'_> {
                     .ok_or(ExecutionError::Invariant(
                         "import_parcel: an image import names a root the parcel lacks",
                     ))?;
-                bindings.insert(identity, handle);
+                bindings.insert(identity.clone(), handle);
+                if seen_identities.insert(identity.clone()) {
+                    imported.push((identity, handle));
+                    kept_indices.insert(index);
+                }
             }
             self.install_shared(image, bindings)?;
-            eprintln!("DIAG import installed an image: registry {} entries", self.descriptor_registry.len());
         }
-        for handle in handles.iter().skip(1) {
-            self.release(*handle);
+        for (index, handle) in handles.iter().copied().enumerate().skip(1) {
+            if !kept_indices.contains(&index) {
+                self.release(handle);
+            }
         }
-        Ok(handles[0])
+        Ok((handles[0], imported))
     }
 }

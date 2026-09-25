@@ -541,7 +541,7 @@ impl NurseryView {
             let header = std::ptr::read(object.cast::<usize>()) & !7;
             let descriptor = descriptors
                 .live_descriptor(header)
-                .ok_or_else(|| { eprintln!("DIAG evacuate copier: unknown header {header:#x}"); DescriptorTraceError::UnknownDescriptor { address: header } })?;
+                .ok_or(DescriptorTraceError::UnknownDescriptor { address: header })?;
             let extent = descriptor.allocation_extent() as usize;
             if extent < 16 || !extent.is_multiple_of(8) || extent > used - offset {
                 return Err(DescriptorTraceError::InvalidRange);
