@@ -130,3 +130,12 @@ Sent the root the wave-7 interview (fastest and why, where it waited, which
 notes and rules changed behaviour, the three-owner Here seam, prompt edits,
 the first adapter-readiness slice, open). Answers go to
 docs/exomonad-friction.md; read and analyze at the next wake.
+
+## 12:26Z wake: interview read, prompts updated, next milestone sent
+
+Read the root's interview (harness 73f3816); analysis and cards in
+plans/next-wave-inputs.md ("Wave 7 (run 26122845)"). Applied its prompt
+proposals plus a root-contracts-first rule (harness 7bf6d29). Sent the root
+the next milestone: adapter readiness, first vertical slice, harness side
+(amendment 1, minimal amendment 8, CellJob interface, strict typed finalize,
+offline ReplayProvider fixture), with its own release test.
