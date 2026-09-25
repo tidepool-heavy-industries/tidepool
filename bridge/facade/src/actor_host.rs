@@ -3010,9 +3010,9 @@ fn compile_root(
     let child_run_root = run_root.to_path_buf();
     // This run's one shared image cache: installed on the forest
     // (`ResidentForest::with_image_registry`) so it is applied to every
-    // session's engine, root and child alike, from that session's second
-    // install onward (its own bootstrap install is unavoidably fresh — see
-    // `ResidentMachineAccess::image_registry`'s doc comment).
+    // session's engine, root and child alike, including each session's
+    // bootstrap install (`PersistentSession::set_image_registry` holds it
+    // for the first turn).
     let image_registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
@@ -3083,6 +3083,10 @@ fn compile_root(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     )?;
+    // The root's own bootstrap install goes through the run's registry, so
+    // every child session bootstraps with this same driver image rather
+    // than a second compile of it.
+    machine.set_image_registry(Arc::clone(&image_registry));
     let outcome = machine.run_with_sites("exomonad_root_driver", compiled.code())?;
     let resource_scope = match &outcome {
         tidepool_runtime::session::ResidentOutcome::Suspended { hole, .. } => machine
