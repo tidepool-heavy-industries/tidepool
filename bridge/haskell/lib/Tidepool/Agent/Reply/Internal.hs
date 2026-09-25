@@ -14,6 +14,7 @@ module Tidepool.Agent.Reply.Internal
   , currentRequest
   , currentRequestSited
   , requestReplyOf
+  , requestIdNumber
   , Replies (..)
   , Progress (..)
   , ProgressSink (..)
@@ -122,6 +123,9 @@ data RequestScope input result
 requestReplyOf :: RequestScope input result -> Maybe (Reply result)
 requestReplyOf (RequestUnavailable _) = Nothing
 requestReplyOf (RequestActive request _) = Just (Reply request)
+
+requestIdNumber :: RequestId -> Int
+requestIdNumber (RequestId request) = request
 
 instance Display (Reply result) where
   displayTree (Reply (RequestId request)) = opaqueHandle ("reply for request " <> tshow request)
