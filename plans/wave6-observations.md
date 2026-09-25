@@ -105,3 +105,19 @@ or cancellations. Contention: 170 calls since 06:46, checkout_wait p50
 5.9 s, max 169 s. No intervention. Trial evidence: the item2 integration
 followed the review-then-merge path with an exact-commit review; nothing
 new on the four trials.
+
+## 07:46Z wake
+
+Alive; 3.7 GiB available (above the 3 GiB line), swap 27 GiB; 27 windows.
+Memory: the wave's two GHC workers hold 4.5 GiB each, the host 3.1 GiB,
+and the background-jobs lane's test daemon a further 1.7 to 3.4 GiB per
+worker. No latched machine. The one Failed/Retired match is a WARN at
+07:32:36: retired actor 37@1's cleanup was degraded because its delivery
+component was Forced (process, pane and tool service completed); not a
+run failure. Root nine minutes into a turn with live bash calls. Master
+gained a42920f (item2 trace flush fix) and f6b0e35 (trace implementer
+interview). run-map: the root's own row is an admitted in-flight delivery,
+not a fence. Rejections: 26@1 UpdatePending x2. Contention: 142 calls since
+07:16, checkout_wait p50 6.2 s, max 158 s. No intervention; if available
+memory drops under 3 GiB at the next wake, the first lever is the
+operator's test lanes, not the wave.
