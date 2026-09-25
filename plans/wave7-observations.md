@@ -116,3 +116,17 @@ so this path reaches the child in seconds. Lesson for the harness: the
 mailbox Steer class is the fix (docs/dogfood-requirements.md amendment 1);
 interim prompt lever: "end the turn after 30 tool calls" did not hold for
 a child forked before the rule reached leads' obligations.
+
+## 11:56Z wake: (c) and (d) done; interview sent
+
+The relay worked: 34@1 ordered the Here output before the fresh pin
+(b4257da, 11:30Z, four minutes after the operator relay reached it at its
+next tool call); reviewer 37 accepted the exact commit; the root merged it
+(2e456e3, 11:43Z) and verified Here 6/6 and the full harness library (95
+passing). (c) and (d) are integrated on master, 3h31m after launch (wave 6
+integrated neither in 3h15m). Remaining open: (b)'s live gates (manual
+wait_agent continuation, item-13 trace), which need operator-run live calls.
+Sent the root the wave-7 interview (fastest and why, where it waited, which
+notes and rules changed behaviour, the three-owner Here seam, prompt edits,
+the first adapter-readiness slice, open). Answers go to
+docs/exomonad-friction.md; read and analyze at the next wake.
