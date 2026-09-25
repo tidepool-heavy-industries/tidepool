@@ -291,6 +291,10 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
 /// instead publish an answer written before the model read the update, which
 /// is what the fence exists to prevent. The refusal therefore tells the model
 /// where the update will appear and that retrying earlier fails the same way.
+///
+/// The workspace template's `Project.Watchdog.hostSettlementRefusal` reads the
+/// `<settlement> not settled: ` prefix to tell request state from a failed
+/// approach; keep the two in step.
 fn settlement_refusal(
     settlement: &str,
     request: crate::RequestId,

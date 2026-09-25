@@ -25,7 +25,9 @@
 -- carries no token from a small destructive-command list, is abstained on
 -- directly. It is exported so a workspace can reuse or replace it; it never
 -- widens what a heuristic can trip, only skips asking Jev at all for a call
--- this cheap to judge by inspection.
+-- this cheap to judge by inspection. 'messageSend' is the same kind of gate
+-- for a @haskell@ cell that only sends a message: its text is addressed to the
+-- recipient, so no heuristic judges the call by it.
 module Project.Watchdog
   ( Outcome (..)
   , Heuristic (..)
@@ -42,9 +44,13 @@ module Project.Watchdog
   , preferTool
   , escalationEvidence
   , trivialCall
+  , messageSend
+  , hostSettlementRefusal
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad.Freer (Eff, Member)
+import Data.Char (isSpace)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -128,7 +134,9 @@ historyDepth = 2
 -- 'ignoringAFailure' are worded to ask about. A call earlier in the turn now
 -- in progress is not included: 'reflect' only ever returns turns that have
 -- already completed. An unavailable history is explicitly marked, not treated
--- as evidence that an earlier read or corrective action never happened.
+-- as evidence that an earlier read or corrective action never happened. A
+-- call the host refused to settle ('hostSettlementRefusal') is left out: it
+-- met request state the model does not control, not a failed approach.
 recentToolActivity :: Member Reflect effects => Eff effects Value
 recentToolActivity = do
   turns <- reflect historyDepth
@@ -143,6 +151,7 @@ recentToolActivity = do
             , TurnToolCall callId name arguments <- turnItems t
             , TurnToolResult callId' out <- turnItems t
             , callId == callId'
+            , not (hostSettlementRefusal out)
             ]
         ]
 
@@ -271,6 +280,61 @@ hasDestructiveToken tokens =
            )
     adjacent a b = or (zipWith (\x y -> x == a && y == b) tokens (drop 1 tokens))
 
+-- | A pre-Jev gate on the invoked tool, before any payload text: a @haskell@
+-- cell that is one statement applying 'messageSenders' (optionally bound, as
+-- in @Right receipt <- sendMessage p "..."@) only delivers text. That text is
+-- written for the recipient and may quote commands; it says nothing about
+-- what this call did, so the call is abstained on rather than judged from it.
+-- A cell with a second statement, a block, or a sequencing operator outside
+-- its string literals can run other effects and falls through to the battery.
+messageSend :: ToolCall -> Maybe Text
+messageSend call
+  | toolCallName call /= "haskell" = Nothing
+  | otherwise = case toolCallArguments call of
+      String source
+        | [statement] <- filter startsStatement (T.lines (withoutStringLiterals source))
+        , (function : _) <- T.words (afterBinder statement)
+        , function `elem` messageSenders
+        , not (any (`elem` T.words statement) ["do", "let", "case", "where"])
+        , not (any (`T.isInfixOf` statement) [">>", "=<<", "*>", "<*", ";"])
+        -> Just ("message send: " <> function <> " delivers text to its recipient; the text is not a command")
+      _ -> Nothing
+  where
+    startsStatement line = maybe False (not . isSpace . fst) (T.uncons line)
+    afterBinder statement = case T.breakOn "<-" statement of
+      (_, rest) | T.null rest -> statement
+      (_, rest) -> T.drop 2 rest
+
+-- | The functions whose only effect is delivering a value to another actor.
+messageSenders :: [Text]
+messageSenders = ["sendMessage", "respond", "reportProgress"]
+
+-- | Haskell source with every string literal's contents removed (the quotes
+-- stay), so words inside a message cannot read as code.
+withoutStringLiterals :: Text -> Text
+withoutStringLiterals = T.pack . outside . T.unpack
+  where
+    outside [] = []
+    outside ('\'' : '\\' : c : '\'' : rest) = '\'' : '\\' : c : '\'' : outside rest
+    outside ('\'' : c : '\'' : rest) = '\'' : c : '\'' : outside rest
+    outside ('"' : rest) = '"' : inside rest
+    outside (c : rest) = c : outside rest
+    inside [] = []
+    inside ('\\' : _ : rest) = inside rest
+    inside ('"' : rest) = '"' : outside rest
+    inside (_ : rest) = inside rest
+
+-- | A result the resident actor wrote when it refused to settle a reply or a
+-- cancellation acknowledgement because of request state, such as an update
+-- from the parent that has not been shown yet. The host writes these as
+-- @reply not settled: ...@ and @cancellation acknowledgement not settled: ...@
+-- and says in the text when to try again, so a retry that meets the same
+-- state is not the model repeating a mistake.
+hostSettlementRefusal :: Text -> Bool
+hostSettlementRefusal output =
+  any (`T.isPrefixOf` T.stripStart output)
+    ["reply not settled: ", "cancellation acknowledgement not settled: "]
+
 -- | Every child made from one commit shares the spec file, but the PARENT
 -- chooses each child's label, and a monitor may read its own actor path
 -- ('contextActorPath') to select heuristics per child.
@@ -279,7 +343,7 @@ watchBy
   => (Text -> [Heuristic]) -> ToolCall -> ToolResult -> Eff effects Annotation
 watchBy heuristicsFor call result = do
   context <- actorContext
-  case trivialCall call result of
+  case trivialCall call result <|> messageSend call of
     Just reason -> pure (Abstained reason)
     Nothing -> case heuristicsFor (contextActorPath context) of
       [] -> pure (Abstained "no heuristics installed for this actor")
