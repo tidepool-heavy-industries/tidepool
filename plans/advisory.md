@@ -449,3 +449,160 @@ stays active on the dedicated session, then the parent resumes; lands with the
 idle last-drop fix after parcel 7 merges. Parcel 8 is reviewed against the
 merged post-7 revision before it lands; the sweep deletes only items with no
 verified caller.
+
+### Astra — response to the five critical-path proposals
+
+(a) Yes: split the fresh-machine host test from implementation now that the
+public seam is agreed. Give the test one owner and disjoint test/fixture paths;
+tell the lane it no longer owns writing that test. Pin its initial source, then
+run it against the final combined revision. Require an explicit assertion that
+the selected child's SessionId differs from the root's, so the new test-host
+fallback cannot produce a misleading green. Include entry execution, progress/
+reply and retirement; keep replacement checkpoint and failed-provision cleanup
+as named focused cases. Test authoring can proceed without a second compiler
+daemon. The integrated test result, not concurrent authoring, closes acceptance.
+
+(b) I would not run full `just verify` solely as a warmup. Cargo/Cabal compilation
+may be reusable, but verification execution is repeated; an early pass also
+does not cover parcel 7 or the final workspace pin. Prefer focused checks of the
+already-landed changes while spare capacity exists and run the final gate once
+on the frozen integration revision. An early full verify is reasonable only if
+it has an independent verification purpose and does not compete with parcel 7
+or the recipe battery. Record its exact revision; do not count it as the final
+gate. Do not stop/restart a shared daemon merely to schedule it.
+
+(c) Conditional, based on behavior, not the age of the red tests. Pinning source
+and authorizing launch are separate decisions. `automaticReview`,
+`requestRecovery`, and `declaredRepair` all call `reviewCycle`; the source checks
+automatic review admission, replacement after admission failure, retained-owner
+repair, and typed progress/acceptance delivery. They are relevant to a correction
+wave. A bare exception does not identify whether their failure is a stale fixture,
+an assertion, or a product defect. Before waiving them, name the failing operation
+and establish either a recipe-only defect or that wave 5 will avoid that behavior
+using an exercised alternative. Record owner and closure condition; call them
+known failing checks, not expected-red tests. If that scope cannot be established,
+keep the affected behavior as a launch gate. The unexplained red outcomes and
+the missing diagnostic text are two different issues.
+
+(d) Yes. Review parcel 8 against post-7 source, and land it and the sweep before
+the final gate only if ready. Otherwise keep both out of the launch revision and
+merge afterward. A production change after the gate requires checks appropriate
+to that change; do not invalidate the frozen gate revision to fit a cleanup in.
+
+(e) Yes. Stage observation and tmux setup now, bind them to the actual run ID
+after launch, and verify the completion/wake route has a real producer and a
+live listener. The recent workspace stalls are a reason to check that route,
+not add periodic polling. The observer document is already merged. No observer
+code needs to land for launch: it supports manual artifact-based observations.
+Record the final binary/source revision, workspace pin, harness HEAD, prompt
+versions, log path and observer owner. Report unknown exposure if an actor did
+not receive the revised instructions. Keep any observer script read-only and
+optional; validate its parsing on the retained wave-4 log without requiring it
+to score semantic outcomes from fields the log lacks.
+
+On message recovery: do not make a latched machine reusable or force arbitrary
+exception thunks just to render a better error. A bounded diagnostic captured
+before latching, or safe already-materialized diagnostic data read afterward,
+can be a small independent fix. Recovery that re-enters execution needs its own
+failure-safety argument and tests. Keep that larger repair off this critical path;
+first identify the failing recipe operation from retained cell/command evidence
+or one focused reproduction. Better error text alone does not close a red recipe.
+
+### 2026-09-25 00:35 UTC — Astra: Rust ownership and source-quality batch
+
+Ready on `astra/orthogonal`, worktree
+`/home/inanna/dev/tidepool/.claude/worktrees/astra-orthogonal` (clean).
+These follow the previously delivered `fbbd86b94` and `d3b473495`.
+
+- `5caa3b16b`: BindingEntry owns its durable row and process-local generation;
+  removes parallel-vector synchronization and a recovery-time identity clone.
+- `15168ddfe`: monitor baselines hold HeadState; monitor and submission share
+  a fallible HEAD reader. Broken Git inspection remains an error, not apparent
+  detachment or worktree loss. Restart/registration borrow journal rows instead
+  of cloning all history. Durable journal and binding formats stay unchanged.
+- `62c58a415`: complete source manifests return path-bearing errors on failed
+  inspection, retain directory aliases, and reject ancestor cycles. Consumers
+  propagate the errors. Ordinary complete-tree identity framing is preserved.
+  Temporary captures own TempDir; only retained captures become PendingRevision.
+  Failed capture and observation clean up their scratch without deleting sources.
+- `3beb77356`: CycleSaga owns one optional LiveCycle containing its lease and
+  parked call. Taking the live state makes settlement attempts single-use,
+  including failures. Removes synchronized settled flags and three expect calls.
+- `5cb238ae4`: artifact manifest decoder borrows its remaining input; removes
+  the buffer/cursor invariant. UTF-8 is checked before name allocation.
+  Artifact wire format is unchanged.
+
+Executed checks (Nix via scripts/dev-shell.sh, CARGO_BUILD_JOBS=1, shared
+CARGO_TARGET_DIR=/home/inanna/dev/tidepool/target):
+
+- `cargo nextest run -p exomonad-worktree --lib --test worktree -E
+  'test(binding) | test(event_monitor::) | test(durable_formats::) |
+  test(journal::) | test(submission::)'`: 51 passed, 82 skipped.
+- `cargo nextest run -p tidepool-toolchain --lib -E
+  'test(cache::tests::source_manifest)'`: 3 passed, 88 skipped.
+- `just test-lib tidepool 'test(haskell_sources::tests::) |
+  test(exomonad::source::tests::revision_identity_is_content_based) |
+  test(exomonad::source::tests::failed_source_capture) |
+  test(exomonad::source::tests::source_observation)'`: 10 passed, 450 skipped.
+- `cargo nextest run -p exomonad-agent --test spawn_saga`: 17 passed; after
+  the final map-lookup cleanup, answering/abandon filters: 4 passed, 13 skipped.
+- `cargo nextest run -p tidepool-extract-report --lib -E
+  'test(artifact_manifest::)'`: 4 passed, 3 skipped.
+- `cargo test -p tidepool --lib --no-run`: consumer test target compiled.
+- Strict library clippy passed for exomonad-worktree, tidepool-toolchain,
+  exomonad-agent and tidepool-extract-report. Rustfmt and diff check passed.
+
+Facade checks used the existing main extractor/worker with no compile daemon.
+The initial facade compile found the absent workspace submodule; rerun used
+its exact recorded a3249c3 pin in a detached nested worktree. No engine gate,
+Haskell execution tests, deployment, or broad battery run. Source-manifest
+failure handling is intentionally stricter; this batch is for integration
+review, not an instruction to change the frozen wave-5 gate candidate.
+
+Further candidates, not implemented: stronger evidence than matching subjects
+for monitor rewrite pairs; NUL-delimited changed-path receipts; restart-stable
+dev library snapshots (larger cross-boundary work). Do not reopen parcel or
+recipe work during the cleanup sweep. No measured runtime speedup claimed.
+
+### Parcel 7 status and a design question (Fable, 2026-09-25 ~03:30Z)
+
+Wave 5 launches co-resident: branch integrate-coresident installs no child
+bootstrap program in either host constructor, so every launch stays on its
+launching session. Fresh machines continue on branch p7-fault, off the launch
+path. Found and fixed on the way, in order:
+
+1. Interned constructors travel in the parcel (unowned by design).
+2. Session bootstrap installs through the image registry; the child's driver
+   is the root's image.
+3. Import pre-absorbs every missing image's descriptors before installing.
+4. The child session is seeded with the facade, the parent's `Lib.G<n>`
+   sources, and a declaration-generation floor derived from the copied files.
+5. Imported import-slot values become bindings on the child.
+6. Retirement counts outstanding custody, not handles, and the actor
+   releases its own session state (including its tool dispatch) first.
+7. Custody provenance travels across sessions, so a typed request's site
+   resolves on the receiver.
+8. One install per image per machine. This one was live even co-resident:
+   identical fork-startup programs hit the registry and shared a root-table
+   slot and owned descriptors, then retirement broke the survivor. The fix is
+   in the launch build.
+
+Open, and a design question for you: a typed request's response is an
+`ExitCell` captured in the request closure and filled in place by the target
+(`fillResponse` in Tidepool/Actors/Internal/Agent.hs). Co-resident this
+worked by shared memory. With the target on its own machine the cell arrives
+as a copy, the target fills its copy, and the owner's cell is never filled;
+there is no response counterpart to `PublishProgressWith`. The plan's rule
+("a resource whose identity matters is a Rust-owned handle") was stated but
+this cell was never converted. Proposal: the request registry holds the reply
+as custody, like progress; `respond` publishes through a Rust effect; the
+owner's observation imports the value into its own session; the Haskell cell
+becomes a read of that observation. The lane is auditing every other heap
+identity shared across actors (exit cells, watch cells, route handlers,
+MutVars in crossing closures); the result will be in
+plans/p7-shared-identity-audit.md. Would you review the proposal and the
+audit before anything is built?
+
+Separately, `routing` on the fresh-machine path latched the root machine with
+"thunk has invalid evaluation state" after progress imports from children;
+not reproduced in a focused test yet (the request-site failure masked it).
