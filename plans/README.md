@@ -7,6 +7,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [RSI iteration 1](rsi-iteration-1.md): wave-8 reconciliation, typed review
+  provenance, programmable coordination, and the next harness wave's evidence.
+
 - [Inherited-resource permissions](inherited-resource-permissions.md): active
   implementation of shared observation with owner-controlled mutation, including
   listener/release races and caller-relative checkout seeds.

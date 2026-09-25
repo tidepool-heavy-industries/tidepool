@@ -42,6 +42,25 @@ for every event.
 This is an early alpha for people who want to build and reshape agent
 workflows. [Try it](#try-it) on Linux with Nix.
 
+### Our RSI loop
+
+We develop Exomonad through waves of real work. Our current proving ground is
+building `exomonad-harness` incrementally. Each wave feeds two connected cycles:
+
+- **Improve execution:** compare actual behavior with the intended outcome and
+  ideal execution. Inspect artifacts, traces and interviews; repair wrong paths
+  and friction; test explicit hypotheses in the next wave.
+- **Expand ambition:** experiment with programmable tools, actors, effects and
+  semantic judgments to discover useful orchestration patterns and expand what
+  we want the system to accomplish.
+
+The target evolves alongside the system. Keep observations, interpretations and
+proposals distinct. Measure product progress and orchestration improvements
+separately, carry unresolved questions forward, and judge changes by subsequent
+behavior. Useful procedures become authored programs; missing capabilities can
+justify new primitives. [The current iteration](plans/rsi-iteration-1.md) records
+the experiments and evidence.
+
 ## System 1 is a program, not another chat
 
 Use ordinary code for exact decisions: did the command succeed, does the file
