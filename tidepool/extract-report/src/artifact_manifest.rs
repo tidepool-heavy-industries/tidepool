@@ -48,8 +48,9 @@ impl ArtifactManifest {
         let count = usize::try_from(count).map_err(|_| ManifestDecodeError::InvalidCount)?;
         let mut entries = Vec::with_capacity(count.min(1024));
         for _ in 0..count {
-            let name = String::from_utf8(decoder.frame()?.to_vec())
-                .map_err(|_| ManifestDecodeError::InvalidName)?;
+            let name = std::str::from_utf8(decoder.frame()?)
+                .map_err(|_| ManifestDecodeError::InvalidName)?
+                .to_owned();
             let digest = match decoder.byte()? {
                 0 => None,
                 1 => Some(
@@ -128,22 +129,19 @@ fn frame(out: &mut Vec<u8>, bytes: &[u8]) {
 
 struct Decoder<'a> {
     bytes: &'a [u8],
-    cursor: usize,
 }
 
 impl<'a> Decoder<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
+        Self { bytes }
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8], ManifestDecodeError> {
-        let end = self
-            .cursor
-            .checked_add(count)
-            .filter(|end| *end <= self.bytes.len())
+        let (value, remaining) = self
+            .bytes
+            .split_at_checked(count)
             .ok_or(ManifestDecodeError::Truncated)?;
-        let value = &self.bytes[self.cursor..end];
-        self.cursor = end;
+        self.bytes = remaining;
         Ok(value)
     }
 
@@ -162,7 +160,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn finish(self) -> Result<(), ManifestDecodeError> {
-        if self.cursor == self.bytes.len() {
+        if self.bytes.is_empty() {
             Ok(())
         } else {
             Err(ManifestDecodeError::TrailingBytes)
@@ -181,6 +179,38 @@ mod tests {
             ("asks.json", None),
         ]);
         assert_eq!(ArtifactManifest::decode(&manifest.encode()), Ok(manifest));
+    }
+
+    #[test]
+    fn every_truncated_manifest_prefix_is_rejected() {
+        let manifest = ArtifactManifest::from_artifacts([
+            ("metadata", Some(b"contents".as_slice())),
+            ("optional", None),
+        ]);
+        let encoded = manifest.encode();
+        for end in 0..encoded.len() {
+            assert!(
+                ArtifactManifest::decode(&encoded[..end]).is_err(),
+                "accepted prefix {end}"
+            );
+        }
+        assert_eq!(ArtifactManifest::decode(&encoded), Ok(manifest));
+    }
+
+    #[test]
+    fn oversized_frame_is_rejected_without_advancing_past_input() {
+        let bytes = u64::MAX.to_le_bytes();
+        assert_eq!(
+            Decoder::new(&bytes).frame(),
+            Err(ManifestDecodeError::Truncated)
+        );
+        let mut decoder = Decoder::new(b"x");
+        assert_eq!(
+            decoder.take(usize::MAX),
+            Err(ManifestDecodeError::Truncated)
+        );
+        assert_eq!(decoder.take(1), Ok(b"x".as_slice()));
+        assert_eq!(decoder.finish(), Ok(()));
     }
 
     #[test]
