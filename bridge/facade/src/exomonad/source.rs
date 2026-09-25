@@ -1745,12 +1745,16 @@ mod tests {
         .unwrap();
     }
 
+    /// `Project.Work` also imports a library module, as the harness project's
+    /// `Jev.Operators` imports `Jev.Host`: a published revision must keep
+    /// resolving the library beneath it, not just the workspace's own modules.
     fn write_work(project: &Path, accessor: &str) {
         std::fs::write(
             project.join(".exomonad/workspace/Project/Work.hs"),
             format!(
                 "module Project.Work (describe) where\n\
                  \n\
+                 import Jev.Host ()\n\
                  import Project.Types\n\
                  \n\
                  describe :: Evidence -> Int\n\

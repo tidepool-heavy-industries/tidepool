@@ -599,9 +599,9 @@ pub struct ToolchainStamp {
 /// Where the deploy stamp lives: `$TIDEPOOL_TOOLCHAIN_STAMP`, else
 /// `<cache_dir>/toolchain-stamp.json`.
 ///
-/// It sits in the cache root deliberately: `scripts/redeploy.sh` clears that
-/// root and then rewrites the stamp, so a hand-cleared cache degrades to
-/// "no stamp" (a warning) rather than to a stale stamp (a false alarm).
+/// It sits in the cache root deliberately: `scripts/redeploy.sh` rewrites it,
+/// and a hand-cleared cache degrades to "no stamp" (a warning) rather than to
+/// a stale stamp (a false alarm).
 #[must_use]
 pub fn stamp_path() -> PathBuf {
     if let Some(p) = std::env::var_os(ENV_STAMP) {
