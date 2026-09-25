@@ -207,3 +207,13 @@ the hosted tool service because the bash tool description, extended by the
 background-jobs merge, was about 1,100 characters against the 1,024 provider
 limit. Fixed (a30997ff9, 910 characters), redeploying again; lane desc-limit
 adds a test so shipped tool descriptions cannot exceed the limit unnoticed.
+
+Correction (14:45Z): the source layer was not at fault. My own redeploy at
+13:56Z (installed 14:01:32Z) ran scripts/redeploy.sh Step 5, which deleted
+~/.cache/tidepool/stdlib; the live run compiles against its stdlib copy
+there, so every later compile lost every stdlib module (Jev.Host was only the
+first error listed). Wave 5's 04:51Z "Jev.Host missing" had the same cause.
+The reload at 12:26Z was fine (438 compiles succeeded after it). Fix on
+branch layer-hostmods (9672f5151): Step 5 removed, since every cleared cache
+is content- or build-keyed; merge after the running redeploy finishes. The
+handoff note's "do not call reload_agent_spec" is withdrawn.
