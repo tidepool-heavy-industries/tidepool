@@ -120,6 +120,279 @@ impl TraceSummary {
     }
 }
 
+/// Trace lines read per run. A reviewer of a long live wave needs the newest
+/// lines, so this bound is far above one wave's volume; reaching it is reported.
+const MAX_TRACE_RECORDS: usize = 2_000_000;
+/// Per-kind bound on retained review events; overflow is counted, not dropped silently.
+const MAX_EVENTS_PER_KIND: usize = 50_000;
+/// Characters of model-written text retained per notification or nudge.
+pub(super) const TEXT_PREFIX_CHARS: usize = 80;
+
+/// Typed projections of the host trace lines the review sections consume.
+/// Each carries its own UTC Unix-millisecond timestamp.
+#[derive(Debug, Default)]
+pub(super) struct TraceEvents {
+    pub standing: Vec<StandingTransition>,
+    pub launched: Vec<(u64, String)>,
+    pub first_dispatch: BTreeMap<String, u64>,
+    pub effects: Vec<EffectSettled>,
+    pub reply_rejections: Vec<ReplyRejection>,
+    /// Rejected input-unit receipts keyed by (execution, input unit index),
+    /// valued by the reply rejection class when the receipt names one.
+    pub rejected_units: BTreeMap<(String, u64), Option<String>>,
+    pub calls: Vec<CallTiming>,
+    pub notifications: Vec<NotificationSent>,
+    pub slot_invocations: Vec<SlotInvocation>,
+    pub cancellations: Vec<Cancellation>,
+    pub omitted: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct StandingTransition {
+    pub at: u64,
+    pub actor: String,
+    pub to: String,
+    pub to_request: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct EffectSettled {
+    pub at: u64,
+    pub actor: Option<String>,
+    pub effect: String,
+    pub disposition: String,
+    pub execution: Option<String>,
+    pub input_unit_index: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ReplyRejection {
+    pub actor: Option<String>,
+    pub execution: Option<String>,
+    pub rejection: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallTiming {
+    pub at_unix_ms: u64,
+    pub actor: String,
+    pub tool: String,
+    pub total_ms: u64,
+    pub checkout_wait_ms: u64,
+    pub checkout_hold_ms: u64,
+    pub compile_ms: u64,
+    pub compile_count: u64,
+    pub jev_ms: u64,
+    pub jev_count: u64,
+    pub exec_ms: u64,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct NotificationSent {
+    pub at: u64,
+    pub sender: String,
+    pub target: String,
+    pub from_slot: bool,
+    pub text_prefix: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SlotInvocation {
+    pub at: u64,
+    pub actor: String,
+    /// The disposition's variant name, e.g. `Annotated` or `Abstained`.
+    pub disposition: String,
+    pub detail_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Cancellation {
+    pub at_unix_ms: u64,
+    pub thread_id: String,
+    pub call_id: String,
+    pub execution: Option<String>,
+    pub outcome: String,
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, omitted: &mut u64, item: T) {
+    if items.len() < MAX_EVENTS_PER_KIND {
+        items.push(item);
+    } else {
+        *omitted += 1;
+    }
+}
+
+/// The first `TEXT_PREFIX_CHARS` characters of model-written text.
+pub(super) fn text_prefix(text: &str) -> String {
+    text.chars().take(TEXT_PREFIX_CHARS).collect()
+}
+
+/// Tracing renders integers wider than 64 bits as strings.
+fn lenient_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+/// The innermost span field named `name`, falling back to the current span.
+fn span_field<'a>(record: &'a Value, name: &str) -> Option<&'a str> {
+    record["spans"]
+        .as_array()
+        .and_then(|spans| spans.iter().rev().find_map(|span| span[name].as_str()))
+        .or_else(|| record["span"][name].as_str())
+}
+
+/// The Rust variant name that leads a `Debug` rendering such as `Abstained("..")`.
+fn variant_name(debug: &str) -> Option<String> {
+    let name = debug
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()?;
+    (!name.is_empty() && name.len() <= 64).then(|| name.to_owned())
+}
+
+impl TraceEvents {
+    fn observe(&mut self, at: u64, record: &Value) {
+        let fields = &record["fields"];
+        let actor_field = || fields["actor"].as_str().and_then(actor_key);
+        match fields["message"].as_str().unwrap_or("") {
+            "resident actor standing transition" => {
+                if let (Some(actor), Some(to)) = (actor_field(), fields["to"].as_str()) {
+                    let to_request = fields["to_request"]
+                        .as_str()
+                        .and_then(|text| text.strip_prefix("Some(RequestId("))
+                        .and_then(|text| text.strip_suffix("))"))
+                        .and_then(|text| text.parse().ok());
+                    let transition = StandingTransition {
+                        at,
+                        actor,
+                        to: to.to_owned(),
+                        to_request,
+                    };
+                    push_bounded(&mut self.standing, &mut self.omitted, transition);
+                }
+            }
+            "interactive application launched" => {
+                if let Some(actor) = actor_field() {
+                    push_bounded(&mut self.launched, &mut self.omitted, (at, actor));
+                }
+            }
+            "workbench cell dispatched to its actor" => {
+                if let Some(actor) = actor_field() {
+                    self.first_dispatch.entry(actor).or_insert(at);
+                }
+            }
+            "effect settled" => {
+                if let (Some(effect), Some(disposition)) = (
+                    fields["effect"].as_str(),
+                    fields["disposition"].as_str().and_then(variant_name),
+                ) {
+                    let settled = EffectSettled {
+                        at,
+                        actor: span_field(record, "actor").and_then(actor_key),
+                        effect: effect.to_owned(),
+                        disposition,
+                        execution: span_field(record, "execution").map(str::to_owned),
+                        input_unit_index: fields["input_unit_index"].as_u64(),
+                    };
+                    push_bounded(&mut self.effects, &mut self.omitted, settled);
+                }
+            }
+            "reply rejected" => {
+                if let Some(rejection) = fields["rejection"].as_str().and_then(variant_name) {
+                    let rejected = ReplyRejection {
+                        actor: span_field(record, "actor").and_then(actor_key),
+                        execution: span_field(record, "execution").map(str::to_owned),
+                        rejection,
+                    };
+                    push_bounded(&mut self.reply_rejections, &mut self.omitted, rejected);
+                }
+            }
+            "input unit receipt" if fields["status"] == "Rejected" => {
+                if let (Some(execution), Some(index)) =
+                    (span_field(record, "execution"), fields["index"].as_u64())
+                {
+                    // Only the fixed receipt prefix the reply boundary renders is
+                    // read; any other output stays unread.
+                    let class = fields["output"]
+                        .as_str()
+                        .and_then(|output| output.strip_prefix("reply rejected: "))
+                        .and_then(variant_name);
+                    self.rejected_units
+                        .insert((execution.to_owned(), index), class);
+                }
+            }
+            "call timing" => {
+                let number = |name: &str| lenient_u64(&fields[name]).unwrap_or(0);
+                if let (Some(actor), Some(incarnation), Some(tool)) = (
+                    lenient_u64(&fields["actor"]),
+                    lenient_u64(&fields["incarnation"]),
+                    fields["tool"].as_str(),
+                ) {
+                    let call = CallTiming {
+                        at_unix_ms: at,
+                        actor: format!("{actor}@{incarnation}"),
+                        tool: tool.to_owned(),
+                        total_ms: number("total_ms"),
+                        checkout_wait_ms: number("checkout_wait_ms"),
+                        checkout_hold_ms: number("checkout_hold_ms"),
+                        compile_ms: number("compile_ms"),
+                        compile_count: number("compile_count"),
+                        jev_ms: number("jev_ms"),
+                        jev_count: number("jev_count"),
+                        exec_ms: number("exec_ms"),
+                        outcome: fields["outcome"].as_str().unwrap_or("").to_owned(),
+                    };
+                    push_bounded(&mut self.calls, &mut self.omitted, call);
+                }
+            }
+            "actor notification sent" => {
+                if let (Some(sender), Some(target)) =
+                    (actor_field(), fields["target"].as_str().and_then(actor_key))
+                {
+                    let sent = NotificationSent {
+                        at,
+                        sender,
+                        target,
+                        from_slot: fields["from_slot"].as_bool().unwrap_or(false),
+                        text_prefix: text_prefix(fields["reason"].as_str().unwrap_or("")),
+                    };
+                    push_bounded(&mut self.notifications, &mut self.omitted, sent);
+                }
+            }
+            "after-tool slot invoked" => {
+                if let (Some(actor), Some(disposition)) = (
+                    actor_field(),
+                    fields["disposition"].as_str().and_then(variant_name),
+                ) {
+                    let invocation = SlotInvocation {
+                        at,
+                        actor,
+                        disposition,
+                        detail_prefix: text_prefix(fields["detail"].as_str().unwrap_or("")),
+                    };
+                    push_bounded(&mut self.slot_invocations, &mut self.omitted, invocation);
+                }
+            }
+            "hosted workbench cancellation" => {
+                if let (Some(thread_id), Some(outcome)) =
+                    (fields["thread_id"].as_str(), fields["outcome"].as_str())
+                {
+                    let cancellation = Cancellation {
+                        at_unix_ms: at,
+                        thread_id: thread_id.to_owned(),
+                        call_id: fields["call_id"].as_str().unwrap_or("").to_owned(),
+                        execution: fields["execution"].as_str().map(str::to_owned),
+                        outcome: outcome.to_owned(),
+                    };
+                    push_bounded(&mut self.cancellations, &mut self.omitted, cancellation);
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 fn unknown<T>(reason: &str) -> Evidence<T> {
     Evidence::Unknown {
         reason: reason.into(),
@@ -297,13 +570,17 @@ fn known_phase(raw: &str) -> Option<&str> {
     .then_some(raw)
 }
 
+/// Reads the host trace once. The summary covers only the window; the review
+/// events cover the whole trace, each carrying its own timestamp, so sections
+/// can apply the window themselves and the actor tree keeps first occurrences.
 pub(super) fn read_trace(
     path: &Path,
     limits: Limits,
     window: TimeWindow,
     diagnostics: &mut Vec<String>,
-) -> TraceSummary {
+) -> (TraceSummary, TraceEvents) {
     let mut summary = TraceSummary::default();
+    let mut events = TraceEvents::default();
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => {
@@ -311,14 +588,14 @@ pub(super) fn read_trace(
                 "{}: host trace absent or unreadable",
                 path.display()
             ));
-            return summary;
+            return (summary, events);
         }
     };
     let mut reader = BufReader::new(file);
     let max_records = limits
         .records_per_actor
         .saturating_mul(limits.actors)
-        .min(100_000);
+        .min(MAX_TRACE_RECORDS);
     let bound = limits.bytes_per_record.saturating_add(1) as u64;
     for index in 0..max_records {
         let mut bytes = Vec::new();
@@ -330,11 +607,11 @@ pub(super) fn read_trace(
                     path.display(),
                     index + 1
                 ));
-                return summary;
+                return (summary, events);
             }
         };
         if count == 0 {
-            return summary;
+            return (summary, events);
         }
         if count > limits.bytes_per_record {
             diagnostics.push(format!(
@@ -342,7 +619,7 @@ pub(super) fn read_trace(
                 path.display(),
                 index + 1
             ));
-            return summary;
+            return (summary, events);
         }
         if bytes.last() != Some(&b'\n') {
             diagnostics.push(format!(
@@ -350,7 +627,7 @@ pub(super) fn read_trace(
                 path.display(),
                 index + 1
             ));
-            return summary;
+            return (summary, events);
         }
         let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
             diagnostics.push(format!(
@@ -363,6 +640,7 @@ pub(super) fn read_trace(
         let Some(time) = record["timestamp"].as_str().and_then(timestamp_ms) else {
             continue;
         };
+        events.observe(time, &record);
         if !window.contains(time) {
             continue;
         }
@@ -481,7 +759,7 @@ pub(super) fn read_trace(
         }
     }
     diagnostics.push(format!("{}: trace record limit reached", path.display()));
-    summary
+    (summary, events)
 }
 
 #[cfg(test)]
@@ -514,7 +792,7 @@ mod tests {
         )
         .unwrap();
         let mut diagnostics = Vec::new();
-        let summary = read_trace(
+        let (summary, _) = read_trace(
             &path,
             Limits::default(),
             TimeWindow {
@@ -553,7 +831,7 @@ mod tests {
         )
         .unwrap();
         let mut diagnostics = Vec::new();
-        let summary = read_trace(
+        let (summary, _) = read_trace(
             &path,
             Limits::default(),
             TimeWindow::default(),

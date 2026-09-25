@@ -67,6 +67,12 @@ enum Command {
         /// Exclusive UTC Unix-millisecond upper bound.
         #[arg(long)]
         until_unix_ms: Option<u64>,
+        /// Lower bound relative to now, e.g. `90s`, `15m`, `2h`.
+        #[arg(long, conflicts_with = "from_unix_ms", value_parser = tidepool::run_map::parse_duration_ms)]
+        since: Option<u64>,
+        /// Number of slowest hosted calls to list.
+        #[arg(long, default_value_t = 15)]
+        slowest: usize,
         #[arg(long)]
         json: bool,
     },
@@ -264,15 +270,29 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             run_dir,
             from_unix_ms,
             until_unix_ms,
+            since,
+            slowest,
             json,
         } => {
-            let report = tidepool::run_map::read_windowed_run(
+            let now_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?;
+            let observation = tidepool::run_map::Observation {
+                now_unix_ms,
+                codex_home: exomonad_agent::backend::codex::isolation::codex_home().ok(),
+                slowest_calls: slowest,
+            };
+            let report = tidepool::run_map::read_observed_run(
                 &run_dir,
                 tidepool::run_map::Limits::default(),
                 tidepool::run_map::TimeWindow {
-                    from_unix_ms,
+                    from_unix_ms: since
+                        .map(|since| now_unix_ms.saturating_sub(since))
+                        .or(from_unix_ms),
                     until_unix_ms,
                 },
+                &observation,
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -387,10 +407,38 @@ mod tests {
                 "exomonad", "run-map", "/sanitized/run", "--from-unix-ms", "10",
                 "--until-unix-ms", "20", "--json"
             ]).unwrap().command,
-            Command::RunMap { run_dir, from_unix_ms: Some(10), until_unix_ms: Some(20), json: true }
+            Command::RunMap { run_dir, from_unix_ms: Some(10), until_unix_ms: Some(20), since: None, slowest: 15, json: true }
                 if run_dir == std::path::Path::new("/sanitized/run")
         ));
         assert!(Cli::try_parse_from(["exomonad", "run-map"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from([
+                "exomonad",
+                "run-map",
+                "/run",
+                "--since",
+                "15m",
+                "--slowest",
+                "3"
+            ])
+            .unwrap()
+            .command,
+            Command::RunMap {
+                since: Some(900_000),
+                slowest: 3,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "run-map",
+            "/run",
+            "--since",
+            "15m",
+            "--from-unix-ms",
+            "1"
+        ])
+        .is_err());
         assert!(Cli::try_parse_from([
             "exomonad",
             "run-map",

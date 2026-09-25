@@ -1,12 +1,35 @@
 //! Read-only, bounded derivation of Exomonad run artifacts.
 //! Missing evidence is not a negative observation or an acceptance verdict.
+//!
+//! Reviewing a live wave (`exomonad run-map <run-dir>`, add `--json` for machines):
+//! 1. Run it with no window first. `tree` shows who exists, their model and effort,
+//!    whether each has its own session (`inline` forks do not), and when each
+//!    started, first called a tool, first and last replied, and its standing.
+//! 2. Read `deliveries` next; it is current durable state, never windowed. Grep
+//!    `inbox=fenced(`: the front row has sat unconfirmed past 60 s and every
+//!    row behind it waits. `host_input=no row` means Codex never admitted it.
+//! 3. `notifications` pairs every send with its inbox row: `presented at refN`,
+//!    or `not-presented` with the phase. Nothing is inferred from transcripts.
+//! 4. `slowest calls` names the long hosted calls and splits their time; a high
+//!    `wait` or checkout_wait share is checkout contention, not slow work.
+//! 5. `rejections` and `nudges` count repeats per actor: the same rejection or
+//!    after-tool annotation many times is a model stuck in a loop.
+//! 6. On each later wake pass `--since 15m` (or the interval since the last
+//!    wake) to see only new events; deliveries still show the whole inbox.
 mod metadata;
+mod review;
 mod trace;
 use metadata::{binding_thread, read_root, recorded_link};
 pub use metadata::{RecordedLink, RootBinding, TimeWindow, WatchState};
+pub use review::{
+    ActorDeliveries, CancellationRow, Deliveries, DeliveryRow, Fence, HostInput, MessagePhase,
+    Notification, Observation, Percentiles, Provenance, Receipt, RepeatGroup, Review, Section,
+    SlowCalls, ToolPercentiles, TreeNode, FENCE_AFTER_MS,
+};
 use serde::Serialize;
 pub use trace::{
-    ActorLifecycle, CorrelationCounts, DurationSummary, RunProvenance, TimingLink, TraceSummary,
+    ActorLifecycle, CallTiming, Cancellation, CorrelationCounts, DurationSummary, RunProvenance,
+    TimingLink, TraceSummary,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,7 +44,29 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Parses a relative duration such as `90s`, `15m`, `2h` or `1d` into milliseconds.
+pub fn parse_duration_ms(text: &str) -> Result<u64, String> {
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| format!("duration {text:?} needs a unit: s, m, h or d"))?;
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| format!("duration {text:?} needs a leading integer"))?;
+    let scale = match unit {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return Err(format!("duration {text:?} needs a unit: ms, s, m, h or d")),
+    };
+    number
+        .checked_mul(scale)
+        .ok_or_else(|| format!("duration {text:?} overflows"))
+}
 
 /// Explicit resource bounds. A limit produces a diagnostic, not silent completeness.
 #[derive(Clone, Copy)]
@@ -47,6 +92,19 @@ pub struct ActorNode {
     pub events: Vec<RecordedEvent>,
     pub parent: Evidence<exomonad_actor::ActorRef>,
     pub source_seed: Evidence<String>,
+    #[serde(skip)]
+    directory: PathBuf,
+    #[serde(skip)]
+    rows: Vec<InboxRow>,
+}
+
+/// One inbox row as the review reads it: its receipt context, if tracked, and
+/// the text prefix of a notification payload.
+#[derive(Debug)]
+struct InboxRow {
+    sequence: u64,
+    context: Option<Value>,
+    text_prefix: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct RecordedEvent {
@@ -61,6 +119,8 @@ pub struct RecordedEvent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "label", rename_all = "snake_case")]
 pub enum EventKind {
+    /// A plain-text notification from another actor.
+    Notification,
     SessionReady,
     WatchChanged,
     ChildExited,
@@ -69,6 +129,7 @@ pub enum EventKind {
 impl From<&str> for EventKind {
     fn from(value: &str) -> Self {
         match value {
+            "notification" => Self::Notification,
             "sessionReady" => Self::SessionReady,
             "watchChanged" => Self::WatchChanged,
             "childExited" => Self::ChildExited,
@@ -87,6 +148,7 @@ pub struct RunMap {
     pub acceptance: Evidence<String>,
     pub provenance: RunProvenance,
     pub trace: TraceSummary,
+    pub review: Review,
 }
 
 /// Partial artifact inventory. It deliberately does not parse assignment prose
@@ -98,6 +160,21 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
 /// Timestamped events outside the window are omitted. Untimed events remain
 /// explicitly unclassified; static actor directories are not dated by inference.
 pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::Result<RunMap> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    read_observed_run(run, limits, window, &Observation::at(now))
+}
+
+/// [`read_windowed_run`] with the review measured at `observation`.
+pub fn read_observed_run(
+    run: &Path,
+    limits: Limits,
+    window: TimeWindow,
+    observation: &Observation,
+) -> io::Result<RunMap> {
     window.validate()?;
     let read_bound = u64::try_from(limits.bytes_per_record)
         .ok()
@@ -123,6 +200,7 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
         },
         provenance,
         trace: TraceSummary::default(),
+        review: Review::placeholder(),
     };
     // Inspect the listing, retaining only the smallest keys. Selection is
     // independent of filesystem enumeration order and uses O(actor limit) memory.
@@ -177,6 +255,8 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
             source_seed: Evidence::Unknown {
                 reason: "No structured source seed artifact consumed".into(),
             },
+            directory: directory.clone(),
+            rows: Vec::new(),
         };
         let inbox = directory.join("inbox.jsonl");
         match File::open(&inbox) {
@@ -232,7 +312,17 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
                     }
                     match serde_json::from_slice::<Value>(&bytes) {
                         Ok(value) => {
-                            if let Some(kind) = value["payload"]["type"].as_str() {
+                            if let Some(sequence) = value["sequence"].as_u64() {
+                                node.rows.push(InboxRow {
+                                    sequence,
+                                    context: value.get("receipt_context").cloned(),
+                                    text_prefix: value["payload"].as_str().map(trace::text_prefix),
+                                });
+                            }
+                            let kind = value["payload"]["type"]
+                                .as_str()
+                                .or(value["payload"].is_string().then_some("notification"));
+                            if let Some(kind) = kind {
                                 let timestamp = value["payload"]["occurred_at_unix_ms"].as_u64();
                                 if timestamp.is_some_and(|time| !window.contains(time)) {
                                     continue;
@@ -297,19 +387,42 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
             ));
         }
     }
+    let mut events = None;
+    let mut trace_unavailable = String::new();
     if let Some(path) = trace_path {
-        report.trace = trace::read_trace(&path, limits, window, &mut report.diagnostics);
+        let (summary, read) = trace::read_trace(&path, limits, window, &mut report.diagnostics);
+        report.trace = summary;
         if report.trace.unclassified_dispatch_failures > 0 {
             report.diagnostics.push(format!(
                 "{} dispatch failures have no structured class; error prose was not classified",
                 report.trace.unclassified_dispatch_failures
             ));
         }
+        if read.omitted > 0 {
+            report.diagnostics.push(format!(
+                "{} review events omitted past the per-kind bound",
+                read.omitted
+            ));
+        }
+        if path.is_file() {
+            events = Some(read);
+        } else {
+            trace_unavailable = format!("{} absent", path.display());
+        }
     } else {
+        trace_unavailable = "host trace location unknown: run status unavailable".into();
         report
             .diagnostics
             .push("Host trace location unknown because run status is unavailable".into());
     }
+    report.review = review::build(
+        run,
+        &report.actors,
+        events.as_ref(),
+        &trace_unavailable,
+        window,
+        observation,
+    );
     Ok(report)
 }
 impl RunMap {
@@ -370,6 +483,7 @@ impl RunMap {
         for diagnostic in &self.diagnostics {
             output.push_str(&format!("\n    diagnostic: {diagnostic}"));
         }
+        output.push_str(&self.review.concise());
         output
     }
 }
