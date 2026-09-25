@@ -45,6 +45,7 @@ import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Agent.Assignment.Internal (IsWatchLabel (..))
+import Tidepool.Effects.Core (CommandReport)
 import Tidepool.Agent.Reply.Internal
   ( ReplyError (..)
   , Progress (..)
@@ -59,7 +60,12 @@ import Tidepool.Agent.Reply.Internal
   , responseRequestId
   )
 
-data AwaitDependency = AwaitDependency RequestId Bool | AwaitProgress RequestId ProgressCursor
+-- | 'AwaitCommand' names a command job; the runtime resolves it to the
+-- request its completion settles when the watch is registered.
+data AwaitDependency
+  = AwaitDependency RequestId Bool
+  | AwaitProgress RequestId ProgressCursor
+  | AwaitCommand Text
   deriving (Eq)
 
 -- Each inner list is an any-of group; every group must become ready.
@@ -149,6 +155,9 @@ data Watches a where
   ListRoutesWith :: Watches [Int]
   ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
+  -- | The completion report of a finished command job, once its settlement
+  -- is made.
+  ObserveCommandWith :: Text -> Watches (Maybe CommandReport)
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
 
 data ForgetWatchOutcome

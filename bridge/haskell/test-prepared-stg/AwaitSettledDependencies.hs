@@ -23,3 +23,4 @@ awaitSettledDependencies = case awaitSettled sampleResponse of
   where
     dependency (AwaitDependency (RequestId request) settled) = (request, settled)
     dependency (AwaitProgress (RequestId request) _) = (request, False)
+    dependency (AwaitCommand _) = (-1, False)

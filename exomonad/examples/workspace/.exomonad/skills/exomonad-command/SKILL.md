@@ -29,6 +29,13 @@ initial observation (choose the limit for the actual check):
 {"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"yield_time_ms":1000}
 ```
 
+To keep working while it runs, start it in the background; the call returns at
+once and a completion notice wakes you (see Background commands below):
+
+```json
+{"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"background":true}
+```
+
 Use the returned `session_id` verbatim. `write_stdin` with omitted `chars` polls;
 with `chars` it sends input. For piped stdin, `close_stdin: true` sends any final
 chars before EOF. PTYs reject this flag; use explicit terminal input there.
@@ -54,8 +61,8 @@ None of these operations reruns the command. A finished nonzero exit is a comman
 result; inspect its diagnostics. Terminal receipts always show cleanup separately.
 Running or queued means the same job remains
 owned. Do useful independent work or route completion rather than repeatedly
-polling through model turns. `Cmd.completion` is an actor EventSource, not an Await
-value for `watch`; see the routing example linked below.
+polling through model turns. `Cmd.awaitFinished job` is the Await value for
+`watch`; `Cmd.completion` is the record-actor EventSource (routing example below).
 
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
@@ -220,5 +227,47 @@ terminal event, including attachment after completion. To continue automatically
 
 Use `exomonad-define-actors` for handler construction. Captured jobs permit
 inspection while available; they do not transfer command control.
+
+## Background commands
+
+`Cmd.background` (or `bash` with `"background": true`) returns the job at once.
+The job runs detached with its output retained; when it finishes, a settlement
+notice wakes you with the command, exit code or signal, whether the process and
+its cleanup are terminal, whether the output is complete, a diagnostic tail,
+the directory and commit it ran at, and the `session_id` that `read_output`
+pages without rerunning. `Cmd.awaitFinished job :: Await Cmd.CommandReport`
+joins it with child replies in one `watch` or `route`, like `awaitSettled`; the
+watch then owns the wake:
+
+```haskell
+check <- Cmd.background (withMemory (GiB 4) [bash|cargo test -p my_crate --lib|])
+checked <- watch "check-done" (Cmd.awaitFinished check)
+```
+
+A report is evidence about the source it ran at, not about a later candidate.
+Before counting a pass, compare its commit with the exact revision you are
+about to accept, and refuse a dirty tree:
+
+```haskell
+passedAt :: Text -> Cmd.CommandReport -> Bool
+passedAt candidate report = case Cmd.reportSource report of
+  Just source ->
+    Cmd.commandOutcome (Cmd.reportResult report) == Cmd.CommandExited 0
+      && Cmd.reportOutputComplete report
+      && Cmd.sourceCommit source == Just candidate
+      && not (Cmd.sourceDirty source)
+  Nothing -> False
+```
+
+After the wake, with `candidate` the commit under review:
+
+```haskell
+WatchReady report <- pollWatch checked
+passedAt candidate report
+```
+
+A job started in the foreground can be watched the same way; its report has no
+recorded source (`reportSource` is `Nothing`), so it cannot pass this check.
+Do not mutate a checkout while a background check still runs in it.
 
 For project-authored direct tools, see [Defining compiled tools](references/hosted-tools.md).
