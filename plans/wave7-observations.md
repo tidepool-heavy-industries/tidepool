@@ -96,3 +96,23 @@ one is structural: the compaction reviewer (31@1) held the shared checkout
 every co-resident actor; the root's own cell waited 96 s at 10:22 behind
 such holds. No note: nothing stalled, (d) closed and (c) is one seam from
 closing.
+
+## 11:26Z wake
+
+Alive; 13 GiB available; 21 windows; no latched machine. One commit in 30
+minutes (a NEXT.md note); 70 calls; checkout wait p50 0, max 4 s. (c)'s Here
+seam is the whole critical path: the rescue owner 34@1 produced fa649cd, which
+the root judged not review-ready (output still follows the pin; the
+write-output/append race test is missing; post-rebase checks not run). The
+root and lead sent 34@1 a short-turn steer and the repair requirements, but
+34@1 was 14 minutes into a turn of more than 60 responses, so the host queue
+holds both until its turn ends (the Codex turn-end delivery defect; 34@1 also
+hit UpdatePending x2 and three watchdog nudges). The root is waiting on it.
+
+Costliest delta: steering cannot reach a child in a long turn. Drove: pasted
+the root's requirements directly into 34@1's pane as an operator relay; the
+Codex TUI submits composer input after the next tool call, not at turn end,
+so this path reaches the child in seconds. Lesson for the harness: the
+mailbox Steer class is the fix (docs/dogfood-requirements.md amendment 1);
+interim prompt lever: "end the turn after 30 tool calls" did not hold for
+a child forked before the rule reached leads' obligations.
