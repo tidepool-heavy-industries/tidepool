@@ -58,3 +58,13 @@ Final bounded rehearsal: a parent customizes a Bash/Jev test helper, parallel
 Luna children inherit it, typed actors route review/repair, Sol integrates.
 Measure overlap, Luna work, independent-review value, tool calls/model rounds,
 helper reuse and avoidable relay. No next product-wave launch is implied.
+
+## Future dogfooding experiment
+
+Move inter-wave Tidepool/Exomonad development itself into the dogfood workload
+once the coordination surfaces are reliable enough. Alternatively, trial an
+Astra root for exomonad-harness with explicit authority to participate in design,
+while retaining broad parallel Luna execution and independent review. This is
+a future experiment, not a model change or new launch for the current batch.
+Compare design quality, useful delegation, convergence and end-to-end cost;
+do not assume a stronger root removes the need to fix orchestration defects.
