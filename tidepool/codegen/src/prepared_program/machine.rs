@@ -4674,7 +4674,7 @@ mod tests {
             options,
         )
         .expect("right installs an unrelated base image, lacking both A and B");
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both A and B");
         let call_site =
@@ -4746,7 +4746,7 @@ mod tests {
             options,
         )
         .expect("right installs an unrelated base image, lacking A's");
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing A's image it lacked");
         // The parcel is consumed by `import_parcel`; the source machine is
