@@ -12,6 +12,8 @@ use tidepool_bridge_effects::{
 };
 use tokio::sync::{oneshot, watch};
 
+mod discard_hold;
+
 /// Bound on a single native-backend call reached from inside an actor's one
 /// active turn: cancellation acknowledgement and cleanup confirmation both use
 /// this so an unresponsive backend cannot freeze the actor indefinitely.
@@ -370,6 +372,8 @@ impl CommandJobs {
     /// that raised it. Where it then *runs* is the deployment owner's
     /// decision: an actor with a native application of its own runs it there,
     /// and one without runs it in the host, inside its own owned resources.
+    /// Either way the command first gains the discard hold
+    /// ([`discard_hold`]), which travels with it to wherever it runs.
     pub(crate) async fn start(
         &self,
         parent: &KernelContext,
@@ -381,6 +385,7 @@ impl CommandJobs {
             )),
             error => error,
         })?;
+        let spec = discard_hold::install(spec);
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {

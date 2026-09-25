@@ -231,7 +231,12 @@ runPublish request = do
                         ("the checked head was not published to " <> branchText advance
                           <> ": " <> detail)
                 else do
-                  reset <- Cmd.run (Cmd.inDirectory path (Cmd.argv ["git", "reset", "--hard", before]))
+                  -- The rollback takes the red merge commit off the worktree's
+                  -- ref, so it names the tip it checked: the discard hold
+                  -- refuses it if anything else moved the worktree meanwhile.
+                  let intent = DiscardIntent (GitOid checked) (GitOid before) "red check rollback"
+                  reset <- Cmd.run (withDiscardIntent intent
+                    (Cmd.inDirectory path (Cmd.argv ["git", "reset", "--hard", before])))
                   restored <- gitIn path ["rev-parse", "HEAD"]
                   if isNothing (Cmd.failure reset) && restored == before
                     then do

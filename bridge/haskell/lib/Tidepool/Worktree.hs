@@ -117,6 +117,10 @@ module Tidepool.Worktree
   , MergeOutcome (..)
   , tryMerge
 
+    -- * Discarding committed work
+  , DiscardIntent (..)
+  , withDiscardIntent
+
     -- * Receipts and failures
   , WorktreeReceipt (..)
   , WorktreeSummary (..)
@@ -138,6 +142,7 @@ import Data.String (IsString (fromString))
 import qualified Prelude as P (error)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
+import Tidepool.Command.Types (Command, withEnvironment)
 import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Aeson.Value (Value (..))
@@ -406,6 +411,35 @@ instance IsString GitOid where
     | T.length text == 40 && T.all isHexDigit text = GitOid text
     | otherwise = P.error ("GitOid literal must be exactly 40 hex characters: " <> show raw)
     where text = T.pack raw
+
+-- | The confirmation a command needs before Git takes committed work off a
+-- ref: the tip the caller saw, the commit the ref will hold, and why.
+--
+-- Every actor command passes the discard hold at admission (owned by
+-- @exomonad/actor/src/command_jobs/discard_hold.rs@, which lists the held
+-- forms: @reset --hard@ backward, @rebase --onto@ or @--skip@ that drops
+-- commits, @branch -D@ of a branch's last ref, a force push over published
+-- commits). A held form runs only when 'expectedTip' is the ref's actual tip;
+-- otherwise it is refused before Git runs, naming the actual tip and the
+-- commits that would lose the ref. A clean worktree does not waive it.
+--
+-- > Cmd.run (withDiscardIntent (DiscardIntent checked before "red check")
+-- >   (Cmd.inDirectory path (Cmd.argv ["git", "reset", "--hard", renderGitOid before])))
+data DiscardIntent = DiscardIntent
+  { expectedTip :: GitOid
+  , discardTarget :: GitOid
+    -- ^ compared with the form's target: the reset target, the rebase
+    -- newbase, the pushed source
+  , discardReason :: Text
+  } deriving (Show, Eq)
+
+-- | Attach a 'DiscardIntent' to a command, as the environment the hold reads.
+withDiscardIntent :: DiscardIntent -> Command -> Command
+withDiscardIntent intent = withEnvironment
+  [ ("EXOMONAD_DISCARD_EXPECTED_TIP", renderGitOid (expectedTip intent))
+  , ("EXOMONAD_DISCARD_TARGET", renderGitOid (discardTarget intent))
+  , ("EXOMONAD_DISCARD_REASON", discardReason intent)
+  ]
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t
