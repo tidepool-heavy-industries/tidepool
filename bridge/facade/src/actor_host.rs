@@ -4112,6 +4112,7 @@ async fn run_interactive_applications(
                             Arc::clone(&deployment.update_reconciliations),
                             deployment.workspace.clone(),
                             deployment.runtime_observation.clone(),
+                            deployment.local_actor.clone(),
                             Arc::clone(&watch_retention),
                             Arc::clone(&watch_observation),
                             source_layers.clone(),
@@ -5593,7 +5594,7 @@ async fn deliver_pending(
         runtime_observation,
         &|_, _| true,
         &|_, _, _| false,
-        &|| runtime_observation.hosted_cell_computing(),
+        &|| false,
         &Mutex::new(BTreeMap::new()),
     )
     .await
@@ -5614,6 +5615,21 @@ const PENDING_DELIVERY_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// control admitted without proving whether the model saw it.
 const POSSIBLY_SEEN_PREFIX: &str = "(possibly already seen)";
 
+/// Leading line on every re-delivered message: it was queued again behind
+/// the messages that were waiting for it.
+const REDELIVERED_PREFIX: &str = "(re-delivered: messages sent after it may have arrived first)";
+
+/// Pump memory for a tracked row whose native input control answers without
+/// evidence (no record, or an unknown dispatch outcome).
+#[derive(Debug, Clone, Copy)]
+enum WithoutEvidence {
+    /// First answered without evidence at this instant.
+    Since(std::time::Instant),
+    /// Withdrawal itself had no evidence to act on (native input control is
+    /// unavailable); the row stays unconfirmed and is not withdrawn again.
+    WithdrawUnavailable,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn deliver_pending_checked(
     actor: ActorRef,
@@ -5627,7 +5643,7 @@ async fn deliver_pending_checked(
     watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
     watch_observed_since: &(dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync),
     hosted_cell_computing: &(dyn Fn() -> bool + Send + Sync),
-    without_evidence: &Mutex<BTreeMap<String, std::time::Instant>>,
+    without_evidence: &Mutex<BTreeMap<String, WithoutEvidence>>,
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
@@ -5898,7 +5914,9 @@ async fn deliver_out_of_order_notices(
 /// native evidence stays absent or unknown past
 /// `WITHDRAW_WITHOUT_EVIDENCE_AFTER` (first observation tracked per native
 /// key in `without_evidence`, pump memory only) is withdrawn; a settled
-/// withdrawal retires it and re-delivers its payload (`redeliver_withdrawn`).
+/// withdrawal retires it and re-delivers its payload (`redeliver_withdrawn`)
+/// at the back of the queue, so messages queued after it are presented
+/// first; the re-delivered text says so.
 #[allow(clippy::too_many_arguments)]
 async fn deliver_tracked_message(
     actor: ActorRef,
@@ -5909,7 +5927,7 @@ async fn deliver_tracked_message(
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
     observation: &exomonad_actor::ActorRuntimeObservationHandle,
     hosted_cell_computing: &(dyn Fn() -> bool + Send + Sync),
-    without_evidence: &Mutex<BTreeMap<String, std::time::Instant>>,
+    without_evidence: &Mutex<BTreeMap<String, WithoutEvidence>>,
 ) -> Result<(), String> {
     use exomonad_node::{DeliveryPhase, ReceiptLookup};
     let sequence = inbox
@@ -5981,11 +5999,11 @@ async fn deliver_tracked_message(
     let mut rendered = envelope
         .payload
         .render(observation.snapshot().launched_at_unix_ms);
-    if envelope
-        .redelivery
-        .is_some_and(|redelivery| redelivery.possibly_seen)
-    {
-        rendered = format!("{POSSIBLY_SEEN_PREFIX}\n{rendered}");
+    if let Some(redelivery) = envelope.redelivery {
+        rendered = format!("{REDELIVERED_PREFIX}\n{rendered}");
+        if redelivery.possibly_seen {
+            rendered = format!("{POSSIBLY_SEEN_PREFIX}\n{rendered}");
+        }
     }
     let operation = InteractiveInputEnvelope::new(
         operation_id,
@@ -6049,32 +6067,61 @@ async fn deliver_tracked_message(
                 without_evidence.lock().remove(&native_key);
                 queried
             } else {
-                let since = *without_evidence
+                let memory = *without_evidence
                     .lock()
                     .entry(native_key.clone())
-                    .or_insert_with(std::time::Instant::now);
-                if since.elapsed() < WITHDRAW_WITHOUT_EVIDENCE_AFTER {
-                    queried
-                } else {
-                    let withdrawn = backend
-                        .withdraw_input(thread, operation.id())
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    match withdrawn {
-                        exomonad_agent::InputAdmission::Withdrawn
-                        | exomonad_agent::InputAdmission::Unknown => {
-                            without_evidence.lock().remove(&native_key);
-                            return redeliver_withdrawn(
-                                actor,
-                                inbox,
-                                sequence,
-                                &evidence.context,
-                                withdrawn == exomonad_agent::InputAdmission::Unknown,
-                                reconciliations,
-                                &native_key,
-                            );
+                    .or_insert_with(|| WithoutEvidence::Since(std::time::Instant::now()));
+                match memory {
+                    WithoutEvidence::WithdrawUnavailable => queried,
+                    WithoutEvidence::Since(since)
+                        if since.elapsed() < WITHDRAW_WITHOUT_EVIDENCE_AFTER =>
+                    {
+                        queried
+                    }
+                    WithoutEvidence::Since(_) => {
+                        let withdrawn = backend
+                            .withdraw_input(thread, operation.id())
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        match withdrawn {
+                            exomonad_agent::InputAdmission::Withdrawn
+                            | exomonad_agent::InputAdmission::Unknown => {
+                                without_evidence.lock().remove(&native_key);
+                                // A copy already labelled possibly seen keeps
+                                // the label through every later re-delivery.
+                                let possibly_seen = withdrawn
+                                    == exomonad_agent::InputAdmission::Unknown
+                                    || envelope
+                                        .redelivery
+                                        .is_some_and(|redelivery| redelivery.possibly_seen);
+                                return redeliver_withdrawn(
+                                    actor,
+                                    inbox,
+                                    sequence,
+                                    &evidence.context,
+                                    possibly_seen,
+                                    reconciliations,
+                                    &native_key,
+                                );
+                            }
+                            exomonad_agent::InputAdmission::EvidenceUnavailable => {
+                                without_evidence.lock().insert(
+                                    native_key.clone(),
+                                    WithoutEvidence::WithdrawUnavailable,
+                                );
+                                tracing::warn!(
+                                    actor = ?actor,
+                                    sequence,
+                                    native_key = %native_key,
+                                    "native input control cannot withdraw an input it holds no evidence for; the row stays unconfirmed and later tracked messages stay fenced"
+                                );
+                                queried
+                            }
+                            settled => {
+                                without_evidence.lock().remove(&native_key);
+                                settled
+                            }
                         }
-                        settled => settled,
                     }
                 }
             }
@@ -6248,6 +6295,7 @@ async fn run_delivery_pump(
     reconciliations: Arc<Mutex<BTreeMap<String, PendingUpdateReconciliation>>>,
     workspace: PathBuf,
     runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
+    local_actor: LocalActorRef,
     watch_retained: WatchRetentionCheck,
     watch_observed_since: WatchObservationCheck,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
@@ -6256,10 +6304,7 @@ async fn run_delivery_pump(
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let mut usage_poll = tokio::time::interval(Duration::from_secs(10));
-    let hosted_cell_computing = {
-        let observation = runtime_observation.clone();
-        move || observation.hosted_cell_computing()
-    };
+    let hosted_cell_computing = move || local_actor.hosted_cell_computing();
     let without_evidence = Mutex::new(BTreeMap::new());
     let mut pending: Option<PendingDeliveryWarning> = None;
     let mut last_message = None;
@@ -6324,7 +6369,7 @@ fn observe_inbound_delivery(
     inbox: &ActorInbox,
     producer: &InputProducerId,
     cell_computing: bool,
-    without_evidence: &Mutex<BTreeMap<String, std::time::Instant>>,
+    without_evidence: &Mutex<BTreeMap<String, WithoutEvidence>>,
     last_message: &mut Option<exomonad_actor::TrackedMessageObservation>,
 ) -> exomonad_actor::InboundDeliveryObservation {
     use exomonad_actor::{InboundNext, InboxDelivery, TrackedMessageState};
@@ -6385,7 +6430,7 @@ fn observe_inbound_delivery(
         .as_ref()
         .map_or(now, |message| message.at_unix_ms);
     let behind = inbox.watermark().saturating_sub(sequence);
-    let no_evidence_since = std::num::NonZeroU64::new(sequence).and_then(|native_sequence| {
+    let no_evidence = std::num::NonZeroU64::new(sequence).and_then(|native_sequence| {
         let key = InputOperationId {
             producer: producer.clone(),
             sequence: native_sequence,
@@ -6395,38 +6440,42 @@ fn observe_inbound_delivery(
     });
     let (inbox_state, next) = match phase {
         DeliveryPhase::Accepted if cell_computing => (
-            InboxDelivery::Held { since_unix_ms },
+            InboxDelivery::WaitingForCell { since_unix_ms },
             InboundNext::AwaitCell,
         ),
         DeliveryPhase::Accepted if redelivered => (InboxDelivery::Open, InboundNext::Resubmitting),
+        // An in-flight message fences later ones only once it has stayed
+        // without native evidence past the grace period.
         DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed => {
             let word = if phase == DeliveryPhase::Unconfirmed {
                 "unconfirmed"
             } else {
                 "submitted"
             };
-            let next = match no_evidence_since {
-                Some(first) if first.elapsed() >= WITHDRAW_WITHOUT_EVIDENCE_AFTER => {
-                    InboundNext::Resubmitting
-                }
-                Some(_) => InboundNext::RouteRecovery,
-                None if redelivered => InboundNext::Resubmitting,
-                None => InboundNext::AwaitEvent,
+            let fenced = |reason: &str| InboxDelivery::Fenced {
+                reason: format!("message {sequence} {word}, {reason}, {behind} behind"),
+                since_unix_ms,
             };
-            (
-                InboxDelivery::Fenced {
-                    reason: format!("message {sequence} {word}, {behind} behind"),
-                    since_unix_ms,
-                },
-                next,
-            )
+            match no_evidence {
+                Some(WithoutEvidence::WithdrawUnavailable) => (
+                    fenced("withdrawal unavailable"),
+                    InboundNext::NoHostRecovery,
+                ),
+                Some(WithoutEvidence::Since(first))
+                    if first.elapsed() >= WITHDRAW_WITHOUT_EVIDENCE_AFTER =>
+                {
+                    (fenced("no native evidence"), InboundNext::Resubmitting)
+                }
+                _ if redelivered => (InboxDelivery::Open, InboundNext::Resubmitting),
+                _ => (InboxDelivery::Open, InboundNext::AwaitEvent),
+            }
         }
         DeliveryPhase::Compacted => (
             InboxDelivery::Fenced {
                 reason: format!("message {sequence} compacted, {behind} behind"),
                 since_unix_ms,
             },
-            InboundNext::Handoff,
+            InboundNext::NoHostRecovery,
         ),
         DeliveryPhase::Accepted
         | DeliveryPhase::Presented

@@ -256,6 +256,37 @@ impl WorkbenchExecutionControl {
     }
 }
 
+/// Publishes one hosted call's control on its actor's hosted-cell slot and
+/// clears it on drop, including when the dispatching future is torn down.
+/// A later call that replaced the slot keeps it.
+struct HostedCellPublication {
+    slot: crate::kernel::HostedCellSlot,
+    control: Arc<WorkbenchExecutionControl>,
+}
+
+impl HostedCellPublication {
+    fn publish(actor: &crate::LocalActorRef, control: &Arc<WorkbenchExecutionControl>) -> Self {
+        let slot = Arc::clone(actor.hosted_cell());
+        *slot.lock() = Some(Arc::clone(control));
+        Self {
+            slot,
+            control: Arc::clone(control),
+        }
+    }
+}
+
+impl Drop for HostedCellPublication {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|published| Arc::ptr_eq(published, &self.control))
+        {
+            *slot = None;
+        }
+    }
+}
+
 /// A policy waiting for its next invocation.
 pub(crate) struct ResidentToolAwait {
     pub(crate) continuation: ResidentHole,
@@ -599,18 +630,29 @@ impl ResidentToolClient {
         mut request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
     ) -> Result<serde_json::Value, ResidentToolError> {
+        let Some(invocation) = invocation else {
+            let _turn = self.dispatch_gate.lock().await;
+            let control = WorkbenchExecutionControl::untracked();
+            return self.dispatch_registered_workbench(request, control).await;
+        };
+        if let Some(context_call_id) = &invocation.context_call_id {
+            request =
+                request.with_fork_boundary(tidepool_runtime::session::WorkbenchForkBoundary {
+                    thread_id: invocation.thread_id.clone(),
+                    call_id: context_call_id.clone(),
+                });
+        }
+        let operation = WorkbenchCallKey::from(invocation);
+        let execution = execution_id(self.actor.identity(), &operation);
+        request = request.with_execution_id(execution.clone());
+        let control = WorkbenchExecutionControl::new(Some(operation.clone()));
+        // Visible on the actor from before the dispatch gate until this call
+        // returns or is dropped: while queued on the gate or computing,
+        // `cancel_workbench` cannot interrupt it, and the host's delivery
+        // pump must not start an input exchange that would wait on it.
+        let _published = HostedCellPublication::publish(&self.actor, &control);
         let _turn = self.dispatch_gate.lock().await;
-        if let Some(invocation) = invocation {
-            if let Some(context_call_id) = &invocation.context_call_id {
-                request =
-                    request.with_fork_boundary(tidepool_runtime::session::WorkbenchForkBoundary {
-                        thread_id: invocation.thread_id.clone(),
-                        call_id: context_call_id.clone(),
-                    });
-            }
-            let operation = WorkbenchCallKey::from(invocation);
-            let execution = execution_id(self.actor.identity(), &operation);
-            request = request.with_execution_id(execution.clone());
+        {
             // The cell runs in the actor's own task, so its span cannot be a
             // child of the tool call. This event is the join: the provider's
             // call id and the execution id the cell span carries, recorded
@@ -624,11 +666,8 @@ impl ResidentToolClient {
                 items = request.items.len(),
                 "workbench cell dispatched to its actor"
             );
-            let control = WorkbenchExecutionControl::new(Some(operation));
-            *self.active_workbench.lock() = Some((execution, Arc::clone(&control)));
-            return self.dispatch_registered_workbench(request, control).await;
         }
-        let control = WorkbenchExecutionControl::untracked();
+        *self.active_workbench.lock() = Some((execution, Arc::clone(&control)));
         self.dispatch_registered_workbench(request, control).await
     }
 
@@ -849,27 +888,106 @@ mod tests {
         let mut key = call_key("call-1");
         key.namespace = None;
         let control = WorkbenchExecutionControl::new(Some(key));
-        let observation = crate::ActorRuntimeObservationHandle::default();
-        assert!(!observation.hosted_cell_computing());
-        observation.publish_hosted_cell(Some(Arc::clone(&control)));
-        assert!(observation.hosted_cell_computing());
+        assert!(control.is_computing_hosted_cell());
         control.arm_sleep();
         assert!(
-            !observation.hosted_cell_computing(),
+            !control.is_computing_hosted_cell(),
             "a sleep is cancellable"
         );
         assert!(control.claim_expiry());
-        assert!(observation.hosted_cell_computing());
+        assert!(control.is_computing_hosted_cell());
         control.finish_sleep();
-        assert!(observation.hosted_cell_computing());
+        assert!(control.is_computing_hosted_cell());
         control.settle(terminal_reply());
-        assert!(!observation.hosted_cell_computing());
-        observation.publish_hosted_cell(None);
-        assert!(!observation.hosted_cell_computing());
+        assert!(!control.is_computing_hosted_cell());
 
         let namespaced = WorkbenchExecutionControl::new(Some(call_key("call-2")));
         assert!(!namespaced.is_computing_hosted_cell());
         assert!(!WorkbenchExecutionControl::untracked().is_computing_hosted_cell());
+    }
+
+    type ReceivedWorkbench = (
+        Option<Arc<WorkbenchExecutionControl>>,
+        ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
+    );
+
+    /// Stands in for the owning actor: hands each workbench dispatch to the
+    /// test without running it.
+    struct WorkbenchCollector;
+
+    impl ractor::Actor for WorkbenchCollector {
+        type Msg = crate::KernelMessage;
+        type State = tokio::sync::mpsc::UnboundedSender<ReceivedWorkbench>;
+        type Arguments = Self::State;
+
+        async fn pre_start(
+            &self,
+            _: ractor::ActorRef<Self::Msg>,
+            sender: Self::Arguments,
+        ) -> Result<Self::State, ractor::ActorProcessingErr> {
+            Ok(sender)
+        }
+
+        async fn handle(
+            &self,
+            _: ractor::ActorRef<Self::Msg>,
+            message: Self::Msg,
+            sender: &mut Self::State,
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            if let crate::KernelMessage::Workbench { control, reply, .. } = message {
+                sender.send((control, reply))?;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_hosted_cell_is_visible_on_its_actor_until_it_ends() {
+        let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
+            .await
+            .unwrap();
+        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let client = ResidentToolClient::local(actor.clone());
+        let invocation = ToolInvocationContext {
+            context_call_id: Some("outer-call".into()),
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: "call-1".into(),
+            namespace: None,
+        };
+        let dispatch = |client: ResidentToolClient, invocation: ToolInvocationContext| {
+            tokio::spawn(async move {
+                client
+                    .dispatch_workbench(WorkbenchRequest::from_cell_input("cell"), Some(invocation))
+                    .await
+            })
+        };
+        assert!(!actor.hosted_cell_computing());
+
+        let running = dispatch(client.clone(), invocation.clone());
+        let (control, reply) = received.recv().await.unwrap();
+        let control = control.unwrap();
+        assert!(actor.hosted_cell_computing());
+        control.arm_sleep();
+        assert!(
+            !actor.hosted_cell_computing(),
+            "a sleeping cell is interruptible"
+        );
+        reply.send(terminal_reply()).unwrap();
+        running.await.unwrap().unwrap();
+        assert!(!actor.hosted_cell_computing());
+
+        // An execution whose reply is lost is cleared too.
+        let torn_down = dispatch(client.clone(), invocation);
+        let (_control, reply) = received.recv().await.unwrap();
+        assert!(actor.hosted_cell_computing());
+        drop(reply);
+        assert!(torn_down.await.unwrap().is_err());
+        assert!(!actor.hosted_cell_computing());
+
+        address.stop(None);
+        task.await.unwrap();
     }
 
     #[test]

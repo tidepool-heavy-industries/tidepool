@@ -7498,8 +7498,6 @@ where
                     .begin(execution, request.clone(), invocation);
             }
             self.active_workbench_control = control.clone();
-            self.runtime_observation
-                .publish_hosted_cell(control.clone());
             self.active_fork_boundary = request.fork_boundary().cloned();
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
@@ -7532,7 +7530,6 @@ where
             call_scope.finish(&call_outcome);
             self.active_fork_boundary = None;
             self.active_workbench_control = None;
-            self.runtime_observation.publish_hosted_cell(None);
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation

@@ -5735,15 +5735,12 @@ async fn withdraw_and_redeliver(withdrawal: exomonad_agent::InputAdmission) -> V
         &without_evidence,
         &mut last_message,
     );
-    assert!(
-        matches!(
-            &fenced.inbox,
-            exomonad_actor::InboxDelivery::Fenced { reason, .. }
-                if reason == "message 1 unconfirmed, 1 behind"
-        ),
-        "{fenced:?}"
+    assert_eq!(
+        fenced.inbox,
+        exomonad_actor::InboxDelivery::Open,
+        "an ordinary in-flight message within the grace period is not fenced"
     );
-    assert_eq!(fenced.next, exomonad_actor::InboundNext::RouteRecovery);
+    assert_eq!(fenced.next, exomonad_actor::InboundNext::AwaitEvent);
 
     // Past the grace period the row is withdrawn and re-queued once.
     let key = without_evidence
@@ -5754,10 +5751,28 @@ async fn withdraw_and_redeliver(withdrawal: exomonad_agent::InputAdmission) -> V
         .expect("first evidence-less query is recorded");
     without_evidence.lock().insert(
         key,
-        std::time::Instant::now()
-            .checked_sub(WITHDRAW_WITHOUT_EVIDENCE_AFTER + Duration::from_secs(1))
-            .unwrap(),
+        WithoutEvidence::Since(
+            std::time::Instant::now()
+                .checked_sub(WITHDRAW_WITHOUT_EVIDENCE_AFTER + Duration::from_secs(1))
+                .unwrap(),
+        ),
     );
+    let past_grace = observe_inbound_delivery(
+        &inbox,
+        &producer,
+        false,
+        &without_evidence,
+        &mut last_message,
+    );
+    assert!(
+        matches!(
+            &past_grace.inbox,
+            exomonad_actor::InboxDelivery::Fenced { reason, .. }
+                if reason == "message 1 unconfirmed, no native evidence, 1 behind"
+        ),
+        "{past_grace:?}"
+    );
+    assert_eq!(past_grace.next, exomonad_actor::InboundNext::Resubmitting);
     tick().await.unwrap();
     assert_eq!(*backend.withdrawals.lock().unwrap(), vec![1]);
     assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Withdrawn);
@@ -5802,11 +5817,130 @@ async fn withdraw_and_redeliver(withdrawal: exomonad_agent::InputAdmission) -> V
 #[tokio::test]
 async fn never_admitted_input_is_withdrawn_and_redelivered_once() {
     let submissions = withdraw_and_redeliver(exomonad_agent::InputAdmission::Withdrawn).await;
-    assert_eq!(submissions[2].1, "A");
+    assert_eq!(submissions[2].1, format!("{REDELIVERED_PREFIX}\nA"));
 }
 
 #[tokio::test]
 async fn admitted_input_with_unknown_outcome_is_redelivered_as_possibly_seen() {
     let submissions = withdraw_and_redeliver(exomonad_agent::InputAdmission::Unknown).await;
-    assert_eq!(submissions[2].1, format!("{POSSIBLY_SEEN_PREFIX}\nA"));
+    assert_eq!(
+        submissions[2].1,
+        format!("{POSSIBLY_SEEN_PREFIX}\n{REDELIVERED_PREFIX}\nA")
+    );
+}
+
+/// Age every no-evidence entry past the withdrawal grace period.
+fn past_withdraw_grace(without_evidence: &Mutex<BTreeMap<String, WithoutEvidence>>) {
+    let aged = std::time::Instant::now()
+        .checked_sub(WITHDRAW_WITHOUT_EVIDENCE_AFTER + Duration::from_secs(1))
+        .unwrap();
+    for memory in without_evidence.lock().values_mut() {
+        *memory = WithoutEvidence::Since(aged);
+    }
+}
+
+#[tokio::test]
+async fn a_second_redelivery_keeps_the_possibly_seen_label() {
+    use exomonad_node::DeliveryPhase;
+    let root = tempfile::tempdir().unwrap();
+    let (inbox, actor, thread) = tracked_delivery_fixture(root.path(), &["A"]).await;
+    let context = match inbox.observe_receipt(1).unwrap() {
+        exomonad_node::ReceiptLookup::Retained(evidence) => evidence.context,
+        exomonad_node::ReceiptLookup::Unavailable => panic!("receipt unavailable"),
+    };
+    inbox
+        .begin_tracked_delivery(1)
+        .unwrap()
+        .unconfirmed()
+        .unwrap();
+    inbox.redeliver_withdrawn(1, &context, true).unwrap();
+    let backend = EvidenceLessNative::new(exomonad_agent::InputAdmission::Withdrawn);
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+    let without_evidence = Mutex::new(BTreeMap::new());
+    let retained = |_: ActorRef, _: exomonad_actor::WatchId| true;
+    let observed = |_: ActorRef, _: exomonad_actor::WatchId, _: u64| false;
+    let cell = || false;
+    let tick = || {
+        deliver_pending_checked(
+            actor,
+            &inbox,
+            &thread,
+            &backend,
+            &producer,
+            &reconciliations,
+            root.path(),
+            &observation,
+            &retained,
+            &observed,
+            &cell,
+            &without_evidence,
+        )
+    };
+
+    assert!(tick().await.is_err());
+    assert!(tick().await.is_err());
+    past_withdraw_grace(&without_evidence);
+    tick().await.unwrap();
+    assert_eq!(delivery_phase(&inbox, 2), DeliveryPhase::Withdrawn);
+    tick().await.unwrap();
+    assert_eq!(delivery_phase(&inbox, 3), DeliveryPhase::Presented);
+    let submissions = backend.submissions.lock().unwrap().clone();
+    assert_eq!(
+        submissions.last().unwrap(),
+        &(
+            3,
+            format!("{POSSIBLY_SEEN_PREFIX}\n{REDELIVERED_PREFIX}\nA")
+        )
+    );
+}
+
+#[tokio::test]
+async fn withdrawal_without_native_evidence_is_not_retried_and_reports_no_host_recovery() {
+    use exomonad_node::DeliveryPhase;
+    let root = tempfile::tempdir().unwrap();
+    let (inbox, actor, thread) = tracked_delivery_fixture(root.path(), &["A", "B"]).await;
+    let backend = EvidenceLessNative::new(exomonad_agent::InputAdmission::EvidenceUnavailable);
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+    let without_evidence = Mutex::new(BTreeMap::new());
+    let retained = |_: ActorRef, _: exomonad_actor::WatchId| true;
+    let observed = |_: ActorRef, _: exomonad_actor::WatchId, _: u64| false;
+    let cell = || false;
+    let tick = || {
+        deliver_pending_checked(
+            actor,
+            &inbox,
+            &thread,
+            &backend,
+            &producer,
+            &reconciliations,
+            root.path(),
+            &observation,
+            &retained,
+            &observed,
+            &cell,
+            &without_evidence,
+        )
+    };
+
+    assert!(tick().await.is_err());
+    assert!(tick().await.is_err());
+    past_withdraw_grace(&without_evidence);
+    for _ in 0..3 {
+        assert!(tick().await.is_err());
+    }
+    assert_eq!(*backend.withdrawals.lock().unwrap(), vec![1]);
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Unconfirmed);
+    assert_eq!(delivery_phase(&inbox, 2), DeliveryPhase::Accepted);
+    let status = observe_inbound_delivery(&inbox, &producer, false, &without_evidence, &mut None);
+    assert!(
+        matches!(
+            &status.inbox,
+            exomonad_actor::InboxDelivery::Fenced { reason, .. }
+                if reason == "message 1 unconfirmed, withdrawal unavailable, 1 behind"
+        ),
+        "{status:?}"
+    );
+    assert_eq!(status.next, exomonad_actor::InboundNext::NoHostRecovery);
 }

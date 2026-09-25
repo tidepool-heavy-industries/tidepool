@@ -323,8 +323,18 @@ pub struct LocalActorRef {
     admission: MailboxAdmission,
 }
 
+/// Admission shares its fence with the incarnation's hosted-cell slot: both
+/// are per-incarnation state every handle to the actor (the directory's and
+/// the spawner's alike) must observe identically.
 #[derive(Clone, Default)]
-pub(crate) struct MailboxAdmission(std::sync::Arc<parking_lot::Mutex<AdmissionState>>);
+pub(crate) struct MailboxAdmission(
+    std::sync::Arc<parking_lot::Mutex<AdmissionState>>,
+    HostedCellSlot,
+);
+
+/// The model-visible hosted call this incarnation is executing, if any.
+pub(crate) type HostedCellSlot =
+    std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<crate::WorkbenchExecutionControl>>>>;
 
 #[derive(Default)]
 enum AdmissionState {
@@ -369,6 +379,24 @@ impl std::fmt::Debug for LocalActorRef {
 }
 
 impl LocalActorRef {
+    pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
+        &self.admission.1
+    }
+
+    /// Whether this incarnation is inside a model-visible `haskell` call that
+    /// is computing (or still waiting to start) rather than sleeping. Codex
+    /// cancels such a call before admitting new input and cannot finish that
+    /// exchange until the cell ends, so the host's delivery pump defers
+    /// native submission while this holds.
+    #[must_use]
+    pub fn hosted_cell_computing(&self) -> bool {
+        self.admission
+            .1
+            .lock()
+            .as_ref()
+            .is_some_and(|control| control.is_computing_hosted_cell())
+    }
+
     pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.address

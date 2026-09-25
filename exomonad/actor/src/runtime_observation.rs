@@ -107,9 +107,11 @@ pub enum InboxDelivery {
     Open,
     /// The front message waits for the actor's computing `haskell` cell to
     /// end before it is submitted.
-    Held { since_unix_ms: u64 },
-    /// The front message is in flight or terminally fenced; no later tracked
-    /// message can be presented before it resolves.
+    WaitingForCell { since_unix_ms: u64 },
+    /// The front message stayed without native evidence past the grace
+    /// period, or is terminally fenced; no later tracked message can be
+    /// presented before it resolves. An ordinary in-flight message is not
+    /// fenced.
     Fenced { reason: String, since_unix_ms: u64 },
 }
 
@@ -141,13 +143,10 @@ pub enum InboundNext {
     AwaitEvent,
     /// The front message is submitted once the computing cell ends.
     AwaitCell,
-    /// The front message has no native evidence; after the grace period the
-    /// pump withdraws it and re-delivers it on its own.
-    RouteRecovery,
     /// The pump is withdrawing or re-delivering the front message.
     Resubmitting,
-    /// Delivery cannot recover on its own; hand the work off.
-    Handoff,
+    /// The host cannot recover delivery on its own; hand the work off.
+    NoHostRecovery,
 }
 
 /// One source layer's active revision against the latest observed on-disk
@@ -341,8 +340,8 @@ impl ActorRuntimeObservation {
             Some(delivery) => (
                 match &delivery.inbox {
                     InboxDelivery::Open => "open".to_owned(),
-                    InboxDelivery::Held { since_unix_ms } => format!(
-                        "held(computing cell, {})",
+                    InboxDelivery::WaitingForCell { since_unix_ms } => format!(
+                        "waiting(computing cell, {})",
                         render_age(*since_unix_ms, now_unix_ms)
                     ),
                     InboxDelivery::Fenced {
@@ -375,9 +374,9 @@ impl ActorRuntimeObservation {
                 match delivery.next {
                     InboundNext::AwaitEvent => "await-event",
                     InboundNext::AwaitCell => "await-cell",
-                    InboundNext::RouteRecovery => "route-recovery",
+
                     InboundNext::Resubmitting => "resubmitting",
-                    InboundNext::Handoff => "handoff",
+                    InboundNext::NoHostRecovery => "no host recovery; hand off",
                 },
             ),
         };
@@ -482,10 +481,6 @@ impl ActorRuntimeObservation {
 #[derive(Debug, Clone, Default)]
 pub struct ActorRuntimeObservationHandle {
     inner: Arc<RwLock<ActorRuntimeObservation>>,
-    /// Control of the hosted workbench call this actor is executing, if any.
-    /// Kept beside the snapshot rather than in it: its phase is live state
-    /// the delivery pump reads at submit time, not a published value.
-    hosted_cell: Arc<parking_lot::Mutex<Option<Arc<crate::WorkbenchExecutionControl>>>>,
 }
 
 impl ActorRuntimeObservationHandle {
@@ -606,27 +601,6 @@ impl ActorRuntimeObservationHandle {
 
     pub fn publish_inbound_delivery(&self, delivery: InboundDeliveryObservation) {
         self.inner.write().inbound_delivery = Some(delivery);
-    }
-
-    /// Record the control of the workbench execution the actor has started,
-    /// or `None` once it has returned.
-    pub(crate) fn publish_hosted_cell(
-        &self,
-        control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) {
-        *self.hosted_cell.lock() = control;
-    }
-
-    /// Whether the actor is inside a model-visible `haskell` call that is
-    /// computing rather than sleeping. Codex cancels such a call before
-    /// admitting new input and cannot finish that exchange until the cell
-    /// ends, so the delivery pump defers native submission while this holds.
-    #[must_use]
-    pub fn hosted_cell_computing(&self) -> bool {
-        self.hosted_cell
-            .lock()
-            .as_ref()
-            .is_some_and(|control| control.is_computing_hosted_cell())
     }
 
     /// Record the exact composed developer prompt installed for this actor.
@@ -820,7 +794,7 @@ mod tests {
                     state: TrackedMessageState::Unconfirmed,
                     at_unix_ms: now - 41 * minute,
                 }),
-                next: InboundNext::RouteRecovery,
+                next: InboundNext::Resubmitting,
             }),
             source_drift: ActorSourceDriftObservation {
                 checkout: Some(CheckoutGitDrift {
@@ -833,8 +807,15 @@ mod tests {
         };
         assert_eq!(
             observation.delivery_status_line("core-lead", 1, now),
-            "core-lead req=1 pending; provider=idle 27m; inbox=fenced(message 2 unconfirmed, 6 behind, 41m); last_message=ref2 unconfirmed/not-presented; source=8d45d32; next=route-recovery"
+            "core-lead req=1 pending; provider=idle 27m; inbox=fenced(message 2 unconfirmed, 6 behind, 41m); last_message=ref2 unconfirmed/not-presented; source=8d45d32; next=resubmitting"
         );
+        let mut terminal = observation.clone();
+        if let Some(delivery) = terminal.inbound_delivery.as_mut() {
+            delivery.next = InboundNext::NoHostRecovery;
+        }
+        assert!(terminal
+            .delivery_status_line("core-lead", 1, now)
+            .ends_with("; next=no host recovery; hand off"));
 
         let healthy = ActorRuntimeObservation {
             provider_turn: Some(exomonad_model::ProviderTurnObservation {
