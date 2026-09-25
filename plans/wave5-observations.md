@@ -88,3 +88,17 @@ run 2: answer Q4/Q5, unblock (c) provenance, rescope probe, rewrite
 NEXT.md", the operator's brief for the next run. No actor activity since
 04:02Z; 20 calls since 03:49 with checkout_wait p50 0 ms, max 216 ms. The
 run is in stand-down; no intervention.
+
+## 04:47Z wake (intervened: memory)
+
+Run alive, root idle since 04:02Z, 7 windows, no Failed/Retired, no
+latched machine, no actor calls since 04:15Z, no new master commits.
+Free memory was 2 GiB with swap 38 of 39 GiB used. Cause: the gate run I
+had stopped at 04:40Z left two cargo-nextest runners and 19 exomonad-actor
+test binaries alive (re-parented after the shell died); each test had
+spawned its own extractor endpoint, 27 endpoints with 31 GHC workers at
+1 to 2 GiB each, on top of the redeploy's Nix build. Killed the runners,
+test binaries, endpoints and every worker not owned by the two live
+daemons (the other run's a8f054b6 daemon and the shared one). After:
+23 GiB free, swap 17 GiB, 3 workers. The wave's host and the redeploy were
+untouched; the redeploy is still building the extractor package.
