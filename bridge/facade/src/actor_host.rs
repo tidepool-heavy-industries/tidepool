@@ -1362,7 +1362,8 @@ impl DurableActorEvent {
                         elapsed(notification.occurred_at_unix_ms),
                     ),
                     (transition, _) => format!(
-                        "job {job} settlement {transition:?} ({}). Inspect it with read_output session_id={job}; nothing reruns.",
+                        "job {job} no longer reports its completion to you: {} ({}). Its retained output stays readable with read_output session_id={job}; nothing reruns.",
+                        command_settlement_loss(transition),
                         elapsed(notification.occurred_at_unix_ms),
                     ),
                 }
@@ -1397,6 +1398,21 @@ impl DurableActorEvent {
             Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
         }
+    }
+}
+
+/// Why a command job's settlement ended without its report, in words.
+fn command_settlement_loss(transition: &exomonad_actor::SettlementTransition) -> &'static str {
+    use exomonad_actor::{ResponseFailure, SettlementTransition};
+    match transition {
+        SettlementTransition::Ready => "its report was not retained",
+        SettlementTransition::Unavailable(ResponseFailure::RequesterStopped) => {
+            "the actor that owned it stopped"
+        }
+        SettlementTransition::Unavailable(ResponseFailure::Released) => {
+            "its settlement was released"
+        }
+        SettlementTransition::Unavailable(_) => "its settlement became unavailable",
     }
 }
 

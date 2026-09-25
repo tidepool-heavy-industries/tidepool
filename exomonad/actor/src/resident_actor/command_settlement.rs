@@ -3,9 +3,14 @@
 //! `CommandJobs` owns the job; `RequestRegistry` owns settlement. Joining them
 //! here lets a finished job wake its owner through the same settlement notice,
 //! watch and route paths as a child's reply. A background start also records
-//! the source the command ran at: a short `git` probe runs through the same
-//! job owner, in the same directory, and the command itself is released to its
-//! backend only after the probe has answered.
+//! the source the command started at: a short `git` probe runs through the
+//! same job owner, in the same directory, and the command itself is released
+//! to its backend only after the probe has answered or its bound expired.
+//!
+//! The checkout is not guarded while a job runs: the recorded commit is where
+//! the command started, not proof that the tree stayed there. Settlement is
+//! process-local, like a child's reply: a job running when the host restarts
+//! is not recovered and sends no notice.
 
 use super::*;
 use crate::command_jobs::{CommandBackendRequest, CommandJobs};
@@ -28,10 +33,16 @@ const TAIL_LINES: usize = 12;
 const TAIL_BYTES: usize = 1200;
 const COMMAND_DISPLAY_BYTES: usize = 400;
 
-/// Prints the working directory, then `HEAD`, then whether tracked files
-/// differ from it. Optional locks stay off so the probe never contends for
-/// the index with the command it precedes or with another checkout user.
-const SOURCE_PROBE: &str = "pwd\ngit rev-parse --verify -q HEAD 2>/dev/null || exit 0\nif git diff --quiet HEAD -- 2>/dev/null; then echo clean; else echo dirty; fi\n";
+/// How long a background start waits, once the probe's backend exists, for
+/// its resource admission (memory admission can queue it behind other jobs)
+/// before releasing the command without a recorded source.
+const SOURCE_PROBE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Prints the working directory, then `HEAD`, then whether the checkout
+/// differs from it, untracked files included. Optional locks stay off so the
+/// probe never contends for the index with the command it precedes or with
+/// another checkout user.
+const SOURCE_PROBE: &str = "pwd\ngit rev-parse --verify -q HEAD 2>/dev/null || exit 0\nif [ -z \"$(git status --porcelain --untracked-files=normal 2>/dev/null)\" ]; then echo clean; else echo dirty; fi\n";
 
 #[derive(Clone)]
 pub(super) struct CommandSettlements {
@@ -159,6 +170,11 @@ impl CommandSettlements {
                 return Err(error);
             }
         };
+        if !armed && !notify_owner && !self.requests.hold_command(request) {
+            // The settled record was released once its notice existed and
+            // nothing watched it. A later watch gets a fresh, settled record.
+            return self.rearm(job, start);
+        }
         if armed {
             let settlements = self.clone();
             let job = job.to_owned();
@@ -169,33 +185,70 @@ impl CommandSettlements {
         Ok(request)
     }
 
+    fn rearm(&self, job: &str, start: Option<BackgroundStart>) -> Result<RequestId, CommandError> {
+        if let Some(start) = start {
+            dispatch_backend(&self.deployments, start.command);
+        }
+        let report = self.jobs.report(job)?.ok_or_else(|| {
+            CommandError::CommandUnavailable("job settled without a retained report".into())
+        })?;
+        let revision = report
+            .source
+            .as_ref()
+            .and_then(|source| source.commit.clone());
+        let requests = Arc::clone(&self.requests);
+        let request = self.jobs.replace_settlement(job, |owner| {
+            requests.reserve_command_settlement(owner, job.to_owned(), false)
+        })?;
+        drop(
+            self.requests
+                .settle_command(request, render_report(job, &report), revision),
+        );
+        Ok(request)
+    }
+
     /// Resolve command-job watch dependencies to the requests their
     /// completions settle. A watch on a job started in the foreground arms
-    /// its settlement here, without an owner notice of its own.
+    /// its settlement here, without an owner notice of its own. The records
+    /// armed here are held for the registration; a refused registration hands
+    /// them to [`Self::release`].
     pub(super) fn resolve(
         &self,
         groups: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
     ) -> Result<Vec<Vec<(RequestId, crate::request::WatchRequirement)>>, ResidentActorWorkbenchError>
     {
-        groups
-            .into_iter()
-            .map(|group| {
-                group
-                    .into_iter()
-                    .map(|(subject, requirement)| match subject {
-                        WatchSubject::Request(request) => Ok((request, requirement)),
-                        WatchSubject::Command(job) => self
-                            .arm(&job, false, None)
-                            .map(|request| (request, requirement))
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "watch refused: command job {job} cannot be awaited: {error:?}"
-                                ))
-                            }),
-                    })
-                    .collect()
-            })
-            .collect()
+        let mut resolved = Vec::with_capacity(groups.len());
+        for group in groups {
+            let mut dependencies = Vec::with_capacity(group.len());
+            for (subject, requirement) in group {
+                let request = match subject {
+                    WatchSubject::Request(request) => request,
+                    WatchSubject::Command(job) => match self.arm(&job, false, None) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            resolved.push(dependencies);
+                            self.release(&resolved);
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "watch refused: command job {job} cannot be awaited: {error:?}"
+                            )));
+                        }
+                    },
+                };
+                dependencies.push((request, requirement));
+            }
+            resolved.push(dependencies);
+        }
+        Ok(resolved)
+    }
+
+    /// Drop the watch holds on command records a refused registration armed.
+    pub(super) fn release(&self, groups: &[Vec<(RequestId, crate::request::WatchRequirement)>]) {
+        let requests = groups
+            .iter()
+            .flatten()
+            .map(|(request, _)| *request)
+            .collect::<Vec<_>>();
+        self.requests.release_command_holds(&requests);
     }
 
     pub(super) fn report(&self, job: &str) -> Option<CommandReport> {
@@ -236,15 +289,27 @@ impl CommandSettlements {
 
     async fn probe(&self, probe: &str) -> Option<CommandSource> {
         let owner = self.jobs.owner(probe).ok()?;
-        self.jobs.admitted(probe).await.ok()?;
-        match tokio::time::timeout(SOURCE_PROBE_TIMEOUT, self.jobs.finished(probe)).await {
-            Ok(Ok(CommandResult {
+        let answered = async {
+            // The host supplies a backend promptly or fails the job; only the
+            // resource admission after that is bounded.
+            self.jobs.supplied(probe).await.ok()?;
+            tokio::time::timeout(SOURCE_PROBE_ADMISSION_TIMEOUT, self.jobs.admitted(probe))
+                .await
+                .ok()?
+                .ok()?;
+            tokio::time::timeout(SOURCE_PROBE_TIMEOUT, self.jobs.finished(probe))
+                .await
+                .ok()?
+                .ok()
+        };
+        match answered.await {
+            Some(CommandResult {
                 outcome: CommandOutcome::CommandExited(0),
                 ..
-            })) => {}
-            Ok(_) => return None,
-            Err(_) => {
-                tracing::warn!(%probe, "background command source probe timed out");
+            }) => {}
+            Some(_) => return None,
+            None => {
+                tracing::warn!(%probe, "background command source probe did not answer in time");
                 // best-effort: the probe's outcome no longer matters.
                 drop(
                     self.jobs
@@ -435,10 +500,18 @@ fn cleanup_text(cleanup: &CommandCleanup) -> String {
 /// The settlement notice body for one finished job. Read by a model on the
 /// turn it wakes: every line is a fact it may act on.
 pub(super) fn render_report(job: &str, report: &CommandReport) -> String {
-    let output = if report.output_complete {
-        "output complete"
+    let (output, recovery) = if report.output_complete {
+        (
+            "output complete",
+            format!("Full output: read_output session_id={job}; nothing reruns."),
+        )
     } else {
-        "output incomplete"
+        (
+            "output incomplete",
+            format!(
+                "Output incomplete; read_output session_id={job} has what was retained. Nothing reruns."
+            ),
+        )
     };
     let source = match &report.source {
         Some(CommandSource {
@@ -446,7 +519,7 @@ pub(super) fn render_report(job: &str, report: &CommandReport) -> String {
             commit: Some(commit),
             dirty,
         }) => format!(
-            "ran in {directory} at {commit}{}",
+            "started in {directory} at {commit}{}",
             if *dirty {
                 " with uncommitted changes"
             } else {
@@ -457,11 +530,11 @@ pub(super) fn render_report(job: &str, report: &CommandReport) -> String {
             directory,
             commit: None,
             ..
-        }) => format!("ran in {directory}, not a Git checkout"),
+        }) => format!("started in {directory}, not a Git checkout"),
         None => "source revision not recorded".into(),
     };
     format!(
-        "command: {}\n{} · {} · {output}\n{source}\n{}Full output: read_output session_id={job}; nothing reruns. A pass here covers this source only, not a later revision.",
+        "command: {}\n{} · {} · {output}\n{source}\n{}{recovery} The checkout was not guarded while it ran; a pass covers this source only, not a later revision.",
         command_text(&report.command),
         outcome_text(&report.result.outcome),
         cleanup_text(&report.result.cleanup),
@@ -524,8 +597,23 @@ mod tests {
         };
         assert_eq!(
             render_report("job-1", &report),
-            "command: cargo test -p crate --lib\nexit 101 · process and cleanup terminal · output complete\nran in /work/tree at 0123abcd with uncommitted changes\nstdout tail:\ntest result: FAILED\nFull output: read_output session_id=job-1; nothing reruns. A pass here covers this source only, not a later revision."
+            "command: cargo test -p crate --lib\nexit 101 · process and cleanup terminal · output complete\nstarted in /work/tree at 0123abcd with uncommitted changes\nstdout tail:\ntest result: FAILED\nFull output: read_output session_id=job-1; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
         );
+        let incomplete = CommandReport {
+            output_complete: false,
+            source: None,
+            ..report
+        };
+        let text = render_report("job-1", &incomplete);
+        assert!(
+            text.contains("output incomplete\nsource revision not recorded\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Output incomplete; read_output session_id=job-1 has what was retained."),
+            "{text}"
+        );
+        assert!(!text.contains("Full output"), "{text}");
     }
 
     #[test]

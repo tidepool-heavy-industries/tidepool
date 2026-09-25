@@ -388,6 +388,19 @@ fn render_watches_view(
             elapsed_into_session(launched_at_unix_ms, response.registered_at_unix_ms),
         ));
     }
+    if !overview.running_jobs.is_empty() {
+        lines.push(format!(
+            "running jobs ({} total):",
+            overview.running_jobs.len()
+        ));
+    }
+    for job in &overview.running_jobs {
+        lines.push(format!(
+            "  - job {}: started {}",
+            job.label,
+            elapsed_into_session(launched_at_unix_ms, job.registered_at_unix_ms),
+        ));
+    }
     lines.push(
         "Reading a settled VALUE still needs pollWatch (watches) or pollResponse \
          (plain requests); this view only reports status, not values."
@@ -1539,7 +1552,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
                 self.descriptor.label(),
                 actor.id.0,
                 actor.incarnation.0,
@@ -1555,6 +1568,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 requests.ready_watches,
                 unavailable_watches,
                 requests.pending_watches,
+                requests.running_jobs,
                 self.descriptor.effective_role().role(),
                 self.descriptor.effective_role().workspace(),
                 self.descriptor.effective_role().descendants().maximum_depth,
@@ -1570,7 +1584,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
                 self.descriptor.label(),
@@ -1609,6 +1623,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 requests.pending_watches,
                 requests.ready_watches,
                 unavailable_watches,
+                requests.running_jobs,
                 roster_summary,
                 sample_history,
             )
@@ -4077,18 +4092,19 @@ where
                 let owner = kernel.resolve(context.actor).ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
                 })?;
-                let dependencies = command_settlement::CommandSettlements::new(&self.environment)
-                    .resolve(registration.dependencies)?;
+                let settlements = command_settlement::CommandSettlements::new(&self.environment);
+                let dependencies = settlements.resolve(registration.dependencies)?;
                 let (watch, notifications) = self
                     .environment
                     .requests
                     .register_watch_groups_with_route(
                         context.actor,
                         registration.label,
-                        dependencies,
+                        dependencies.clone(),
                         Some(crate::request::routes::WatchRoute::new(owner, entry)),
                     )
                     .map_err(|error| {
+                        settlements.release(&dependencies);
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "route registration rejected: {error:?}"
                         ))
@@ -4134,17 +4150,18 @@ where
                         "invalid watch label: {error}"
                     ))
                 })?;
-                let dependencies = command_settlement::CommandSettlements::new(&self.environment)
-                    .resolve(registration.dependencies)?;
+                let settlements = command_settlement::CommandSettlements::new(&self.environment);
+                let dependencies = settlements.resolve(registration.dependencies)?;
                 let (watch, notifications) = self
                     .environment
                     .requests
                     .register_watch_requirement_groups(
                         context.actor,
                         registration.label,
-                        dependencies,
+                        dependencies.clone(),
                     )
                     .map_err(|error| {
+                        settlements.release(&dependencies);
                         ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
                             error,
                         ))
@@ -9372,6 +9389,11 @@ mod tests {
                 label: "compile".into(),
                 registered_at_unix_ms: 1_030_000,
             }],
+            running_jobs: vec![crate::request::PendingResponseAge {
+                id: crate::RequestId(8),
+                label: "job-1".into(),
+                registered_at_unix_ms: 1_040_000,
+            }],
         };
 
         let rendered = super::render_watches_view(launched_at_unix_ms, &overview);
@@ -9385,6 +9407,9 @@ mod tests {
         ));
         assert!(rendered.contains("pending responses (1 total):"));
         assert!(rendered.contains(r#"request 7 "compile": registered +0m30s into your session"#));
+        assert!(rendered.contains("running jobs (1 total):"));
+        assert!(rendered.contains("job job-1: started +0m40s into your session"));
+        assert!(!rendered.contains("request 8"));
         assert!(rendered.contains("pollWatch"));
         assert!(rendered.contains("pollResponse"));
         assert!(rendered.contains("still needs"));
@@ -9403,6 +9428,7 @@ mod tests {
             &crate::request::WatchesOverview {
                 watches: Vec::new(),
                 pending_responses: Vec::new(),
+                running_jobs: Vec::new(),
             },
         );
         assert!(empty.contains("(none registered)"));

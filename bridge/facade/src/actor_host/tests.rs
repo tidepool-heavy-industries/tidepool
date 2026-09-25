@@ -2148,6 +2148,35 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
 /// target with no path at all (an unforked `startActor`/`startAgent`) keeps
 /// today's rendering verbatim, with no leading identity line.
 #[test]
+fn command_settlement_notices_render_plain_text() {
+    let owner = exomonad_actor::ActorRef {
+        id: exomonad_actor::ActorId(1),
+        incarnation: exomonad_actor::Incarnation(1),
+    };
+    let notice = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+        notification: exomonad_actor::SettlementNotification {
+            owner,
+            request: exomonad_actor::RequestId(5),
+            label: "job j-1".into(),
+            transition: exomonad_actor::SettlementTransition::Unavailable(
+                exomonad_actor::ResponseFailure::RequesterStopped,
+            ),
+            reply_preview: None,
+            target_path: None,
+            target_revision: None,
+            command_job: Some("j-1".into()),
+            occurred_at_unix_ms: 0,
+            sequence: exomonad_actor::ActorEventSequence(1),
+            watermark: exomonad_actor::ActorEventSequence(1),
+        },
+    });
+    assert_eq!(
+        notice.render(None),
+        "job j-1 no longer reports its completion to you: the actor that owned it stopped (elapsed time unavailable). Its retained output stays readable with read_output session_id=j-1; nothing reruns."
+    );
+}
+
+#[test]
 fn settlement_notice_names_the_settled_child_on_its_first_line() {
     let owner = exomonad_actor::ActorRef {
         id: exomonad_actor::ActorId(1),
