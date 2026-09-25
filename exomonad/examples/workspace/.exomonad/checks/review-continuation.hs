@@ -11,7 +11,7 @@ let startReview = (\own result -> do
             Right selected -> do
               _ <- requestWithProgressInto @WorkProgress @(Outcome ReviewDecision)
                 (responseActor reviewer)
-                ((assignment reviewLabel (ReviewTask task selected repairPolicy)) { guidance = Just (projectPrompt "review"), report = Silent }) $ R.send (reviewStarted (own :: ReviewFlow Self))
+                ((assignment reviewLabel (ReviewRequest (AssignedTask task) selected repairPolicy)) { guidance = Just (projectPrompt "review"), report = Silent }) $ R.send (reviewStarted (own :: ReviewFlow Self))
               pure ()
             Left reason -> do
               modify' (\state -> state { sourceProblems = sourceProblems state ++ [(responseExecution receipt, reason)] })

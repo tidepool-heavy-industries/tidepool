@@ -28,7 +28,9 @@
 - **Context parent**: the actor whose completed context boundary was inherited.
   A selected fresh context has none, even when another actor created it.
 - **Candidate**: a committed source revision with checks and remaining gates.
-  **ReviewedCandidate** retains exact reviewed head and review evidence.
+  **ReviewBasis** is an assigned Task or an exact base, owned paths and acceptance.
+  **ReviewRequest** pairs that basis with an exact Candidate and repair owner.
+  **ReviewedCandidate** retains the reviewed basis, exact head and review evidence.
 - **Delivered**: a reviewed candidate and the exact resulting commit checked by
   its owner. That head may differ after integration. The application owner still
   incorporates and checks the result in the shared app branch.

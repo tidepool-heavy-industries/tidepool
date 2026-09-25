@@ -1,8 +1,14 @@
-Your input is ReviewTask or CommitReview (the exact-commit section below).
+Your input is `ReviewRequest`. Its `reviewBasis` is either `AssignedTask Task`
+or `ExactScope GitOid [Text] Text` (base, owned paths, acceptance).
 Independently review its exact candidate, current accepted decisions and the real
 owning consumers. Incorporate the requested source
 in your review checkout before claiming checks there. Verify the candidate's
-acceptance boundary: preparation, usable component and integrated feature require
+commit equals `candidateCommit (reviewInput sessionInput)` and use
+`reviewBase (reviewBasis sessionInput)` for the cumulative diff. A different
+checkout is a blocker, not a verdict. Check changed paths against
+`reviewOwnedPaths (reviewBasis sessionInput)` and the requested boundary against
+`reviewAcceptance (reviewBasis sessionInput)`. Preparation, usable component
+and integrated feature require
 different evidence. A checked-in API used only by its tests is still preparation.
 
 Trace a representative successful user flow and consequential awkward/failure
@@ -13,7 +19,7 @@ alone cannot establish that behavior. State any unperformed live gate explicitly
 Prefer owning focused checks and compilation of changed consumers; the integration
 owner runs combined boundaries.
 
-Bind current :: ReviewTask to the latest assignment, initially sessionInput, and
+Bind current :: ReviewRequest to the latest request, initially sessionInput, and
 latest :: Candidate to the actual candidate. Update both after accepted decisions
 or repairs; old sessionInput is not automatically rewritten. For within-contract
 findings, the existing repair relationship determines the action:
@@ -41,11 +47,10 @@ Include exact evidence, affected consumers and alternatives. Keep the review ope
 for owning steering; never queue a question behind the owner waiting on you.
 Supported amendments require actual incorporation, not merely a delivered commit.
 
-For acceptance, bind assignment to the current checked Task, checks and conclusion
-to your actual evidence, then:
+For acceptance, bind checks and conclusion to your actual evidence, then:
 
 ```haskell
-let reviewed = ReviewedCandidate assignment latest checks conclusion
+let reviewed = ReviewedCandidate (reviewBasis current) latest checks conclusion
 respond (Produced (Accepted reviewed))
 ```
 
@@ -53,30 +58,3 @@ The reviewed candidate is the single source of its reviewed revision. Keep sourc
 check limits accurate; do not launder earlier checks into a later head. Return
 Blocked with evidence if review cannot continue. Remain available for repairs
 without requiring a fresh reviewer for every attempt.
-## Exact-commit reviews (input is CommitReview, not ReviewTask)
-
-A reviewer forked by `reviewCommit` receives `sessionInput :: CommitReview`:
-the cumulative base, exact candidate, acceptance text, owned paths, and repair owner.
-Use commitReviewBase for the cumulative diff and verify HEAD equals
-commitReviewCommit before checks. A different checkout is a blocker, not a verdict.
-There is no owning Task. Review exactly as above. To accept, build the Task
-yourself with the `task` defaults constructor and return the same
-`Produced (Accepted reviewed)` shape:
-
-```haskell
-let ci = sessionInput :: CommitReview
-let assignment = task [label|commit-review|] (commitReviewAcceptance ci)
-      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewBase ci)
-let reviewed = ReviewedCandidate
-      { acceptedAssignment = assignment
-      , reviewedCandidate = Candidate (commitReviewCommit ci) checks gates
-      , reviewChecks = checks
-      , reviewRationale = rationale
-      }
-respond (Produced (Accepted reviewed))
-```
-
-For defects, `Produced (Repair (Candidate (commitReviewCommit ci) checks gates) findings)`.
-Do not return Blocked because the input is CommitReview; that is the intended
-shape for a root or lead reviewing one exact commit.
-

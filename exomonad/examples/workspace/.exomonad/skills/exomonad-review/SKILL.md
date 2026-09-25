@@ -12,7 +12,7 @@ reviewCommit unfolds an absolute group path from it rather than
 nesting under your own (root has no allocated actor path to nest under):
 
 ```haskell
-(reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] base commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
+(reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] base commit "Round-trip tests for every item kind pass" ["src/parse.rs"]
 ```
 
 Inside a request whose `sessionInput :: Task` describes the work, with your
@@ -27,8 +27,11 @@ Both return a retained reviewer plus progress; its settlement notice wakes you.
 `OwnerRepairs` means you repair findings; it avoids queuing a repair behind
 your own pending delivery.
 
-Inside the reviewer, the assignment is `sessionInput :: ReviewTask`. Its candidate
-accessor is `reviewInput`, not `candidate`. Read for structure before bugs: does the change add a second way to do
+Inside the reviewer, the request is `sessionInput :: ReviewRequest`. Its basis
+is `AssignedTask Task` or `ExactScope GitOid [Text] Text`, and its candidate
+accessor is `reviewInput`, not `candidate`. Use `reviewBase`, `reviewOwnedPaths`
+and `reviewAcceptance` on the basis to check the exact cumulative scope.
+Read for structure before bugs: does the change add a second way to do
 something that exists? Confirm `git rev-parse HEAD` is the
 candidate commit before running checks; a test filter that matched zero tests is
 "not run", never "passed". After executing the relevant review, with
@@ -37,7 +40,7 @@ candidate commit before running checks; a test filter that matched zero tests is
 
 ```haskell
 let reviewed = ReviewedCandidate
-      { acceptedAssignment = reviewAssignment sessionInput
+      { reviewedBasis = reviewBasis sessionInput
       , reviewedCandidate = reviewInput sessionInput
       , reviewChecks = checks
       , reviewRationale = scope
@@ -50,8 +53,10 @@ Keep findings actionable: exact source, defect, consequence and required repair.
 Reference durable evidence rather than reproducing the plan or unaffected constraints.
 The tool's reply-submission result is sufficient; don't add an acknowledgment turn.
 
-After repair, reuse the retained specialist with `reviewAgain` at the revised
-candidate; consult its signature only when needed. Integrate the reviewed source,
+After repair, reuse the retained specialist with `reviewAgain` and a revised
+`ReviewRequest` that preserves its basis and carries the revised candidate;
+consult its signature only when needed. `ExactScope` findings return to the
+requester because an exact scope has no Task to delegate for repair. Integrate the reviewed source,
 then verify the changed integration boundary. A review decision covers its stated
 scope and does not turn partial work into product completion.
 

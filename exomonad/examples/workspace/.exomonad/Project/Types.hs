@@ -96,27 +96,33 @@ instance Display Candidate where
 data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef
   deriving (Show)
 
-data ReviewTask = ReviewTask
-  { reviewAssignment :: Task
+-- Preserve the contract that was actually submitted for review. An exact
+-- commit review has no owning Task or plan to carry forward.
+data ReviewBasis
+  = AssignedTask Task
+  | ExactScope GitOid [Text] Text -- cumulative base, owned paths, acceptance
+  deriving (Show, Eq)
+
+reviewBase :: ReviewBasis -> GitOid
+reviewBase (AssignedTask task) = taskSource task
+reviewBase (ExactScope base _ _) = base
+
+reviewOwnedPaths :: ReviewBasis -> [Text]
+reviewOwnedPaths (AssignedTask task) = ownedPaths task
+reviewOwnedPaths (ExactScope _ paths _) = paths
+
+reviewAcceptance :: ReviewBasis -> Text
+reviewAcceptance (AssignedTask task) = acceptance task
+reviewAcceptance (ExactScope _ _ accept) = accept
+
+data ReviewRequest = ReviewRequest
+  { reviewBasis :: ReviewBasis
   , reviewInput :: Candidate
   , repairOwner :: RepairOwner
   } deriving (Show)
 
--- What a root review of one exact commit needs, with no owning Task: the
--- base and candidate, the acceptance it is judged against, the paths it may
--- touch, and who repairs it. reviewCommit (Project.Work) forks a reviewer
--- from this without building a Task first; the reviewer builds its own Task
--- (with the `task` defaults constructor) only if it accepts.
-data CommitReview = CommitReview
-  { commitReviewBase :: GitOid
-  , commitReviewCommit :: GitOid
-  , commitReviewAcceptance :: Text
-  , commitReviewOwnedPaths :: [Text]
-  , commitReviewOwner :: RepairOwner
-  } deriving (Show)
-
 data ReviewedCandidate = ReviewedCandidate
-  { acceptedAssignment :: Task
+  { reviewedBasis :: ReviewBasis
   , reviewedCandidate :: Candidate
   , reviewChecks :: [Text]
   , reviewRationale :: Text

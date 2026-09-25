@@ -76,7 +76,7 @@ twoLaneHandoff = do
   rightSource <- readFile (checkActor right) "right.txt"
   check "both final candidates have source evidence" (leftSource == "left final\n" && rightSource == "right final\n")
   let deliver actor commit = void $ turn actor
-        ("respond (Produced (Delivered (ReviewedCandidate sessionInput (Candidate " <> gitOidLiteral commit
+        ("respond (Produced (Delivered (ReviewedCandidate (AssignedTask sessionInput) (Candidate " <> gitOidLiteral commit
           <> " [\"read final source\"] [\"product acceptance remains\"]) [\"recipe source assertion\"] \"model-free handoff fixture\") "
           <> gitOidLiteral commit <> " [\"read final source\"]))")
   deliver (checkActor left) leftFinal
@@ -157,7 +157,7 @@ reviewCycle failAfterAdmission automaticRepair = do
     pure (repeated, repaired)
   else pure (reviewing, candidate)
   void $ turn (checkActor accepting) "reportProgress (WorkProgress [reviewInput sessionInput] [])"
-  void $ turn (checkActor accepting) "respond (Produced (Accepted (ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
+  void $ turn (checkActor accepting) "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
   received <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (reviewEvents flow)" (Text.isInfixOf "Accepted")
   let arrived = finalCandidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
   check (if arrived then "typed review progress and acceptance return through the mailbox"

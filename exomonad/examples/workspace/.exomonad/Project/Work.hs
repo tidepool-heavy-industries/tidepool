@@ -130,23 +130,31 @@ implement
 implement task = unfold (taskGroup task) $
   childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] Medium task)
 
--- What a reviewer needs to know about who repairs a rejected candidate.
--- Shared by reviewContext (a full Task's review) and commitReviewContext
--- (an exact-commit review with no Task).
+-- Exact-scope reviews return findings to their requester because there is no
+-- owning Task with which to address a retained implementer.
 repairOwnerContext :: RepairOwner -> Text
 repairOwnerContext owner = case owner of
   OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
   RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
     <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
 
-reviewContext :: ReviewTask -> Text
-reviewContext task = Text.unlines
-  [ taskContext (reviewAssignment task)
-  , "Candidate: " <> renderGitOid (candidateCommit (reviewInput task))
-  , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput task))
-  , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
-  , repairOwnerContext (repairOwner task)
+reviewContext :: ReviewRequest -> Text
+reviewContext request = Text.unlines
+  [ basisContext
+  , "Candidate: " <> renderGitOid (candidateCommit (reviewInput request))
+  , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput request))
+  , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput request))
+  , ownerContext
   ]
+  where
+    (basisContext, ownerContext) = case reviewBasis request of
+      AssignedTask task -> (taskContext task, repairOwnerContext (repairOwner request))
+      ExactScope base owned accept ->
+        (Text.unlines
+          [ "Base: " <> renderGitOid base
+          , "Owned source: " <> Text.intercalate ", " owned
+          , "Acceptance: " <> accept
+          ], repairOwnerContext OwnerRepairs)
 
 -- Both admission branches of a review fork at Medium: the reviewer's job is
 -- to read a bounded diff and judge it, not to carry a design loop, so there
@@ -160,24 +168,14 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
-    (assignment [label|review|] (ReviewTask task candidate owner))
-
-commitReviewContext :: CommitReview -> Text
-commitReviewContext review = Text.unlines
-  [ "Base: " <> renderGitOid (commitReviewBase review)
-  , "Candidate: " <> renderGitOid (commitReviewCommit review)
-  , "Owned source: " <> Text.intercalate ", " (commitReviewOwnedPaths review)
-  , "Acceptance: " <> commitReviewAcceptance review
-  , repairOwnerContext (commitReviewOwner review)
-  ]
+    (assignment [label|review|] (ReviewRequest (AssignedTask task) candidate owner))
 
 -- A root review of one exact commit, with no owning Task: useful when the
 -- root itself produced or selected the commit (an incorporation, a direct
 -- edit) and only needs a judgment against a stated acceptance, not the full
 -- fork-group/plan/rationale bookkeeping a Task carries. Same admission shape
--- as reviewCandidate (fixed Medium, same effect constraints); if the
--- reviewer accepts, it builds its own Task for the ReviewedCandidate it
--- returns -- the `task` defaults constructor makes that a one-liner.
+-- as reviewCandidate (fixed Medium, same effect constraints). The exact
+-- scope stays distinct from a Task in the accepted result.
 --
 -- Takes its own campaign label rather than nesting under the caller's path
 -- (subgroup): the root itself has no allocated actor path to nest under
@@ -186,12 +184,12 @@ commitReviewContext review = Text.unlines
 -- concurrent reviewCommit calls from the same actor in separate groups.
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewCommit reviewLabel base commit accept owned owner = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
-  withInstructions (projectPrompt "review") $ withContext (selected commitReviewContext) $
+  => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewCommit reviewLabel base commit accept owned = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
+  withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid commit)))
-    (assignment [label|review|] (CommitReview base commit accept owned owner))
+    (assignment [label|review|] (ReviewRequest (ExactScope base owned accept) (Candidate commit [] []) OwnerRepairs))
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.
@@ -226,9 +224,9 @@ unownedPaths base candidate owned = do
 -- lunaTaskFrom's note above.
 reviewAgain
   :: Member Replies effects
-  => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
-  (assignment label task) { guidance = Just (projectPrompt "review") }
+  => AgentRef -> Label -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewAgain actor label request = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
+  (assignment label request) { guidance = Just (projectPrompt "review") }
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
 -- separate request to an available implementer. No queue is created for Left.
@@ -236,13 +234,15 @@ reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome Revie
 -- above.
 repair
   :: Member Replies effects
-  => Label -> ReviewTask -> Candidate -> [Text]
+  => Label -> ReviewRequest -> Candidate -> [Text]
   -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
-repair label task candidate findings = case repairOwner task of
-  OwnerRepairs -> pure (Left (Repair candidate findings))
-  RetainedImplementer actor -> Right <$> requestWith actor
-    ((assignment label (RepairTask (reviewAssignment task) candidate findings))
-      { guidance = Just (projectPrompt "repair") })
+repair label request candidate findings = case reviewBasis request of
+  ExactScope _ _ _ -> pure (Left (Repair candidate findings))
+  AssignedTask task -> case repairOwner request of
+    OwnerRepairs -> pure (Left (Repair candidate findings))
+    RetainedImplementer actor -> Right <$> requestWith actor
+      ((assignment label (RepairTask task candidate findings))
+        { guidance = Just (projectPrompt "repair") })
 
 -- Reporting is the Assignment default (NotifyOwner); see lunaTaskFrom's note
 -- above.

@@ -158,15 +158,31 @@ reviewProvenance = do
   actual <- git (checkActor reviewer) ["rev-parse", "HEAD"]
   check "review checkout is the assigned candidate" (actual == candidate)
   fields <- turn (checkActor reviewer)
-    ("let ci = sessionInput :: CommitReview\ninspectFull (commitReviewBase ci == " <> gitOidLiteral baseline
-      <> " && commitReviewCommit ci == " <> gitOidLiteral candidate <> ")")
+    ("let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\ninspectFull (reviewBase (reviewBasis current) == " <> gitOidLiteral baseline
+      <> " && candidateCommit latest == " <> gitOidLiteral candidate <> ")")
   check "typed request preserves both revision identities" (lastOutput fields == "True")
-  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet gates = [] :: [Text]\nlet rationale = \"review provenance fixture\" :: Text"
+  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet conclusion = \"review provenance fixture\" :: Text"
   prompt <- readFile (checkActor reviewer) (Text.pack workspaceRoot <> "/prompts/review.md")
-  let section = snd (Text.breakOn "## Exact-commit reviews" prompt)
+  let section = snd (Text.breakOn "For acceptance" prompt)
       blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" section))
   void $ turn (checkActor reviewer) (head blocks)
   accepted <- turn owner
-    "result <- pollResponse reviewer\ninspectFull (case result of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> taskSource (acceptedAssignment checked) == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False })"
-  check "accepted task retains the base while reviewed candidate retains the tip"
+    "result <- pollResponse reviewer\ninspectFull (case result of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> case reviewedBasis checked of { ExactScope originalBase _ _ -> originalBase == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False }; _ -> False })"
+  check "exact acceptance retains its scope without fabricating a Task"
     (lastOutput accepted == "True")
+  -- Exact review retries retain the real scope, including when the caller offers
+  -- a retained implementer: there is no implementation Task to assign to it.
+  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- reviewAgain (responseActor reviewer) [label|exact-retry|] exact"
+  retried <- turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair [label|exact-findings|] current latest [\"repair at the owner\"]\ninspectFull (case verdict of { Left (Repair found issues) -> found == latest && issues == [\"repair at the owner\"]; _ -> False })"
+  check "exact-scope repair returns findings without inventing an implementation assignment"
+    (lastOutput retried == "True")
+  void $ turn (checkActor reviewer) "respond (Produced (Repair latest [\"repair at the owner\"]))"
+  revised <- checkpoint owner "review-provenance.txt" "revised review candidate\n" "review repair fixture"
+  void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
+  void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
+  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- reviewAgain (responseActor reviewer) [label|assigned-retry|] assignedRequest"
+  void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
+  void $ turn (checkActor reviewer) (head blocks)
+  retained <- turn owner "answer <- pollResponse assignedReview\ninspectFull (case answer of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> reviewedBasis checked == AssignedTask assigned && reviewedCandidate checked == reviewInput assignedRequest; _ -> False }; _ -> False })"
+  check "assigned acceptance preserves the whole Task, decisions and candidate gates"
+    (lastOutput retained == "True")

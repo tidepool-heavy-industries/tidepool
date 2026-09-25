@@ -72,7 +72,7 @@ collaboration = do
   check "answering one question leaves the other open" ("product-gate" `Text.isInfixOf` output remaining && not ("questionKey = \"semantics\"" `Text.isInfixOf` output remaining))
   original <- turn owner "original <- pollResponse worker\ninspectFull original"
   check "repair did not rewrite the original candidate receipt" (candidate `Text.isInfixOf` output original && not (revised `Text.isInfixOf` output original))
-  void $ turn (checkActor reviewer) ("let latest = Candidate " <> gitOidLiteral amendment <> " [\"focused repair check\",\"incorporated plan check\"] [\"open product gate\"]\nrespond (Produced (Accepted (ReviewedCandidate assignment latest [\"reviewed revised source and plan\"] \"preparation only\")))")
+  void $ turn (checkActor reviewer) ("let latest = Candidate " <> gitOidLiteral amendment <> " [\"focused repair check\",\"incorporated plan check\"] [\"open product gate\"]\nrespond (Produced (Accepted (ReviewedCandidate (AssignedTask assignment) latest [\"reviewed revised source and plan\"] \"preparation only\")))")
   accepted <- turn owner "accepted <- pollResponse reviewer\ninspectFull accepted"
   check "independent acceptance retains the updated contract and latest source" (amendment `Text.isInfixOf` output accepted && "Preparation retains the boundary" `Text.isInfixOf` output accepted && "open product gate" `Text.isInfixOf` output accepted)
   void $ git owner ["merge", "--ff-only", amendment]

@@ -84,7 +84,7 @@ checks, bind `revised :: Candidate` and reuse the retained reviewer:
 
 ```haskell
 let retryLabel = [label|review-repaired|]
-(attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
+(attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewRequest (AssignedTask task) revised OwnerRepairs)
 retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork me (workMessage reviewSummary))
 ```
 
@@ -103,7 +103,7 @@ is no reason to discard unresolved questions. The final state remains in
 `previousAttempt`; retain useful reviewer agents separately from these collectors.
 
 The reviewer incorporates that revision before checking it. Keep its latest
-accepted Task/Candidate intact. A reviewed head and the lead's resulting checked
+review basis and candidate intact. A reviewed head and the lead's resulting checked
 head are different facts. Once the lead has checked its resulting checkout:
 
 ```haskell

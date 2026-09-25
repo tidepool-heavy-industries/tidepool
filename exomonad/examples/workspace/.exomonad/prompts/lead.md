@@ -48,7 +48,8 @@ reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMe
 
 Continue independent engineering while review is pending; end the turn when
 waiting is all that remains. A Repair verdict returns implementation to you;
-repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. With a separately
+repair locally and reuse the reviewer with reviewAgain and a revised ReviewRequest
+that preserves the reviewed basis. With a separately
 completed implementer, RetainedImplementer lets review own direct repairs. Never
 queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.
@@ -59,7 +60,7 @@ retire it and finished implementation children. Before returning, settle descend
 or explicitly transfer unfinished ownership. A reply does not release their processes
 or workspace storage.
 
-Accepted contains the reviewed task, candidate, checks and rationale. Verify your
+Accepted contains the reviewed basis, candidate, checks and rationale. Verify your
 resulting integration head; review semantic integration changes. Bind accepted,
 head and checks to that actual evidence, then:
 

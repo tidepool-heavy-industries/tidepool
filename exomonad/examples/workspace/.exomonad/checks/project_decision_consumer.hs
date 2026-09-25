@@ -1,9 +1,10 @@
 {-# LANGUAGE QuasiQuotes #-}
+let AssignedTask assignedTask = reviewBasis sessionInput
 import Tidepool.Agent.Reply (pollReply)
 let WatchReady incorporationResult = incorporation
 let Right (Incorporated amendment incorporatedHead incorporationChecks) = settledValue incorporationResult
 let acceptedDecision = AcceptedDecision semantics incorporatedHead "Preparation retains the boundary; visible UI acceptance remains separate." incorporationChecks
-let assignment = withDecision acceptedDecision (reviewAssignment sessionInput)
+let assignment = withDecision acceptedDecision assignedTask
 let remainingQuestions = resolveQuestion acceptedDecision openQuestions
 reportProgress (WorkProgress [] remainingQuestions)
 let newer = semantics { questionDetails = (questionDetails semantics) { questionFinding = "A new owning consumer contradicts the earlier answer." } }
