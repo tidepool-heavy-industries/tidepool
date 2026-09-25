@@ -636,3 +636,14 @@ each seen at least twice:
    skills plus two lookups each.
 Prompt paragraphs for root, lead, luna and reviewer are in the wave6-prompts-2
 branch; engine fixes 1 and 2 in the parent-handle branch.
+- **Cell memo is unsound as a cache (cell-memo lane, no code):** every
+  compiled item is tied to the value generation it was compiled for (bare
+  expressions bind as `observation<n>` in the generation-n module; binder
+  ids are module plus name; `set_val_gen` only rises), so a memo hit cannot
+  install at a fresh generation. `compile_relevant_eq` deliberately omits
+  the generation. Only host carriers reuse compiled programs, because their
+  stub module carries no generation fact. Options: memoize the check only
+  (one round trip); rebase compiled items to a new generation the way
+  carriers do (runtime plus extractor design); or remove the retry, which
+  the UpdatePending refusal text now does. Decision: no cache; revisit
+  rebasing only if per-actor machines leave cell latency compile-bound.
