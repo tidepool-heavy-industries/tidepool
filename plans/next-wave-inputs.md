@@ -560,17 +560,23 @@ rows), D with per-actor machines, E as its own design.
 Timelines from the host and compiler logs; no per-child compiles, no
 provider startup inside either cell (both launched Codex after the cell
 settled), git capture 1 to 2 s total.
-- **Root, about 40 s:** two per-worker memo misses (`required-interface-not-
-  retained`, requests f20f1c on worker 1 and f6036b on worker 0). Earlier
-  requests compiled about 60 library modules with no interface because no
-  later home module imported them (`registerPreparedInterface`,
-  bridge/haskell/src/Tidepool/GhcPipeline.hs ~2361-2375); the cell's new
-  session value modules did import them, so a memo hit then needed an
-  interface (~1656-1665) and every module recompiled from scratch. The
-  worker-0 miss was the display render, which runs inside `with_machine`
-  and held the checkout 24.6 s. Fix: with a resident memo active, register
-  and keep the interface for every freshly compiled home module (about
-  35 ms each, absorbed by pre-warm). Est. 55 s to about 15 s.
+- **Root, about 40 s:** two per-worker memo misses, one per GHC worker,
+  mislabeled `required-interface-not-retained`. Real cause (memo-interfaces
+  lane, verified in the compiler log): the pre-warm and ordinary evals
+  compile only modules the target uses, so about 60 unused library modules
+  (Project.*, Jev.*, Tidepool.*) were memoized as type-check facts with no
+  body or interface; the session cell compiles every module, so each was a
+  miss (lowering 10 to 14 s plus interfaces 5 to 7 s per worker; the
+  worker-0 miss was the display render, holding the checkout 24.6 s). The
+  leaf-interface elision only ever skipped the target module and was not
+  involved. Fix (8878d3b89): with a resident memo active, an ordinary
+  compile also builds body and interface for unused modules (output
+  unchanged, one-shot compiles unaffected); misses without a body now
+  report `executable-body-not-prepared`; the request logs
+  `memo_completion_modules count=N` and a `memo_completion` timing under
+  lowering. Measured on the stdlib: second request 2.92 s to 0.01 s, first
+  request 0.76 s to 3.88 s. Expected: pre-warm or a worker's first cold
+  eval grows 20 to 25 s; the root setup cell loses about 40 s.
 - **Core lead, about 22 s:** the split-compile stale-retry loop. An
   InheritedContext fork shares the root's scope chain; the root committed a
   cell every 7 to 10 s, `compile_relevant_eq` (runtime/src/session/view.rs:239)
