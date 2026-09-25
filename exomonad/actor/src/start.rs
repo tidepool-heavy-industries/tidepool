@@ -222,6 +222,33 @@ pub(crate) struct CapturedChildLaunch {
     pub entry: RootCustody,
     pub launch_worktrees: Vec<String>,
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
+    /// `Some` exactly for an eligible launch (see `child_session_eligibility`):
+    /// everything `ResidentActorRunner::provision_child_session` needs to
+    /// give the child's own, freshly built session what its first cell (the
+    /// tool installer) will need to compile against the facade
+    /// `with_source_imports` already names — the facade never physically
+    /// existed under the child's own session root otherwise. `None` for a
+    /// same-session launch: nothing to seed, the facade is already
+    /// reachable from the session that will run it.
+    pub seed: Option<ChildSessionSeed>,
+}
+
+/// Captured in `capture_decoded` while the PARENT checkout is still held —
+/// everything a fresh child session needs physically present on its own
+/// disk before a cell can compile there against the facade the parent
+/// materialized: the facade itself (path + source, already rendered), the
+/// source text of every `Tidepool/Session/Lib/G<n>.hs` module under the
+/// parent's session root at that exact moment (the facade's `import`
+/// line names whichever generations it re-exports from; read every Lib
+/// module present rather than parsing that line, since a re-exported
+/// item's own definition may in turn reference an EARLIER generation), and
+/// the parent's current value-binding generation, so provisioning can raise
+/// the child's own counter past every generation number a copied file uses
+/// before the child ever mints one of its own.
+pub(crate) struct ChildSessionSeed {
+    pub facade: MaterializedFacade,
+    pub lib_sources: Vec<(std::path::PathBuf, String)>,
+    pub val_generation: Generation,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -400,6 +427,21 @@ impl ResidentActorStart {
             reason = eligibility.reason,
             "selected-context child session eligibility decided"
         );
+        // Only an eligible launch needs a seed at all — read while this,
+        // the parent's, checkout is still held, since the child session
+        // this seeds does not exist yet (see `ChildSessionSeed`'s doc
+        // comment).
+        let seed = if eligibility.eligible {
+            let lib_sources = capture_lib_sources(session, session.run_context().lexical_scope)
+                .unwrap_or_default();
+            Some(ChildSessionSeed {
+                facade: facade.clone(),
+                lib_sources,
+                val_generation: session.val_gen(),
+            })
+        } else {
+            None
+        };
         // An eligible launch gets its own fresh session id here, recorded
         // in the descriptor's placement — but the entry itself stays
         // resident on THIS, the parent's, session; crossing it to the
@@ -464,6 +506,7 @@ impl ResidentActorStart {
                 entry,
                 launch_worktrees,
                 fork_workspace,
+                seed,
             },
         })
     }
@@ -672,6 +715,43 @@ where
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
     Ok(surface.materialize(&view)?)
+}
+
+/// Every `Tidepool/Session/Lib/G<n>.hs` file under `scope`'s session root
+/// right now, as `(path relative to the session root, source text)` pairs —
+/// the source half of a [`ChildSessionSeed`]. `None` only when this session
+/// has no compile view at `scope` at all (the same condition
+/// `materialize_entry_facade` already turns into
+/// [`ActorStartCaptureError::NoCompileView`] for the facade itself); an
+/// unreadable directory (no declarations committed yet) is an empty list,
+/// not an error, since a launch with no Lib generations to copy is ordinary,
+/// not exceptional.
+fn capture_lib_sources<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+) -> Option<Vec<(std::path::PathBuf, String)>>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let view = session.compile_view_in(scope)?;
+    let root = view.session_root();
+    let lib_dir = root.join("Tidepool/Session/Lib");
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
+        return Some(Vec::new());
+    };
+    let mut sources = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("hs") {
+            continue;
+        }
+        if let Ok(source) = std::fs::read_to_string(&path) {
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            sources.push((relative, source));
+        }
+    }
+    Some(sources)
 }
 
 fn validate_head_incarnations<H, O>(

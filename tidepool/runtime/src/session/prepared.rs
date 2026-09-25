@@ -1887,9 +1887,9 @@ impl PreparedEngine {
                     registry.insert(linked, Arc::new(compiled))
                 }
             },
-            None => Arc::new(
-                CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?,
-            ),
+            None => {
+                Arc::new(CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?)
+            }
         };
         let (machine, program) =
             PreparedMachine::new_shared(image, PreparedMachineOptions { nursery_bytes })
@@ -3295,15 +3295,21 @@ impl PreparedEngine {
     /// arena on this engine's machine, and mint a bare cross-engine
     /// [`ValueHandle`] over it (`PreparedMachine::import_parcel`), mirroring
     /// [`Self::live_payload_handle_owned_by`]'s handle minting for a value
-    /// that did not come from a parked frame.
+    /// that did not come from a parked frame. The second element pairs each
+    /// distinct import identity the parcel's newly installed images name
+    /// with the (still-tagged) [`PreparedHandle`] rooting its copied value
+    /// — kept as a `PreparedHandle`, not a bare `ValueHandle`, because the
+    /// session layer (`ResidentSession::import_parcel`) roots it as a
+    /// [`tidepool_codegen::binding_table::BoundValue`], which carries a
+    /// `PreparedHandle` the same way any other persistent binding does.
     pub fn import_parcel(
         &mut self,
         parcel: Parcel,
         realm: RealmId,
-    ) -> Result<ValueHandle, PreparedRuntimeError> {
+    ) -> Result<(ValueHandle, Vec<(SymbolIdentity, PreparedHandle)>), PreparedRuntimeError> {
         self.machine
             .import_parcel(parcel, realm)
-            .map(|handle| handle.raw())
+            .map(|(handle, imports)| (handle.raw(), imports))
             .map_err(PreparedRuntimeError::Run)
     }
 

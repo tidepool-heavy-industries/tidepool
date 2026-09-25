@@ -1784,6 +1784,21 @@ impl ResidentRequest {
     }
 }
 
+/// Write `source` to `path`, creating parent directories as needed — the
+/// same shape [`tidepool_runtime::session::ExactExportSurface::materialize`]
+/// itself uses to put a facade under the launching session's own root, used
+/// here to put a copy of that same content (and the `Lib.G<n>` sources it
+/// re-exports from) under a CHILD session's own root instead.
+fn write_seed_source(path: &std::path::Path, source: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("child session seed directory {}: {error}", parent.display())
+        })?;
+    }
+    tidepool_atomic_write::write_best_effort(path, source.as_bytes())
+        .map_err(|error| format!("child session seed file {}: {error}", error.path.display()))
+}
+
 impl<H, O> ResidentActorRunner<H, O> {
     #[must_use]
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
@@ -1900,6 +1915,20 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// SAME realm `transfer_custody` will later import the entry under, not
     /// a second one of this call's own minting nothing afterward would use.
     ///
+    /// `seed`, when the launch carried one (`crate::start::ChildSessionSeed`
+    /// — an eligible launch always does), is written to the child's own
+    /// session root BEFORE the bootstrap install: the facade
+    /// `capture_decoded` materialized under the PARENT's session root (its
+    /// `import Tidepool.Session.Lib.G<n> (...)` line names generations that
+    /// otherwise exist nowhere the child can find them) and every
+    /// `Lib.G<n>.hs` source it might reference, at the same relative paths
+    /// (`tidepool_atomic_write`, exactly as `ExactExportSurface::materialize`
+    /// itself writes the facade on the parent). The child's own value-binding
+    /// generation counter is then raised to the parent's
+    /// (`ResidentSession::set_val_gen`'s own monotonic-max, never lowers it)
+    /// so nothing the child declares on its own later can mint a generation
+    /// number a just-copied file already uses.
+    ///
     /// Returns the child's own freshly minted lexical scope
     /// (`ActorDescriptor::with_lexical_scope` replaces the placeholder the
     /// parent minted at capture time with this one). The caller still owns
@@ -1909,6 +1938,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         &self,
         session_id: tidepool_repr::SessionId,
         resource_scope: RealmId,
+        seed: Option<&crate::start::ChildSessionSeed>,
     ) -> Result<tidepool_codegen::scope::ScopeId, String>
     where
         H: DispatchEffect<O> + Send + 'static,
@@ -1937,6 +1967,23 @@ impl<H, O> ResidentActorRunner<H, O> {
                 tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .map_err(|error| format!("child session bootstrap context: {error}"))?;
+        if let Some(seed) = seed {
+            let root = machine
+                .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
+                .ok_or_else(|| {
+                    "child session has no compile view to seed with the parent's facade".to_string()
+                })?
+                .session_root()
+                .to_path_buf();
+            write_seed_source(
+                &root.join(seed.facade.identity().relative_hs_path()),
+                seed.facade.source(),
+            )?;
+            for (relative, source) in &seed.lib_sources {
+                write_seed_source(&root.join(relative), source)?;
+            }
+            machine.set_val_gen(seed.val_generation);
+        }
         // Installs the shared program, bootstrapping the engine. Its own
         // suspended boot handshake belongs to nobody here — only the
         // install side effect matters, so the outcome is discarded exactly
@@ -1976,16 +2023,25 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// shared session in particular is never a member of
     /// [`ResidentMachineAccess::child_sessions`] and is never removed).
     ///
-    /// The invariant: a dedicated child session is dropped only once its
-    /// actor has retired AND no live [`RootCustody`] still roots a value on
-    /// its machine. Parcel 6 delivers replies and retained progress to
-    /// other sessions as imported copies, and `export_custody` already
-    /// releases the source-side handle the instant each one crosses, so
-    /// this reduces to one cheap check: the session's own
-    /// [`ResidentSession::value_handle_count`]. Zero means the session
-    /// drops right here. Nonzero means something this actor produced has
-    /// not yet been exported off its machine (still in flight, most
-    /// likely); the release is deferred (logged once, here) and retried
+    /// The invariant has two parts, and teardown needs both: (a) no live
+    /// [`RootCustody`] for this session is held outside it anywhere in the
+    /// process ([`ResidentSession::outstanding_custody`] — NOT
+    /// `value_handle_count`, which also counts the session's own private
+    /// bindings, e.g. the crossed-entry identities `ResidentSession::import_parcel`
+    /// records, and so never reaches zero on its own); (b) no live actor in
+    /// the forest directory is still PLACED on this session — an inherited
+    /// context fork shares its parent's session rather than getting a
+    /// dedicated one of its own, so a dedicated session's owner retiring
+    /// does not mean every actor using it has. `other_actor_still_on_session`
+    /// is that second check, made by the caller against the actor
+    /// directory (this runner owns no directory of its own) immediately
+    /// before this call.
+    ///
+    /// A live occupant (b) skips straight to `Ok(())`: nothing to defer,
+    /// since another actor's own eventual retirement checks again. Passing
+    /// (b), (a)'s check happens under the SAME checkout the settlement
+    /// below marks pending for, so a caller who finds custody still
+    /// outstanding logs it once here and the deferred release completes
     /// the next time anything checks this session out for any reason — see
     /// [`Self::with_host_machine`]'s settlement. This call itself never
     /// waits for that: it performs one checkout, one check, and returns
@@ -1994,17 +2050,19 @@ impl<H, O> ResidentActorRunner<H, O> {
     pub(crate) async fn retire_child_session(
         &self,
         session_id: tidepool_repr::SessionId,
+        other_actor_still_on_session: bool,
     ) -> Result<(), ResidentActorWorkbenchError>
     where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        if !self
-            .access
-            .child_sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&session_id)
+        if other_actor_still_on_session
+            || !self
+                .access
+                .child_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&session_id)
         {
             return Ok(());
         }
@@ -2024,12 +2082,13 @@ impl<H, O> ResidentActorRunner<H, O> {
             );
         self.access
             .with_host_machine("child-teardown", session_id, None, |session, _| {
-                Ok(session.value_handle_count())
+                Ok(session.outstanding_custody())
             })
             .await?;
         // `with_host_machine`'s settlement already either removed the
-        // session (zero live handles) or left it idle and logged the
-        // deferral (nonzero) — nothing further to do here either way.
+        // session (nothing outstanding) or left it idle and logged the
+        // deferral (still outstanding) — nothing further to do here either
+        // way.
         Ok(())
     }
 
@@ -2467,8 +2526,8 @@ where
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .contains_key(&session_id);
                     if still_pending_teardown {
-                        let live_handles = session.value_handle_count();
-                        if live_handles == 0 {
+                        let outstanding = session.outstanding_custody();
+                        if outstanding == 0 {
                             pending_child_teardown
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2487,7 +2546,7 @@ where
                             return outcome;
                         }
                         tracing::info!(actor = %actor, session = ?session_id,
-                            live_handles, "dedicated child session release still deferred");
+                            outstanding, "dedicated child session release still deferred");
                     }
 
                     let holes = session
@@ -12138,25 +12197,37 @@ mod request_tests {
         assert!(error.contains("no child-session factory"));
     }
 
-    /// A dedicated child session whose actor has retired, but which still
-    /// holds a live value handle (standing in for a reply/retained progress
-    /// value not yet exported off it — parcel 6's territory, not
-    /// reconstructed here), is not torn down: the release defers. Once that
-    /// handle is released, the NEXT checkout of the session (a second
+    /// A dedicated child session whose actor has retired, but for which a
+    /// `RootCustody` is still held OUTSIDE the session (standing in for a
+    /// reply/retained progress value not yet exported off it — parcel 6's
+    /// territory, not reconstructed here), is not torn down: the release
+    /// defers. `value_handle_count` would never reach zero here even once
+    /// released (it also counts the session's own private bindings), which
+    /// is exactly why `retire_child_session`/`with_host_machine`'s
+    /// settlement check `ResidentSession::outstanding_custody` instead —
+    /// this test is the regression pin for that distinction. Once the held
+    /// token drops, the NEXT checkout of the session (a second
     /// `retire_child_session` call, exactly as `with_host_machine`'s own
     /// settlement retries it for any other reason a session gets checked
     /// out) completes the teardown and the session is gone from the
     /// registry. Exercises `ResidentActorRunner::retire_child_session`
     /// directly (`child_sessions` membership is normally recorded by
-    /// `provision_child_session`; set here by hand since this test
-    /// only needs a dedicated session to already exist, not the full
-    /// parcel-crossing launch path that builds one).
+    /// `provision_child_session`; set here by hand since this test only
+    /// needs a dedicated session to already exist, not the full
+    /// parcel-crossing launch path that builds one) with
+    /// `other_actor_still_on_session: false` throughout (no directory
+    /// entries at all in this fixture).
     #[tokio::test]
     async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
         let (mut child_session, _child_root) = bare_session_at(child_id);
-        let lexical_scope = child_session.mint_isolated_scope();
+        // `ResidentSession::prepared_binding_handle` resolves a name only in
+        // `ScopeId::ROOT` (`BindingTable::resolve`'s own doc comment: "the
+        // ROOT frame"), so the binding this test mounts (and later resolves
+        // a custody token for) must live there too, not in a freshly minted
+        // scope.
+        let lexical_scope = tidepool_codegen::scope::ScopeId::ROOT;
         let resource_scope = RealmId::fresh();
         child_session
             .set_actor_execution(
@@ -12177,10 +12248,12 @@ mod request_tests {
             },
             ..context.clone()
         };
-        // A real compiled/mounted binding: bootstraps the session's engine
-        // and roots a live value handle, standing in for output this
-        // actor's last cell produced but nothing has exported off the
-        // machine yet.
+        // A real compiled/mounted binding bootstraps the session's engine;
+        // `prepared_binding_handle` then mints a `RootCustody` over it —
+        // the SAME shape a reply or retained-progress value crosses the
+        // resident-workbench boundary as — and this local variable is what
+        // "outside the session" means: it is not released until this test
+        // drops it below.
         mount_text_binding(
             &mut child_session,
             &child_context,
@@ -12191,10 +12264,9 @@ mod request_tests {
             None,
         )
         .expect("mount a real binding to hold a live handle");
-        assert!(
-            child_session.value_handle_count() > 0,
-            "the mounted binding must hold at least one live handle"
-        );
+        let custody = child_session
+            .prepared_binding_handle("outstanding")
+            .expect("the mounted binding resolves to a live custody token");
         machines.insert_idle(child_id, Box::new(child_session));
 
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
@@ -12206,7 +12278,7 @@ mod request_tests {
             .insert(child_id);
 
         runner
-            .retire_child_session(child_id)
+            .retire_child_session(child_id, false)
             .await
             .expect("retirement check itself does not fail");
         assert!(
@@ -12223,23 +12295,11 @@ mod request_tests {
             "the deferral must be recorded"
         );
 
-        // Release the custody: evict the mounted binding's scope, exactly
-        // as an ordinary actor's own lexical-scope retirement does.
-        machines
-            .peek(child_id, |_| ())
-            .expect("session still present to release custody on");
-        let released = runner
-            .access
-            .with_host_machine("test-release", child_id, None, move |session, _| {
-                session.retire_scope(lexical_scope);
-                Ok(session.value_handle_count())
-            })
-            .await
-            .expect("releasing the mounted binding's scope");
-        assert_eq!(released, 0, "retiring its only scope must clear the handle");
+        // Release the custody itself — the only thing outstanding.
+        drop(custody);
 
         runner
-            .retire_child_session(child_id)
+            .retire_child_session(child_id, false)
             .await
             .expect("retirement recheck itself does not fail");
         assert_eq!(
