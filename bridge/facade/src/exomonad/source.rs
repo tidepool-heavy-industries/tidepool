@@ -99,7 +99,13 @@ impl SourceRevision {
     }
 }
 
-/// A captured revision that exists on disk but is not yet the active one.
+/// Temporary source bytes are removed unless explicitly retained.
+struct CapturedRevision {
+    directory: tempfile::TempDir,
+    revision: SourceRevision,
+}
+
+/// A retained revision that exists on disk but is not yet the active one.
 pub(crate) struct PendingRevision {
     directory: PathBuf,
     source_roots: Vec<PathBuf>,
@@ -257,7 +263,7 @@ impl SourceLayer {
         };
         let directory = self.revisions().join(&record.identity);
         Ok(Some(SourceRevision {
-            modules: revision_modules(&directory, record.roots),
+            modules: revision_modules(&directory, record.roots)?,
             identity: record.identity,
             generation: record.generation,
         }))
@@ -292,7 +298,24 @@ impl SourceLayer {
         domain_identity: &str,
         roots: &[PathBuf],
     ) -> Result<PendingRevision> {
-        self.capture(domain_identity, roots, true)
+        let CapturedRevision {
+            directory: captured,
+            revision,
+        } = self.capture(domain_identity, roots)?;
+        let directory = self.revisions().join(&revision.identity);
+        if directory.exists() {
+            captured.close()?;
+        } else {
+            std::fs::rename(captured.path(), &directory)?;
+            // The temporary name is gone; the retained revision now owns the tree.
+            let _ = captured.keep();
+            tidepool_atomic_write::sync_parent_directory(&directory)?;
+        }
+        Ok(PendingRevision {
+            directory,
+            source_roots: roots.to_vec(),
+            revision,
+        })
     }
 
     /// What `roots` would be as a revision, without keeping it. A status or
@@ -303,7 +326,9 @@ impl SourceLayer {
         domain_identity: &str,
         roots: &[PathBuf],
     ) -> Result<SourceRevision> {
-        Ok(self.capture(domain_identity, roots, false)?.revision)
+        let captured = self.capture(domain_identity, roots)?;
+        captured.directory.close()?;
+        Ok(captured.revision)
     }
 
     /// [`Self::observe_from_roots`] over the workspace's declared roots.
@@ -320,25 +345,17 @@ impl SourceLayer {
         self.observe_from_roots(frozen.identity(), &roots)
     }
 
-    fn capture(
-        &self,
-        domain_identity: &str,
-        roots: &[PathBuf],
-        keep: bool,
-    ) -> Result<PendingRevision> {
-        let pending = self
-            .revisions()
-            .join(format!(".pending-{}", uuid::Uuid::new_v4()));
-        if pending.exists() {
-            std::fs::remove_dir_all(&pending)?;
-        }
-        std::fs::create_dir_all(&pending)?;
+    fn capture(&self, domain_identity: &str, roots: &[PathBuf]) -> Result<CapturedRevision> {
+        std::fs::create_dir_all(self.revisions())?;
+        let pending = tempfile::Builder::new()
+            .prefix(".pending-")
+            .tempdir_in(self.revisions())?;
         for (index, root) in roots.iter().enumerate() {
             let mut captured = BTreeMap::new();
             super::workspace::capture_sources(
                 root,
                 Path::new(&index.to_string()),
-                &pending,
+                pending.path(),
                 &mut captured,
             )?;
         }
@@ -349,29 +366,19 @@ impl SourceLayer {
         let mut domain = DOMAIN.to_vec();
         domain.extend_from_slice(domain_identity.as_bytes());
         let captured_roots: Vec<PathBuf> = (0..roots.len())
-            .map(|index| pending.join(index.to_string()))
+            .map(|index| pending.path().join(index.to_string()))
             .collect();
-        let identity = tidepool_toolchain::cache::source_roots_identity(&domain, &captured_roots);
-        let modules = revision_modules(&pending, roots.len());
+        let identity = tidepool_toolchain::cache::source_roots_identity(&domain, &captured_roots)?;
+        let modules = revision_modules(pending.path(), roots.len())?;
 
-        std::fs::create_dir_all(pending.join("resources/Exomonad/Source"))?;
+        std::fs::create_dir_all(pending.path().join("resources/Exomonad/Source"))?;
         tidepool_atomic_write::write_durable(
-            &pending.join("resources").join(REVISION_MODULE),
+            &pending.path().join("resources").join(REVISION_MODULE),
             revision_module(&identity).as_bytes(),
         )?;
 
-        // A revision directory is named by its content, so an existing one
-        // holds the same bytes; keep it and discard the fresh copy.
-        let directory = self.revisions().join(&identity);
-        if directory.exists() || !keep {
-            std::fs::remove_dir_all(&pending)?;
-        } else {
-            std::fs::rename(&pending, &directory)?;
-            tidepool_atomic_write::sync_parent_directory(&directory)?;
-        }
-        Ok(PendingRevision {
-            directory,
-            source_roots: roots.to_vec(),
+        Ok(CapturedRevision {
+            directory: pending,
             revision: SourceRevision {
                 identity,
                 generation: 0,
@@ -876,10 +883,10 @@ impl ExomonadSourceReload {
     /// in front of it ([`Self::drift`]), so a clean answer here does not
     /// imply a clean answer there or the reverse.
     pub(crate) fn frozen_drift(&self) -> Result<exomonad_actor::FrozenSourceDrift> {
-        let frozen_modules = manifest_of_roots(self.frozen.captured_source_roots());
+        let frozen_modules = manifest_of_roots(self.frozen.captured_source_roots())?;
         let config = self.frozen.config()?;
         let live_roots = super::workspace::resolve_source_roots(&self.workspace, &config.haskell)?;
-        let live_modules = manifest_of_roots(&live_roots);
+        let live_modules = manifest_of_roots(&live_roots)?;
         let frozen = SourceRevision {
             identity: String::new(),
             generation: 0,
@@ -1406,23 +1413,23 @@ fn revision_include_paths(directory: &Path, roots: usize) -> Vec<PathBuf> {
 /// order. Shared by a captured revision directory (whose roots are
 /// `directory/0`, `directory/1`, …, via [`revision_modules`]) and a live,
 /// uncaptured root list alike (e.g. [`ExomonadSourceReload::frozen_drift`]).
-fn manifest_of_roots(roots: &[PathBuf]) -> Vec<(String, String)> {
+fn manifest_of_roots(roots: &[PathBuf]) -> Result<Vec<(String, String)>> {
     let mut modules: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
-        for (relative, digest) in tidepool_toolchain::cache::source_root_manifest(root) {
+        for (relative, digest) in tidepool_toolchain::cache::source_root_manifest(root)? {
             let Some(module) = module_name(&relative) else {
                 continue;
             };
             modules.entry(module).or_insert(digest);
         }
     }
-    modules.into_iter().collect()
+    Ok(modules.into_iter().collect())
 }
 
 /// Every module a captured revision provides, by module name, first root
 /// wins — exactly the shadowing GHC applies across the same include roots in
 /// the same order.
-fn revision_modules(directory: &Path, roots: usize) -> Vec<(String, String)> {
+fn revision_modules(directory: &Path, roots: usize) -> Result<Vec<(String, String)>> {
     let root_paths: Vec<PathBuf> = (0..roots)
         .map(|index| directory.join(index.to_string()))
         .collect();
@@ -1470,6 +1477,42 @@ mod tests {
         .unwrap();
         std::fs::write(authored.join("Project/Work.hs"), source).unwrap();
         (project, run)
+    }
+
+    #[test]
+    fn failed_source_capture_removes_its_temporary_tree() {
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
+        let layer = SourceLayer::new(run.path());
+        assert!(layer
+            .capture_from_roots(
+                "test",
+                &[root.path().to_path_buf(), root.path().join("missing"),]
+            )
+            .is_err());
+        assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("A.hs")).unwrap(),
+            "module A where"
+        );
+    }
+
+    #[test]
+    fn source_observation_discards_scratch_and_retention_keeps_the_revision() {
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
+        let layer = SourceLayer::new(run.path());
+        let roots = [root.path().to_path_buf()];
+        let observed = layer.observe_from_roots("test", &roots).unwrap();
+        assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 0);
+        let retained = layer.capture_from_roots("test", &roots).unwrap();
+        assert_eq!(retained.revision(), &observed);
+        assert!(retained.directory.join("0/A.hs").is_file());
+        let observed_again = layer.observe_from_roots("test", &roots).unwrap();
+        assert_eq!(observed_again, observed);
+        assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 1);
     }
 
     /// Identity is content, not time, path or capture: the same bytes captured
@@ -1914,7 +1957,7 @@ mod tests {
     /// Source-revision identity; artifact reuse additionally validates the
     /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include)
+        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include).unwrap()
     }
 
     /// Two cooperating files edited together are one transaction, and what a

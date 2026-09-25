@@ -73,7 +73,7 @@ impl FrozenWorkspace {
             if frozen.version != 1 {
                 return Err("unsupported frozen workspace format; start a new swarm".into());
             }
-            if frozen.library_identity != crate::haskell_sources::source_identity() {
+            if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
                 );
@@ -173,7 +173,7 @@ impl FrozenWorkspace {
             }
             prompts.insert(name, text);
         }
-        let library_identity = crate::haskell_sources::source_identity();
+        let library_identity = crate::haskell_sources::source_identity()?;
         let source_prefix = PathBuf::from(format!("sources/{capture}"));
         let logical_files = files
             .iter()
@@ -188,7 +188,12 @@ impl FrozenWorkspace {
         .to_hex()
         .to_string();
         let workspace_root = authored_workspace_root(&config.haskell.source_roots);
-        let resources = resource_module(&identity, &workspace_root, &config.haskell.modules, &prompts);
+        let resources = resource_module(
+            &identity,
+            &workspace_root,
+            &config.haskell.modules,
+            &prompts,
+        );
         let resources_path = PathBuf::from("resources/Exomonad/Workspace.hs");
         if include.iter().any(|root| root.join("Exomonad").is_dir()) {
             return Err(
@@ -942,7 +947,7 @@ mod tests {
     /// Source-revision identity; artifact reuse additionally validates the
     /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include)
+        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include).unwrap()
     }
 
     #[test]

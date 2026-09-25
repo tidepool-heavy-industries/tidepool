@@ -29,21 +29,21 @@ fn content_hash(entries: &[(&str, &str)]) -> String {
 /// fixed content to hash; instead this hashes the on-disk `bridge/haskell/lib`
 /// and `bridge/haskell/actors` trees the build actually reads from, so
 /// resuming against a workspace still fails closed when either tree changed.
-pub(crate) fn source_identity() -> String {
+pub(crate) fn source_identity() -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
     if EMBEDDED_STDLIB.is_empty() && EMBEDDED_EXOMONAD_HASKELL.is_empty() {
         return dev_source_identity();
     }
-    format!(
+    Ok(format!(
         "{}:{}",
         content_hash(EMBEDDED_STDLIB),
         content_hash(EMBEDDED_EXOMONAD_HASKELL)
-    )
+    ))
 }
 
 /// [`source_identity`]'s dev-mode path: locate the checkout's stdlib and
 /// actors trees and hash them with the same source-revision identity the
 /// runtime uses elsewhere, rather than inventing a second content digest.
-fn dev_source_identity() -> String {
+fn dev_source_identity() -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
     let stdlib = tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
         .map(|location| location.dir)
         .ok();
@@ -57,7 +57,10 @@ fn dev_source_identity() -> String {
 /// hashes root count and content, not the root paths themselves — so a build
 /// that cannot find one tree still gets a distinct identity from one that
 /// found both.
-fn dev_source_identity_from(stdlib: Option<PathBuf>, actors: Option<PathBuf>) -> String {
+fn dev_source_identity_from(
+    stdlib: Option<PathBuf>,
+    actors: Option<PathBuf>,
+) -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
     let roots: Vec<PathBuf> = [stdlib, actors].into_iter().flatten().collect();
     tidepool_toolchain::cache::source_roots_identity(b"tidepool-facade-dev-source-identity", &roots)
 }
@@ -301,19 +304,19 @@ mod tests {
         std::fs::create_dir_all(&actors).unwrap();
         std::fs::write(actors.join("Check.hs"), "module Tidepool.Check where\n").unwrap();
 
-        let before = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone()));
+        let before = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone())).unwrap();
         std::fs::write(
             actors.join("Check.hs"),
             "module Tidepool.Check where\n-- changed\n",
         )
         .unwrap();
-        let after = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone()));
+        let after = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone())).unwrap();
         assert_ne!(
             before, after,
             "changing an actors file must change the identity"
         );
 
-        let missing_actors = dev_source_identity_from(Some(stdlib), None);
+        let missing_actors = dev_source_identity_from(Some(stdlib), None).unwrap();
         assert_ne!(
             after, missing_actors,
             "a missing tree must not silently collide with one that was found"

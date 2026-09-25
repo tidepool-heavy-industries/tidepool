@@ -10,7 +10,7 @@ use crate::digest::frame;
 
 /// Source snapshot identity, independent from compiler dependency selection.
 struct DependencyManifest {
-    files: Vec<(PathBuf, Vec<u8>)>,
+    files: Vec<(PathBuf, blake3::Hash)>,
 }
 
 impl DependencyManifest {
@@ -18,77 +18,72 @@ impl DependencyManifest {
         frame(hasher, &(self.files.len() as u64).to_le_bytes());
         for (rel, digest) in &self.files {
             frame(hasher, prefix.join(rel).as_os_str().as_encoded_bytes());
-            frame(hasher, digest);
+            // Preserve the source-identity framing for complete trees.
+            let mut tagged = [1_u8; 33];
+            tagged[1..].copy_from_slice(digest.as_bytes());
+            frame(hasher, &tagged);
         }
     }
 }
 
-/// Enumerate every source form GHC can resolve as a Haskell home module from
-/// an import path. Entries are relative to `root`, globally sorted, and carry
-/// a tagged content digest (`1 || blake3(content)`, or `0` when unreadable).
-///
-/// `visited` holds the CANONICALIZED path of every directory already walked:
-/// `path.is_dir()` follows symlinks, so a directory symlink under an include
-/// dir that (directly or transitively) points back at an ancestor would
-/// otherwise recurse forever. Canonicalizing and checking membership before
-/// descending breaks the cycle (and, as a side effect, a diamond of two
-/// symlinks to the same real directory is only hashed once).
-fn dependency_source_manifest(root: &Path) -> DependencyManifest {
-    let mut manifest = DependencyManifest { files: Vec::new() };
-    let mut visited = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut manifest, &mut visited);
-    manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
-    manifest
+/// A source tree could not be completely inspected. No identity is published
+/// from partial evidence; the failing path remains available to callers.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot inspect source path {path}: {source}")]
+pub struct SourceManifestError {
+    pub path: PathBuf,
+    #[source]
+    pub source: std::io::Error,
 }
 
-/// The per-file content manifest used for source revision identities, as
-/// readable data: each Haskell home-module source under `root`, by its path
-/// RELATIVE to `root`, paired with the hex digest of its bytes. Unreadable
-/// files carry an empty digest, exactly as they contribute an absent-marker to
-/// the key.
-///
-/// Callers that need a content identity for a set of source roots — a live
-/// source revision, say — must build it from this rather than from a second
-/// directory walk, so "what the compiler keys on" and "what a revision is
-/// named by" cannot drift apart.
-#[must_use]
-pub fn source_root_manifest(root: &Path) -> Vec<(PathBuf, String)> {
-    dependency_source_manifest(root)
+fn source_error(path: &Path, source: std::io::Error) -> SourceManifestError {
+    SourceManifestError {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// Enumerate Haskell home-module sources by their visible relative paths.
+/// The ancestor set breaks cycles while retaining distinct directory aliases.
+fn dependency_source_manifest(root: &Path) -> Result<DependencyManifest, SourceManifestError> {
+    let mut manifest = DependencyManifest { files: Vec::new() };
+    let mut ancestors = std::collections::HashSet::new();
+    collect_dependency_sources(root, root, &mut manifest, &mut ancestors)?;
+    manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(manifest)
+}
+
+/// Complete content manifest for source revision identities. Every Haskell
+/// source is paired with its relative path and content digest. Inspection
+/// failures are errors, never omissions or empty digests.
+pub fn source_root_manifest(root: &Path) -> Result<Vec<(PathBuf, String)>, SourceManifestError> {
+    Ok(dependency_source_manifest(root)?
         .files
         .into_iter()
-        .map(|(rel, digest)| {
-            let hex = match digest.split_first() {
-                Some((1, bytes)) => hex_digest(bytes),
-                _ => String::new(),
-            };
-            (rel, hex)
-        })
-        .collect()
+        .map(|(rel, digest)| (rel, digest.to_hex().to_string()))
+        .collect())
 }
 
-/// One content identity for an ORDERED set of source roots, framed exactly as
-/// root count, then each root's
-/// relative-path manifest in argument order. `domain` separates one caller's
-/// identities from another's.
-///
-/// Order matters for the same reason it matters to the cache key: GHC's search
-/// path decides module shadowing, so `[A, B]` and `[B, A]` are different
-/// compilations and must not share an identity.
-#[must_use]
-pub fn source_roots_identity(domain: &[u8], roots: &[PathBuf]) -> String {
+/// Content identity for ordered source roots. Root order determines module
+/// shadowing; relative paths and bytes determine each root's identity.
+/// Any incomplete source inspection refuses the identity.
+pub fn source_roots_identity(
+    domain: &[u8],
+    roots: &[PathBuf],
+) -> Result<String, SourceManifestError> {
     let mut hasher = blake3::Hasher::new();
     frame(&mut hasher, domain);
     frame(&mut hasher, &(roots.len() as u64).to_le_bytes());
     for root in roots {
-        dependency_source_manifest(root).fingerprint(Path::new(""), &mut hasher);
+        dependency_source_manifest(root)?.fingerprint(Path::new(""), &mut hasher);
     }
-    hasher.finalize().to_hex().to_string()
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut out, byte| {
-        // best-effort: `fmt::Write` on a `String` cannot fail.
+        // Writing to a String is infallible.
         write!(out, "{byte:02x}").ok();
         out
     })
@@ -98,40 +93,39 @@ fn collect_dependency_sources(
     root: &Path,
     dir: &Path,
     out: &mut DependencyManifest,
-    visited: &mut std::collections::HashSet<PathBuf>,
-) {
-    if let Ok(canon) = fs::canonicalize(dir) {
-        if !visited.insert(canon) {
-            return;
-        }
+    ancestors: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), SourceManifestError> {
+    let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
+    if !ancestors.insert(canonical.clone()) {
+        return Err(source_error(
+            dir,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "source directory cycle"),
+        ));
     }
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.filter_map(std::result::Result::ok).collect();
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| source_error(dir, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| source_error(dir, error))?;
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_dependency_sources(root, &path, out, visited);
-            continue;
+        let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
+        if metadata.is_dir() {
+            collect_dependency_sources(root, &path, out, ancestors)?;
+        } else if is_haskell_dependency_source(&path) {
+            let bytes = fs::read(&path).map_err(|error| source_error(&path, error))?;
+            let digest = blake3::hash(&bytes);
+            let rel = path.strip_prefix(root).map_err(|error| {
+                source_error(
+                    &path,
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                )
+            })?;
+            out.files.push((rel.to_path_buf(), digest));
         }
-        if !is_haskell_dependency_source(&path) {
-            continue;
-        }
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        // `fs::read` follows source symlinks, matching what GHC compiles.
-        let digest = match fs::read(&path) {
-            Ok(bytes) => {
-                let mut digest = vec![1];
-                digest.extend_from_slice(blake3::hash(&bytes).as_bytes());
-                digest
-            }
-            Err(_) => vec![0],
-        };
-        out.files.push((rel, digest));
     }
+    ancestors.remove(&canonical);
+    Ok(())
 }
 
 fn is_haskell_dependency_source(path: &Path) -> bool {
@@ -445,6 +439,56 @@ mod tests {
             }],
             packages: vec!["base".into()],
         }
+    }
+
+    #[test]
+    fn source_manifest_missing_root_is_not_an_empty_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("absent");
+        let error = source_root_manifest(&absent).unwrap_err();
+        assert_eq!(error.path, absent);
+        assert_eq!(error.source.kind(), std::io::ErrorKind::NotFound);
+        assert!(source_roots_identity(b"test", &[absent]).is_err());
+        assert!(source_root_manifest(root.path()).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_manifest_preserves_aliases_and_rejects_cycles() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let sources = root.path().join("A");
+        fs::create_dir(&sources).unwrap();
+        fs::write(sources.join("Module.hs"), "module A.Module where").unwrap();
+        let before = source_roots_identity(b"test", &[root.path().to_path_buf()]).unwrap();
+        symlink(&sources, root.path().join("B")).unwrap();
+        let manifest = source_root_manifest(root.path()).unwrap();
+        assert_eq!(
+            manifest
+                .iter()
+                .map(|(path, _)| path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("A/Module.hs"), Path::new("B/Module.hs")]
+        );
+        assert_eq!(manifest[0].1, manifest[1].1);
+        assert_ne!(
+            before,
+            source_roots_identity(b"test", &[root.path().to_path_buf()]).unwrap()
+        );
+        symlink(root.path(), sources.join("cycle")).unwrap();
+        let error = source_root_manifest(root.path()).unwrap_err();
+        assert_eq!(error.path, sources.join("cycle"));
+        assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_manifest_dangling_source_link_refuses_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Missing.hs");
+        std::os::unix::fs::symlink(root.path().join("absent"), &source).unwrap();
+        assert_eq!(source_root_manifest(root.path()).unwrap_err().path, source);
+        assert!(source_roots_identity(b"test", &[root.path().to_path_buf()]).is_err());
     }
 
     #[test]
