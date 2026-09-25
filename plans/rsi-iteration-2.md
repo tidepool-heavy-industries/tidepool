@@ -212,3 +212,40 @@ repair and integration checks. The reviewer reported two tests executing 1/1
 each and excluded an earlier zero-match invocation. Four rejected Haskell reply
 cells preceded the successful reply: parse errors and unavailable bindings after
 failed cells. Retain this as model-facing friction for the post-wave interview.
+
+### Reply rejection audit and next experiment
+
+The detailed rollout audit supersedes the preliminary count above: Engine had
+five rejected cells before its first successful Repair. At 18:51:10Z an extra
+closing parenthesis failed parsing; at 18:51:20Z a multiline list binding failed
+notebook input-unit parsing. Subsequent attempts referenced uncommitted `latest`
+or resolved `findings` to an unrelated existing binding. The inline-list reply
+succeeded at 18:51:57Z. Store's multiline list binding similarly failed at
+18:48:03Z and its single-line retry succeeded at 18:48:21Z. These were not
+ReviewDecision API type errors. Engine's later redundant replies failed because
+`respond` was no longer in scope after successful submission; interview why it
+attempted another reply. A later request was accepted at 18:58:27Z.
+
+Evidence: native rollouts ending 01a0d9e4-22de-7b50-a96b-e30a5db5168c (Store)
+and 01a0d9e6-f251-7e02-a97b-d84d7723c21b (Engine), dated 2026-09-25.
+
+User proposes tools tailored to the requested value so bounded Luna reviewers
+need not author Haskell. Investigate a typed review submission tool that captures
+the current request/basis and accepts the judgment and evidence, using existing
+tool schemas and reply authority. Preserve exact-candidate checks and ordinary
+typed replies; do not create a second review protocol. This is a proposal, not
+an implemented or tested tool. Assess request rebinding and single-submission
+behavior before implementation.
+
+Contract audit: the brief already required a shared scaffold before forks, but
+the next scaffold should exercise the real message projection and strict tool
+ingress. The evolving harness NEXT.md retains the superseded `typed_result`
+signature alongside its correction; consolidate its current-contract section
+after the active wave. This is an incorporation/documentation issue. Test prompts
+already exclude zero matches; retain that policy and give exact target/filter
+and expected count in the gate packet once named, rather than adding more rules.
+
+Post-wave root interview must cover these incidents, correction incorporation,
+review-tool ergonomics, evidence counts, and the final integrated behavior. Ask
+whether reply success was clear before redundant submissions. Compare answers
+with traces before selecting the next implementation changes.
