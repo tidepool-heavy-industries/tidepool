@@ -501,6 +501,8 @@ teardown_battery_daemon() {
 #   producer      - hex producer identity recorded at the daemon's last
 #                   successful start, used to detect staleness below
 
+# Mirrors tidepool-toolchain's paths::persistent_compile_daemon_socket, which
+# `exomonad init`'s preflight reads; change both together.
 _persistent_daemon_dir() {
   echo "$(cache_dir)/battery-daemon"
 }

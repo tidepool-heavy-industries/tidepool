@@ -43,13 +43,17 @@ pub use request::{
 /// This performs the daemon protocol preflight rather than merely checking
 /// that a Unix socket path exists. Composition roots use it to gate dependent
 /// process startup without reproducing the compiler endpoint wire protocol.
-pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<()> {
-    daemon::preflight(socket).map(|_| ()).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            format!("compiler daemon preflight failed: {error}"),
-        )
-    })
+/// Returns the daemon's identity, whose producer half is comparable with a
+/// directly bound extractor's (see [`ExtractCmd::bind_direct`]).
+pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<CompilerIdentity> {
+    daemon::preflight(socket)
+        .map(|binding| CompilerIdentity::daemon(binding.producer, binding.epoch))
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                format!("compiler daemon preflight failed: {error}"),
+            )
+        })
 }
 
 /// The bare binary name, used when `$TIDEPOOL_EXTRACT` is unset (resolved
@@ -409,6 +413,13 @@ impl ExtractCmd {
     /// The returned endpoint reports the producer loaded by Nix itself.
     pub fn bind_nix_fallback(&self, flake_root: &Path) -> Result<CompilerEndpoint, SpawnError> {
         CompilerEndpoint::bind_nix(flake_root)
+    }
+
+    /// Bind this command's own binary, ignoring any resident daemon named by
+    /// [`DAEMON_SOCKET_ENV`]. The endpoint reports the producer this binary
+    /// would load; dropping it closes the endpoint before any worker starts.
+    pub fn bind_direct(&self) -> Result<CompilerEndpoint, SpawnError> {
+        CompilerEndpoint::bind_direct(self)
     }
 
     /// A positional input file. Repeatable; order is preserved (the classify

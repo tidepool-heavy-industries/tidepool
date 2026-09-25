@@ -30,11 +30,13 @@ pub(crate) const STATUS_VERSION: u32 = 5;
 const PREVIOUS_STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
+mod launch_preflight;
 pub mod resources;
 mod scaffold;
 pub(crate) mod source;
 pub mod workspace;
 
+pub use launch_preflight::PreflightMode;
 pub use scaffold::{FlakeLock, NewRefusal, NixLock};
 
 const EXOMONAD_CONFIG: &str = ".exomonad/config.toml";
@@ -75,6 +77,7 @@ pub struct InitOptions {
     pub no_attach: bool,
     pub model: Option<String>,
     pub effort: Option<ExomonadEffort>,
+    pub preflight: PreflightMode,
 }
 
 pub struct HostOptions {
@@ -584,6 +587,29 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             .into());
     }
     tracing::info!(slice = slice.as_str(), ?limits, "selected swarm budget");
+    let interactive_agent = exomonad_agent::resolve_native_interactive_agent().await;
+    if options.preflight != PreflightMode::Skip {
+        let observation = launch_preflight::LaunchObservation::observe(
+            &workspace,
+            interactive_agent.as_ref().map_err(ToString::to_string),
+        );
+        let lines = launch_preflight::assess(&observation, options.preflight);
+        for line in &lines {
+            println!("{line}");
+        }
+        let failed: Vec<_> = lines
+            .iter()
+            .filter(|line| line.verdict == launch_preflight::Verdict::Fail)
+            .map(|line| line.check)
+            .collect();
+        if !failed.is_empty() {
+            return Err(runtime_error(format!(
+                "launch preflight failed: {}",
+                failed.join(", ")
+            )));
+        }
+    }
+    let interactive_agent = interactive_agent?;
     exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
     let agent = resolve_agent_defaults(configuration.defaults, options.model, options.effort)?;
     retain_packaged_interactive_agent(&workspace).await?;
@@ -602,7 +628,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join(&session_name);
     std::fs::create_dir_all(&session_root)?;
     let root_binding_path = session_root.join("root-binding.json");
-    let interactive_agent = preflight(&workspace).await?;
+    preflight(&workspace).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = exomonad_log_path(&workspace, &run_id);
     let compiler_log_path = exomonad_compiler_log_path(&workspace, &run_id);
@@ -1580,9 +1606,7 @@ fn settle_host_result(
     }
 }
 
-async fn preflight(
-    workspace: &Path,
-) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
+async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     tidepool_toolchain::toolchain::bind_extract_endpoint().map_err(|error| {
         runtime_error(format!(
             "{error}. Launch through `just exomonad-console` or `just exomonad-init` for the matched local toolchain."
@@ -1594,8 +1618,6 @@ async fn preflight(
     // stable slot, so this creates one durable entry rather than one per run.
     std::fs::create_dir_all(ACTOR_PROJECT_ROOT)?;
     exomonad_agent::trust_interactive_project(Path::new(ACTOR_PROJECT_ROOT))?;
-
-    let interactive_agent = exomonad_agent::resolve_native_interactive_agent().await?;
 
     #[allow(
         clippy::disallowed_methods,
@@ -1650,7 +1672,7 @@ async fn preflight(
             String::from_utf8_lossy(&stderr).trim()
         )));
     }
-    Ok(interactive_agent)
+    Ok(())
 }
 
 async fn wait_until_interactive(
@@ -2507,6 +2529,7 @@ mod tests {
             no_attach: true,
             model: None,
             effort: None,
+            preflight: PreflightMode::Warn,
         })
         .await
         .unwrap_err();
