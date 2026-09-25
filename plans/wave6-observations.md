@@ -28,3 +28,20 @@
 - State at 05:15Z: 16 actors, no fenced or waiting inboxes, root busy;
   run-map reports 19 rejected units and 3 unclassified dispatch failures,
   to be read at the next wake.
+
+## 05:16Z wake
+
+Alive, 12 GiB free (swap 12 GiB), 12 windows, no Failed/Retired, no latched
+machine. Root mid-cell (44 s) after the operator note; harness master gained
+ee27b86 (item2 live-gap no-spend finding integrated) and 8779c47 (item2
+trace scaffold) besides the two operator commits. run-map: actor 18@1
+(item2-trace-impl) shows a submitted delivery with host_input=ready since
+05:12 (Codex admitted it, queued behind the thread's turn; run-map renders
+any in-flight row as fenced, the status view does not); watching, no
+action. Rejections: 9@1 reply UpdatePending x2 (wave 5 had x4 with a
+watchdog scold; no nudges this time). Checkout wait since 04:47: 382 calls,
+p50 20 ms, max 23.5 s (root cell at 05:03 waited 23 s, core lead 11 s):
+co-resident contention at 16 actors, as expected without fresh machines.
+Trial 2 held: the red-review reviewer named the failing test as the
+expected red and refused to call it product verification. Trials 1, 3, 4:
+no evidence yet.
