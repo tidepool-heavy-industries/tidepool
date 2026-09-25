@@ -1,6 +1,6 @@
 ---
 name: exomonad-coordinate
-description: Split a shared Exomonad Task into inherited children, then route and inspect progress and replies with Project.Routing actors.
+description: Split a shared Exomonad Task into children, then route and inspect progress and replies with Project.Routing actors.
 ---
 
 For a worker launched with `childWithProgress @WorkProgress`, its current request
@@ -73,9 +73,11 @@ does not need a parent turn either.
 Start from the accepted `Task` and a checked shared source. Bind the shared plan
 once. An ordinary local selector can make short, disjoint assignments without
 a new workspace workstream registry. This cell assumes `baseline :: GitOid` is bound
-to the source being split. Both branches deliberately inherit the current
-reasoning and use the live root source; `lunaTaskFrom` selects the cheap `luna` alias
-with the effort you pass (`solTaskFrom` is the Sol-tier variant for design-owning children). The current branch is checkpointed before capture.
+to the source being split. Both branches use `lunaTaskFrom` with fresh context
+selected from their Tasks and the `projectHead` checkout seed. Put the shared
+decisions and seam contracts they need in those Tasks. `lunaTaskFrom` selects
+the cheap `luna` alias with the effort you pass; `solTaskFrom` uses inherited
+context for Sol children that own design or integration.
 
 ```haskell
 data WorkSlice = InterfaceSlice | ConsumerSlice deriving (Show, Eq)

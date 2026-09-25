@@ -11,10 +11,10 @@ mutually recursive and visible to every statement, but a declaration cannot
 depend on a binding a statement in the same cell introduces. Every expression
 displays its value; declarations and bindings persist into later cells.
 
-Everything named in this skill is **shipped**: it is in scope in any Exomonad cell
-with no project module and no import. The two exceptions are marked where they
-appear — `Jev` and `Commands` (effect types from `Tidepool.Effects.Core`) need
-an import line. Names from `.exomonad/workspace/Project`, such as
+The APIs in this skill are **shipped** and need no project module. Most names
+are already in scope; the raw lookup API below and `Jev` and `Commands`
+(effect types from `Tidepool.Effects.Core`) need imports. Names from
+`.exomonad/workspace/Project`, such as
 `coordinationActor`, `Outcome` and `Candidate`, are **example-only** and are
 not used here.
 
@@ -42,18 +42,6 @@ directly when a request needs custom discovery, view, candidate limit, or refere
 Leading `LANGUAGE` and `OPTIONS_GHC` pragmas apply to this cell only and must
 come first; imports persist. No pragmas or imports after executable source, no
 colon commands, no `:{` / `:}`.
-
-## Look up a name from a cell
-
-The hosted `lookup` tool is not a Haskell function. In a cell, use the raw
-effect with the default request constructor:
-
-```haskell
-lookupRaw (lookupRequest ["Cmd.quiet"])
-```
-
-`lookupRequest` uses the shipped hosted tool's defaults; use `LookupRequest`
-directly when a request needs custom discovery, view, candidate limit, or references.
 
 ## Text, not String
 
@@ -236,8 +224,9 @@ usually what you want in a cell; use `either` when the failure is a value you
 carry forward. Nothing here is ever `String`: `T.lines`, `T.splitOn`,
 `T.stripPrefix` do the path and output work.
 
-`Cmd.stdout` is `Either OutputIssue Text`, not `String` and not `Text`, so a
-command's output is `either (const "") id . Cmd.stdout <$> Cmd.run …`:
+`Cmd.stdout` returns `Either OutputIssue Text`. Retain that result and handle
+the failure explicitly; substituting empty text would hide missing evidence.
+The example renders a short failure notice while keeping the issue in `out`:
 
 ```haskell
 out <- Cmd.stdout <$> Cmd.run (Cmd.withArguments ["HEAD"] [bash|git show --stat --oneline "$1"|])
