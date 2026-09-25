@@ -75,3 +75,24 @@ root's own cell waited 96 s at 10:22 and another took 45 s of compile. That
 is the stale-split fallback class fixed on main (7d4a108b4, 43d320dbe) and not
 in this build. No note: nothing stalled, integrations landing, (d) is one
 review from done and (c) one seam from done.
+
+## 10:56Z wake
+
+Alive; 12.2 GiB available; 21 windows; no latched machine; no rejections.
+(d) is done: the replay repair (c8c7fef) was Accepted by the same reviewer on
+the exact commit and integrated (f504dd0, 10:38Z); the unanswered-call
+experiment ran offline and is recorded (f9d49a7). (c): everything but the
+Here seam is integrated; Here is on a bounded rescue wave with an unmerged
+red active-Here test and broad engine test failures recorded for its owner.
+(b): the root admitted a bounded item-13 trace sufficiency audit and found
+a request-correlated Store usage surface to use instead of JSONL. The root
+also recorded its own node interview and friction (47df0cd).
+
+Deltas: the NEXT.md-per-step commits came back (7 of the last 12 commits
+touch only NEXT.md) despite the 08:56 note; the root called
+reload_agent_spec, outcome not visible in the log. Minor cost. The costlier
+one is structural: the compaction reviewer (31@1) held the shared checkout
+60 s in one cell (compile 9 s), i.e. long work inside a Haskell cell blocks
+every co-resident actor; the root's own cell waited 96 s at 10:22 behind
+such holds. No note: nothing stalled, (d) closed and (c) is one seam from
+closing.
