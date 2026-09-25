@@ -4749,6 +4749,24 @@ async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row
 }
 
 #[tokio::test]
+async fn retired_delivery_settles_while_pump_work_is_parked() {
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let (shutdown, mut stop) = oneshot::channel();
+    let (parked_tx, parked) = oneshot::channel::<()>();
+    let mut delivery = tokio::spawn(async move {
+        until_shutdown(&mut stop, async move {
+            parked_tx.send(()).ok();
+            std::future::pending::<()>().await;
+        })
+        .await;
+    });
+    parked.await.unwrap();
+    shutdown.send(()).unwrap();
+    let outcome = stop_retired_delivery(actor, &mut delivery, Duration::from_secs(5)).await;
+    assert_eq!(outcome, CleanupComponentOutcome::Completed);
+}
+
+#[tokio::test]
 async fn retired_delivery_is_forced_without_claiming_tool_service_cleanup() {
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
     let mut delivery = tokio::spawn(std::future::pending::<()>());

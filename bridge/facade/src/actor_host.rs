@@ -6324,71 +6324,89 @@ async fn run_delivery_pump(
     let without_evidence = Mutex::new(BTreeMap::new());
     let mut pending: Option<PendingDeliveryWarning> = None;
     let mut last_message = None;
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => return,
-            _ = health.tick() => {
-                let result = deliver_pending_checked(
-                    actor,
-                    &inbox,
-                    &thread,
-                    backend.as_ref(),
-                    &producer,
-                    &reconciliations,
-                    &workspace,
-                    &runtime_observation,
-                    watch_retained.as_ref(),
-                    watch_observed_since.as_ref(),
-                    &hosted_cell_computing,
-                    &without_evidence,
-                ).await;
-                match result {
-                    Ok(()) => {
-                        if let Some(pending) = pending.take() {
-                            tracing::info!(
-                                actor = ?actor,
-                                pending_secs = pending.since.elapsed().as_secs(),
-                                "actor inbox delivery recovered"
-                            );
-                        }
-                    }
-                    Err(error) => PendingDeliveryWarning::observe(&mut pending, actor, error),
-                }
-                runtime_observation.publish_inbound_delivery(observe_inbound_delivery(
-                    &inbox,
-                    &producer,
-                    hosted_cell_computing(),
-                    &without_evidence,
-                    &mut last_message,
-                ));
-            }
-            _ = usage_poll.tick() => {
-                match backend.observe(&thread).await {
-                    Ok(Some(observation)) => runtime_observation.publish_provider_observation(observation),
-                    Ok(None) => runtime_observation.mark_provider_observation_stale(),
-                    Err(error) => {
-                        runtime_observation.mark_provider_observation_stale();
-                        tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
-                    }
-                }
-                if let Some(open_request) = &open_request {
-                    let now = u64::try_from(current_time_ms()).unwrap_or_default();
-                    if let Err(error) = remind_turn_ended_without_respond(
+    until_shutdown(&mut shutdown, async {
+        loop {
+            tokio::select! {
+                _ = health.tick() => {
+                    let result = deliver_pending_checked(
                         actor,
+                        &inbox,
                         &thread,
                         backend.as_ref(),
-                        &workspace.to_string_lossy(),
-                        &runtime_observation.snapshot(),
-                        || open_request(actor),
-                        &mut reminded_idle_since,
-                        now,
-                    ).await {
-                        tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
+                        &producer,
+                        &reconciliations,
+                        &workspace,
+                        &runtime_observation,
+                        watch_retained.as_ref(),
+                        watch_observed_since.as_ref(),
+                        &hosted_cell_computing,
+                        &without_evidence,
+                    ).await;
+                    match result {
+                        Ok(()) => {
+                            if let Some(pending) = pending.take() {
+                                tracing::info!(
+                                    actor = ?actor,
+                                    pending_secs = pending.since.elapsed().as_secs(),
+                                    "actor inbox delivery recovered"
+                                );
+                            }
+                        }
+                        Err(error) => PendingDeliveryWarning::observe(&mut pending, actor, error),
                     }
+                    runtime_observation.publish_inbound_delivery(observe_inbound_delivery(
+                        &inbox,
+                        &producer,
+                        hosted_cell_computing(),
+                        &without_evidence,
+                        &mut last_message,
+                    ));
                 }
-                poll_source_drift(actor, &runtime_observation, source_layers.as_ref(), &worktrees).await;
+                _ = usage_poll.tick() => {
+                    match backend.observe(&thread).await {
+                        Ok(Some(observation)) => runtime_observation.publish_provider_observation(observation),
+                        Ok(None) => runtime_observation.mark_provider_observation_stale(),
+                        Err(error) => {
+                            runtime_observation.mark_provider_observation_stale();
+                            tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
+                        }
+                    }
+                    if let Some(open_request) = &open_request {
+                        let now = u64::try_from(current_time_ms()).unwrap_or_default();
+                        if let Err(error) = remind_turn_ended_without_respond(
+                            actor,
+                            &thread,
+                            backend.as_ref(),
+                            &workspace.to_string_lossy(),
+                            &runtime_observation.snapshot(),
+                            || open_request(actor),
+                            &mut reminded_idle_since,
+                            now,
+                        ).await {
+                            tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
+                        }
+                    }
+                    poll_source_drift(actor, &runtime_observation, source_layers.as_ref(), &worktrees).await;
+                }
             }
         }
+    })
+    .await;
+}
+
+/// Run `work` until `shutdown` fires, dropping it at whatever await it is
+/// parked on. Shutdown is sent only by retirement, which then stops the
+/// process and joins the pump within `APPLICATION_TASK_GRACE_TIMEOUT`; an
+/// in-flight submit, rollout read or drift probe serves no one, and a pump
+/// that outlasts the grace is forced, which retains the socket directory,
+/// workspace and worktree binding. Blocking reads a dropped await detaches
+/// stay outside those resources: host Git is captured by workspace
+/// retirement itself.
+async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::future::Future) {
+    tokio::select! {
+        biased;
+        _ = shutdown => {}
+        _ = work => {}
     }
 }
 
