@@ -893,11 +893,20 @@ impl<'code> PreparedMachine<'code> {
     /// static-region folding. Only the code-generation accounting differs:
     /// see [`CompiledProgram::charge_codegen_once`] and the `install` call
     /// site that consults it.
+    ///
+    /// An image installs at most once per machine: its root-table slot and
+    /// owned descriptors belong to that one install. A second install of the
+    /// same `Arc` is refused; the caller compiles a private copy instead.
     pub fn install_shared(
         &mut self,
         image: Arc<CompiledProgram>,
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
+        if self.has_image(&image) {
+            return Err(ExecutionError::Invariant(
+                "install_shared: this machine already installed the image",
+            ));
+        }
         self.install(ProgramCustody::Shared(image), &imports)
     }
 

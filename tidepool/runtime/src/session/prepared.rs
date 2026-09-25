@@ -1832,6 +1832,19 @@ impl PreparedEngine {
                 .map_err(PreparedRuntimeError::Run);
         };
         let image = match registry.lookup(&linked) {
+            // One install per image per machine: an image's root block and
+            // owned descriptors belong to the install, so a machine that
+            // already holds this image compiles its own copy instead.
+            Some(image) if self.machine.has_image(&image) => {
+                let compiled = self
+                    .machine
+                    .compile_for_install(&linked)
+                    .map_err(PreparedRuntimeError::Compile)?;
+                return self
+                    .machine
+                    .install_program(compiled, imports)
+                    .map_err(PreparedRuntimeError::Run);
+            }
             Some(image) => image,
             None => {
                 let compiled = self
@@ -2218,6 +2231,12 @@ impl PreparedEngine {
             .registry
             .as_ref()
             .and_then(|registry| registry.lookup(&linked));
+        // A machine that already holds the registry's image for this program
+        // compiles a private copy, never shared: see `compile_and_install`.
+        let (precompiled, registry) = match precompiled {
+            Some(image) if self.machine.has_image(&image) => (None, None),
+            precompiled => (precompiled, self.registry.clone()),
+        };
         let compile = self.machine.compile_snapshot();
         Ok(InstallSnapshot {
             linked,
@@ -2227,7 +2246,7 @@ impl PreparedEngine {
             plan,
             exports,
             compile,
-            registry: self.registry.clone(),
+            registry,
             precompiled,
         })
     }
@@ -2272,7 +2291,12 @@ impl PreparedEngine {
     ) -> Result<Option<ProgramId>, PreparedRuntimeError> {
         let (fresh_values, fresh_imports) =
             self.resolve_imports(snapshot.linked.prepared(), bindings, index)?;
-        if fresh_values != snapshot.values || fresh_imports != snapshot.imports {
+        // Stale import facts, or this machine installed the same image
+        // since the snapshot: either way the caller recompiles.
+        if fresh_values != snapshot.values
+            || fresh_imports != snapshot.imports
+            || self.machine.has_image(&compiled)
+        {
             return Ok(None);
         }
         let import_count = snapshot.imports.len();
