@@ -202,10 +202,10 @@ data SessionScope = SessionScope
   , ssValIfaces :: ![SessionModule]   -- ^ inject these (readIface raw -> HPT)
   , ssIncarnation :: !(Maybe String)
     -- ^ This session's incarnation identity (the Rust @SessionId@, decimal
-    -- text), when the caller has one. 'Tidepool.GhcPipeline.sanitizeMemo'
-    -- reads it to decide whether a @Tidepool.Session.*@ 'GutsMemo' entry may
-    -- outlive this transaction; 'Nothing' keeps that eviction unconditional,
-    -- matching every caller from before this field existed.
+    -- text), when the caller has one. Session memo entries produced under
+    -- it survive the transaction ('Tidepool.GhcPipeline.sanitizeMemo') and
+    -- are reused only by a request carrying the same identity; 'Nothing'
+    -- produces entries that are discarded when the transaction ends.
   } deriving (Show)
 
 emptySessionScope :: SessionScope

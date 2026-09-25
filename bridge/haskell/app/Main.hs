@@ -125,8 +125,8 @@ freshRecoveryCaches = RecoveryCaches
 
 -- | True for a 'Module' whose cached recovery state must not survive past
 -- this transaction: one of the transaction's target modules, or any
--- @Tidepool.Session.*@ module (both mirror 'Tidepool.GhcPipeline.sanitizeMemo''s
--- own predicate for 'GutsMemo', over the same 'ModuleName').
+-- @Tidepool.Session.*@ module. These caches carry no incarnation, so unlike
+-- 'Tidepool.GhcPipeline.sanitizeMemo' they drop every session module.
 staleRecoveryModule :: ModuleName -> Module -> Bool
 staleRecoveryModule targetModName' owner =
   moduleName owner == targetModName'

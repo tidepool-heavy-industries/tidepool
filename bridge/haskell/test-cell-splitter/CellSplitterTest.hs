@@ -68,8 +68,9 @@ main = do
     ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
+    ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
 
 untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -700,11 +701,23 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
       ]
 
+memoLifecycleCompilation :: IO ()
+memoLifecycleCompilation = bracket temporary removeDirectoryRecursive requestMemoLifecycle
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-memo-lifecycle"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
 requestMemoLifecycle :: FilePath -> IO ()
 requestMemoLifecycle root = do
   let dependencyDir = root </> "Tidepool" </> "Session" </> "Lib"
       dependencyPath = dependencyDir </> "G1.hs"
       targetPath = root </> "MemoTarget.hs"
+      otherTargetPath = root </> "MemoOther.hs"
       validDependency = unlines
         [ "module Tidepool.Session.Lib.G1 (dependency) where"
         , "dependency :: Int"
@@ -723,32 +736,25 @@ requestMemoLifecycle root = do
     , "result :: Int"
     , "result = dependency + 1"
     ]
+  writeFile otherTargetPath "module MemoOther where\nother :: Int\nother = 2\n"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-      let compile purpose compiler = compiler PreparedStg mempty purpose Nothing targetPath [root] Nothing
+      -- Session entries are reusable only within one incarnation; an
+      -- incarnation-less request never reuses one and never keeps one.
+      let compileIn scope purpose compiler = compiler PreparedStg mempty purpose scope targetPath [root] Nothing
+          compile = compileIn Nothing
+          incarnate = Just (SessionScope root [] (Just "7"))
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
           targetMiss = "tidepool-memo-miss module=MemoTarget"
-      runRequest $ \compiler -> do
-        (_, coldLog) <- captureStderr root "memo-cold" (compile GeneralCompile compiler)
-        assertContains "cold request compiles the session dependency" absentSession coldLog
-        assertContains "cold request compiles its target" targetMiss coldLog
-        (_, warmLog) <- captureStderr root "memo-warm" (compile LookupTypeCompile compiler)
-        unless (not (sessionMiss `isInfixOf` warmLog)) $
-          fail "unchanged session dependency was not reused within one worker request"
-        assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
-        writeFile dependencyPath invalidDependency
-        (changed, changedLog) <- captureStderr root "memo-changed"
-          (try (compile GeneralCompile compiler) :: IO (Either SourceError PreparedPipelineResult))
-        case changed of
-          Left _ -> pure ()
-          Right _ -> fail "changed invalid session dependency reused a stale memo entry"
-        assertContains "source-sensitive memo invalidation" sessionMiss changedLog
-      writeFile dependencyPath validDependency
+      (_, anonymousLog) <- captureStderr root "memo-anonymous"
+        (runRequest $ \compiler -> compile GeneralCompile compiler)
+      assertContains "cold request compiles the session dependency" absentSession anonymousLog
       (_, nextRequestLog) <- captureStderr root "memo-next-request"
         (runRequest $ \compiler -> compile GeneralCompile compiler)
-      assertContains "normal request exit evicts session dependencies" absentSession nextRequestLog
+      assertContains "normal request exit evicts incarnation-less session entries"
+        absentSession nextRequestLog
       failedRequest <- try (captureStderr root "memo-exception" $ runRequest $ \compiler -> do
         _ <- compile GeneralCompile compiler
         throwIO (userError "request failure after compile"))
@@ -758,7 +764,37 @@ requestMemoLifecycle root = do
         Right _ -> fail "exception cleanup probe unexpectedly succeeded"
       (_, afterExceptionLog) <- captureStderr root "memo-after-exception"
         (runRequest $ \compiler -> compile GeneralCompile compiler)
-      assertContains "exceptional request exit evicts session dependencies" absentSession afterExceptionLog)
+      assertContains "exceptional request exit evicts incarnation-less session entries"
+        absentSession afterExceptionLog
+      runRequest $ \compiler -> do
+        (_, coldLog) <- captureStderr root "memo-cold" (compileIn incarnate GeneralCompile compiler)
+        assertContains "incarnation's first request compiles the session dependency" absentSession coldLog
+        assertContains "cold request compiles its target" targetMiss coldLog
+        (_, warmLog) <- captureStderr root "memo-warm" (compileIn incarnate LookupTypeCompile compiler)
+        when (sessionMiss `isInfixOf` warmLog) $
+          fail ("unchanged session dependency was not reused within one worker request: " ++ warmLog)
+        assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
+        writeFile dependencyPath invalidDependency
+        (changed, changedLog) <- captureStderr root "memo-changed"
+          (try (compileIn incarnate GeneralCompile compiler) :: IO (Either SourceError PreparedPipelineResult))
+        case changed of
+          Left _ -> pure ()
+          Right _ -> fail "changed invalid session dependency reused a stale memo entry"
+        assertContains "source-sensitive memo invalidation" sessionMiss changedLog
+      writeFile dependencyPath validDependency
+      _ <- captureStderr root "memo-incarnate-restored"
+        (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
+      -- A transaction with no incarnation (a lookup, a plain eval) must not
+      -- discard another incarnation's session entries: in a live daemon one
+      -- lands between most pairs of a session's transactions.
+      _ <- captureStderr root "memo-anonymous-between"
+        (runRequest $ \compiler ->
+          compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
+      (_, incarnateWarmLog) <- captureStderr root "memo-incarnate-warm"
+        (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
+      when (sessionMiss `isInfixOf` incarnateWarmLog) $
+        fail ("an incarnation-less transaction evicted another incarnation's session entry: "
+          ++ incarnateWarmLog))
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
