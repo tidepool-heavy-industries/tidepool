@@ -249,3 +249,31 @@ Post-wave root interview must cover these incidents, correction incorporation,
 review-tool ergonomics, evidence counts, and the final integrated behavior. Ask
 whether reply success was clear before redundant submissions. Compare answers
 with traces before selecting the next implementation changes.
+
+### Post-wave proposal for root feedback
+
+Ask after the integrated gate and stop handoff, without reopening the product
+assignment. First ask for unprompted observations, then test these proposals:
+
+1. Fix ordinary multiline notebook bindings at their owning parser/renderer
+   boundary. Implementation is delegated; preserve valid Haskell semantics and
+   demonstrate the actual rejected review-cell forms in regressions.
+2. Add a typed review submission tool alongside Haskell. Capture the current
+   ReviewRequest and basis, accept the judgment/evidence, and use the existing
+   reply mechanism. Keep Haskell available for pagination, exploration and
+   coordination. Ask which other repeated operations merit tools only after
+   observing this first addition. Do not remove the notebook in this iteration.
+3. Keep one current shared API in the brief. Before the next split, execute one
+   representative producer/consumer path through real serialization and strict
+   input schema boundaries. Ask which concrete example would have exposed this
+   wave's contract amendments before independent implementation.
+4. Put exact test target, filter and expected matched count in the release gate
+   packet. Existing prompts already demand honest counts. Ask whether zero-match
+   refusals belong in the project's existing runner, based on actual rerun cost;
+   avoid adding another check subsystem solely for this wave.
+
+Root interview: what cost the most avoidable work; which proposals would have
+helped; whether anything here duplicates an existing capability; how request
+state/notices contributed to redundant replies; and which single experiment
+would most improve the next wave. Separate reported friction from verified
+failure paths and preserve unresolved contradictions in the evidence.
