@@ -104,7 +104,7 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Use focus whenever output may be large or is a failing build/test run: focus is what you are looking for (\"the failing test and its assertion\", \"functions touching mailbox ordering\") and the result keeps only the relevant sections, names what was omitted, and points at the retained job. Raw head/tail truncation is the fallback when focus is omitted; read_output pages any retained output by byte range without rerunning. Observation expiry leaves execution alive: write_stdin with no input waits and observes it. background: true returns at once; a notice with the exit status, output tail and the source revision it ran at wakes you when it finishes, so keep working instead of polling. intent supplies the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); output max_output_bytes clamps to 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Use focus whenever output may be large or is a failing build/test run: focus is what you are looking for (\"the failing test and its assertion\", \"functions touching mailbox ordering\") and the result keeps only the relevant sections, names what was omitted, and points at the retained job. Raw head/tail truncation is the fallback when focus is omitted; read_output pages any retained output by byte range without rerunning. Observation expiry leaves execution alive: write_stdin with no input waits and observes it. background: true returns at once (focus, yield_time_ms and max_output_bytes are ignored); a notice with the exit status, output tail and the commit it started at wakes you when it finishes, so keep working instead of polling. intent supplies the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
@@ -176,7 +176,7 @@ executeWith presenter
             | inBackground -> do
                 -- A budget below one page presents no output: the host only
                 -- names the retained binding beside this line.
-                send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\nrunning in background; its completion notice will wake you. Keep working; do not poll.") 512))
+                send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\nrunning in background; its completion notice will wake you. Keep working; do not poll. read_output reads its output so far; cancel_command stops it. focus, yield_time_ms and max_output_bytes do not apply here. A host restart loses a running job.") 512))
                 pure ""
             | otherwise -> presenter (Just script) purpose focus options retained
 

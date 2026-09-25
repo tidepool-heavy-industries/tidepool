@@ -234,8 +234,10 @@ inspection while available; they do not transfer command control.
 The job runs detached with its output retained; when it finishes, a settlement
 notice wakes you with the command, exit code or signal, whether the process and
 its cleanup are terminal, whether the output is complete, a diagnostic tail,
-the directory and commit it ran at, and the `session_id` that `read_output`
-pages without rerunning. `Cmd.awaitFinished job :: Await Cmd.CommandReport`
+the directory and commit it started at (untracked files count as uncommitted
+changes), and the `session_id` that `read_output` pages without rerunning.
+`focus`, `yield_time_ms` and `max_output_bytes` do not apply to a background
+call. A job running when the host restarts is not recovered and sends no notice. `Cmd.awaitFinished job :: Await Cmd.CommandReport`
 joins it with child replies in one `watch` or `route`, like `awaitSettled`; the
 watch then owns the wake:
 
@@ -244,7 +246,7 @@ check <- Cmd.background (withMemory (GiB 4) [bash|cargo test -p my_crate --lib|]
 checked <- watch "check-done" (Cmd.awaitFinished check)
 ```
 
-A report is evidence about the source it ran at, not about a later candidate.
+A report is evidence about the source it started at, not about a later candidate.
 Before counting a pass, compare its commit with the exact revision you are
 about to accept, and refuse a dirty tree:
 
@@ -268,6 +270,7 @@ passedAt candidate report
 
 A job started in the foreground can be watched the same way; its report has no
 recorded source (`reportSource` is `Nothing`), so it cannot pass this check.
-Do not mutate a checkout while a background check still runs in it.
+Nothing guards the checkout while a background check runs in it; do not
+mutate it until the notice arrives.
 
 For project-authored direct tools, see [Defining compiled tools](references/hosted-tools.md).

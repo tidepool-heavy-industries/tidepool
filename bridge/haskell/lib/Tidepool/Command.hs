@@ -222,7 +222,9 @@ tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 
 -- | Start a command and return at once. When it finishes, a settlement
 -- notice wakes this actor, unless a watch on 'awaitFinished' takes that wake
--- over. The notice and the report carry the source the command ran at.
+-- over. The notice and the report carry the commit the command started at;
+-- the checkout is not guarded while it runs. A job running when the host
+-- restarts is not recovered and sends no notice.
 background :: (Member Commands effects) => Command -> Eff effects Job
 background = fmap checked . tryBackground
 
@@ -231,10 +233,10 @@ tryBackground :: (Member Commands effects) => Command -> Eff effects (Either Com
 tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 
 -- | Ready when the job has finished, with its outcome, cleanup, output
--- completeness, a diagnostic tail, and the source it ran at ('Nothing' for a
--- job started in the foreground). Compose it with 'awaitSettled' and use it
--- with 'watch' or 'route'. A report proves the command ran at that source; it
--- says nothing about a later revision.
+-- completeness, a diagnostic tail, and the source it started at ('Nothing'
+-- for a job started in the foreground). Compose it with 'awaitSettled' and use
+-- it with 'watch' or 'route'. A report is evidence about the commit the command
+-- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
   Await [[AwaitCommand key]] (\_ _ -> send (ObserveCommandWith key))

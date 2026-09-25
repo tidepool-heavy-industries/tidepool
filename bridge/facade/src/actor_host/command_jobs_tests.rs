@@ -1791,7 +1791,7 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     tokio::select! {
-        request = campaign.next_deployment("first skill backend", Duration::from_secs(180), |event| match event {
+        request = campaign.next_deployment("first skill backend", Duration::from_secs(300), |event| match event {
             LocalResidentDeployment::CommandBackend(request) => Ok(request),
             other => Err(other),
         }) => request.supply(Ok(backend.clone())),
@@ -2297,21 +2297,36 @@ async fn command_settlement(campaign: &mut TestCampaign) -> exomonad_actor::Sett
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
-    let response = policy
-        .dispatch_boxed(ToolInvocation {
-            context: None,
-            name: "bash".into(),
-            arguments: ToolArguments::Structured(
-                serde_json::json!({"cmd":"cargo test -p crate --lib","background":true}),
-            ),
-        })
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(
+            serde_json::json!({"cmd":"cargo test -p crate --lib","background":true}),
+        ),
+    }));
+    // The source probe is released first; the command waits behind it. The
+    // probe is answered while the call is in flight so its admission bound
+    // cannot expire behind a slow compile of the call itself.
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let probe = TestCommands::completed_streams(&format!("/work/tree\n{commit}\ndirty\n"), "");
+    campaign
+        .next_deployment(
+            "probe backend",
+            Duration::from_secs(300),
+            |event| match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        )
         .await
-        .unwrap();
-    // Nothing has run yet: the call returned before any backend was supplied.
+        .supply(Ok(probe.clone()));
+    // The call returns without the command's backend: nothing waits on it.
+    let response = running.await.unwrap().unwrap();
     assert_eq!(response["status"], "committed", "{response}");
     let output = response["items"][0]["output"].as_str().unwrap();
     assert!(
-        output.contains("running in background; its completion notice will wake you"),
+        output.contains("running in background; its completion notice will wake you")
+            && output.contains("A host restart loses a running job."),
         "{output}"
     );
     let binding = response["items"][0]["installedBindings"][0]
@@ -2330,12 +2345,6 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
         .unwrap()
         .to_owned();
 
-    // The source probe is released first; the command waits behind it.
-    let commit = "0123456789abcdef0123456789abcdef01234567";
-    let probe = TestCommands::completed_streams(&format!("/work/tree\n{commit}\ndirty\n"), "");
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(probe.clone()));
     let command = TestCommands::completed_streams("running 3 tests\ntest result: ok\n", "");
     backend_request(&mut campaign)
         .await
@@ -2354,7 +2363,7 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     assert_eq!(
         rendered,
         format!(
-            "job {job} finished (elapsed time unavailable).\ncommand: cargo test -p crate --lib\nexit 0 · process and cleanup terminal · output complete\nran in /work/tree at {commit} with uncommitted changes\nstdout tail:\nrunning 3 tests\ntest result: ok\nFull output: read_output session_id={job}; nothing reruns. A pass here covers this source only, not a later revision."
+            "job {job} finished (elapsed time unavailable).\ncommand: cargo test -p crate --lib\nexit 0 · process and cleanup terminal · output complete\nstarted in /work/tree at {commit} with uncommitted changes\nstdout tail:\nrunning 3 tests\ntest result: ok\nFull output: read_output session_id={job}; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
         )
     );
     campaign.forest.shutdown().await;
@@ -2416,6 +2425,65 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
     assert!(text.contains(commit), "{text}");
     assert!(text.contains("True"), "{text}");
     assert!(text.contains("Nothing"), "{text}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
+    let mut campaign = TestCampaign::start().await;
+    let running = tokio::spawn({
+        let policy = campaign.root_installation.policy.clone();
+        async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "done <- Cmd.start [bash|true|]\nCmd.await done",
+            )
+            .await
+        }
+    });
+    campaign
+        .next_deployment(
+            "foreground backend",
+            Duration::from_secs(300),
+            |event| match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await
+        .supply(Ok(TestCommands::completed("")));
+    assert_eq!(running.await.unwrap()["status"], "committed");
+    // Twice: a second watch on the same finished job is served as well.
+    for label in ["late-one", "late-two"] {
+        committed(
+            &campaign,
+            &format!("w <- watch \"{label}\" (Cmd.awaitFinished done)\nWatchReady r <- pollWatch w\nCmd.commandOutcome (Cmd.reportResult r)"),
+        )
+        .await;
+        campaign
+            .next_deployment("late watch", Duration::from_secs(30), |event| match event {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.label == label =>
+                {
+                    Ok(notification)
+                }
+                other => Err(other),
+            })
+            .await;
+    }
+    assert!(campaign
+        .next_deployment_opt(Duration::from_millis(500), |event| match event {
+            LocalResidentDeployment::WatchChanged { notification } => Ok(notification),
+            LocalResidentDeployment::SettlementChanged { notification } =>
+                Err(LocalResidentDeployment::SettlementChanged { notification }),
+            other => Err(other),
+        })
+        .await
+        .is_none());
+    campaign.assert_no_deployment("no settlement notice for a watched job", |event| {
+        matches!(event, LocalResidentDeployment::SettlementChanged { .. })
+    });
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
