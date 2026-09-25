@@ -277,3 +277,17 @@ helped; whether anything here duplicates an existing capability; how request
 state/notices contributed to redundant replies; and which single experiment
 would most improve the next wave. Separate reported friction from verified
 failure paths and preserve unresolved contradictions in the evidence.
+
+Implementation investigation correction: the rejected list RHS started before
+the layout column of its `let` binder, so these examples violate normal Haskell
+layout. Do not describe every rejection as a splitter defect or silently relax
+the language. Check valid multiline cells and the separate Rust/worker placement
+divergence; make malformed indentation actionable where the owning diagnostics
+permit it.
+
+Another verified prompt defect: harness `.exomonad/prompts/review.md:61` still
+uses `let repairLabel = "repair-candidate" :: Label`, which Driver's reviewer
+rejected at 19:05:16Z with no IsString Label instance. Shared and template review
+prompts already use `[label|repair-candidate|]`, also exercised by
+checks/project_review_repair.hs. Repair the project override after the wave;
+do not confuse this with the multiline layout issue.
