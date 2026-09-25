@@ -141,4 +141,25 @@ arbitrary work. Power-loss durability and exactly-once remote attempts are not
 claimed. Wave-10 history is archived in harness docs/wave10-handoff.md.
 
 After its completed interview and handoff, wave 10 was stopped through the CLI
-(exit 0); its tmux session no longer exists. No wave 11 run has been launched.
+(exit 0); its tmux session no longer exists.
+
+## Wave 11 launch — 2026-09-25 20:09 UTC
+
+Launched on the user's instruction through `just exomonad-init`, with the
+matched local tools, Sol Medium root, and one compiler worker. Build and launch
+preflight passed. Root received the NEXT.md brief and began reading the assignment
+and resolving the committed source baseline; nested Luna delegation is assigned,
+not yet observed at launch.
+
+- Run: `cbc4c903-1655-4b3d-a48a-c8eb3712bd77`; tmux: `wave11`.
+- Tidepool binary source: `ec1b006686fd71227b393acc93df13fbfa586661`.
+- Harness baseline: `3788fd25ff7b081ac123b66aadf1dab25c0f021a`.
+- Workspace pin: `5864ae1eada2410fdd8e2e371b4ce14d556ba356`.
+- Root thread: `01a0da2f-4342-7af2-b48b-fc4dd21661ff`; pane `%511`.
+- Host evidence: harness `.exomonad/logs/cbc4c903-1655-4b3d-a48a-c8eb3712bd77.jsonl`.
+- Launch command output: `/tmp/rsi-wave11-launch.log`.
+
+The terminal's first Enter left the brief in the composer; a separate Enter
+submitted it. Confirmed execution by the root's first shell call reading NEXT.md
+and reporting the exact harness HEAD, rather than treating terminal input as
+proof of delivery.
