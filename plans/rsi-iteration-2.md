@@ -24,8 +24,10 @@ The integrated first-request and adapter-readiness targets each executed 1/1.
 - Manual head advancement in the test limits its claim to persistence. The next
   release gate should use the real driver for lifecycle and parent publication.
 
-Do not optimize for elapsed minutes. Choose a capability substantial enough to
-require shared decisions and integration; faster successful execution is welcome.
+Choose the smallest wave that teaches enough to meaningfully change the next
+one; size and duration are not success criteria. For wave 10, deliberately expand
+beyond wave 9: implement and integrate the complete lifecycle below, with shared
+contracts and production consumers. Faster successful execution is welcome.
 
 ## Preparation improvements
 
@@ -37,7 +39,7 @@ require shared decisions and integration; faster successful execution is welcome
    ReviewRequest carries it through admission and acceptance. Exact reviews
    return repair findings to the requester; no Task is fabricated. Workspace
    `7307478`, Tidepool `4e4a62396`, harness `705eaee`. The focused provenance
-   recipe passed six assertions in Tidepool; harness verification follows.
+   recipe passed six assertions in both Tidepool and the pinned harness workspace.
 3. Repair generated wrapper type preservation at the compiler/workbench boundary.
    No fixed qualifier whitelist or silent removal of semantically needed pins.
    Acceptance: the actual automaticReview recipe executes its assertions, plus
@@ -80,6 +82,20 @@ Then delegate meaningful obligations with disjoint owned paths where practical:
 
 The acceptance owner supplies fixtures early; do not assign overlapping Engine
 or Store edits to several leaves merely to achieve parallelism.
+
+## Scope and learning budget
+
+The required outcome includes sender-visible envelope identity, structured typed
+answer publication with input provenance, and continuation through the existing
+driver. A lower-level passing test alone does not complete the wave. Establish
+the common contract first, then use two or three implementation owners where
+source ownership permits. Root owns the combined gate and integration.
+
+This gives us real opportunities to observe baseline incorporation, independent
+implementation against a shared contract, candidate review, and integrated race
+handling. Retain event waiting and test the unified review request on real
+candidates. Automatic review is an additional experiment only if its prerequisite
+works; its repair must not become an unbounded launch dependency.
 
 ## Release scenarios
 
