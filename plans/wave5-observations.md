@@ -78,3 +78,13 @@ fence is diagnosed. New friction: the watchdog classified core's
 sendMessage checkpoint as destructive_command (0.9) from quoted text;
 root recorded it in docs/exomonad-friction.md at 0553f8c. Fix lanes
 running off main: delivery-fence, agent-ux, observability.
+
+## 04:15Z wake
+
+Alive, 17 GiB free, 7 windows, no Failed/Retired, no latched machine. Root
+idle since 04:02Z after committing its round-two design sketches
+(95daec8). Since then the harness master gained 48b738f, "steering after
+run 2: answer Q4/Q5, unblock (c) provenance, rescope probe, rewrite
+NEXT.md", the operator's brief for the next run. No actor activity since
+04:02Z; 20 calls since 03:49 with checkout_wait p50 0 ms, max 216 ms. The
+run is in stand-down; no intervention.
