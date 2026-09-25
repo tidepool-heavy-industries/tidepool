@@ -2651,8 +2651,9 @@ async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
             .unwrap()
         };
     }
-    let expected = "Your request 4 is still open. End with respond (Produced ...) or respond (Blocked reason evidence); a turn that ends in prose settles nothing.";
+    let expected = "Request 4 appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. Otherwise, finish it with respond using its assigned reply type.";
 
+    runtime.publish_request_activation(request, 1);
     runtime.publish_provider_observation(turn("t1", 1, ProviderTurnState::Active));
     remind!(Some(request), u64::MAX);
     runtime.publish_provider_observation(turn("t1", 2, ProviderTurnState::Succeeded));
@@ -2683,6 +2684,99 @@ async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
     let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
     remind!(None, idle + poll);
     assert_eq!(backend.messages.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn request_reminder_ignores_the_turn_visible_at_activation() {
+    use exomonad_agent::{
+        BackendThreadId, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba3".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(false),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let request = exomonad_actor::RequestId(13);
+    let runtime = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let turn = |turn: &str, revision, state| ProviderObservation {
+        turn: Some(ProviderTurnObservation {
+            thread: "thread".into(),
+            turn: turn.into(),
+            revision,
+            state,
+        }),
+        ..Default::default()
+    };
+    let poll = u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap();
+    let mut reminded = None;
+
+    // A completed turn from the prior request must not remind the new request.
+    runtime.publish_provider_observation(turn("old", 1, ProviderTurnState::Succeeded));
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    runtime.publish_request_activation(request, 2);
+    let old_idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    remind_turn_ended_without_respond(
+        actor,
+        &thread,
+        &backend,
+        "/",
+        &runtime.snapshot(),
+        || Some(request),
+        &mut reminded,
+        old_idle + poll,
+    )
+    .await
+    .unwrap();
+    assert!(backend.messages.lock().unwrap().is_empty());
+
+    // Even when the old turn finishes after activation, it is still old.
+    runtime.publish_provider_observation(turn("old", 2, ProviderTurnState::Active));
+    runtime.publish_provider_observation(turn("old", 3, ProviderTurnState::Succeeded));
+    let old_idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    remind_turn_ended_without_respond(
+        actor,
+        &thread,
+        &backend,
+        "/",
+        &runtime.snapshot(),
+        || Some(request),
+        &mut reminded,
+        old_idle + poll,
+    )
+    .await
+    .unwrap();
+    assert!(backend.messages.lock().unwrap().is_empty());
+
+    runtime.publish_provider_observation(turn("new", 4, ProviderTurnState::Active));
+    runtime.publish_provider_observation(turn("new", 5, ProviderTurnState::Succeeded));
+    let new_idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    remind_turn_ended_without_respond(
+        actor,
+        &thread,
+        &backend,
+        "/",
+        &runtime.snapshot(),
+        || None, // The request settled before the reminder was sent.
+        &mut reminded,
+        new_idle + poll,
+    )
+    .await
+    .unwrap();
+    assert!(backend.messages.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

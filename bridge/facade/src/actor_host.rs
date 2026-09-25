@@ -6542,8 +6542,8 @@ async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::fu
 
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Push one reminder to an actor whose provider turn ended while the request
-/// presented to it is still open. The idle age is the status line's
+/// Push one reminder to an actor whose provider turn ended after its current
+/// request was activated and the request is still open. The idle age is the status line's
 /// `provider_idle_since_unix_ms`; the reminder waits one poll interval of
 /// idleness so a model about to call `respond` is not interrupted, and fires
 /// once per idle period (`reminded_idle_since` holds the period reminded;
@@ -6559,17 +6559,30 @@ async fn remind_turn_ended_without_respond(
     reminded_idle_since: &mut Option<u64>,
     now_unix_ms: u64,
 ) -> Result<(), String> {
-    if observation.provider_observation_stale
-        || !observation
-            .provider_turn
-            .as_ref()
-            .is_some_and(|turn| turn.state == exomonad_agent::ProviderTurnState::Succeeded)
-    {
+    if observation.provider_observation_stale {
         return Ok(());
     }
+    let Some(turn) = observation
+        .provider_turn
+        .as_ref()
+        .filter(|turn| turn.state == exomonad_agent::ProviderTurnState::Succeeded)
+    else {
+        return Ok(());
+    };
     let Some(idle_since) = observation.provider_idle_since_unix_ms else {
         return Ok(());
     };
+    let Some(activation) = observation.request_activation.as_ref() else {
+        return Ok(());
+    };
+    if idle_since < activation.at_unix_ms
+        || activation
+            .provider_turn
+            .as_ref()
+            .is_some_and(|(thread, prior_turn)| turn.thread == *thread && turn.turn == *prior_turn)
+    {
+        return Ok(());
+    }
     let poll_ms = u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap_or(u64::MAX);
     if *reminded_idle_since == Some(idle_since) || now_unix_ms.saturating_sub(idle_since) < poll_ms
     {
@@ -6578,6 +6591,9 @@ async fn remind_turn_ended_without_respond(
     let Some(request) = open_request() else {
         return Ok(());
     };
+    if activation.request != request {
+        return Ok(());
+    }
     backend
         .push(cwd, thread, &turn_end_reminder(request))
         .await
@@ -6594,7 +6610,7 @@ async fn remind_turn_ended_without_respond(
 
 fn turn_end_reminder(request: exomonad_actor::RequestId) -> String {
     format!(
-        "Your request {} is still open. End with respond (Produced ...) or respond (Blocked reason evidence); a turn that ends in prose settles nothing.",
+        "Request {} appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. Otherwise, finish it with respond using its assigned reply type.",
         request.0
     )
 }

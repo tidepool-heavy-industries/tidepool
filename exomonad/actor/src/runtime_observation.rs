@@ -221,6 +221,14 @@ pub struct ProviderUsageSample {
     pub uncached_input_tokens: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestActivationObservation {
+    pub request: crate::RequestId,
+    pub at_unix_ms: u64,
+    /// Provider turn visible when the request was activated.
+    pub provider_turn: Option<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActorRuntimeObservation {
     pub compactions: Option<u64>,
@@ -237,6 +245,7 @@ pub struct ActorRuntimeObservation {
     pub provider_parent_thread: Option<String>,
     pub current_activation_sequence: Option<u64>,
     pub activation_kind: ActorActivationKind,
+    pub request_activation: Option<RequestActivationObservation>,
     pub event_watermark: u64,
     pub cache_boundary: CacheBoundaryReason,
     pub prompt_profile: Option<String>,
@@ -579,6 +588,20 @@ impl ActorRuntimeObservationHandle {
     pub fn publish_request_activation(&self, request: crate::RequestId, sequence: u64) {
         let mut observation = self.inner.write();
         observation.current_activation_sequence = Some(sequence);
+        if observation
+            .request_activation
+            .as_ref()
+            .is_none_or(|activation| activation.request != request)
+        {
+            observation.request_activation = Some(RequestActivationObservation {
+                request,
+                at_unix_ms: unix_time_ms(),
+                provider_turn: observation
+                    .provider_turn
+                    .as_ref()
+                    .map(|turn| (turn.thread.clone(), turn.turn.clone())),
+            });
+        }
         observation.activation_kind = ActorActivationKind::RequestActivated {
             request,
             activation_sequence: sequence,
@@ -1051,6 +1074,42 @@ mod tests {
             ActorActivationKind::EventsActivated {
                 inbox_sequences: vec![11, 12]
             }
+        );
+        assert_eq!(
+            snapshot.request_activation.unwrap().request,
+            crate::RequestId(7)
+        );
+    }
+
+    #[test]
+    fn repeated_request_activation_keeps_the_original_provider_turn() {
+        use exomonad_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
+
+        let observation = ActorRuntimeObservationHandle::default();
+        let turn = |name: &str, revision| ProviderObservation {
+            turn: Some(ProviderTurnObservation {
+                thread: "thread".into(),
+                turn: name.into(),
+                revision,
+                state: ProviderTurnState::Active,
+            }),
+            ..Default::default()
+        };
+        observation.publish_provider_observation(turn("prior", 1));
+        observation.publish_request_activation(crate::RequestId(7), 0);
+        let first = observation.snapshot().request_activation.unwrap();
+        assert_eq!(first.provider_turn, Some(("thread".into(), "prior".into())));
+
+        observation.publish_provider_observation(turn("serving", 2));
+        observation.publish_request_activation(crate::RequestId(7), 3);
+        assert_eq!(observation.snapshot().request_activation, Some(first));
+
+        observation.publish_request_activation(crate::RequestId(8), 4);
+        let next = observation.snapshot().request_activation.unwrap();
+        assert_eq!(next.request, crate::RequestId(8));
+        assert_eq!(
+            next.provider_turn,
+            Some(("thread".into(), "serving".into()))
         );
     }
 
