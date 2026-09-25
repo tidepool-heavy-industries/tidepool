@@ -1,18 +1,8 @@
-//! A typed monotonic id issuer — the shared mechanism behind every
-//! `<prefix>_<n>`-shaped id in the workspace (`tidepool-mcp`'s
-//! `server_common::mint_id` and its REPL continuation-id caller,
-//! `tidepool-runtime`'s `SessionEngine::next_continuation_id` and
-//! `ResidentSession::next_cont_id`).
+//! In-process monotonic ids shaped `<prefix>_<n>`.
 //!
-//! Each of those independently paired an `AtomicU64` counter with a
-//! `format!("{prefix}_{n}")` call. [`MonotonicIdIssuer`] owns both halves so
-//! the scheme (start at 1, increment by one, `prefix_n` rendering) exists
-//! once; callers keep their own choice of prefix and their own decision
-//! about where the counter lives (bare, `Arc`-shared, …).
-//!
-//! Durable, cross-process-unique ids (e.g. the self-iterating harness's run
-//! ids) are explicitly OUT of scope here — this is only the in-process,
-//! reset-on-restart counter shape.
+//! The issuer owns both the counter and rendering. Its sequence starts at one
+//! by default and resets on restart; durable cross-process ids use another
+//! mechanism.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -1,37 +1,10 @@
-//! A single typed merge primitive for the worktree-coordination fold: a node
-//! merges each child's branch into its own worktree, in declared branch
-//! order.
+//! Merge one exact child commit into an integration worktree through `GitCli`.
 //!
-//! This is NOT a reopening of the "no git workflow verbs" boundary
-//! (`crate::git`'s module docs, this crate's `CLAUDE.md`, and
-//! `Tidepool.Worktree`'s own docstring all say the same thing: rebase,
-//! cherry-pick, and conflict RESOLUTION belong to coding agents with their
-//! native tools, and Tidepool only observes what the repository became). It
-//! is one narrowly-typed primitive for the coordination fold specifically.
-//! It IS exposed as a `Worktree` effect verb (`WorktreeTryMerge` /
-//! `tryMerge`, generated from `tidepool-protocol`'s schema) — the
-//! consolidation is deliberate, not a widening of the boundary: two authored
-//! Haskell reimplementations of exactly this primitive
-//! (`exomonad/harness-dogfooding/dev-tree/Harness.hs`'s `mergeChild` and
-//! `exomonad/harness-dogfooding/recursive-companion/Harness.hs`'s `mergeChildInto`)
-//! had drifted from this crate's own conflict-vs-failure classification —
-//! every nonzero exit read as a conflict, a failed `merge --abort` silently
-//! ignored — so the fix is exposing the one ground truth, not re-deriving it
-//! a third time. The boundary this module does NOT reopen is a GENERAL git
-//! workflow surface: there is still no `rebase`, `cherryPick`, or conflict
-//! resolution verb, and resolving a reported conflict stays authored policy.
-//! This module exists so that semantics is defined ONCE, typed, and pinned by
-//! a fast-tier test against a real repository, rather than re-derived ad hoc
-//! at each authored call site.
-//!
-//! Every outcome is DATA. A conflict never leaves the target worktree
-//! mid-merge: [`try_merge`] runs `git merge --abort` before returning
-//! [`MergeOutcome::ManualGitRequired`]. A landed merge whose workspace checkout
-//! cannot be synchronized also returns that outcome, naming the landed commit.
-//! A merge failure that is not a real conflict (an unknown
-//! branch, for instance) surfaces as `Err(WorktreeError::GitFailure(_))`,
-//! the crate's ordinary git-failure shape — never a panic, never a
-//! half-merged tree.
+//! [`try_merge`] distinguishes conflicts from invocation failures. It aborts
+//! a conflicted merge before returning [`MergeOutcome::ManualGitRequired`];
+//! other git failures remain [`WorktreeError::GitFailure`]. A merge that lands
+//! but cannot synchronize its workspace checkout also requires manual Git
+//! work and names the landed commit. Conflict resolution stays with the caller.
 
 use std::collections::BTreeMap;
 use std::path::Path;

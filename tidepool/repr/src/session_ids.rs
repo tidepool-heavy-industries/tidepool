@@ -1,5 +1,5 @@
-//! Session identifiers for `tidepool-repl`'s persistent declaration
-//! environment and persistent binding store.
+//! Session identifiers for the persistent declaration environment and binding
+//! store in `tidepool-runtime`.
 //!
 //! Newtypes — never bare `u64`/`String` — so the invariants (monotonic
 //! generation, the single gen-versioned module-name string) live on the type.
@@ -77,7 +77,7 @@ pub struct BindingName(pub String);
 ///
 /// - `Lib`: user-written declarations, accumulated as source text.
 /// - `Val`: synthesized value-binding ifaces; construction lives in
-///   `tidepool-repl`/`tidepool-runtime`, not in this crate.
+///   `tidepool-runtime`, not in this crate.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SessionModuleKind {
     Val,
@@ -112,7 +112,7 @@ impl SessionModule {
         }
     }
 
-    /// A `Tidepool.Session.Val.G<g>` value-iface module (Wave 3).
+    /// A `Tidepool.Session.Val.G<g>` value-iface module.
     #[must_use]
     pub fn val(gen: Generation) -> SessionModule {
         SessionModule {
