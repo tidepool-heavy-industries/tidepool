@@ -31,7 +31,8 @@ spliceTemplate template turnText binders = go template
 placeTurnStmt :: String -> String
 placeTurnStmt turnText = case letRest of
   Just rest | not ("{" `isPrefixOf` dropWhile isSpace rest) ->
-    "let {" ++ rest ++ trailingNewline rest ++ " }\n"
+    let body = explicitBraceLetBody rest
+     in "let {" ++ body ++ trailingNewline body ++ " }\n"
   _ -> turnText ++ trailingNewline turnText
   where
     trimmed = dropWhile isSpace turnText
@@ -39,6 +40,26 @@ placeTurnStmt turnText = case letRest of
       Just rest@(char : _) | isSpace char -> Just rest
       _ -> Nothing
     trailingNewline text = if "\n" `isSuffixOf` text then "" else "\n"
+
+-- | Mirror Rust's @explicit_brace_let_body@: preserve the separators that
+-- layout inserts between declarations when a statement-position @let@ is
+-- placed inside explicit braces. A deeper line continues the preceding
+-- declaration's expression.
+explicitBraceLetBody :: String -> String
+explicitBraceLetBody rest = firstLine ++ go following
+  where
+    (firstLine, following) = break (== '\n') rest
+    firstColumn = 4 + length (takeWhile isSpace firstLine)
+
+    go [] = []
+    go ('\n' : remaining) =
+      let (line, followingLines) = break (== '\n') remaining
+          (indent, content) = span isSpace line
+          placed = if not (null content) && length indent + 1 == firstColumn
+            then indent ++ ";" ++ content
+            else line
+       in '\n' : placed ++ go followingLines
+    go other = other
 
 -- | Read the module name from a conventional module header.
 extractModuleName :: String -> Maybe String

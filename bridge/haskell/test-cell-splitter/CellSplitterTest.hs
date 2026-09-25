@@ -20,6 +20,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
+import Tidepool.TurnSource (spliceTemplate)
 import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
@@ -57,7 +58,9 @@ main = do
       automaticGenericPlans flags
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
+      multilineLetPlacement flags
   interfaceMeasurementDiagnostics
+  multilineLetCompilation
   renderNameErrorTeachesGroupPaths
   ambiguousOccurrenceHintCompilation
   getArgs >>= \case
@@ -71,6 +74,68 @@ main = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+multilineLetPlacement :: DynFlags -> IO ()
+multilineLetPlacement flags = do
+  let template = "{{TURN_STMT}}pure ({{BINDERS}})\n"
+      signed = unlines
+        [ "let findings :: [Text]"
+        , "    findings ="
+        , "      [\"ready\"]"
+        ]
+      expected = unlines
+        [ "let { findings :: [Text]"
+        , "    ;findings ="
+        , "      [\"ready\"]"
+        , " }"
+        , "pure (findings)"
+        ]
+  assertEqual "signature and equation retain their separator"
+    expected (spliceTemplate template signed "findings")
+  assertEqual "RHS continuation is not a new declaration"
+    "let { checks =\n      [1, 2]\n }\npure (checks)\n"
+    (spliceTemplate template "let checks =\n      [1, 2]\n" "checks")
+  assertEqual "explicit-brace let is kept"
+    "let { checks = [1, 2] }\npure (checks)\n"
+    (spliceTemplate template "let { checks = [1, 2] }" "checks")
+  forM_ ["let checks =\n      [1, 2]\n", signed] $ \source ->
+    case splitCellWithFlags flags source of
+      Right [item] -> assertEqual "valid multiline let stays one bind item"
+        KBind (sbKind (classifyWithFlags flags (cellSourceText item)))
+      other -> fail ("valid multiline let split unexpectedly: " ++ show other)
+  assertEqual "under-indented wave RHS is not a valid binding"
+    KExpr (sbKind (classifyWithFlags flags "let checks =\n  [1, 2]\n"))
+  assertEqual "under-indented typed wave RHS is not a valid binding"
+    KExpr (sbKind (classifyWithFlags flags "let findings :: [Text] =\n  [\"ready\"]\n"))
+
+multilineLetCompilation :: IO ()
+multilineLetCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let includes = ["lib"]
+      template name = unlines
+        [ "{-# LANGUAGE OverloadedStrings #-}"
+        , "module " ++ name ++ " where"
+        , "import Data.Text (Text)"
+        , "result :: IO Int"
+        , "result = do { {{TURN_STMT}}; pure (length {{BINDERS}}) }"
+        ]
+      cases =
+        [ ("LetChecks", "let checks =\n      [1, 2]\n", "checks")
+        , ("LetFindings", "let findings :: [Text]\n    findings =\n      [\"ready\"]\n", "findings")
+        ]
+  withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest ->
+    runRequest $ \compiler -> forM_ cases $ \(name, source, binder) -> do
+      let path = root </> (name ++ ".hs")
+      writeFile path (spliceTemplate (template name) source binder)
+      _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing path includes Nothing
+      pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-multiline-let"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
