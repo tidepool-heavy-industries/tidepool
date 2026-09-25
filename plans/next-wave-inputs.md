@@ -610,3 +610,29 @@ settled), git capture 1 to 2 s total.
 - **Manifest ownership:** an assignment that adds a trait derive or a new
   crate must own the crate manifest and lock file, or the lead adds the
   dependency before forking. Brief and lead prompt item.
+
+## First-turn orientation (waves 5 and 6, rollouts, 2026-09-25)
+
+Median time to the first productive action: root about 28 s / 4.5 calls,
+leads 25 s / 2.5, reviewers 20 s / 4, Luna implementers 68 s / 10 (wave 6
+rose to about 86 s / 13). Recurring reads forced by the harness or brief,
+each seen at least twice:
+1. `inspectFull sessionInput` on 14 of 14 children: the activation text
+   truncates the Task ("additional detail omitted"). One child returned
+   Blocked prematurely on the truncated text. Fix: do not truncate the Task.
+2. `parentAgent` is Nothing for `lunaTask` (selected-context) children, yet
+   task.md and the leads' obligations told them to sendMessage the parent:
+   3 to 10 calls per Luna hunting the parent (lookups, status lineage), and
+   checkpoints silently dropped in the Nothing branch. Fix: every child
+   gets a parent handle (its supervisor), independent of context
+   inheritance; until then, prompts say reportProgress / respond Blocked.
+3. `.exomonad/plans/language.md` re-read by 8 Lunas for nothing.
+4. Reply construction: Candidate/Outcome/ReviewDecision constructor lookups
+   by 8 actors; ambiguous `Blocked`/`Accepted` failed 5 cells (fixed by the
+   workspace pin); CommitReview reviewers derived the base with merge-base
+   and one treated the input as ReviewTask (prompt fixed).
+5. PRD named by section without a path (3 hunts).
+6. Both roots re-derived the fork-cell recipe from the fork and coordinate
+   skills plus two lookups each.
+Prompt paragraphs for root, lead, luna and reviewer are in the wave6-prompts-2
+branch; engine fixes 1 and 2 in the parent-handle branch.
