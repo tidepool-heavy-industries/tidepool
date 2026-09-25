@@ -606,3 +606,11 @@ audit before anything is built?
 Separately, `routing` on the fresh-machine path latched the root machine with
 "thunk has invalid evaluation state" after progress imports from children;
 not reproduced in a focused test yet (the request-site failure masked it).
+
+Audit result (plans/p7-shared-identity-audit.md): `ExitCell` is the only
+shared-mutable identity in the stdlib (no MutVar/IORef in Tidepool/Actors or
+Tidepool/Internal). Two uses cross machines under parcel 7: a typed request's
+`Response` cell (reproduced) and an `ActorRef`'s exit cell read by
+`awaitExit`/`pollExit` (same shape, not yet reproduced). `Async`'s cell is
+same-machine only; `Progress`, `Watch` and `Reply` already resolve through
+Rust registry state. So the redesign is two cells becoming Rust-owned.
