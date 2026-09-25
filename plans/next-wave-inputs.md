@@ -686,3 +686,17 @@ plans/wave6-root-interview-digest.md)
   turn-end-reminder): the host itself pushes one line when a provider turn
   ends with the actor's own request still open.
 - **Possibly pre-existing test failure:** `invalid_label_literals_fail_before_actor_side_effects` fails with `watch ("Bad Label" :: WatchLabel)` throwing InvalidWatchLabel instead of returning a rejection (seen by the model-facing-text lane on its branch; not confirmed on main). Check at the next gate.
+- **Codex shows queued hosted input only at turn end, one per turn end
+  (update-pending investigation, wave 6):** `ext/queue/src/service.rs`
+  delivers only from `dispatch_if_idle` (the idle hook) and a 10 s poll
+  that returns while the thread runs, and returns after starting one item,
+  so `startOrSteer` never steers a running turn. Effect: every
+  notification, request update and assignment to a busy actor waits for
+  its turn end (3.5 to 51 minutes observed), and each turn end shows only
+  one queued message. It is the cause of the UpdatePending retries (5 of 6
+  refusals came before the update was shown). Fork fix, three lines: steer
+  a head-of-queue startOrSteer host item into a Running thread (admit and
+  poll), and keep looping in dispatch_if_idle after Started/Steered; the
+  host's hold during computing cells stays. Needs a Codex rebuild and
+  redeploy: operator decision. Interim: refusal text now says queued
+  messages show only at a turn end (resident_actor.rs `settlement_refusal`).
