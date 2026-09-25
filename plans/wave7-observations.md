@@ -19,3 +19,25 @@ end) and sent the root one note pointing it at the retained stacks as
 integration candidates. Also: 7@1 (compaction server) hit UpdatePending x3 on
 a repair steer (turn-end delivery; it was forked before the short-turn rule);
 one watchdog nudge on 16@1.
+
+## 09:26Z wake
+
+Alive; 13.8 GiB available; 15 windows; no latched machine; no rejections or
+nudges this window. (d): the Compactor Server component was implemented,
+repaired, reviewed and integrated (03beea9 merged at c3f29d0, 09:03Z), with
+one docs commit after it: the root followed the note and the new rule. The
+remaining (d) gates are the Engine::run consumer (the root owns that seam)
+and the unanswered-call experiment. (c): the settings lead runs three parallel
+waves (set_effort verb with its review, visibility, Here-fork rebase with a
+pending-claims review); the retained prior stack 5876336 is still unmerged,
+being recovered slice by slice. The root is reassigning a provenance repair
+to a retained owner.
+
+Costliest delta: shared-checkout contention from stale split compiles. Since
+launch, 206 splits went stale, 205 on `CompileView`, and 150 fell back to
+compiling under the checkout (about 14 s hold each); two cells at 08:57 waited
+79 s and 81 s. Even selected-context Luna leaves go stale, so the check is
+coarser than what their compiles depend on. Median wait stays 0 ms. Engine
+lane stale-view started to narrow `compile_relevant_eq` to the actor's own
+scope and the cell's imports. No note to the root: nothing is stalled and
+integrations are landing.
