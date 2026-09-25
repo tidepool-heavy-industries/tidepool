@@ -49,6 +49,12 @@ product run; either may motivate the next improvement. Use existing traces, reta
 outputs, commits and typed results. Interview at meaningful boundaries. Avoid
 creating an observer management tree or waking actors just to collect status.
 
+While a wave runs, use bounded subagent work to remove confirmed technical debt
+and improve the next development cycle: duplicate mechanisms, unclear ownership,
+dead paths and types that leave invariants to callers. Give each change an owner,
+real consumer and focused verification; keep its integration separate from the
+active wave and its executable stable. Return findings to the same RSI backlog.
+
 For each opportunity retain actor/request identity, time, exposed source/prompt,
 outcome and an artifact reference. Mark held, missed, pending or unknown;
 unexercised behavior is not success. Reported interview evidence remains distinct

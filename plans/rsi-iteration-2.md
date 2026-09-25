@@ -156,3 +156,22 @@ The supervisor is also an Exomonad user; these are RSI findings.
   not a harness-product failure. Logs: /tmp/rsi-wave10-launch.log,
   /tmp/rsi-wave10-launch-retry.log, /tmp/rsi-wave10-recreate.log; durable initial
   host log in harness .exomonad/logs/b48bf7e2-a7c5-4eef-875a-19b3f5eddc6b.log.
+
+### Launch repair verification
+
+Tidepool `22133ae88` integrates the repair from isolated worktree
+`codex/launch-cleanup` (`14042ebea`): collected host cleanup, durable-evidence
+journal opening, and a nonmutating early binding-lock probe. Active wave 10 keeps
+its frozen executable. Independent readers checked recovery, cleanup ordering
+and the lock boundary. No active run was restarted for validation.
+
+- `just test-target exomonad-worktree worktree 'test(binding_owner_probe)'`: 4/4
+  passed, 119 skipped; missing/held/released locks, untouched rows, I/O refusal.
+- `just test-lib tidepool 'test(stop_host_unit) | test(later_host_) |
+  test(a_later_generation_) | test(recreate_on_a_session_)'`: 7/7 passed,
+  482 skipped; mocked systemd states plus journal and root-mode tests.
+- First attempted target `worktree_core` was not a Cargo test target; corrected
+  to its actual owning target `worktree`. That attempt ran no tests.
+- Rust formatting and diff checks passed. Real systemd crash/restart integration
+  was not exercised; the running wave is not a test fixture.
+- Retained logs: target/tidepool-test-runs/launch-cleanup/{worktree,facade}.log.
