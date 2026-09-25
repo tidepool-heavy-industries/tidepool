@@ -1356,7 +1356,7 @@ impl DurableActorEvent {
                 let identity = settlement_identity_line(notification);
                 match &notification.reply_preview {
                     Some(preview) => format!(
-                        "{identity}request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nRead the full value with `pollResponse` only if you need more than this preview; settlement is not integration.",
+                        "{identity}request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nSettlement is not integration.",
                         notification.request.0,
                         notification.label,
                         notification.transition,

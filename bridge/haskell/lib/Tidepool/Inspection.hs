@@ -14,6 +14,8 @@ module Tidepool.Inspection
     print,
     WorkbenchDisplay (..),
     application,
+    displayRecord,
+    opaqueHandle,
     FullInspection,
     FullDisplay (inspectFull),
     DisplayTree (..),

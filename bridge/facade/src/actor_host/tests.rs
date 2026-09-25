@@ -2051,9 +2051,8 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
         DurableActorEvent::Text("old notice".into())
     );
 
-    // A `Ready` settlement carrying a reply preview puts the reply text
-    // directly in the notice and softens the `pollResponse` guidance to an
-    // optional follow-up, instead of insisting on it unconditionally.
+    // A `Ready` settlement carrying a reply within budget puts the whole
+    // reply in the notice, with no excerpt notice and no `pollResponse` cue.
     let settled_with_preview = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
         notification: exomonad_actor::SettlementNotification {
             owner: exomonad_actor::ActorRef {
@@ -2073,11 +2072,11 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     });
     let rendered = settled_with_preview.render(Some(0));
     assert!(rendered.contains("request 12 \"implementation\" settled Ready"));
-    assert!(rendered.contains("Reply:\n\"looks correct, ship it\""));
-    assert!(rendered.contains(
-        "Read the full value with `pollResponse` only if you need more than this preview"
-    ));
-    assert!(!rendered.contains("Inspect its retained `Response` with `pollResponse`"));
+    assert!(
+        rendered.ends_with("Reply:\n\"looks correct, ship it\"\n\nSettlement is not integration.")
+    );
+    assert!(!rendered.contains("pollResponse"), "{rendered}");
+    assert!(!rendered.contains("budget"), "{rendered}");
 
     // A `Ready` settlement with no preview (observation failed, or the
     // reply's shape could not be read) keeps today's unconditional guidance.
@@ -2105,10 +2104,13 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
     ));
     assert!(!rendered.contains("Reply:\n"));
 
-    // A preview `tidepool_runtime::ResidentSession::render_retained_preview`
-    // cut for length carries its own truncation note; the notice renders it
-    // exactly as given, alongside the softened `pollResponse` guidance.
-    let long_preview = format!("{}\n[reply preview truncated]", "x".repeat(64));
+    // A reply over budget carries the note `truncate_preview_at_line`
+    // appended, naming the budget and the retained value; the notice renders
+    // it exactly as given.
+    let long_preview = tidepool_runtime::session::truncate_preview_at_line(
+        format!("{}\n{}", "x".repeat(64), "y".repeat(64)),
+        100,
+    );
     let settled_with_truncated_preview =
         DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
             notification: exomonad_actor::SettlementNotification {
@@ -2128,11 +2130,12 @@ fn durable_actor_events_are_typed_and_legacy_rows_remain_readable() {
             },
         });
     let rendered = settled_with_truncated_preview.render(Some(0));
-    assert!(rendered.contains(&format!("Reply:\n{long_preview}")));
-    assert!(rendered.contains("[reply preview truncated]"));
-    assert!(rendered.contains(
-        "Read the full value with `pollResponse` only if you need more than this preview"
-    ));
+    assert!(rendered.contains(&format!(
+        "Reply:\n{}\n[reply exceeds the 100-byte notice budget",
+        "x".repeat(64)
+    )));
+    assert!(rendered.contains("`pollResponse` on the retained `Response` has the complete value."));
+    assert!(!rendered.contains(&"y".repeat(64)));
 }
 
 /// A settlement notice for a child launched from a fork workspace names that
@@ -3439,6 +3442,23 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     admit_notification(&command, inbox_key.into(), &inbox);
     let sent = send.await.unwrap();
     assert_eq!(sent["status"], "committed", "{sent:?}");
+    // `sendMessage`'s result reads as what happened, not as a wire tuple.
+    let accepted = format!(
+        " to agent {} accepted; `pollNotification` on this receipt reports whether it was presented",
+        child.actor.identity()
+    );
+    for cell in [
+        "receipt",
+        "(Right receipt :: Either NotificationError NotificationReceipt)",
+    ] {
+        let shown = dispatch_haskell_script(root.as_ref(), cell).await;
+        assert_eq!(shown["status"], "committed", "{shown:?}");
+        let output = shown["items"][0]["output"].as_str().unwrap();
+        assert!(
+            output.starts_with("notification ") && output.ends_with(&accepted),
+            "{output}"
+        );
+    }
     let policy = root.clone();
     let poll = tokio::spawn(async move {
         dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
@@ -3932,6 +3952,65 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
                         "{:?}",
                         notification.reply_preview
                     );
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A structured reply within the notice budget arrives whole: the notice is
+/// not the 512-character observation prefix a cell shows, so the owner has
+/// the child's result without asking for it again.
+#[tokio::test]
+async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        "worker <- startAgent (readonlyAgent \"reply-whole-recipient\")\n\
+         let requestName = [label|reply-whole|]\n\
+         answer <- request @[Text] worker (assignment requestName [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]])",
+    )
+    .await;
+    assert_eq!(setup["status"], "committed", "{setup:?}");
+    let child = campaign
+        .next_deployment(
+            "recipient policy",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign
+        .next_deployment(
+            "original request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+    let reply =
+        dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: [Text])").await;
+    assert_eq!(reply["status"], "replied", "{reply:?}");
+    campaign
+        .next_deployment(
+            "owner settlement notification carries the whole reply",
+            Duration::from_secs(120),
+            move |event| match event {
+                LocalResidentDeployment::SettlementChanged { notification } => {
+                    let preview = notification.reply_preview.as_deref().unwrap_or_default();
+                    assert!(preview.len() > 512, "{preview}");
+                    assert!(preview.starts_with("[reply line 10,\n"), "{preview}");
+                    assert!(preview.ends_with("reply line 99]"), "{preview}");
+                    assert!(!preview.contains("notice budget"), "{preview}");
                     Ok(())
                 }
                 other => Err(other),

@@ -177,8 +177,15 @@ import Tidepool.Effects
   , worktreeId
   )
 import Tidepool.Prelude hiding (error)
+import Tidepool.Inspection.Display (Display (..))
+import Tidepool.Inspection.Tree (DisplayTree (TextLeaf))
 
 default (Int, Double, Text)
+
+-- | The workbench shows an object id as git prints it, ready to paste into a
+-- command; 'Show' keeps the constructor form.
+instance Display GitOid where
+  displayTree = TextLeaf . renderGitOid
 
 -- Generated Worktree values predate the model-facing output-schema layer.
 -- These instances keep CandidateReceipt on the canonical Worktree vocabulary

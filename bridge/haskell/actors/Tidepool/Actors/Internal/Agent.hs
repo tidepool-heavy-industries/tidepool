@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -62,6 +64,7 @@ module Tidepool.Actors.Internal.Agent
 
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Prelude
 
 import qualified Tidepool.Actor as Actor
@@ -95,6 +98,8 @@ import Tidepool.Agent.Assignment
   , assignment, labelFromText, labelText
   )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
+import Tidepool.Inspection
+  ( Display (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
 import Tidepool.Agent.Session
   ( attachAgent
   , requestSessionSited
@@ -726,6 +731,33 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
   deriving (Show, Eq)
+
+-- | Nested in another value: which notification, to whom.
+instance Display NotificationReceipt where
+  displayTree receipt =
+    opaqueHandle ("notification " <> notificationSummary receipt)
+
+-- | A cell's own result reads as what happened: admitted, not yet presented.
+instance PageDisplay effects NotificationReceipt where
+  displayPage budget receipt =
+    pageWithContinuation budget (TextLeaf (notificationAccepted receipt)) Nothing
+
+-- | 'sendMessage''s result, bound or observed as a cell's value.
+instance PageDisplay effects (Either NotificationError NotificationReceipt) where
+  displayPage budget (Right receipt) = displayPage budget receipt
+  displayPage budget (Left failure) =
+    pageWithContinuation budget
+      (Concat [TextLeaf "notification not accepted: ", displayTree failure]) Nothing
+
+notificationSummary :: NotificationReceipt -> Text
+notificationSummary (NotificationReceipt (_, ((target, incarnation), (_, sequence)))) =
+  Text.pack (show sequence) <> " to agent "
+    <> Text.pack (show target) <> "@" <> Text.pack (show incarnation)
+
+notificationAccepted :: NotificationReceipt -> Text
+notificationAccepted receipt =
+  "notification " <> notificationSummary receipt
+    <> " accepted; `pollNotification` on this receipt reports whether it was presented"
 
 -- | Admit normal steering into the existing TUI conversation. The receipt is
 -- admission evidence, not incorporation or successful execution. No response

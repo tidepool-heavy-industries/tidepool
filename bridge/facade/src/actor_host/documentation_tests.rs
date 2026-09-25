@@ -780,10 +780,10 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     .await;
     let rendered = committed(root.as_ref(), "inspectFull worker").await;
     let rendered = rendered["items"][0]["output"].as_str().unwrap();
-    assert!(rendered.contains("AgentRef ("), "{rendered}");
-    assert!(rendered.contains("actor = AgentRef ("), "{rendered}");
-    assert!(rendered.contains("path = ActorPath"), "{rendered}");
-    assert!(rendered.contains("Response { request ="), "{rendered}");
+    assert!(rendered.starts_with("<response to request "), "{rendered}");
+    assert!(rendered.contains(" from agent "), "{rendered}");
+    assert!(rendered.contains(", path "), "{rendered}");
+    assert!(!rendered.contains("AgentRef"), "{rendered}");
     let invalid_request = dispatch_haskell_script(
         root.as_ref(),
         "badResponse <- request @Text (responseActor worker) (assignment [label|Bad Label|] ())",
@@ -1976,6 +1976,20 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
             .contains("unknownActors = [("),
         "{result}"
     );
+    // Authored Display instances render workspace records with the harness's
+    // own model-facing forms nested inside; Show keeps the constructor dump.
+    let candidate = committed(
+        policy,
+        "inspectFull (Candidate (GitOid \"3f2a9c\") [\"cargo test\"] [])",
+    )
+    .await;
+    let candidate = candidate["items"][0]["output"].as_str().unwrap();
+    assert!(candidate.starts_with("Candidate {"), "{candidate}");
+    assert!(
+        candidate.contains("candidateCommit = 3f2a9c"),
+        "{candidate}"
+    );
+    assert!(!candidate.contains("GitOid"), "{candidate}");
     let lookup = dispatch_lookup(
         policy,
         &[

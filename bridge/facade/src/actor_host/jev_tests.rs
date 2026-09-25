@@ -1943,6 +1943,40 @@ annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haske
     assert!(judged.contains("message send: sendMessage"), "{judged}");
     assert!(judged.contains("Nothing,Nothing,True,False)"), "{judged}");
 
+    // An escalation carries the tool output whole within its budget, with no
+    // excerpt notice; only a larger output is cut, and the cut names the budget.
+    let evidence = |output: &'static str| {
+        let policy = policy.clone();
+        async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                &format!(
+                    r#"import qualified Project.Watchdog as Watchdog
+import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..))
+import Tidepool.Aeson.Value (Value (String))
+Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 {output})"#
+                ),
+            )
+            .await
+            .to_string()
+        }
+    };
+    let whole = evidence(r#""line one\nline two""#).await;
+    assert!(
+        whole.contains(
+            "Tool output (complete):\\nline one\\nline two\\nResult reference (held by the child): toolResult4"
+        ),
+        "{whole}"
+    );
+    assert!(!whole.contains("escalation budget"), "{whole}");
+    let cut = evidence(r#"(mconcat (replicate 9000 "x"))"#).await;
+    assert!(
+        cut.contains(
+            "Tool output (first 8192 of 9000 characters; over the 8192-character escalation budget):"
+        ),
+        "{cut}"
+    );
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

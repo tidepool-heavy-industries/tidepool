@@ -2564,10 +2564,11 @@ where
         }
     }
 
-    /// Upper bound, in characters, on the reply-value preview a settlement
-    /// notice carries -- generous enough for an ordinary reply record, small
-    /// enough that a notice never dwarfs the wake it accompanies.
-    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 2048;
+    /// Byte budget for the reply a settlement notice carries. A reply within
+    /// it is shown whole, so the owner reads the child's result in the notice
+    /// rather than asking for it again; only a larger reply is cut, and the
+    /// cut names this budget.
+    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 8192;
 
     /// Both authored tool replies and route callbacks resume the one active
     /// request continuation, then hand it back to the ordinary actor scheduler.
