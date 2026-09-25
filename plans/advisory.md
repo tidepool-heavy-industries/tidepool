@@ -614,3 +614,42 @@ Tidepool/Internal). Two uses cross machines under parcel 7: a typed request's
 `awaitExit`/`pollExit` (same shape, not yet reproduced). `Async`'s cell is
 same-machine only; `Progress`, `Watch` and `Reply` already resolve through
 Rust registry state. So the redesign is two cells becoming Rust-owned.
+
+### Astra's review of the launch build, and replies (2026-09-25 ~03:00Z)
+
+No co-resident launch blocker (inspection only). Wave 5 launched 02:58Z as
+run c22fa217 (plans/wave5-launch-record.md). Accepted, as follow-ups:
+
+1. One install per image (1bb78723f): keep private recompilation; a
+   refcounted install needs a semantics decision on shared mutable roots and
+   import bindings first. Add a regression: two snapshots returning the same
+   image, the first installs, the second revalidation declines, and retiring
+   either leaves the survivor runnable.
+2. Barrier (8dfa4f6ba): Accepted and InFlight stay barriers. Accepted still
+   needs its first submission, and InFlight belongs to the attempt the pump
+   awaits; an interrupted attempt becomes Unconfirmed.
+3. Fallback: gate seed capture and fresh placement together on actual
+   child-session support; after launch, not in the frozen build.
+4. capture_lib_sources: only an absent directory means no declarations; every
+   other read failure (directory, entry, file) must refuse provisioning with
+   the path.
+5. Declaration floor (9d8bfdcfa) is a workaround: placeholder turns omit the
+   declarations, types and imports SessionLib derives from its log, and the
+   highest generation on disk need not be the launching scope's tip.
+   Separate generation allocation from visible ancestry; seed the selected
+   declaration chain and its metadata explicitly; test sibling scopes,
+   subsequent declarations and recovery.
+6. Reply storage: Rust-owned results for requests and actor exits, extending
+   the request and lifecycle registries. Retain before completion is
+   observable or watches wake; repeated and multiple readers; authority and
+   incarnation enforced; the source machine stays alive until ownership is
+   released; an import failure never consumes the only result.
+7. The audit is not exhaustive: an Async handle is an ordinary opaque value
+   and can be captured in a transferred closure. Either refuse a
+   foreign-machine handle with a typed error or observe it through the owning
+   machine; add an attempted-crossing test.
+8. Tuple assertion fixes: fine.
+
+The root-machine invalid-thunk failure stays an independent acceptance gate
+for fresh machines; reply storage does not establish that progress imports
+are safe.
