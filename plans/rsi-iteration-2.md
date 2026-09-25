@@ -291,3 +291,13 @@ rejected at 19:05:16Z with no IsString Label instance. Shared and template revie
 prompts already use `[label|repair-candidate|]`, also exercised by
 checks/project_review_repair.hs. Repair the project override after the wave;
 do not confuse this with the multiline layout issue.
+
+Notebook placement fix integrated as `dffd88db3` (isolated candidate
+`5ff8d671e`). The worker now preserves declaration separators when placing a
+valid multiline let inside explicit braces, matching the existing Rust path.
+Focused `bash scripts/dev-shell.sh bash -lc 'cd bridge/haskell && cabal test
+cell-splitter-test -j1'` passed in the isolated checkout. Tests cover valid RHS
+continuations, signature/equation groups, whole binding classification, generated
+module compilation, and rejection classification of the under-indented wave
+forms. Parent reviewed the diff; no active wave binary/compiler was replaced.
+This does not make the original malformed cells valid or add a diagnostic hint.
