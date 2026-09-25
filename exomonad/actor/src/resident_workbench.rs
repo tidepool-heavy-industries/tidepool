@@ -1310,6 +1310,10 @@ pub(crate) enum ResidentActorBoundary {
         request: crate::RequestId,
         after: u64,
     },
+    CommandReportPoll {
+        continuation: ResidentHole,
+        job: String,
+    },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
     ResponseForget(ResponseForget),
@@ -1427,6 +1431,7 @@ impl ResidentActorBoundary {
             Self::RequestUpdate { .. } => "updateRequest",
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
+            Self::CommandReportPoll { .. } => "pollWatch command",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -1779,6 +1784,7 @@ impl ResidentRequest {
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
+            Self::Watches(WatchesReq::ObserveCommandWith(..)) => "pollWatch command",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
     }
@@ -6787,6 +6793,9 @@ where
                             request: crate::request_effect::request_id(request)?,
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
                         })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveCommandWith(job)) => {
+                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, job })
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {

@@ -9,6 +9,7 @@ pub fn commands_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "CommandStartWith :: CommandSpec -> Commands (Either CommandError Text)",
+            "CommandBackgroundWith :: CommandSpec -> Commands (Either CommandError Text)",
             "CommandStatusWith :: Text -> Commands (Either CommandError CommandStatus)",
             "CommandAwaitWith :: Text -> Int -> Commands (Either CommandError CommandStatus)",
             "CommandForegroundWith :: Text -> Commands (Either CommandError CommandObservation)",
@@ -33,6 +34,8 @@ pub fn commands_decl() -> crate::EffectDecl {
             "data CommandPage = CommandPage { outputText :: Text, outputStart :: Int, outputEnd :: Int, outputAvailableEnd :: Int, outputRetainedStart :: Int, outputLostBytes :: Int, outputFinished :: Bool, outputLossy :: Bool, outputLeadingFragment :: Bool, outputTrailingFragment :: Bool } deriving (Show, Eq)",
             "data CommandOutput = CommandOutput { commandStdout :: CommandPage, commandStderr :: CommandPage } deriving (Show, Eq)",
             "data CommandObservation = CommandObservation { observedCommandResult :: CommandResult, observedCommandOutput :: CommandOutput } deriving (Show, Eq)",
+            "data CommandSource = CommandSource { sourceDirectory :: Text, sourceCommit :: Maybe Text, sourceDirty :: Bool } deriving (Show, Eq)",
+            "data CommandReport = CommandReport { reportCommand :: [Text], reportSource :: Maybe CommandSource, reportResult :: CommandResult, reportOutputComplete :: Bool, reportTail :: Text } deriving (Show, Eq)",
             "data CommandPresentation = CommandVisible Text Int | CommandQuiet deriving (Show, Eq)",
             "data CommandError = CommandUnavailable Text | CommandInvalid Text | CommandUnauthorized | CommandOutputPending | CommandInputRejected Text | CommandInputAcceptedCloseUnconfirmed Text deriving (Show, Eq)",
         ],

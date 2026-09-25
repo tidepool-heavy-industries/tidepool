@@ -203,6 +203,28 @@ pub fn commands() -> Effect {
                     ("observedCommandOutput", "output", named("CommandOutput")),
                 ],
             ),
+            record(
+                "CommandSource",
+                vec![
+                    ("sourceDirectory", "directory", HsType::Text),
+                    ("sourceCommit", "commit", HsType::maybe(HsType::Text)),
+                    ("sourceDirty", "dirty", HsType::Bool),
+                ],
+            ),
+            record(
+                "CommandReport",
+                vec![
+                    ("reportCommand", "command", HsType::list(HsType::Text)),
+                    (
+                        "reportSource",
+                        "source",
+                        HsType::maybe(named("CommandSource")),
+                    ),
+                    ("reportResult", "result", named("CommandResult")),
+                    ("reportOutputComplete", "output_complete", HsType::Bool),
+                    ("reportTail", "tail", HsType::Text),
+                ],
+            ),
             sum(
                 "CommandPresentation",
                 vec![
@@ -228,6 +250,16 @@ pub fn commands() -> Effect {
             verb(
                 "CommandStartWith",
                 "command_start_with",
+                vec![(
+                    "spec",
+                    named("CommandSpec"),
+                    "tidepool_bridge_effects::CommandSpec",
+                )],
+                HsType::either(named("CommandError"), HsType::Text),
+            ),
+            verb(
+                "CommandBackgroundWith",
+                "command_background_with",
                 vec![(
                     "spec",
                     named("CommandSpec"),

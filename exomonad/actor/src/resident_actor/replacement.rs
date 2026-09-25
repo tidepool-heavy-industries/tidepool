@@ -194,6 +194,9 @@ where
         self.environment
             .requests
             .transfer_owner(predecessor.identity(), &successor_actor);
+        self.environment
+            .commands
+            .transfer_owner(predecessor.identity(), successor_actor.identity());
         for record in self.environment.actors.lock().values_mut() {
             if record.descriptor.supervisor_parent() == Some(predecessor.identity()) {
                 record.descriptor = record

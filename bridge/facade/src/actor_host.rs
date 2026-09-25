@@ -1352,6 +1352,22 @@ impl DurableActorEvent {
                 notification.current,
                 elapsed(notification.occurred_at_unix_ms),
             ),
+            Self::Typed(TypedActorEvent::SettlementChanged { notification })
+                if notification.command_job.is_some() =>
+            {
+                let job = notification.command_job.as_deref().unwrap_or_default();
+                match (&notification.transition, &notification.reply_preview) {
+                    (exomonad_actor::SettlementTransition::Ready, Some(report)) => format!(
+                        "job {job} finished ({}).\n{report}",
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                    (transition, _) => format!(
+                        "job {job} no longer reports its completion to you: {} ({}). Its retained output stays readable with read_output session_id={job}; nothing reruns.",
+                        command_settlement_loss(transition),
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                }
+            }
             Self::Typed(TypedActorEvent::SettlementChanged { notification }) => {
                 let identity = settlement_identity_line(notification);
                 match &notification.reply_preview {
@@ -1382,6 +1398,21 @@ impl DurableActorEvent {
             Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
         }
+    }
+}
+
+/// Why a command job's settlement ended without its report, in words.
+fn command_settlement_loss(transition: &exomonad_actor::SettlementTransition) -> &'static str {
+    use exomonad_actor::{ResponseFailure, SettlementTransition};
+    match transition {
+        SettlementTransition::Ready => "its report was not retained",
+        SettlementTransition::Unavailable(ResponseFailure::RequesterStopped) => {
+            "the actor that owned it stopped"
+        }
+        SettlementTransition::Unavailable(ResponseFailure::Released) => {
+            "its settlement was released"
+        }
+        SettlementTransition::Unavailable(_) => "its settlement became unavailable",
     }
 }
 

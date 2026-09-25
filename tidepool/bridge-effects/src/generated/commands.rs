@@ -143,6 +143,28 @@ pub struct CommandObservation {
 #[derive(
     ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct CommandSource {
+    pub directory: String,
+    pub commit: Option<String>,
+    pub dirty: bool,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct CommandReport {
+    pub command: Vec<String>,
+    pub source: Option<CommandSource>,
+    pub result: CommandResult,
+    pub output_complete: bool,
+    pub tail: String,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub enum CommandPresentation {
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandVisible(String, i64),

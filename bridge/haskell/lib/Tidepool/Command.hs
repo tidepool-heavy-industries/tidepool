@@ -26,6 +26,11 @@ module Tidepool.Command
     withTerminal,
     start,
     tryStart,
+    background,
+    tryBackground,
+    awaitFinished,
+    CommandReport (..),
+    CommandSource (..),
     run,
     await,
     Observation (..),
@@ -80,6 +85,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
+import Tidepool.Agent.Watch.Internal (Await (..), AwaitDependency (..), Watches (..))
 import Tidepool.Command.Types
 import Tidepool.Effects.Core
   ( CommandCleanup (..),
@@ -91,7 +97,9 @@ import Tidepool.Effects.Core
     CommandPage (..),
     CommandPosition (..),
     CommandPresentation (..),
+    CommandReport (..),
     CommandResult (..),
+    CommandSource (..),
     CommandSpec (..),
     CommandStatus (..),
     CommandStream (..),
@@ -211,6 +219,27 @@ start = fmap checked . tryStart
 -- | Start a command, returning the refusal instead of failing the cell.
 tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
 tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
+
+-- | Start a command and return at once. When it finishes, a settlement
+-- notice wakes this actor, unless a watch on 'awaitFinished' takes that wake
+-- over. The notice and the report carry the commit the command started at;
+-- the checkout is not guarded while it runs. A job running when the host
+-- restarts is not recovered and sends no notice.
+background :: (Member Commands effects) => Command -> Eff effects Job
+background = fmap checked . tryBackground
+
+-- | Start in the background, returning the refusal instead of failing the cell.
+tryBackground :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
+tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
+
+-- | Ready when the job has finished, with its outcome, cleanup, output
+-- completeness, a diagnostic tail, and the source it started at ('Nothing'
+-- for a job started in the foreground). Compose it with 'awaitSettled' and use
+-- it with 'watch' or 'route'. A report is evidence about the commit the command
+-- started at; it says nothing about a later revision.
+awaitFinished :: Job -> Await CommandReport
+awaitFinished (Job key) =
+  Await [[AwaitCommand key]] (\_ _ -> send (ObserveCommandWith key))
 
 -- | Run and observe for up to 30 seconds, returning a completed result.
 -- If still running, the interactive workbench stops the enclosing computation

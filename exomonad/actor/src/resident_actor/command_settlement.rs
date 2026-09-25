@@ -1,0 +1,642 @@
+//! A command job's completion as a settlement.
+//!
+//! `CommandJobs` owns the job; `RequestRegistry` owns settlement. Joining them
+//! here lets a finished job wake its owner through the same settlement notice,
+//! watch and route paths as a child's reply. A background start also records
+//! the source the command started at: a short `git` probe runs through the
+//! same job owner, in the same directory, and the command itself is released
+//! to its backend only after the probe has answered or its bound expired.
+//!
+//! The checkout is not guarded while a job runs: the recorded commit is where
+//! the command started, not proof that the tree stayed there. Settlement is
+//! process-local, like a child's reply: a job running when the host restarts
+//! is not recovered and sends no notice.
+
+use super::*;
+use crate::command_jobs::{CommandBackendRequest, CommandJobs};
+use crate::request_effect::WatchSubject;
+use crate::RequestId;
+use tidepool_bridge_effects::{
+    CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandPage, CommandPosition,
+    CommandReport, CommandResult, CommandSource, CommandSpec, CommandStream,
+};
+
+/// How long a running source probe may take before the command is released
+/// without a recorded source. Admission time does not count: a probe queued
+/// behind other jobs' memory holds the command it precedes.
+const SOURCE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Pages read while confirming that a stream's retained output is contiguous.
+/// A stream whose tail cannot be reached within this many pages is reported
+/// as unverified rather than complete.
+const CONTIGUITY_PAGE_BUDGET: usize = 256;
+const TAIL_LINES: usize = 12;
+const TAIL_BYTES: usize = 1200;
+const COMMAND_DISPLAY_BYTES: usize = 400;
+
+/// How long a background start waits, once the probe's backend exists, for
+/// its resource admission (memory admission can queue it behind other jobs)
+/// before releasing the command without a recorded source.
+const SOURCE_PROBE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Prints the working directory, then `HEAD`, then whether the checkout
+/// differs from it, untracked files included. Optional locks stay off so the
+/// probe never contends for the index with the command it precedes or with
+/// another checkout user.
+const SOURCE_PROBE: &str = "pwd\ngit rev-parse --verify -q HEAD 2>/dev/null || exit 0\nif [ -z \"$(git status --porcelain --untracked-files=normal 2>/dev/null)\" ]; then echo clean; else echo dirty; fi\n";
+
+#[derive(Clone)]
+pub(super) struct CommandSettlements {
+    jobs: CommandJobs,
+    requests: Arc<RequestRegistry>,
+    deployments: mpsc::Sender<LocalResidentDeployment>,
+}
+
+/// The two jobs of one background start: the source probe (absent when it
+/// could not be started) and the backend request the command waits behind.
+pub(super) struct BackgroundStart {
+    probe: Option<String>,
+    command: Arc<CommandBackendRequest>,
+}
+
+/// Ask the deployment owner for this job's backend. Without an owner the job
+/// settles as failed, exactly as a foreground start does.
+pub(super) fn dispatch_backend(
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    request: Arc<CommandBackendRequest>,
+) {
+    if deployments
+        .try_send(LocalResidentDeployment::CommandBackend(request.clone()))
+        .is_err()
+    {
+        request.supply(Err(CommandError::CommandUnavailable(
+            "native host unavailable".into(),
+        )));
+    }
+}
+
+fn probe_spec(spec: &CommandSpec) -> CommandSpec {
+    let mut environment = spec
+        .environment
+        .iter()
+        .filter(|(key, _)| key != "GIT_OPTIONAL_LOCKS")
+        .cloned()
+        .collect::<Vec<_>>();
+    environment.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
+    CommandSpec {
+        argv: vec![
+            "bash".into(),
+            "--noprofile".into(),
+            "--norc".into(),
+            "-c".into(),
+            SOURCE_PROBE.into(),
+            "exomonad-source".into(),
+        ],
+        directory: spec.directory.clone(),
+        environment,
+        memory: 256 * 1024 * 1024,
+        input: CommandInput::ClosedInput,
+    }
+}
+
+fn parse_probe(stdout: &str) -> Option<CommandSource> {
+    let mut lines = stdout.lines();
+    let directory = lines.next().filter(|line| !line.is_empty())?.to_owned();
+    let commit = lines
+        .next()
+        .filter(|line| !line.is_empty() && line.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_owned);
+    let dirty = commit.is_some() && lines.next() == Some("dirty");
+    Some(CommandSource {
+        directory,
+        commit,
+        dirty,
+    })
+}
+
+impl CommandSettlements {
+    pub(super) fn new<H, O>(environment: &ResidentEnvironment<H, O>) -> Self {
+        Self {
+            jobs: environment.commands.clone(),
+            requests: Arc::clone(&environment.requests),
+            deployments: environment.deployments.clone(),
+        }
+    }
+
+    /// Start `spec` in the background: its source probe runs first, the
+    /// command is released after it, and its completion settles a request
+    /// that notifies the owner unless a watch takes that wake over.
+    pub(super) async fn start(
+        &self,
+        kernel: &KernelContext,
+        spec: CommandSpec,
+    ) -> Result<String, CommandError> {
+        let probe = probe_spec(&spec);
+        let (job, command) = self.jobs.start(kernel, spec).await?;
+        let probe = match self.jobs.start(kernel, probe).await {
+            Ok((probe, request)) => {
+                dispatch_backend(&self.deployments, request);
+                Some(probe)
+            }
+            Err(error) => {
+                tracing::warn!(?error, %job, "background command source probe not started");
+                None
+            }
+        };
+        let start = BackgroundStart { probe, command };
+        if let Err(error) = self.arm(&job, true, Some(start)) {
+            tracing::warn!(?error, %job, "background command settlement not armed");
+        }
+        Ok(job)
+    }
+
+    /// The request that settles when `job` finishes, arming it on first use.
+    /// Only the call that arms it releases a background start's command.
+    fn arm(
+        &self,
+        job: &str,
+        notify_owner: bool,
+        start: Option<BackgroundStart>,
+    ) -> Result<RequestId, CommandError> {
+        let requests = Arc::clone(&self.requests);
+        let settled = self.jobs.settlement(job, |owner| {
+            requests.reserve_command_settlement(owner, job.to_owned(), notify_owner)
+        });
+        let (request, armed) = match settled {
+            Ok(settled) => settled,
+            Err(error) => {
+                if let Some(start) = start {
+                    dispatch_backend(&self.deployments, start.command);
+                }
+                return Err(error);
+            }
+        };
+        if !armed && !notify_owner && !self.requests.hold_command(request) {
+            // The settled record was released once its notice existed and
+            // nothing watched it. A later watch gets a fresh, settled record.
+            return self.rearm(job, start);
+        }
+        if armed {
+            let settlements = self.clone();
+            let job = job.to_owned();
+            tokio::spawn(async move { settlements.settle(job, request, start).await });
+        } else if let Some(start) = start {
+            dispatch_backend(&self.deployments, start.command);
+        }
+        Ok(request)
+    }
+
+    fn rearm(&self, job: &str, start: Option<BackgroundStart>) -> Result<RequestId, CommandError> {
+        if let Some(start) = start {
+            dispatch_backend(&self.deployments, start.command);
+        }
+        let report = self.jobs.report(job)?.ok_or_else(|| {
+            CommandError::CommandUnavailable("job settled without a retained report".into())
+        })?;
+        let revision = report
+            .source
+            .as_ref()
+            .and_then(|source| source.commit.clone());
+        let requests = Arc::clone(&self.requests);
+        let request = self.jobs.replace_settlement(job, |owner| {
+            requests.reserve_command_settlement(owner, job.to_owned(), false)
+        })?;
+        drop(
+            self.requests
+                .settle_command(request, render_report(job, &report), revision),
+        );
+        Ok(request)
+    }
+
+    /// Resolve command-job watch dependencies to the requests their
+    /// completions settle. A watch on a job started in the foreground arms
+    /// its settlement here, without an owner notice of its own. The records
+    /// armed here are held for the registration; a refused registration hands
+    /// them to [`Self::release`].
+    pub(super) fn resolve(
+        &self,
+        groups: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
+    ) -> Result<Vec<Vec<(RequestId, crate::request::WatchRequirement)>>, ResidentActorWorkbenchError>
+    {
+        let mut resolved = Vec::with_capacity(groups.len());
+        for group in groups {
+            let mut dependencies = Vec::with_capacity(group.len());
+            for (subject, requirement) in group {
+                let request = match subject {
+                    WatchSubject::Request(request) => request,
+                    WatchSubject::Command(job) => match self.arm(&job, false, None) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            resolved.push(dependencies);
+                            self.release(&resolved);
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "watch refused: command job {job} cannot be awaited: {error:?}"
+                            )));
+                        }
+                    },
+                };
+                dependencies.push((request, requirement));
+            }
+            resolved.push(dependencies);
+        }
+        Ok(resolved)
+    }
+
+    /// Drop the watch holds on command records a refused registration armed.
+    pub(super) fn release(&self, groups: &[Vec<(RequestId, crate::request::WatchRequirement)>]) {
+        let requests = groups
+            .iter()
+            .flatten()
+            .map(|(request, _)| *request)
+            .collect::<Vec<_>>();
+        self.requests.release_command_holds(&requests);
+    }
+
+    pub(super) fn report(&self, job: &str) -> Option<CommandReport> {
+        self.jobs.report(job).ok().flatten()
+    }
+
+    async fn settle(self, job: String, request: RequestId, start: Option<BackgroundStart>) {
+        let source = match start {
+            Some(BackgroundStart { probe, command }) => {
+                let source = match probe {
+                    Some(probe) => self.probe(&probe).await,
+                    None => None,
+                };
+                dispatch_backend(&self.deployments, command);
+                source
+            }
+            None => None,
+        };
+        let result = match self.jobs.finished(&job).await {
+            Ok(result) => result,
+            Err(error) => CommandResult {
+                outcome: CommandOutcome::CommandUnconfirmed(format!("{error:?}")),
+                cleanup: CommandCleanup::CommandCleanupUnknown(format!("{error:?}")),
+            },
+        };
+        let report = self.collect(&job, source, result).await;
+        let text = render_report(&job, &report);
+        let revision = report
+            .source
+            .as_ref()
+            .and_then(|source| source.commit.clone());
+        if let Err(error) = self.jobs.record_report(&job, report) {
+            tracing::warn!(?error, %job, "command report not retained");
+        }
+        let notifications = self.requests.settle_command(request, text, revision);
+        publish_request_notifications(&self.requests, &self.deployments, notifications).await;
+    }
+
+    async fn probe(&self, probe: &str) -> Option<CommandSource> {
+        let owner = self.jobs.owner(probe).ok()?;
+        let answered = async {
+            // The host supplies a backend promptly or fails the job; only the
+            // resource admission after that is bounded.
+            self.jobs.supplied(probe).await.ok()?;
+            tokio::time::timeout(SOURCE_PROBE_ADMISSION_TIMEOUT, self.jobs.admitted(probe))
+                .await
+                .ok()?
+                .ok()?;
+            tokio::time::timeout(SOURCE_PROBE_TIMEOUT, self.jobs.finished(probe))
+                .await
+                .ok()?
+                .ok()
+        };
+        match answered.await {
+            Some(CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                ..
+            }) => {}
+            Some(_) => return None,
+            None => {
+                tracing::warn!(%probe, "background command source probe did not answer in time");
+                // best-effort: the probe's outcome no longer matters.
+                drop(
+                    self.jobs
+                        .control(owner, probe, crate::command_jobs::CommandControl::Cancel)
+                        .await,
+                );
+                return None;
+            }
+        }
+        let page = self
+            .jobs
+            .read(
+                owner,
+                probe,
+                CommandStream::Stdout,
+                CommandPosition::OutputBeginning,
+            )
+            .await
+            .ok()?;
+        parse_probe(&page.text)
+    }
+
+    async fn collect(
+        &self,
+        job: &str,
+        source: Option<CommandSource>,
+        result: CommandResult,
+    ) -> CommandReport {
+        let stdout = self.stream(job, CommandStream::Stdout).await;
+        let stderr = self.stream(job, CommandStream::Stderr).await;
+        let mut tail = String::new();
+        for (name, evidence) in [("stdout", &stdout), ("stderr", &stderr)] {
+            if !evidence.tail.trim().is_empty() {
+                tail.push_str(&format!("{name} tail:\n{}\n", evidence.tail.trim_end()));
+            }
+        }
+        for (name, evidence) in [("stdout", &stdout), ("stderr", &stderr)] {
+            if let Err(gap) = &evidence.complete {
+                tail.push_str(&format!("{name} incomplete: {gap}\n"));
+            }
+        }
+        CommandReport {
+            command: self.jobs.command(job).unwrap_or_default(),
+            source,
+            result,
+            output_complete: stdout.complete.is_ok() && stderr.complete.is_ok(),
+            tail,
+        }
+    }
+
+    async fn stream(&self, job: &str, stream: CommandStream) -> StreamEvidence {
+        let reader = match self.jobs.owner(job) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return StreamEvidence {
+                    complete: Err(format!("output unavailable: {error:?}")),
+                    tail: String::new(),
+                }
+            }
+        };
+        let tail = match self
+            .jobs
+            .read(reader, job, stream.clone(), CommandPosition::OutputTail)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                return StreamEvidence {
+                    complete: Err(format!("output unavailable: {error:?}")),
+                    tail: String::new(),
+                }
+            }
+        };
+        let complete = if !tail.finished {
+            Err("the stream did not reach end of file".to_owned())
+        } else if tail.retained_start > 0 || tail.lost_bytes > 0 {
+            Err(format!(
+                "{} bytes were not retained",
+                tail.retained_start.max(tail.lost_bytes)
+            ))
+        } else if tail.start > 0 {
+            self.contiguous(reader, job, stream, tail.start).await
+        } else {
+            Ok(())
+        };
+        StreamEvidence {
+            complete,
+            tail: tail_text(&tail),
+        }
+    }
+
+    /// Whether bytes `0..end` are retained without a gap, read forward page
+    /// by page. A gap is reported by the page that skips it.
+    async fn contiguous(
+        &self,
+        reader: ActorRef,
+        job: &str,
+        stream: CommandStream,
+        end: i64,
+    ) -> Result<(), String> {
+        let mut offset = 0;
+        for _ in 0..CONTIGUITY_PAGE_BUDGET {
+            let page = self
+                .jobs
+                .read(
+                    reader,
+                    job,
+                    stream.clone(),
+                    CommandPosition::OutputOffset(offset),
+                )
+                .await
+                .map_err(|error| format!("output unavailable: {error:?}"))?;
+            if page.lost_bytes > 0 || page.start > offset {
+                return Err(format!(
+                    "{} bytes were not retained after byte {offset}",
+                    page.lost_bytes.max(page.start - offset)
+                ));
+            }
+            if page.end >= end {
+                return Ok(());
+            }
+            if page.end <= offset {
+                return Err(format!("retained output stops at byte {offset}"));
+            }
+            offset = page.end;
+        }
+        Err(format!("contiguity not verified beyond byte {offset}"))
+    }
+}
+
+struct StreamEvidence {
+    complete: Result<(), String>,
+    tail: String,
+}
+
+fn tail_text(page: &CommandPage) -> String {
+    let text = page.text.as_str();
+    let mut start = text.len().saturating_sub(TAIL_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &text[start..];
+    let lines = text.lines().collect::<Vec<_>>();
+    lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n")
+}
+
+/// The argv as the model wrote it: a `bash` tool script is shown as its
+/// script, anything else as its words.
+fn command_text(argv: &[String]) -> String {
+    let text = match argv {
+        [bash, _, _, flag, script, ..] if bash == "bash" && flag == "-c" => {
+            script.trim().to_owned()
+        }
+        words => words
+            .iter()
+            .map(|word| {
+                if word.is_empty() || word.chars().any(char::is_whitespace) {
+                    format!("{word:?}")
+                } else {
+                    word.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+    crate::workbench_display::bounded_output(&text, COMMAND_DISPLAY_BYTES)
+}
+
+fn outcome_text(outcome: &CommandOutcome) -> String {
+    match outcome {
+        CommandOutcome::CommandExited(code) => format!("exit {code}"),
+        CommandOutcome::CommandSignalled(signal) => format!("killed by signal {signal}"),
+        CommandOutcome::CommandOutOfMemory(mib) => format!("out of memory at {mib} MiB"),
+        CommandOutcome::CommandCancelled => "cancelled".into(),
+        CommandOutcome::CommandFailed(detail) => format!("did not run: {detail}"),
+        CommandOutcome::CommandUnconfirmed(detail) => format!("outcome unconfirmed: {detail}"),
+    }
+}
+
+fn cleanup_text(cleanup: &CommandCleanup) -> String {
+    match cleanup {
+        CommandCleanup::CommandClean => "process and cleanup terminal".into(),
+        CommandCleanup::CommandRetained => "cleanup not terminal: descendants retained".into(),
+        CommandCleanup::CommandCleanupUnknown(detail) => format!("cleanup unconfirmed: {detail}"),
+    }
+}
+
+/// The settlement notice body for one finished job. Read by a model on the
+/// turn it wakes: every line is a fact it may act on.
+pub(super) fn render_report(job: &str, report: &CommandReport) -> String {
+    let (output, recovery) = if report.output_complete {
+        (
+            "output complete",
+            format!("Full output: read_output session_id={job}; nothing reruns."),
+        )
+    } else {
+        (
+            "output incomplete",
+            format!(
+                "Output incomplete; read_output session_id={job} has what was retained. Nothing reruns."
+            ),
+        )
+    };
+    let source = match &report.source {
+        Some(CommandSource {
+            directory,
+            commit: Some(commit),
+            dirty,
+        }) => format!(
+            "started in {directory} at {commit}{}",
+            if *dirty {
+                " with uncommitted changes"
+            } else {
+                ""
+            }
+        ),
+        Some(CommandSource {
+            directory,
+            commit: None,
+            ..
+        }) => format!("started in {directory}, not a Git checkout"),
+        None => "source revision not recorded".into(),
+    };
+    format!(
+        "command: {}\n{} · {} · {output}\n{source}\n{}{recovery} The checkout was not guarded while it ran; a pass covers this source only, not a later revision.",
+        command_text(&report.command),
+        outcome_text(&report.result.outcome),
+        cleanup_text(&report.result.cleanup),
+        report.tail,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_probe_output_parses_directory_commit_and_dirty_state() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{commit}\ndirty\n")),
+            Some(CommandSource {
+                directory: "/work/tree".into(),
+                commit: Some(commit.clone()),
+                dirty: true,
+            })
+        );
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{commit}\nclean\n")).map(|source| source.dirty),
+            Some(false)
+        );
+        assert_eq!(
+            parse_probe("/outside\n"),
+            Some(CommandSource {
+                directory: "/outside".into(),
+                commit: None,
+                dirty: false,
+            })
+        );
+        assert_eq!(parse_probe(""), None);
+    }
+
+    #[test]
+    fn report_names_command_outcome_cleanup_output_source_and_recovery() {
+        let report = CommandReport {
+            command: vec![
+                "bash".into(),
+                "--noprofile".into(),
+                "--norc".into(),
+                "-c".into(),
+                "cargo test -p crate --lib".into(),
+                "exomonad-bash".into(),
+            ],
+            source: Some(CommandSource {
+                directory: "/work/tree".into(),
+                commit: Some("0123abcd".into()),
+                dirty: true,
+            }),
+            result: CommandResult {
+                outcome: CommandOutcome::CommandExited(101),
+                cleanup: CommandCleanup::CommandClean,
+            },
+            output_complete: true,
+            tail: "stdout tail:\ntest result: FAILED\n".into(),
+        };
+        assert_eq!(
+            render_report("job-1", &report),
+            "command: cargo test -p crate --lib\nexit 101 · process and cleanup terminal · output complete\nstarted in /work/tree at 0123abcd with uncommitted changes\nstdout tail:\ntest result: FAILED\nFull output: read_output session_id=job-1; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
+        );
+        let incomplete = CommandReport {
+            output_complete: false,
+            source: None,
+            ..report
+        };
+        let text = render_report("job-1", &incomplete);
+        assert!(
+            text.contains("output incomplete\nsource revision not recorded\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Output incomplete; read_output session_id=job-1 has what was retained."),
+            "{text}"
+        );
+        assert!(!text.contains("Full output"), "{text}");
+    }
+
+    #[test]
+    fn probe_keeps_the_command_location_and_environment_without_optional_locks() {
+        let spec = CommandSpec {
+            argv: vec!["cargo".into(), "test".into()],
+            directory: Some("/work/tree".into()),
+            environment: vec![
+                ("GIT_OPTIONAL_LOCKS".into(), "1".into()),
+                ("KEEP".into(), "yes".into()),
+            ],
+            memory: 8 * 1024 * 1024 * 1024,
+            input: CommandInput::PipeInput,
+        };
+        let probe = probe_spec(&spec);
+        assert_eq!(probe.directory, spec.directory);
+        assert_eq!(
+            probe.environment,
+            vec![
+                ("KEEP".to_owned(), "yes".to_owned()),
+                ("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned()),
+            ]
+        );
+        assert_eq!(probe.input, CommandInput::ClosedInput);
+    }
+}
