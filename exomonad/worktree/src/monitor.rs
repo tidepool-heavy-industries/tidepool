@@ -52,6 +52,7 @@ use crate::git::GitCli;
 use crate::id::{BranchName, EventId, GitOid, WorktreeId};
 use crate::journal::EventJournal;
 use crate::storage::now_ms;
+use crate::submission::HeadState;
 
 /// Default interval between backstop reconciliation polls, in milliseconds.
 ///
@@ -140,8 +141,7 @@ impl RepositoryEvent {
 #[derive(Clone, Debug)]
 struct Baseline {
     path: PathBuf,
-    head: Option<GitOid>,
-    branch: Option<BranchName>,
+    head: HeadState,
 }
 
 /// Watches one or more managed worktrees.
@@ -164,7 +164,6 @@ impl WorktreeMonitor {
     /// against one journal end, not one per worktree.
     pub fn new(git: GitCli, journal: EventJournal) -> Self {
         let next_event_seq = journal
-            .since(0)
             .iter()
             .map(|e| e.event_id.0)
             .max()
@@ -185,16 +184,16 @@ impl WorktreeMonitor {
     /// journalled here). See the module docs for why no event is emitted.
     pub fn register(&mut self, worktree: WorktreeId, path: PathBuf) -> Result<(), WorktreeError> {
         self.journal.ensure_writable()?;
-        let (mut head, mut branch) = self.last_observed(&worktree);
-        if head.is_none() {
-            if !crate::registry::worktree_present(&self.git, &path)? {
-                return Err(WorktreeError::WorktreeLost(worktree));
+        let head = match self.last_observed(&worktree) {
+            Some(head) => head,
+            None => {
+                if !crate::registry::worktree_present(&self.git, &path)? {
+                    return Err(WorktreeError::WorktreeLost(worktree));
+                }
+                HeadState::read(&self.git, &path)?
             }
-            head = Some(read_head(&self.git, &path)?);
-            branch = read_branch(&self.git, &path);
-        }
-        self.baselines
-            .insert(worktree, Baseline { path, head, branch });
+        };
+        self.baselines.insert(worktree, Baseline { path, head });
         Ok(())
     }
 
@@ -206,19 +205,25 @@ impl WorktreeMonitor {
         self.baselines.contains_key(worktree)
     }
 
-    fn last_observed(&self, worktree: &WorktreeId) -> (Option<GitOid>, Option<BranchName>) {
-        let entries = self.journal.since(0);
-        entries
-            .into_iter()
+    fn last_observed(&self, worktree: &WorktreeId) -> Option<HeadState> {
+        self.journal
+            .iter()
             .rev()
-            .flat_map(|entry| entry.events.into_iter().rev())
+            .flat_map(|entry| entry.events.iter().rev())
             .find_map(|event| match event {
                 RepositoryEvent::HeadChanged(r) if &r.worktree == worktree => {
-                    Some((Some(r.new_head), r.branch))
+                    Some(match &r.branch {
+                        Some(branch) => HeadState::OnBranch {
+                            branch: branch.clone(),
+                            oid: r.new_head.clone(),
+                        },
+                        None => HeadState::Detached {
+                            oid: r.new_head.clone(),
+                        },
+                    })
                 }
                 _ => None,
             })
-            .unwrap_or((None, None))
     }
 
     /// Reconcile one worktree against its last observed state and return the
@@ -252,27 +257,20 @@ impl WorktreeMonitor {
             return Err(WorktreeError::WorktreeLost(worktree.clone()));
         }
         let path = baseline.path.clone();
-        #[allow(
-            clippy::expect_used,
-            reason = "register always establishes a concrete baseline before reconcile runs"
-        )]
-        let old_head = baseline
-            .head
-            .clone()
-            .expect("register always establishes a concrete baseline before reconcile runs");
-        let old_branch = baseline.branch.clone();
-
-        let new_head = read_head(&self.git, &path)?;
-        let new_branch = read_branch(&self.git, &path);
-
-        if old_head == new_head && old_branch == new_branch {
+        let new_state = HeadState::read(&self.git, &path)?;
+        if baseline.head == new_state {
             return Ok(Vec::new());
         }
+        let old_head = baseline.head.oid().clone();
+        let old_branch = baseline.head.branch();
+        let new_head = new_state.oid().clone();
+        let new_branch = new_state.branch().cloned();
+        let switched = old_branch != new_state.branch();
 
         let event_id = self.mint_event_id();
         let observed_at_ms = now_ms();
 
-        let kind = if old_branch != new_branch {
+        let kind = if switched {
             HeadChangeKind::Switched
         } else {
             classify(&self.git, &path, &old_head, &new_head)
@@ -318,8 +316,7 @@ impl WorktreeMonitor {
             worktree.clone(),
             Baseline {
                 path,
-                head: Some(new_head),
-                branch: new_branch,
+                head: new_state,
             },
         );
 
@@ -331,17 +328,6 @@ impl WorktreeMonitor {
         self.next_event_seq += 1;
         id
     }
-}
-
-fn read_head(git: &GitCli, cwd: &Path) -> Result<GitOid, WorktreeError> {
-    let out = git.try_run(cwd, &["rev-parse", "HEAD"])?;
-    Ok(GitOid::from_raw(out.trimmed()))
-}
-
-fn read_branch(git: &GitCli, cwd: &Path) -> Option<BranchName> {
-    git.run(cwd, &["symbolic-ref", "--short", "HEAD"])
-        .ok()
-        .map(|out| BranchName::from_raw(out.trimmed()))
 }
 
 /// Whether `ancestor` is an ancestor of `descendant`, honestly distinguishing

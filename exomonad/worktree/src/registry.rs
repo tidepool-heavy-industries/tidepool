@@ -34,7 +34,14 @@ const RECORDS_DIR: &str = "records";
 /// `Path::exists` would be fooled by a directory left behind with its `.git`
 /// file removed; this reconciles like everything else in this crate.
 pub(crate) fn worktree_present(git: &GitCli, cwd: &Path) -> Result<bool, WorktreeError> {
-    Ok(git.try_exists(&cwd.join(".git"))? && inspect::work_tree(git, cwd).is_ok())
+    if !git.try_exists(&cwd.join(".git"))? {
+        return Ok(false);
+    }
+    match inspect::work_tree(git, cwd) {
+        Ok(_) => Ok(true),
+        Err(WorktreeError::NotARepository(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// How a managed worktree came to exist. Recorded because "what was this seeded

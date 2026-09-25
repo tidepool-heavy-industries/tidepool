@@ -784,3 +784,64 @@ fn reconciliation_batch_survives_restart_with_one_shared_event_id() {
         RepositoryEvent::HeadChanged(_)
     ));
 }
+
+#[test]
+fn detached_baseline_survives_restart_and_reports_reattachment() {
+    let repo = TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "one", "first").unwrap();
+    let branch = repo
+        .git()
+        .try_run(repo.path(), &["symbolic-ref", "--short", "HEAD"])
+        .unwrap()
+        .trimmed()
+        .to_string();
+    let (mut monitor, journal_path, _scratch) = open_monitor();
+    let id = wt("detached");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .unwrap();
+    repo.git()
+        .try_run(repo.path(), &["switch", "--detach"])
+        .unwrap();
+    let events = monitor.reconcile(&id).unwrap();
+    assert_eq!(head_changed(&events)[0].kind, HeadChangeKind::Switched);
+    assert_eq!(head_changed(&events)[0].branch, None);
+    drop(monitor);
+    let mut monitor =
+        WorktreeMonitor::new(GitCli::new(), EventJournal::open(journal_path).unwrap());
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .unwrap();
+    assert!(monitor.reconcile(&id).unwrap().is_empty());
+    repo.git()
+        .try_run(repo.path(), &["switch", &branch])
+        .unwrap();
+    let events = monitor.reconcile(&id).unwrap();
+    assert_eq!(head_changed(&events)[0].kind, HeadChangeKind::Switched);
+    assert_eq!(
+        head_changed(&events)[0].branch.as_ref().unwrap().as_str(),
+        branch
+    );
+}
+
+#[test]
+fn inspection_failure_is_not_worktree_loss_and_preserves_baseline() {
+    let repo = TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "one", "first").unwrap();
+    let (mut monitor, _journal, _scratch) = open_monitor();
+    let id = wt("inspection-error");
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .unwrap();
+    let git_dir = repo.path().join(".git");
+    let retained = repo.path().join("retained-git");
+    std::fs::rename(&git_dir, &retained).unwrap();
+    std::fs::write(&git_dir, "invalid gitfile\n").unwrap();
+    assert!(matches!(
+        monitor.reconcile(&id),
+        Err(exomonad_worktree::WorktreeError::GitFailure(_))
+    ));
+    std::fs::remove_file(&git_dir).unwrap();
+    std::fs::rename(&retained, &git_dir).unwrap();
+    assert!(monitor.reconcile(&id).unwrap().is_empty());
+}

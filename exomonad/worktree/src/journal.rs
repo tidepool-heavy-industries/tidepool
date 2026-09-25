@@ -290,6 +290,11 @@ impl EventJournal {
         self.entries.last().map_or(0, |e| e.cursor)
     }
 
+    /// Borrow acknowledged rows for diagnosis and restart recovery.
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &ObservationBatch> {
+        self.entries.iter()
+    }
+
     /// Rows strictly after `cursor`. For diagnosis and restart recovery only.
     /// Infallible — an in-memory filter over already-loaded entries.
     pub fn since(&self, cursor: u64) -> Vec<ObservationBatch> {

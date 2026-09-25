@@ -25,6 +25,34 @@ pub enum HeadState {
     Detached { oid: GitOid },
 }
 
+impl HeadState {
+    /// Read HEAD without confusing a failed inspection with detachment.
+    pub(crate) fn read(git: &GitCli, cwd: &Path) -> Result<Self, WorktreeError> {
+        let oid = GitOid::from_raw(git.try_run(cwd, &["rev-parse", "HEAD"])?.trimmed());
+        match git.run(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+            Ok(out) => Ok(Self::OnBranch {
+                branch: BranchName::from_raw(out.trimmed()),
+                oid,
+            }),
+            Err(receipt) if receipt.exit_code == Some(1) => Ok(Self::Detached { oid }),
+            Err(receipt) => Err(WorktreeError::GitFailure(receipt)),
+        }
+    }
+
+    pub(crate) fn oid(&self) -> &GitOid {
+        match self {
+            Self::OnBranch { oid, .. } | Self::Detached { oid } => oid,
+        }
+    }
+
+    pub(crate) fn branch(&self) -> Option<&BranchName> {
+        match self {
+            Self::OnBranch { branch, .. } => Some(branch),
+            Self::Detached { .. } => None,
+        }
+    }
+}
+
 /// Mutable repository state observed alongside [`HeadState`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkingState {
@@ -51,7 +79,7 @@ struct RepositorySample {
 }
 
 fn sample(git: &GitCli, cwd: &Path, base: &GitOid) -> Result<RepositorySample, WorktreeError> {
-    let oid = GitOid::from_raw(git.try_run(cwd, &["rev-parse", "HEAD"])?.trimmed());
+    let submitted_head = HeadState::read(git, cwd)?;
     let committed_paths = git
         .try_run(
             cwd,
@@ -59,24 +87,13 @@ fn sample(git: &GitCli, cwd: &Path, base: &GitOid) -> Result<RepositorySample, W
                 "diff",
                 "--name-only",
                 "-z",
-                &format!("{}..{}", base.as_str(), oid.as_str()),
+                &format!("{}..{}", base.as_str(), submitted_head.oid().as_str()),
             ],
         )?
         .nul_fields()
         .into_iter()
         .map(String::from)
         .collect();
-    let branch_output = git.try_run(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let branch = branch_output.trimmed();
-    let submitted_head = if branch == "HEAD" {
-        HeadState::Detached { oid }
-    } else {
-        HeadState::OnBranch {
-            branch: BranchName::from_raw(branch),
-            oid,
-        }
-    };
-
     Ok(RepositorySample {
         submitted_head,
         committed_paths,
