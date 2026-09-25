@@ -991,6 +991,25 @@ fn migrate_v1(mut value: serde_json::Value) -> Result<serde_json::Value, Migrati
     value["version"] = serde_json::json!(2);
     Ok(value)
 }
+/// A read-only view of a durable inbox checkpoint: the delivery cursor and
+/// any retained receipt evidence. Reuses the same parsing and migration path
+/// as [`DurableInbox::open`], but never repairs or writes anything, so it is
+/// safe for a reader that does not own the inbox files.
+pub struct CheckpointView<R> {
+    pub sequence: u64,
+    pub receipts: BTreeMap<u64, ReceiptEvidence<R>>,
+}
+
+/// Reads the checkpoint at `path` without repairing or writing it. Missing
+/// files read as an empty, unversioned checkpoint, matching `DurableInbox::open`.
+pub fn read_checkpoint<R: DeserializeOwned>(path: &Path) -> Result<CheckpointView<R>, InboxError> {
+    let (checkpoint, _versioned) = read_cursor::<R>(path)?;
+    Ok(CheckpointView {
+        sequence: checkpoint.sequence,
+        receipts: checkpoint.receipts,
+    })
+}
+
 fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<(InboxCheckpoint<R>, bool), InboxError> {
     let value = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(corrupt)?,
