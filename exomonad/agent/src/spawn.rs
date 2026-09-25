@@ -617,19 +617,15 @@ pub struct CycleSaga {
     worktree: WorktreeHandle,
     thread: BackendThreadId,
     binding_ref: String,
-    /// `Some` for exactly as long as `!self.settled` — `roll_back`/`abandon`
-    /// take it and flip `settled` in the same step, so `settle_step`'s
-    /// `Completed` arm can `.expect()` it rather than re-checking.
-    active_binding: Option<ActiveBinding>,
-    /// The call awaiting an answer. `None` between a completed step and the
-    /// next.
-    parked: Option<ToolCallId>,
+    /// Taking the live state consumes the only lease this cycle may settle.
+    /// None means completion, rollback or abandonment was already attempted.
+    live: Option<LiveCycle>,
     rounds: u32,
-    /// Whether this saga's binding is already settled — by completion,
-    /// rollback, or a previous [`abandon`](Self::abandon). Makes `abandon`
-    /// idempotent: a cancel racing a completion must not write a second lease
-    /// row for a life that ended once.
-    settled: bool,
+}
+
+struct LiveCycle {
+    binding: ActiveBinding,
+    parked: Option<ToolCallId>,
 }
 
 /// Hand-written: the substrate handle is SHARED, so a derived impl would
@@ -642,9 +638,12 @@ impl std::fmt::Debug for CycleSaga {
             .field("worktree", &self.worktree.id())
             .field("thread", &self.thread)
             .field("binding_ref", &self.binding_ref)
-            .field("parked", &self.parked)
+            .field(
+                "parked",
+                &self.live.as_ref().and_then(|live| live.parked.as_ref()),
+            )
             .field("rounds", &self.rounds)
-            .field("settled", &self.settled)
+            .field("settled", &self.is_finished())
             .finish_non_exhaustive()
     }
 }
@@ -710,10 +709,11 @@ impl CycleSaga {
             worktree,
             thread,
             binding_ref,
-            active_binding: Some(lease),
-            parked: None,
+            live: Some(LiveCycle {
+                binding: lease,
+                parked: None,
+            }),
             rounds: 0,
-            settled: false,
         };
         let step = saga.settle_step(event)?;
         Ok(CycleProgress::from_step(saga, step))
@@ -729,19 +729,17 @@ impl CycleSaga {
         call: ToolCallId,
         outcome: ToolOutcome,
     ) -> Result<SpawnStep, SpawnError> {
-        if self.settled {
-            return Err(SpawnError::NotRunning {
-                agent,
-                detail: "no agent is mid-turn".to_string(),
-            });
-        }
+        let live = self.live.as_mut().ok_or_else(|| SpawnError::NotRunning {
+            agent,
+            detail: "no agent is mid-turn".to_string(),
+        })?;
         if self.agent != agent {
             return Err(SpawnError::NotRunning {
                 agent,
                 detail: format!("agent {} is the one mid-turn", self.agent.0),
             });
         }
-        match &self.parked {
+        match &live.parked {
             Some(parked) if *parked == call => {}
             Some(parked) => {
                 return Err(SpawnError::NotRunning {
@@ -768,7 +766,7 @@ impl CycleSaga {
             };
             return Err(self.roll_back(error));
         }
-        self.parked = None;
+        live.parked = None;
 
         // No substrate lock is held here, and none may be.
         let event = match backend.resume(ToolReply { call, outcome }) {
@@ -799,7 +797,7 @@ impl CycleSaga {
     /// Whether this saga's life is over — completed, rolled back, or
     /// abandoned. A finished saga answers nothing and settles nothing further.
     pub fn is_finished(&self) -> bool {
-        self.settled
+        self.live.is_none()
     }
 
     /// Settle the binding `Released` for a cycle being ABANDONED (cancelled)
@@ -814,22 +812,11 @@ impl CycleSaga {
     /// this — settling first would hold the substrate lock across a reap of
     /// unknown duration.
     pub fn abandon(&mut self) -> Result<(), WorktreeError> {
-        if self.settled {
+        let Some(live) = self.live.take() else {
             return Ok(());
-        }
-        // `!settled` means `active_binding` is `Some` — taken exactly once
-        // here regardless of whether the settle below succeeds.
-        #[allow(
-            clippy::expect_used,
-            reason = "an unsettled saga always holds its lease"
-        )]
-        let lease = self
-            .active_binding
-            .take()
-            .expect("an unsettled saga always holds its lease");
-        self.settled = true;
+        };
         let mut sub = self.substrate.lock().map_err(|_| poisoned_storage())?;
-        sub.settle(lease, BindingTerminal::Released)
+        sub.settle(live.binding, BindingTerminal::Released)
     }
 
     /// Turn one backend event into a saga step, settling the binding
@@ -842,27 +829,25 @@ impl CycleSaga {
     fn settle_step(&mut self, event: TurnEvent) -> Result<SpawnStep, SpawnError> {
         match event {
             TurnEvent::ToolCall(call) => {
-                self.parked = Some(call.call.clone());
+                let live = self.live.as_mut().ok_or_else(|| SpawnError::NotRunning {
+                    agent: self.agent,
+                    detail: "no agent is mid-turn".to_string(),
+                })?;
+                live.parked = Some(call.call.clone());
                 Ok(SpawnStep::ToolCall {
                     agent: self.agent,
                     call,
                 })
             }
             TurnEvent::Completed(outcome) => {
-                // Reached only while `!self.settled`, so `active_binding` is
-                // `Some`.
-                #[allow(
-                    clippy::expect_used,
-                    reason = "settle_step is only reached while !self.settled, which is exactly the invariant keeping active_binding Some here"
-                )]
-                let lease = self.active_binding.take().expect(
-                    "settle_step only runs on an unsettled saga, which always holds its lease",
-                );
-                self.settled = true;
+                let live = self.live.take().ok_or_else(|| SpawnError::NotRunning {
+                    agent: self.agent,
+                    detail: "no agent is mid-turn".to_string(),
+                })?;
                 // --- critical section: one settle. No backend call here. ---
                 {
                     let mut sub = lock_substrate(&self.substrate, SpawnStage::Running)?;
-                    if let Err(rollback) = sub.settle(lease, BindingTerminal::Completed) {
+                    if let Err(rollback) = sub.settle(live.binding, BindingTerminal::Completed) {
                         return Err(SpawnError::RollbackFailed {
                             stage: SpawnStage::Running,
                             original: Box::new(SpawnError::Binding {
@@ -897,20 +882,12 @@ impl CycleSaga {
     /// Compensate a post-`Bound` failure and mark this saga finished.
     fn roll_back(&mut self, original: SpawnError) -> SpawnError {
         let stage = original.stage();
-        self.parked = None;
-        if self.settled {
-            return original;
-        }
-        let Some(lease) = self.active_binding.take() else {
-            // The receipt was already consumed by an earlier settle attempt
-            // that itself failed — there is no second one to retry with.
-            self.settled = true;
+        let Some(live) = self.live.take() else {
             return original;
         };
         let mut sub = match self.substrate.lock() {
             Ok(sub) => sub,
             Err(_) => {
-                self.settled = true;
                 return SpawnError::RollbackFailed {
                     stage,
                     original: Box::new(original),
@@ -918,10 +895,7 @@ impl CycleSaga {
                 };
             }
         };
-        // The lease is consumed either way — a failed settle leaves nothing
-        // to retry with, so `settled` flips unconditionally.
-        self.settled = true;
-        sub.roll_back(lease, original)
+        sub.roll_back(live.binding, original)
     }
 }
 
@@ -1078,14 +1052,12 @@ impl CoupledSpawner {
         call: ToolCallId,
         outcome: ToolOutcome,
     ) -> Result<SpawnStep, SpawnError> {
-        if !self.running.contains_key(&agent) {
+        let Some(saga) = self.running.get_mut(&agent) else {
             return Err(SpawnError::NotRunning {
                 agent,
                 detail: self.no_such_agent_detail(),
             });
-        }
-        #[allow(clippy::expect_used, reason = "checked just above")]
-        let saga = self.running.get_mut(&agent).expect("checked just above");
+        };
         let result = saga.answer(backend, agent, call, outcome);
         // A saga whose life ended — completed, rolled back, or backstopped —
         // leaves the map; a refused misroute costs the running agent nothing
