@@ -648,6 +648,10 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
         && "ForeignClass" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "specialized custom instance preserves general structure" True
       ("Special" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
+    assertEqual "authored Show keeps its presentation" False
+      ("Presented" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
+    assertEqual "authored Show keeps the automatic Generic" True
+      ("Presented" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported automatic Generic derivations omitted" False
       (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
     contextual <- cellDisplayDeclarations DisplayInstanceContexts provisional accepted

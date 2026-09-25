@@ -28,3 +28,5 @@ instance External.Display ForeignClass where foreignDisplay _ = ()
 instance External.Generic ForeignClass where foreignGeneric _ = ()
 data Special a = Special a
 instance D.Display (Special Int) where displayTree _ = D.TextLeaf (Text.pack "special-wins")
+data Presented = Presented Int
+instance Show Presented where show _ = "presented"
