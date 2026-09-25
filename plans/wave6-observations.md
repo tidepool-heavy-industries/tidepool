@@ -80,3 +80,16 @@ Contention unchanged: 109 calls since 05:46, checkout_wait p50 6.7 s, max
 145 s waiting and 49 s compiling. The operator lanes' builds and the
 wave's 21 actors share the box. No intervention; wind-down still pending
 the operator. No new trial evidence.
+
+## 06:46Z wake
+
+Alive; 8 GiB free, swap 24 GiB; 23 windows (about 35 actors so far); no
+Failed/Retired, no latched machine. Root nine minutes into a turn (an 18 s
+lookup, a 96 s cell), not stuck. Master gained 859258f (item-2
+trace-design interview recorded). run-map (deployed binary) labels the
+root's and the core lead's own rows fenced; both are admitted in-flight
+rows (host_input=ready) that the corrected run-map renders open. No
+rejections, nudges or cancellations. Contention: 143 calls since 06:16,
+checkout_wait p50 5.2 s, max 174 s (a core-lead cell waited 174 s for a
+3 s compile). No intervention; the wave is past its useful load and the
+wind-down is the operator's call. No new trial evidence.
