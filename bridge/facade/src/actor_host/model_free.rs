@@ -57,6 +57,7 @@ impl ModelFreeSession {
             authority.clone(),
             source_layers.as_ref(),
             exomonad_actor::Incarnation::FIRST,
+            super::JournalOpenMode::Create,
         )?;
         let (descriptor, machine, outcome) = root.into_parts();
         let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(

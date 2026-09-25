@@ -1071,6 +1071,58 @@ fn binding_table_refuses_a_second_live_owner_over_one_root() {
 }
 
 #[test]
+fn binding_owner_probe_leaves_an_absent_root_absent() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = base.path().join("bindings");
+
+    assert!(!BindingTable::has_live_owner(&root).unwrap());
+    assert!(
+        !root.exists(),
+        "the probe must not create storage or a lock file"
+    );
+}
+
+#[test]
+fn binding_owner_probe_observes_lifetime_lock_and_release() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = base.path().join("bindings");
+    let owner = BindingTable::open(&root).unwrap();
+
+    assert!(BindingTable::has_live_owner(&root).unwrap());
+    drop(owner);
+    assert!(!BindingTable::has_live_owner(&root).unwrap());
+}
+
+#[test]
+fn binding_owner_probe_does_not_read_or_reconcile_binding_rows() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = base.path().join("bindings");
+    std::fs::create_dir(&root).unwrap();
+    let lock_path = root.join(".owner.lock");
+    let binding_path = root.join("retained.json");
+    let original = b"unread binding bytes\n";
+    std::fs::write(&lock_path, b"lock bytes\n").unwrap();
+    std::fs::write(&binding_path, original).unwrap();
+
+    assert!(!BindingTable::has_live_owner(&root).unwrap());
+    assert_eq!(std::fs::read(&binding_path).unwrap(), original);
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"lock bytes\n");
+}
+
+#[test]
+fn binding_owner_probe_fails_closed_on_unreadable_lock_path() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = base.path().join("bindings");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(".owner.lock")).unwrap();
+
+    assert!(matches!(
+        BindingTable::has_live_owner(&root),
+        Err(WorktreeError::StorageFailure { .. })
+    ));
+}
+
+#[test]
 fn binding_table_waits_for_release_without_stealing_live_ownership() {
     use exomonad_worktree::BindingTable;
     use std::time::Duration;

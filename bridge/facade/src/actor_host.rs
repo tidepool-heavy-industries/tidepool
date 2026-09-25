@@ -2035,6 +2035,49 @@ fn active_source_identity(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalOpenMode {
+    Create,
+    Resume,
+}
+
+// The host incarnation fences identities even when a predecessor failed before
+// reaching the actor host. Its number alone cannot prove that a journal exists.
+fn actor_journal_mode(
+    incarnation: exomonad_actor::Incarnation,
+    root_binding: &Path,
+    actor_journal: &Path,
+    run_journal: &Path,
+) -> std::io::Result<JournalOpenMode> {
+    if incarnation == exomonad_actor::Incarnation::FIRST {
+        return Ok(JournalOpenMode::Create);
+    }
+    if actor_journal.try_exists()? || root_binding.try_exists()? || run_journal.try_exists()? {
+        Ok(JournalOpenMode::Resume)
+    } else {
+        Ok(JournalOpenMode::Create)
+    }
+}
+
+// The actor journal is written before root compilation opens the run journal.
+// A restart between those steps may create the latter only if no actor was
+// admitted and no root conversation was bound.
+fn run_journal_mode(
+    incarnation: exomonad_actor::Incarnation,
+    root_binding: &Path,
+    run_journal: &Path,
+    no_prior_actors: bool,
+) -> std::io::Result<JournalOpenMode> {
+    if incarnation == exomonad_actor::Incarnation::FIRST {
+        return Ok(JournalOpenMode::Create);
+    }
+    if run_journal.try_exists()? || root_binding.try_exists()? || !no_prior_actors {
+        Ok(JournalOpenMode::Resume)
+    } else {
+        Ok(JournalOpenMode::Create)
+    }
+}
+
 pub(crate) async fn run(
     mut config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
@@ -2060,12 +2103,29 @@ pub(crate) async fn run(
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
     let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
-    let actor_recovery = if host_incarnation.incarnation() == exomonad_actor::Incarnation::FIRST {
+    let run_id = run_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| runtime_error("run root has no UTF-8 run identifier"))?;
+    let run_journal_path = crate::exomonad::exomonad_journal_path(&config.workspace, run_id);
+    let actor_journal_mode = actor_journal_mode(
+        host_incarnation.incarnation(),
+        &config.root_binding_path,
+        &actor_recovery_path,
+        &run_journal_path,
+    )?;
+    let actor_recovery = if actor_journal_mode == JournalOpenMode::Create {
         exomonad_actor::ActorRecoveryJournal::open(actor_recovery_path)
     } else {
         exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
+    let run_journal_mode = run_journal_mode(
+        host_incarnation.incarnation(),
+        &config.root_binding_path,
+        &run_journal_path,
+        prior_actor_records.is_empty(),
+    )?;
     let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
         &run_root,
@@ -2073,6 +2133,7 @@ pub(crate) async fn run(
         worktree_authority.clone(),
         source_layers.as_ref(),
         host_incarnation.incarnation(),
+        run_journal_mode,
     )?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
@@ -2518,6 +2579,19 @@ fn actor_worktree_resources(
     actor_worktree_resources_at(&root, workspace)
 }
 
+pub(crate) fn ensure_actor_workspace_available(
+    workspace: &Path,
+) -> Result<(), exomonad_worktree::WorktreeError> {
+    let bindings = actor_worktree_storage_root(workspace).join("bindings");
+    if BindingTable::has_live_owner(&bindings)? {
+        return Err(exomonad_worktree::WorktreeError::StorageFailure {
+            path: bindings,
+            detail: "another Exomonad host owns this workspace; stop its session and wait for shutdown before launching again".into(),
+        });
+    }
+    Ok(())
+}
+
 fn actor_worktree_storage_root(workspace: &Path) -> PathBuf {
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
@@ -2959,6 +3033,7 @@ fn compile_root(
     worktree_authority: ActorWorktreeAuthority,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     host_incarnation: exomonad_actor::Incarnation,
+    run_journal_mode: JournalOpenMode,
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let CompiledExomonadDriver {
         preamble,
@@ -3012,7 +3087,7 @@ fn compile_root(
     if let Some(parent) = journal_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let journal = if host_incarnation == exomonad_actor::Incarnation::FIRST {
+    let journal = if run_journal_mode == JournalOpenMode::Create {
         tidepool_handlers::JournalHandler::new(tidepool_handlers::SegmentPath::create_exclusive(
             journal_path,
         )?)?

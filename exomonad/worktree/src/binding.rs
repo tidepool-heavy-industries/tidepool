@@ -16,6 +16,8 @@ use crate::error::WorktreeError;
 use crate::id::WorktreeId;
 use crate::storage::{storage_failure, DurableJsonDir};
 
+const OWNER_LOCK_FILE: &str = ".owner.lock";
+
 /// An opaque agent identity. Deliberately a string newtype and not a typed
 /// agent handle: this module must not reach for anything agent-shaped beyond
 /// an opaque identity.
@@ -209,6 +211,28 @@ struct BindingEntry {
 }
 
 impl BindingTable {
+    /// Observe whether another table currently holds this root's lifetime lock.
+    /// This is only an early launch hint: an owner may arrive after the probe,
+    /// so `open` remains the authoritative single-owner boundary. The probe
+    /// neither creates storage nor loads or reconciles binding rows.
+    pub fn has_live_owner(root: impl AsRef<Path>) -> Result<bool, WorktreeError> {
+        let lock_path = root.as_ref().join(OWNER_LOCK_FILE);
+        let owner_lock = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(storage_failure(&lock_path, error)),
+        };
+        match owner_lock.try_lock() {
+            Ok(()) => Ok(false),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(error)) => Err(storage_failure(&lock_path, error)),
+        }
+    }
+
     /// Reconcile one durable active row after the caller has proved the old
     /// actor process stopped. This is the only path that can issue a fresh
     /// in-process receipt for a row loaded from disk. It either transfers the
@@ -334,7 +358,7 @@ impl BindingTable {
         let root = root.as_ref().to_path_buf();
         let dir = DurableJsonDir::open(&root)?;
 
-        let lock_path = root.join(".owner.lock");
+        let lock_path = root.join(OWNER_LOCK_FILE);
         let owner_lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)

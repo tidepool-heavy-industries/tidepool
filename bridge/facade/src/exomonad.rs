@@ -650,7 +650,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             ))
         })?;
         stop(previous_run.trim(), &session_name).await?;
-    } else {
+    }
+    crate::actor_host::ensure_actor_workspace_available(&workspace)?;
+    if !options.recreate {
         clear_fresh_root_binding(&root_binding_path)?;
     }
     tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
@@ -900,25 +902,52 @@ pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error:
     {
         return Err(runtime_error("invalid Exomonad run identity"));
     }
+    let tmux = TmuxSession::new(session)?;
     let unit = format!("exomonad-host-{run_id}.service");
+    stop_host_unit(Path::new("systemctl"), &unit).await?;
+    tmux.kill().await?;
+    Ok(())
+}
+
+async fn stop_host_unit(systemctl: &Path, unit: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[allow(
         clippy::disallowed_methods,
-        reason = "short synchronous probe: systemctl stop, waited on directly via .status()"
+        reason = "short systemd stop request, awaited directly"
     )]
-    let status = tokio::process::Command::new("systemctl")
-        .args(["--user", "stop", &unit])
-        .status()
+    let stopped = tokio::process::Command::new(systemctl)
+        .args(["--user", "stop", unit])
+        .output()
         .await?;
-    if !status.success() {
-        return Err(runtime_error(format!(
-            "could not stop supervised host unit {unit}"
-        )));
+    if stopped.status.success() {
+        return Ok(());
     }
-    let tmux = TmuxSession::new(session)?;
-    if tmux.exists().await? {
-        tmux.kill().await?;
+
+    // A collected failed service may already be absent while its compiler and
+    // diagnostic panes remain. Only authoritative absence permits cleanup after
+    // a failed stop; permission, bus and live-unit failures still retain them.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short systemd property query, awaited directly"
+    )]
+    let observed = tokio::process::Command::new(systemctl)
+        .args(["--user", "show", unit, "--property=LoadState,ActiveState"])
+        .output()
+        .await?;
+    let properties = String::from_utf8_lossy(&observed.stdout);
+    if observed.status.success()
+        && properties.lines().any(|line| line == "LoadState=not-found")
+        && properties
+            .lines()
+            .any(|line| line == "ActiveState=inactive")
+    {
+        return Ok(());
     }
-    Ok(())
+    Err(runtime_error(format!(
+        "could not stop supervised host unit {unit}: {}; state query: {} {}",
+        String::from_utf8_lossy(&stopped.stderr).trim(),
+        properties.trim(),
+        String::from_utf8_lossy(&observed.stderr).trim(),
+    )))
 }
 
 fn compiler_daemon_launch(
@@ -3354,6 +3383,34 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot resume the requested root conversation"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_host_unit_accepts_stopped_or_collected_units_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (stop_status, show_status, properties, allowed) in [
+            (0, 99, "", true),
+            (5, 0, "LoadState=not-found\nActiveState=inactive", true),
+            (5, 0, "LoadState=loaded\nActiveState=active", false),
+            (5, 0, "LoadState=loaded\nActiveState=inactive", false),
+            (5, 1, "LoadState=not-found\nActiveState=inactive", false),
+            (5, 0, "LoadState=not-found", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("systemctl");
+            std::fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\ncase \"$2\" in\nstop) echo 'stop failed' >&2; exit {stop_status};;\nshow) printf '%s\\n' '{properties}'; exit {show_status};;\n*) exit 99;;\nesac\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = stop_host_unit(&executable, "exomonad-host-test.service").await;
+            assert_eq!(result.is_ok(), allowed, "{properties}: {result:?}");
+        }
     }
 
     #[cfg(unix)]

@@ -1,6 +1,69 @@
 use super::*;
 
 #[test]
+fn later_host_before_root_admission_creates_missing_journals() {
+    let directory = tempfile::tempdir().unwrap();
+    let binding = directory.path().join("root-binding.json");
+    let actors = directory.path().join("actor-lifecycle.v2.jsonl");
+    let run = directory.path().join("run-journal.jsonl");
+    let incarnation = exomonad_actor::Incarnation(2);
+
+    assert_eq!(
+        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
+        JournalOpenMode::Create
+    );
+    let actor_journal = exomonad_actor::ActorRecoveryJournal::open(&actors).unwrap();
+    assert!(actor_journal.records().is_empty());
+    assert_eq!(
+        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
+        JournalOpenMode::Create
+    );
+    tidepool_handlers::SegmentPath::create_exclusive(run.clone()).unwrap();
+
+    assert_eq!(
+        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
+        JournalOpenMode::Resume
+    );
+    assert_eq!(
+        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
+        JournalOpenMode::Resume
+    );
+}
+
+#[test]
+fn later_host_requires_missing_journals_when_prior_evidence_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let binding = directory.path().join("root-binding.json");
+    let actors = directory.path().join("actor-lifecycle.v2.jsonl");
+    let run = directory.path().join("run-journal.jsonl");
+    let incarnation = exomonad_actor::Incarnation(2);
+
+    std::fs::write(&binding, b"prior root was bound").unwrap();
+    assert_eq!(
+        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
+        JournalOpenMode::Resume
+    );
+    assert!(exomonad_actor::ActorRecoveryJournal::open_existing(&actors).is_err());
+    assert_eq!(
+        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
+        JournalOpenMode::Resume
+    );
+    assert!(tidepool_handlers::SegmentPath::open_existing(run.clone()).is_err());
+
+    std::fs::remove_file(&binding).unwrap();
+    std::fs::write(&run, b"prior run journal").unwrap();
+    assert_eq!(
+        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
+        JournalOpenMode::Resume
+    );
+    std::fs::remove_file(&run).unwrap();
+    assert_eq!(
+        run_journal_mode(incarnation, &binding, &run, false).unwrap(),
+        JournalOpenMode::Resume
+    );
+}
+
+#[test]
 fn root_never_bound_is_true_exactly_when_the_binding_file_is_absent() {
     // Regression: a root coordination failure before this run's root ever
     // reached a queue-ready binding used to leave the host running,
