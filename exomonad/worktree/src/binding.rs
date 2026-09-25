@@ -186,19 +186,10 @@ impl ActiveBinding {
 #[derive(Debug)]
 pub struct BindingTable {
     dir: DurableJsonDir,
-    bindings: Vec<Binding>,
+    bindings: Vec<BindingEntry>,
     /// Latched after a possibly visible persistence failure; cleared only by
     /// dropping this owner and exclusively reopening authoritative storage.
     write_uncertain: bool,
-    /// Parallel to `bindings` (same length, same index) — the in-memory
-    /// bind-generation of each row, assigned when [`Self::bind`] creates it.
-    /// NEVER persisted: an [`ActiveBinding`] receipt's identity is a fact
-    /// about this process's lifetime, not a durable one. A row loaded from
-    /// disk at [`Self::open`] carries `None` here, so a leftover `Active` row
-    /// from a crashed process can never be settled by a forged receipt — only
-    /// a fresh [`Self::bind`] produces one, and `bind` refuses
-    /// (`WorktreeBusy`) while that row still stands.
-    generations: Vec<Option<u64>>,
     next_generation: u64,
     /// Held (exclusively flocked) for this table's whole lifetime. The
     /// enforcement decisions (`bind`'s already-bound refusal) run against the
@@ -207,6 +198,14 @@ pub struct BindingTable {
     /// persist a binding. The lock turns that silent double-writer into a
     /// loud open-time refusal. Released by drop.
     _owner_lock: fs::File,
+}
+
+/// A durable row and its process-local lease identity travel together.
+/// Reopened rows have no generation until explicit recovery authorizes one.
+#[derive(Debug)]
+struct BindingEntry {
+    binding: Binding,
+    generation: Option<u64>,
 }
 
 impl BindingTable {
@@ -226,38 +225,39 @@ impl BindingTable {
         let current = self
             .bindings
             .iter()
-            .enumerate()
-            .rfind(|(_, binding)| {
-                binding.worktree() == worktree && binding.state() == BindingState::Active
+            .rposition(|entry| {
+                entry.binding.worktree() == worktree
+                    && entry.binding.state() == BindingState::Active
             })
-            .map(|(index, binding)| (index, binding.agent().clone()))
             .ok_or_else(|| WorktreeError::StorageFailure {
                 path: self.path_for(worktree),
                 detail: format!("worktree {worktree} has no durable Active binding to recover"),
             })?;
         let generation = self.next_generation;
         self.next_generation += 1;
-        if current.1 == *successor {
-            self.generations[current.0] = Some(generation);
+        if self.bindings[current].binding.agent() == successor {
+            self.bindings[current].generation = Some(generation);
             return Ok(ActiveBinding {
                 worktree: worktree.clone(),
                 generation,
             });
         }
-        if current.1 != *predecessor {
+        if self.bindings[current].binding.agent() != predecessor {
             return Err(WorktreeError::WorktreeBusy {
                 worktree: worktree.clone(),
-                holder: current.1.to_string(),
+                holder: self.bindings[current].binding.agent().to_string(),
             });
         }
-        self.bindings[current.0].state = BindingState::Released;
-        self.bindings.push(Binding::new(
-            worktree.clone(),
-            successor.clone(),
-            BindingState::Active,
-            now_ms,
-        ));
-        self.generations.push(Some(generation));
+        self.bindings[current].binding.state = BindingState::Released;
+        self.bindings.push(BindingEntry {
+            binding: Binding::new(
+                worktree.clone(),
+                successor.clone(),
+                BindingState::Active,
+                now_ms,
+            ),
+            generation: Some(generation),
+        });
         if let Err(error) = self.persist(worktree) {
             self.write_uncertain = true;
             return Err(error);
@@ -280,14 +280,16 @@ impl BindingTable {
         let previous = self.active_index(lease)?;
         let generation = self.next_generation;
         self.next_generation += 1;
-        self.bindings[previous].state = BindingState::Released;
-        self.bindings.push(Binding::new(
-            lease.worktree.clone(),
-            successor.clone(),
-            BindingState::Active,
-            now_ms,
-        ));
-        self.generations.push(Some(generation));
+        self.bindings[previous].binding.state = BindingState::Released;
+        self.bindings.push(BindingEntry {
+            binding: Binding::new(
+                lease.worktree.clone(),
+                successor.clone(),
+                BindingState::Active,
+                now_ms,
+            ),
+            generation: Some(generation),
+        });
         lease.generation = generation;
         if let Err(error) = self.persist(&lease.worktree) {
             self.write_uncertain = true;
@@ -307,8 +309,10 @@ impl BindingTable {
         self.bindings
             .iter()
             .rev()
-            .find(|binding| binding.agent() == agent && binding.state() == BindingState::Active)
-            .map(Binding::worktree)
+            .find(|binding| {
+                binding.binding.agent() == agent && binding.binding.state() == BindingState::Active
+            })
+            .map(|entry| entry.binding.worktree())
     }
 
     /// Open (creating if absent) a binding table rooted at `root`, loading
@@ -360,13 +364,9 @@ impl BindingTable {
         }
 
         let mut bindings = Vec::new();
-        let mut generations = Vec::new();
         for (path, bytes) in dir.read_all()? {
-            let mut rows: Vec<Binding> =
+            let rows: Vec<Binding> =
                 serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
-            // Loaded rows carry no generation — see the field docs on
-            // `generations`.
-            generations.resize(generations.len() + rows.len(), None);
             // Reopening is the reconciliation boundary: the loaded bytes and
             // pathname must be durable before these rows can authorize ownership.
             fs::File::open(&path)
@@ -374,14 +374,16 @@ impl BindingTable {
                 .map_err(|e| storage_failure(&path, e))?;
             tidepool_atomic_write::sync_parent_directory(&path)
                 .map_err(|e| storage_failure(&e.path, e.source))?;
-            bindings.append(&mut rows);
+            bindings.extend(rows.into_iter().map(|binding| BindingEntry {
+                binding,
+                generation: None,
+            }));
         }
 
         Ok(Self {
             dir,
             bindings,
             write_uncertain: false,
-            generations,
             next_generation: 0,
             _owner_lock: owner_lock,
         })
@@ -399,7 +401,8 @@ impl BindingTable {
         let rows: Vec<&Binding> = self
             .bindings
             .iter()
-            .filter(|b| b.worktree() == worktree)
+            .filter(|entry| entry.binding.worktree() == worktree)
+            .map(|entry| &entry.binding)
             .collect();
         #[allow(clippy::expect_used, reason = "serialize bindings")]
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
@@ -427,20 +430,22 @@ impl BindingTable {
         }
         let generation = self.next_generation;
         self.next_generation += 1;
-        self.bindings.push(Binding::new(
-            worktree.clone(),
-            agent.clone(),
-            BindingState::Active,
-            now_ms,
-        ));
-        self.generations.push(Some(generation));
+        self.bindings.push(BindingEntry {
+            binding: Binding::new(
+                worktree.clone(),
+                agent.clone(),
+                BindingState::Active,
+                now_ms,
+            ),
+            generation: Some(generation),
+        });
         // No lease escapes a failed bind. Retain the tentative Active row for
         // diagnosis, but fence every authority lookup and mutation: the rename
         // may already be visible and reverting memory cannot undo publication.
         if let Err(e) = self.persist(worktree) {
             self.write_uncertain = true;
-            if let Some(generation) = self.generations.last_mut() {
-                *generation = None;
+            if let Some(entry) = self.bindings.last_mut() {
+                entry.generation = None;
             }
             return Err(e);
         }
@@ -461,13 +466,13 @@ impl BindingTable {
     /// the type's docs), reported as a storage invariant failure.
     fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
         let i = self.active_index(&lease)?;
-        let previous = self.bindings[i].state();
-        self.bindings[i].state = to.into();
+        let previous = self.bindings[i].binding.state();
+        self.bindings[i].binding.state = to.into();
         // Retain the previous Active diagnostic snapshot conservatively. This
         // does NOT roll back disk: publication may have succeeded. The consumed
         // lease cannot be retried and this handle cannot authorize or mutate.
         if let Err(e) = self.persist(&lease.worktree) {
-            self.bindings[i].state = previous;
+            self.bindings[i].binding.state = previous;
             self.write_uncertain = true;
             return Err(e);
         }
@@ -476,10 +481,10 @@ impl BindingTable {
 
     fn active_index(&self, lease: &ActiveBinding) -> Result<usize, WorktreeError> {
         self.ensure_writable()?;
-        self.bindings.iter().enumerate().rposition(|(i, binding)| {
-            binding.worktree() == &lease.worktree
-                && binding.state() == BindingState::Active
-                && self.generations[i] == Some(lease.generation)
+        self.bindings.iter().rposition(|binding| {
+            binding.binding.worktree() == &lease.worktree
+                && binding.binding.state() == BindingState::Active
+                && binding.generation == Some(lease.generation)
         }).ok_or_else(|| WorktreeError::StorageFailure {
             path: self.path_for(&lease.worktree),
             detail: format!("no Active binding for worktree {} matches bind-generation {}; receipt is stale", lease.worktree, lease.generation),
@@ -504,7 +509,11 @@ impl BindingTable {
         }
         self.bindings
             .iter()
-            .find(|b| b.worktree() == worktree && b.state() == BindingState::Active)
+            .find(|entry| {
+                entry.binding.worktree() == worktree
+                    && entry.binding.state() == BindingState::Active
+            })
+            .map(|entry| &entry.binding)
     }
 }
 
