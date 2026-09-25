@@ -23,6 +23,8 @@ for bounded implementation and review children. Effort (`Low`, `Medium`, `High`)
 is chosen at every fork. It selects fresh context from the Task (a Luna cannot
 reuse a Sol conversation), so the assignment must carry every fact the child
 needs, including the contract at each seam it shares with a sibling.
+Use the assignment's actual result type for findings or no-change work;
+do not manufacture a code Candidate to fit the example below.
 `solTaskFrom` has the same shape on the `executor` (Sol) alias with inherited
 context; use it only for a child that owns design judgment or its own
 integration loop. The child's settlement notice wakes you with its reply; no

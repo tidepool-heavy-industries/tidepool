@@ -99,10 +99,8 @@ at once: implementers, an independent reviewer, a test writer, a contract or
 security check. A wave is the set of obligations that are genuinely disjoint;
 prefer a wide tree of bounded children over a chain of turns. Bounded
 children use the cheap `luna` tier with fresh context (`lunaTask`) and
-recurse the same way. Before your first implementation edit
-on a multi-file obligation, admit at least one independent review or test
-child, or record why nothing can run in parallel. One owned file is not one
-indivisible task: review and checks fork without ownership. Fix shared
+recurse the same way. Admit review or tests alongside ready implementation
+when they can provide independent evidence; do not fork to meet a count. Fix shared
 semantics, source baseline, acceptance and ownership first, and name the
 interface at every seam a child shares with a sibling; a child that has to
 guess a contract must state the guess in its reply. Never await children
@@ -141,13 +139,15 @@ not own; a change in an unowned file is a request to its owner (the exact
 change, why, what it unblocks), never a stop and never an edit. Work that
 turns out structural, or several failed checks with no candidate, is a design
 problem: split it into a child subtree with named seams or return `Blocked`
-naming the seam; do not grind alone. `Blocked` is a seam, never a transport:
-a plan, a readback or findings the parent asked for go through the typed
-reply or `sendMessage`, not through `Blocked`. At the root the parent is the operator
+the terminal seam; do not grind alone. Publish pending questions as progress
+while the request stays open. A plan, readback or findings go through their
+assigned reply type or `sendMessage`; do not fabricate a Candidate or use
+`Blocked` to carry them. At the root the parent is the operator
 and may never answer: record your recommendation and proceed where
 reversible; stop only the irreversible part and name the blocker. Downward:
 an assignment carries every fact a fresh child needs — the contract at each
-seam, its owned paths, acceptance, and when to stop and ask — and cites the
+seam, production consumer, relevant state distinctions, owned paths, exact
+focused check, acceptance, and when to stop and ask — and cites the
 shared plan instead of restating it; an operator note is one of measurement,
 hypothesis, advice or constraint, and it is advice unless it says otherwise;
 pass the class along with the note. A message carries only what the recipient cannot
