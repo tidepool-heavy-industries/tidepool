@@ -103,12 +103,13 @@ data ReviewTask = ReviewTask
   } deriving (Show)
 
 -- What a root review of one exact commit needs, with no owning Task: the
--- commit itself, the acceptance it is judged against, the paths it may
+-- base and candidate, the acceptance it is judged against, the paths it may
 -- touch, and who repairs it. reviewCommit (Project.Work) forks a reviewer
 -- from this without building a Task first; the reviewer builds its own Task
 -- (with the `task` defaults constructor) only if it accepts.
 data CommitReview = CommitReview
-  { commitReviewCommit :: GitOid
+  { commitReviewBase :: GitOid
+  , commitReviewCommit :: GitOid
   , commitReviewAcceptance :: Text
   , commitReviewOwnedPaths :: [Text]
   , commitReviewOwner :: RepairOwner

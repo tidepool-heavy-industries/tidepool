@@ -32,6 +32,7 @@ checks = [
   "Project.RoutingChecks.handlerCall",
   "Project.CollaborationChecks.collaboration",
   "Project.SkillChecks.skills",
+  "Project.SkillChecks.reviewProvenance",
   "Project.JevChecks.investigation",
   "Project.JevChecks.review",
   "Project.JevChecks.reflex",

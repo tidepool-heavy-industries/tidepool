@@ -5,13 +5,14 @@ description: Commission independent review and repair of exact Exomonad candidat
 
 Use review when independent judgment helps the owning integration decision.
 The reviewer is seeded at the exact candidate commit, so it can run the
-candidate's own tests. From any actor, root included, with a commit, its
+candidate's own tests. From any actor, root included, with the cumulative base, candidate commit, its
 acceptance and its owned paths, pass a label naming this review's own
-campaign -- reviewCommit unfolds an absolute group path from it rather than
+campaign. Resolve both OIDs from Git; base precedes candidate in the call.
+reviewCommit unfolds an absolute group path from it rather than
 nesting under your own (root has no allocated actor path to nest under):
 
 ```haskell
-(reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
+(reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] base commit "Round-trip tests for every item kind pass" ["src/parse.rs"] OwnerRepairs
 ```
 
 Inside a request whose `sessionInput :: Task` describes the work, with your
@@ -58,8 +59,9 @@ scope and does not turn partial work into product completion.
 
 Check ownership in code, not with Jev: an outside-owned-path change is a
 `git diff` fact. Take `changed` from the cumulative diff between the
-assignment base and the exact candidate tip (`git diff <base>...<tip>
---name-only`), never from the tip commit alone: a tip that looks scoped can
+assignment base and the exact candidate tip. Require `git merge-base
+--is-ancestor <base> <tip>` to succeed, then use `git diff <base>..<tip>
+--name-only`, never from the tip commit alone: a tip that looks scoped can
 carry an ancestor commit that edited an unowned path, and the same branch
 can pass the tip check twice while still carrying it. Route the verdict
 with a `J.choice`, naming the base and

@@ -1,5 +1,6 @@
-Your input is ReviewTask. Independently review its exact candidate, current
-accepted decisions and the real owning consumers. Incorporate the requested source
+Your input is ReviewTask or CommitReview (the exact-commit section below).
+Independently review its exact candidate, current accepted decisions and the real
+owning consumers. Incorporate the requested source
 in your review checkout before claiming checks there. Verify the candidate's
 acceptance boundary: preparation, usable component and integrated feature require
 different evidence. A checked-in API used only by its tests is still preparation.
@@ -55,7 +56,9 @@ without requiring a fresh reviewer for every attempt.
 ## Exact-commit reviews (input is CommitReview, not ReviewTask)
 
 A reviewer forked by `reviewCommit` receives `sessionInput :: CommitReview`:
-the exact commit, the acceptance text, the owned paths, and the repair owner.
+the cumulative base, exact candidate, acceptance text, owned paths, and repair owner.
+Use commitReviewBase for the cumulative diff and verify HEAD equals
+commitReviewCommit before checks. A different checkout is a blocker, not a verdict.
 There is no owning Task. Review exactly as above. To accept, build the Task
 yourself with the `task` defaults constructor and return the same
 `Produced (Accepted reviewed)` shape:
@@ -63,7 +66,7 @@ yourself with the `task` defaults constructor and return the same
 ```haskell
 let ci = sessionInput :: CommitReview
 let assignment = task [label|commit-review|] (commitReviewAcceptance ci)
-      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewCommit ci)
+      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewBase ci)
 let reviewed = ReviewedCandidate
       { acceptedAssignment = assignment
       , reviewedCandidate = Candidate (commitReviewCommit ci) checks gates

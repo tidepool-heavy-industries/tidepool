@@ -20,7 +20,7 @@ Supply these bindings:
   `RetainedImplementer`;
 - `onReview :: WorkSink (Outcome ReviewDecision)`, the local notification policy;
 - `onStopped :: Settlement (Outcome Candidate) -> Maybe Text`;
-- `me :: AgentRef`, bound to the Sol owner's incarnation.
+- `owner :: AgentRef`, bound to the owning actor's incarnation (`let owner = me`).
 
 For ordinary steering back to that owner:
 
@@ -29,6 +29,11 @@ import qualified Data.Text as T
 let onReview = notifyWork me (workMessage reviewSummary)
 let onStopped outcome = Just ("implementation: " <> either (T.pack . show) candidateSummary (settledValue outcome))
 ```
+
+This composition captures a fixed `task`. A source amendment or changed accepted
+decision requires a new flow after pending requests settle; changing a notebook
+binding does not update the existing actor's closure. Preserve outstanding
+handles and do not replay uncertain admissions.
 
 A produced candidate submits a new request to the existing reviewer. A blocked or
 unavailable implementation retains its original receipt and does not request review.

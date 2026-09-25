@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.SkillChecks (skills) where
+module Project.SkillChecks (skills, reviewProvenance) where
 
 import Prelude hiding (readFile)
 import Control.Monad (void)
@@ -42,7 +42,7 @@ skills = do
   -- actor (owner), not a forked child, so a regression to a relative
   -- subgroup path (which only a child with an allocated parent path can
   -- resolve) fails this turn instead of passing unnoticed.
-  void $ turn owner ("let commit = " <> gitOidLiteral baseline)
+  void $ turn owner ("let base = " <> gitOidLiteral baseline <> "\nlet commit = " <> gitOidLiteral baseline)
   void $ example owner "exomonad-review" 0
   commitReviewer <- activation
   check "root review-by-commit forks a fresh Luna reviewer with no parent path" (checkModel commitReviewer == Just "gpt-6-luna")
@@ -141,3 +141,32 @@ skills = do
   check "branch and ref identities round-trip through their constructors"
     ("integration/tags" `Text.isInfixOf` output identities
       && "exomonad/integration" `Text.isInfixOf` output identities)
+
+-- Exercise the published root review call with different base and candidate OIDs.
+-- No model is launched: the recipe actor verifies the real admission packet.
+reviewProvenance :: Member RecipeCheck effects => Eff effects ()
+reviewProvenance = do
+  owner <- root
+  baseline <- git owner ["rev-parse", "HEAD"]
+  candidate <- checkpoint owner "review-provenance.txt" "review candidate\n" "review provenance fixture"
+  void $ turn owner ("let base = " <> gitOidLiteral baseline <> "\nlet commit = " <> gitOidLiteral candidate)
+  void $ example owner "exomonad-review" 0
+  reviewer <- activation
+  check "review context carries the distinct cumulative base and candidate"
+    (("Base: " <> baseline) `Text.isInfixOf` checkContext reviewer
+      && ("Candidate: " <> candidate) `Text.isInfixOf` checkContext reviewer)
+  actual <- git (checkActor reviewer) ["rev-parse", "HEAD"]
+  check "review checkout is the assigned candidate" (actual == candidate)
+  fields <- turn (checkActor reviewer)
+    ("let ci = sessionInput :: CommitReview\ninspectFull (commitReviewBase ci == " <> gitOidLiteral baseline
+      <> " && commitReviewCommit ci == " <> gitOidLiteral candidate <> ")")
+  check "typed request preserves both revision identities" (lastOutput fields == "True")
+  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet gates = [] :: [Text]\nlet rationale = \"review provenance fixture\" :: Text"
+  prompt <- readFile (checkActor reviewer) (Text.pack workspaceRoot <> "/prompts/review.md")
+  let section = snd (Text.breakOn "## Exact-commit reviews" prompt)
+      blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" section))
+  void $ turn (checkActor reviewer) (head blocks)
+  accepted <- turn owner
+    "result <- pollResponse reviewer\ninspectFull (case result of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> taskSource (acceptedAssignment checked) == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False })"
+  check "accepted task retains the base while reviewed candidate retains the tip"
+    (lastOutput accepted == "True")

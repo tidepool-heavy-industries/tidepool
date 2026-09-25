@@ -164,7 +164,8 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
 
 commitReviewContext :: CommitReview -> Text
 commitReviewContext review = Text.unlines
-  [ "Candidate: " <> renderGitOid (commitReviewCommit review)
+  [ "Base: " <> renderGitOid (commitReviewBase review)
+  , "Candidate: " <> renderGitOid (commitReviewCommit review)
   , "Owned source: " <> Text.intercalate ", " (commitReviewOwnedPaths review)
   , "Acceptance: " <> commitReviewAcceptance review
   , repairOwnerContext (commitReviewOwner review)
@@ -185,12 +186,12 @@ commitReviewContext review = Text.unlines
 -- concurrent reviewCommit calls from the same actor in separate groups.
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewCommit reviewLabel commit accept owned owner = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
+  => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewCommit reviewLabel base commit accept owned owner = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected commitReviewContext) $
   withModel "luna" $ withEffort Medium $
   coding (atRef (GitRef (renderGitOid commit)))
-    (assignment [label|review|] (CommitReview commit accept owned owner))
+    (assignment [label|review|] (CommitReview base commit accept owned owner))
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.
