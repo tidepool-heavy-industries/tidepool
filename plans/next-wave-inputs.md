@@ -593,3 +593,20 @@ settled), git capture 1 to 2 s total.
   `settle_publication` (actor_host/workspace.rs ~686-706: bubblewrap
   prepare_view, mounts, install_view). Could leave the cell and settle with
   the provider launch. Needs a phase log first.
+
+## From wave 6 (2026-09-25, first hour)
+
+- **Launch checklist gap:** the harness project's `.exomonad/workspace`
+  submodule must be bumped to the synced workspace revision before launch;
+  the binary's DEFAULT_WORKSPACE_REV only scaffolds new workspaces. Add a
+  preflight to `exomonad init` (or the launch record) that compares the
+  project's workspace gitlink with the deployed pin and warns on drift.
+- **CommitReview acceptance was undocumented** for the model: reviewers
+  forked by `reviewCommit` returned Blocked because the review prompt and
+  skill only covered `ReviewTask`. Fixed in the prompt; the skill's review
+  section should carry the same branch, and `exomonad check` could refuse a
+  workspace whose review prompt does not mention every assignment input
+  type a fork constructor uses.
+- **Manifest ownership:** an assignment that adds a trait derive or a new
+  crate must own the crate manifest and lock file, or the lead adds the
+  dependency before forking. Brief and lead prompt item.
