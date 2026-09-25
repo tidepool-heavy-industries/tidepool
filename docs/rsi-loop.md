@@ -6,6 +6,27 @@ capabilities that make better outcomes possible. Building `exomonad-harness` is
 the current product workload. A wave is a local work cycle, not a release of the
 whole vision.
 
+## Working defaults
+
+Prioritize parallel work and Luna delegation, with Sol owning shared decisions
+and integration. Prefer broad worker trees, add depth for coherent component
+ownership, and keep a modest experimental bias toward useful nesting. Independent
+review within the tree provides assurance; a busy root or a repair round is not
+itself a failure. Measure overlapping useful work, work shifted to Lunas, defects
+caught by independent review, and avoidable coordination separately.
+
+Include one bounded ambitious orchestration experiment per iteration. Explore
+Haskell notebook composition deliberately: combine commands, retained evidence,
+Jev judgments, child admission, routing and joins where that reduces total tool
+calls and model rounds while preserving failure boundaries and evidence. Promote
+successful compositions into compiled examples. Code owns authoritative facts;
+Jev supplies typed semantic judgments where those facts need interpretation.
+
+A clean win is a known, implementable solution, even when implementation spans
+several layers. Separate that work from unresolved design questions and experiments.
+For the current harness workload, prove extension points through standalone stubs
+and production consumers before attempting Exomonad integration.
+
 ## 1. Orient and choose
 
 The supervisor reads the previous run's artifacts and interviews, verifies
