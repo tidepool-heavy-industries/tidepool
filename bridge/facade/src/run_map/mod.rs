@@ -5,9 +5,13 @@
 //! 1. Run it with no window first. `tree` shows who exists, their model and effort,
 //!    whether each has its own session (`inline` forks do not), and when each
 //!    started, first called a tool, first and last replied, and its standing.
-//! 2. Read `deliveries` next; it is current durable state, never windowed. Grep
-//!    `inbox=fenced(`: the front row has sat unconfirmed past 60 s and every
-//!    row behind it waits. `host_input=no row` means Codex never admitted it.
+//! 2. Read `deliveries` next; it is current durable state, never windowed. An
+//!    in-flight front row within the recovery grace period (twice the
+//!    input-control deadline) renders `inbox=open (...)`, same as an ordinary
+//!    delivery the host itself would not fence. Grep `inbox=fenced(`: the
+//!    front row stayed with no native evidence (or `Unconfirmed`) past grace,
+//!    or hit a terminal fence (`compacted`), and every row behind it waits.
+//!    `host_input=no row` means Codex never admitted it.
 //! 3. `notifications` pairs every send with its inbox row: `presented at refN`,
 //!    or `not-presented` with the phase. Nothing is inferred from transcripts.
 //! 4. `slowest calls` names the long hosted calls and splits their time; a high
@@ -24,7 +28,7 @@ pub use metadata::{RecordedLink, RootBinding, TimeWindow, WatchState};
 pub use review::{
     ActorDeliveries, CancellationRow, Deliveries, DeliveryRow, Fence, HostInput, MessagePhase,
     Notification, Observation, Percentiles, Provenance, Receipt, RepeatGroup, Review, Section,
-    SlowCalls, ToolPercentiles, TreeNode, FENCE_AFTER_MS,
+    SlowCalls, ToolPercentiles, TreeNode, RECOVERY_GRACE_MS,
 };
 use serde::Serialize;
 pub use trace::{

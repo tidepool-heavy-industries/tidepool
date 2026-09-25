@@ -13,8 +13,16 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// A front delivery held in an unconfirmed phase this long fences its inbox.
-pub const FENCE_AFTER_MS: u64 = 60_000;
+/// Twice the input-control deadline: the same recovery grace period the
+/// host's delivery pump (`bridge/facade/src/actor_host.rs`,
+/// `WITHDRAW_WITHOUT_EVIDENCE_AFTER`) waits before it withdraws and re-fences
+/// a front row that native input control cannot confirm. An in-flight row
+/// younger than this is ordinary and renders `open`, matching
+/// `exomonad_actor::InboundDeliveryObservation`'s own status line
+/// (`runtime_observation::delivery_status_line`).
+pub const RECOVERY_GRACE_MS: u64 = exomonad_agent::INPUT_CONTROL_DEADLINE
+    .saturating_mul(2)
+    .as_millis() as u64;
 
 /// Inputs a review reads beyond the run directory.
 #[derive(Debug, Clone)]
@@ -91,21 +99,29 @@ pub struct ActorDeliveries {
     pub cursor: Option<u64>,
     pub pending: usize,
     /// Every retained phase has held at least this long: no inbox file has
-    /// been written since.
+    /// been written since. Superseded by a row's own notification send time
+    /// when one is known; kept as the fallback age proxy.
     pub phase_age_at_least_ms: Option<u64>,
-    pub fenced: Option<Fence>,
+    /// Set only past the recovery grace period with no evidence (or an
+    /// `Unconfirmed` durable phase), or on a terminal fence (`Compacted`).
+    /// An in-flight front row within grace is `None` here and renders
+    /// `open`, matching `exomonad_actor::InboxDelivery`.
+    pub fence: Option<Fence>,
+    /// When the front pending row's current phase began, whether or not it
+    /// is fenced: a joined notification send time (exact) when the front
+    /// row is a notification, else the file-mtime age proxy (at least this
+    /// old). `None` when there is no pending front row.
+    pub front_since_unix_ms: Option<u64>,
     pub rows: Vec<DeliveryRow>,
     pub unavailable: Option<String>,
 }
 
+/// Mirrors `exomonad_actor::InboxDelivery::Fenced { reason, since_unix_ms }`,
+/// the same tokens the host's own status line renders.
 #[derive(Debug, Serialize)]
 pub struct Fence {
-    pub sequence: u64,
-    pub durable_phase: Option<DeliveryPhase>,
-    pub age_at_least_ms: u64,
-    /// The fence began no later than this instant.
-    pub since_at_most_unix_ms: u64,
-    pub rows_behind: usize,
+    pub reason: String,
+    pub since_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -377,7 +393,7 @@ pub(super) fn build(
     let inboxes: BTreeMap<String, (ActorDeliveries, Vec<Option<String>>)> = actors
         .iter()
         .map(|node| {
-            let state = actor_state(node, &queue, now);
+            let state = actor_state(node, &queue, trace, now);
             let mut deliveries = state.deliveries();
             deliveries.label = labels
                 .get(state.actor.as_str())
@@ -574,38 +590,82 @@ struct ActorState {
     cursor: Option<u64>,
     pending: usize,
     phase_age_at_least_ms: Option<u64>,
+    /// The notification send time for a row whose provenance is a
+    /// notification, joined from the trace's `notifications` events. Exact,
+    /// unlike `phase_age_at_least_ms`'s file-mtime proxy.
+    notification_since: BTreeMap<u64, u64>,
     rows: Vec<(DeliveryRow, Option<String>)>,
     unavailable: Option<String>,
 }
 
+/// No evidence the delivery is progressing: no Codex host-input row, or the
+/// host-input column itself is unavailable. Approximates the host pump's
+/// `without_evidence` bookkeeping, which run-map cannot observe directly.
+fn no_native_evidence(host_input: &HostInput) -> bool {
+    matches!(host_input, HostInput::NoRow | HostInput::Unavailable)
+}
+
 impl ActorState {
+    /// The instant the front row's current phase began: the notification
+    /// send time when known (exact), else the file-mtime age proxy (at
+    /// least this old). `None` when neither is available.
+    fn since(&self, sequence: u64) -> Option<(u64, bool)> {
+        self.notification_since
+            .get(&sequence)
+            // A send time can only precede this observation; a later one
+            // (clock skew, or a mistaken join) is not usable as an age.
+            .filter(|at| **at <= self.now)
+            .map(|at| (*at, true))
+            .or_else(|| {
+                self.phase_age_at_least_ms
+                    .map(|age| (self.now.saturating_sub(age), false))
+            })
+    }
+
     fn deliveries(&self) -> ActorDeliveries {
-        let fenced = self.cursor.and_then(|cursor| {
+        let fence = self.cursor.and_then(|cursor| {
             let front = self
                 .rows
                 .iter()
                 .map(|(row, _)| row)
                 .find(|row| row.sequence > cursor)?;
-            let age = self.phase_age_at_least_ms?;
-            (awaits_confirmation(front.durable_phase) && age >= FENCE_AFTER_MS).then(|| Fence {
-                sequence: front.sequence,
-                durable_phase: front.durable_phase,
-                age_at_least_ms: age,
-                since_at_most_unix_ms: self.now.saturating_sub(age),
-                rows_behind: self
+            let (since, exact) = self.since(front.sequence)?;
+            let terminal = front.durable_phase == Some(DeliveryPhase::Compacted);
+            let past_grace = self.now.saturating_sub(since) >= RECOVERY_GRACE_MS;
+            let unconfirmed = front.durable_phase == Some(DeliveryPhase::Unconfirmed);
+            let stuck = past_grace && (no_native_evidence(&front.host_input) || unconfirmed);
+            (terminal || (awaits_confirmation(front.durable_phase) && stuck)).then(|| {
+                let behind = self
                     .pending
-                    .saturating_sub(1 + self.untracked_before(cursor, front.sequence)),
+                    .saturating_sub(1 + self.untracked_before(cursor, front.sequence));
+                let marker = if exact { "since=" } else { "since<=" };
+                Fence {
+                    reason: format!(
+                        "ref{} {}, {behind} behind, host_input={}, {marker}{}",
+                        front.sequence,
+                        durable_label(front.durable_phase),
+                        front.host_input.label(),
+                        clock(since),
+                    ),
+                    since_unix_ms: since,
+                }
             })
         });
+        let front_sequence = self.cursor.and_then(|cursor| {
+            self.rows
+                .iter()
+                .map(|(row, _)| row.sequence)
+                .find(|sequence| *sequence > cursor)
+        });
+        let front_since_unix_ms = front_sequence
+            .and_then(|sequence| self.since(sequence))
+            .map(|(since, _)| since);
         let rows = self
             .rows
             .iter()
             .map(|(row, _)| {
                 let mut row = row.clone();
-                if fenced
-                    .as_ref()
-                    .is_some_and(|fence| fence.sequence == row.sequence)
-                {
+                if fence.is_some() && Some(row.sequence) == front_sequence {
                     row.phase = MessagePhase::Fenced;
                 }
                 row
@@ -617,7 +677,8 @@ impl ActorState {
             cursor: self.cursor,
             pending: self.pending,
             phase_age_at_least_ms: self.phase_age_at_least_ms,
-            fenced,
+            fence,
+            front_since_unix_ms,
             rows,
             unavailable: self.unavailable.clone(),
         }
@@ -643,6 +704,7 @@ fn modified_ms(path: &Path) -> Option<u64> {
 fn actor_state(
     node: &ActorNode,
     queue: &Result<(String, HostInputs), String>,
+    trace: Option<&TraceEvents>,
     now: u64,
 ) -> ActorState {
     let actor = format!("{}@{}", node.actor, node.incarnation);
@@ -652,9 +714,27 @@ fn actor_state(
         cursor: None,
         pending: 0,
         phase_age_at_least_ms: None,
+        notification_since: BTreeMap::new(),
         rows: Vec::new(),
         unavailable: None,
     };
+    // Unclaimed notification sends targeting this actor, keyed by (sender,
+    // text prefix) and ordered earliest first, so a row can join its own
+    // send time instead of the inbox file's mtime.
+    let mut sent_by_text: BTreeMap<(String, String), Vec<u64>> = BTreeMap::new();
+    if let Some(events) = trace {
+        for sent in &events.notifications {
+            if sent.target == actor {
+                sent_by_text
+                    .entry((sent.sender.clone(), sent.text_prefix.clone()))
+                    .or_default()
+                    .push(sent.at);
+            }
+        }
+        for sends in sent_by_text.values_mut() {
+            sends.sort_unstable();
+        }
+    }
     let cursor_path = node.directory.join("inbox.cursor");
     let rows_path = node.directory.join("inbox.jsonl");
     // Missing checkpoint reads as sequence 0 with no receipts: the inbox
@@ -713,6 +793,17 @@ fn actor_state(
                 .cloned()
                 .unwrap_or(HostInput::NoRow),
         };
+        if let Provenance::Notification { sender } = &provenance {
+            if let Some(text) = &row.text_prefix {
+                if let Some(sends) = sent_by_text.get_mut(&(sender.clone(), text.clone())) {
+                    if !sends.is_empty() {
+                        state
+                            .notification_since
+                            .insert(row.sequence, sends.remove(0));
+                    }
+                }
+            }
+        }
         state.rows.push((
             DeliveryRow {
                 sequence: row.sequence,
@@ -996,6 +1087,18 @@ fn clock_or_dash(unix_ms: Option<u64>) -> String {
     unix_ms.map_or_else(|| "-".into(), clock)
 }
 
+/// Elapsed duration, same tokens as the host's own status line
+/// (`runtime_observation::render_age`): `Ns`, `Nm`, `Nh`, `Nd`.
+fn render_age(since_unix_ms: u64, now_unix_ms: u64) -> String {
+    let seconds = now_unix_ms.saturating_sub(since_unix_ms) / 1000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86400),
+    }
+}
+
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1086,20 +1189,33 @@ impl Review {
                         ));
                         continue;
                     }
-                    let inbox = match &actor.fenced {
-                        Some(fence) => {
-                            let front = actor.rows.iter().find(|row| row.sequence == fence.sequence);
-                            format!(
-                                "fenced(ref{} {}, {} behind, host_input={}, since<={})",
-                                fence.sequence,
-                                durable_label(fence.durable_phase),
-                                fence.rows_behind,
-                                front.map_or_else(|| "-".into(), |row| row.host_input.label()),
-                                clock(fence.since_at_most_unix_ms)
-                            )
+                    let cursor = actor.cursor.unwrap_or(0);
+                    let front = actor.rows.iter().find(|row| row.sequence > cursor);
+                    let in_flight_front = front.filter(|row| awaits_confirmation(row.durable_phase));
+                    let inbox = match (&actor.fence, in_flight_front) {
+                        (Some(fence), _) => format!("fenced({})", fence.reason),
+                        // An ordinary in-flight front row within the recovery
+                        // grace period: not fenced, same as the host's own
+                        // status line (`InboxDelivery::Open`).
+                        (None, Some(row)) => {
+                            let word = if row.durable_phase == Some(DeliveryPhase::Unconfirmed) {
+                                "unconfirmed"
+                            } else {
+                                "submitted"
+                            };
+                            let host_input = if matches!(row.host_input, HostInput::Row { .. }) {
+                                "ready".to_owned()
+                            } else {
+                                row.host_input.label()
+                            };
+                            let age = actor.front_since_unix_ms.map_or_else(
+                                || "unknown".into(),
+                                |since| render_age(since, self.now_unix_ms),
+                            );
+                            format!("open (ref{} {word} {age}, host_input={host_input})", row.sequence)
                         }
-                        None if actor.pending == 0 => "clear".into(),
-                        None => format!("pending({})", actor.pending),
+                        (None, None) if actor.pending == 0 => "clear".into(),
+                        (None, None) => format!("pending({})", actor.pending),
                     };
                     let last = actor.rows.last().map_or_else(
                         || "none".into(),
@@ -1124,7 +1240,6 @@ impl Review {
                         actor.cursor.unwrap_or(0),
                         actor.pending,
                     ));
-                    let cursor = actor.cursor.unwrap_or(0);
                     for row in actor.rows.iter().filter(|row| row.sequence > cursor) {
                         let provenance = match &row.provenance {
                             Provenance::Notification { sender } => {
@@ -1284,6 +1399,20 @@ mod tests {
     /// A run with a root, a lead with its own session and a fenced inbox, and
     /// an inline research fork. Returns (run directory, Codex home).
     fn fixture(dir: &Path) -> (PathBuf, PathBuf) {
+        fixture_with(dir, "unconfirmed", false, "Plan accepted; no planner hold.")
+    }
+
+    /// Same run as [`fixture`], but the lead's front row (sequence 2) carries
+    /// `front_phase`, `front_text` as its notification payload (distinct
+    /// text keeps it from joining a fixed-clock trace notification meant for
+    /// another test), and, when `front_has_evidence`, a Codex host-input row
+    /// confirming native dispatch of it.
+    fn fixture_with(
+        dir: &Path,
+        front_phase: &str,
+        front_has_evidence: bool,
+        front_text: &str,
+    ) -> (PathBuf, PathBuf) {
         let run = dir.join("run-7");
         let workspace = dir.join("workspace");
         let codex = dir.join("codex");
@@ -1341,7 +1470,7 @@ mod tests {
             run.join("2-1/inbox.jsonl"),
             lines(&[
                 json!({"sequence":1,"payload":"Earlier note.","receipt_context":from_root}),
-                json!({"sequence":2,"payload":"Plan accepted; no planner hold.","receipt_context":from_root}),
+                json!({"sequence":2,"payload":front_text,"receipt_context":from_root}),
                 json!({"sequence":3,"payload":{"type":"childExited"}}),
                 json!({"sequence":4,"payload":"Later note.","receipt_context":from_root}),
             ]),
@@ -1351,7 +1480,7 @@ mod tests {
             run.join("2-1/inbox.cursor"),
             json!({"version":2,"checkpoint":{"sequence":1,"watermarks":{},"receipts":{
                 "1":{"context":from_root,"phase":"presented"},
-                "2":{"context":from_root,"phase":"unconfirmed"}}}})
+                "2":{"context":from_root,"phase":front_phase}}}})
             .to_string(),
         )
         .unwrap();
@@ -1361,14 +1490,21 @@ mod tests {
              sequence INTEGER NOT NULL, state TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);",
         )
         .unwrap();
-        for (producer, sequence) in [
+        let mut rows = vec![
             (
                 [run.display().to_string().as_str(), "run-7:2:1", "2", "1"].join("\0"),
                 1,
             ),
             // Another run's producer on the same thread is not this inbox's row.
             (["/elsewhere/run-6", "run-6:2:1", "2", "1"].join("\0"), 2),
-        ] {
+        ];
+        if front_has_evidence {
+            rows.push((
+                [run.display().to_string().as_str(), "run-7:2:1", "2", "1"].join("\0"),
+                2,
+            ));
+        }
+        for (producer, sequence) in rows {
             db.execute(
                 "INSERT INTO host_input_operations VALUES ('thread-lead', ?1, ?2, 'presented', 5)",
                 rusqlite::params![producer, sequence],
@@ -1404,7 +1540,7 @@ mod tests {
     fn review_fences_front_row_and_joins_every_source() {
         let dir = tempfile::tempdir().unwrap();
         let (run, codex) = fixture(dir.path());
-        let report = observe(&run, Some(codex), FENCE_AFTER_MS + 5_000);
+        let report = observe(&run, Some(codex), RECOVERY_GRACE_MS + 5_000);
         let review = &report.review;
 
         let tree = rows(&review.tree);
@@ -1420,9 +1556,9 @@ mod tests {
         assert!(tree[0].first_tool_call_at_unix_ms.is_some());
 
         let lead = &rows(&review.deliveries).actors[0];
-        let fence = lead.fenced.as_ref().expect("front row fenced");
-        assert_eq!((fence.sequence, fence.rows_behind), (2, 2));
-        assert!(fence.age_at_least_ms >= FENCE_AFTER_MS);
+        let fence = lead.fence.as_ref().expect("front row fenced");
+        assert!(fence.reason.contains("ref2 unconfirmed, 2 behind"));
+        assert!(review.now_unix_ms.saturating_sub(fence.since_unix_ms) >= RECOVERY_GRACE_MS);
         let phases: Vec<_> = lead
             .rows
             .iter()
@@ -1500,16 +1636,25 @@ mod tests {
             json["review"]["deliveries"]["rows"]["actors"][0]["rows"][1]["durable_phase"],
             "unconfirmed"
         );
+        let fence_json = &json["review"]["deliveries"]["rows"]["actors"][0]["fence"];
+        assert!(fence_json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("ref2 unconfirmed"));
+        assert!(fence_json["since_unix_ms"].is_u64());
     }
 
     #[test]
     fn review_degrades_per_section_when_sources_are_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let (run, _) = fixture(dir.path());
+        // Distinct front-row text: the trace fixture's own notification text
+        // must not join this row, or its fixed send time (not this test's
+        // "too recent" clock) would decide whether it fences.
+        let (run, _) = fixture_with(dir.path(), "unconfirmed", false, "Note pending review.");
         // Too recent to fence, and no Codex home: host input is unavailable.
         let report = observe(&run, None, 1_000);
         let deliveries = rows(&report.review.deliveries);
-        assert!(deliveries.actors[0].fenced.is_none());
+        assert!(deliveries.actors[0].fence.is_none());
         assert!(matches!(
             deliveries.host_input_db,
             Section::Unavailable { .. }
@@ -1521,15 +1666,52 @@ mod tests {
 
         fs::remove_file(dir.path().join("workspace/.exomonad/logs/run-7.jsonl")).unwrap();
         fs::remove_file(run.join("actor-lifecycle.v2.jsonl")).unwrap();
-        let report = observe(&run, None, FENCE_AFTER_MS);
+        let report = observe(&run, None, RECOVERY_GRACE_MS);
         let review = &report.review;
         assert!(matches!(review.tree, Section::Unavailable { .. }));
         assert!(matches!(review.notifications, Section::Unavailable { .. }));
         assert!(matches!(review.slowest_calls, Section::Unavailable { .. }));
-        assert!(rows(&review.deliveries).actors[0].fenced.is_some());
+        assert!(rows(&review.deliveries).actors[0].fence.is_some());
         let text = report.concise();
         assert!(
             text.contains("notifications (time sender->target receipt \"text\"): unavailable: "),
+            "{text}"
+        );
+    }
+
+    /// A front row admitted with native evidence but still queued behind the
+    /// thread's turn: an ordinary in-flight delivery, not a fence. Regression
+    /// for the defect where every held-open row past 60s was mislabelled
+    /// `fenced`, even minutes into a normal delivery the host itself never
+    /// fences (`InboxDelivery::Open` past its own recovery grace, as long as
+    /// native input control confirmed the message).
+    #[test]
+    fn review_renders_in_flight_row_open_past_the_old_threshold_with_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, codex) = fixture_with(
+            dir.path(),
+            "submitted",
+            true,
+            "Waiting behind the current turn.",
+        );
+        // Older than the old, wrong 60s threshold and the real 70s recovery
+        // grace alike: still open, because native input control has evidence.
+        let report = observe(&run, Some(codex), 4 * 60_000);
+        let review = &report.review;
+
+        let lead = &rows(&review.deliveries).actors[0];
+        assert!(lead.fence.is_none(), "an evidenced submit must not fence");
+        assert_eq!(
+            lead.rows[1].phase,
+            MessagePhase::Queued,
+            "not relabelled Fenced"
+        );
+
+        let text = report.concise();
+        assert!(
+            text.contains(
+                "lead 2@1 cursor=1 pending=3 inbox=open (ref2 submitted 4m, host_input=ready)"
+            ),
             "{text}"
         );
     }
