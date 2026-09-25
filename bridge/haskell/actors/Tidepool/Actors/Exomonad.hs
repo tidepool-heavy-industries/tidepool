@@ -265,6 +265,8 @@ module Tidepool.Actors.Exomonad
   , InProgressKind (..)
   , GitOid (..)
   , renderGitOid
+  , DiscardIntent (..)
+  , withDiscardIntent
   , GitFailureReceipt
   , worktreeId
   , worktreeBranch

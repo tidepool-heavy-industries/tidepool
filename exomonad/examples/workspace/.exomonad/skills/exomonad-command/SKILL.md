@@ -148,6 +148,15 @@ which is why such an actor can write in the worktree it was given
 a command does not snapshot inherited environment or location. `Cmd.describe`
 inspects intent without executing. Use `pwd` in a command when location is evidence.
 
+A `git` call that would take committed work off a ref — `reset --hard` to a
+commit that lacks `HEAD`, `rebase --onto` or `--skip` that drops commits,
+`branch -D` of a branch's last ref, a force push over published commits — is
+held until the command names the ref's actual tip:
+`withDiscardIntent (DiscardIntent expectedTip target reason)` on the command, or
+`EXOMONAD_DISCARD_EXPECTED_TIP=<tip>` in a `bash` call's environment. The
+refusal names the actual tip and the commits that would lose the ref; a clean
+worktree does not waive it.
+
 An actor with no process of its own also has no terminal: run its commands
 with piped or closed input, never `TerminalInput`.
 
