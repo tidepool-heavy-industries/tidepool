@@ -483,3 +483,61 @@ Deferred, one card each:
   the actor's outbound path is unaffected, its inbound stays fenced for the
   run. Also: a /goal-style standing objective the runtime re-asserts on
   idle, mined from Codex.
+
+## Wave 5 root interview (harness master cffd505, docs/exomonad-interviews.md)
+
+Twelve answers, mapped to lanes. Quotes are the root's.
+
+- **Message lifecycle observable and actionable** (the root's "one
+  change"): states receipt, queued, presented, acknowledged, incorporated,
+  fenced, "with the last provider turn and one supported recovery action".
+  The status view line it wanted: "core-lead: request pending; provider
+  idle 27m; notification inbox fenced; last message received by host but
+  not presented; recover by [action]". Lane: delivery-fence (status view
+  per child from the durable rows), observability (run-map deliveries).
+- **Replace-before-presentation** for a queued message (it sent a literal
+  `$(git rev-parse HEAD)` then a correction); after presentation, a
+  superseding correction linked to the first, never silent retraction.
+  Card: `replaceMessage` on an unpresented sequence, else a linked
+  correction; the queue db already keys rows by producer/sequence.
+- **Versioned standing-assignment update**: new owned paths, acceptance,
+  source, an effective-from boundary, a presentation ack and a separate
+  incorporation ack; never rewrites work committed under the old
+  assignment. `updateRequest` exists but its receipt says UpdateUnconfirmed
+  and the root could only verify through the child's reply and the
+  cumulative diff. Card: request-update lifecycle exposed like messages.
+- **Batched admission**: "one batched admission call for a ready frontier,
+  with per-child admission results and a fast return that does not wait for
+  each child's provider startup". It already used an applicative unfold;
+  the 55 s / 39 s cost is provider startup inside the cell. Card: fork
+  returns admission immediately and provider readiness as a later typed
+  result (pairs with non-blocking cells: "start it, do independent work,
+  then receive a retained typed result").
+- **Standing goal** (/goal): the text it would have set is quoted in the
+  interview; reminders wanted on child idle with a pending request, on a
+  leaf commit appearing without review or integration, before a destructive
+  reset, and before a final answer implying completion; "cite the changed
+  fact and the next owner, not replay the whole plan". Card kept.
+- **Ownership gate as a primitive**: "base-to-candidate ownership gate with
+  source-bound review/integration states, not inferred from branch names".
+  The owned-path rule caught a real unowned edit only through a cumulative
+  diff (tip 77c6372 carried ancestor a1b10c3). Card: Git from the parent's
+  view reports the cumulative diff against the assignment base and its
+  owned-path verdict as data.
+- **git reset --hard dropped committed work** (6667ddc) while the worktree
+  was clean; the watchdog alerted after the fact. Card: the Git effect
+  refuses history-discarding commands on a branch with unmerged commits
+  unless the call names the OID being discarded; a hold, not a nudge.
+- **Brief hygiene**: stale "last run stopped" instructions stayed visible
+  after they were done; add "if a lead's inbox is fenced, stop treating
+  receipts as presentation; record the source and use an explicit recovery
+  or handoff"; delete the stale format-first instruction. Lane: wave-6
+  brief.
+- **Pre-fork blocker check**: the cache probe lacked its byte-level
+  reference before it was forked. Brief item, not harness.
+- **Watchdog**: no nudge prevented a mistake; one false positive
+  (destructive_command on message text, now in agent-ux). Keep the reset
+  alert but make it a pre-execution hold (above).
+- **Review pattern**: independent review of a findings-only probe would be
+  waste; inline inspection of (b) was "weaker than an independent review,
+  not equivalent". Skill text, not code.
