@@ -12,16 +12,25 @@
 /// unterminated final block runs. Empty blocks are omitted and trailing
 /// whitespace is removed so generated turn templates receive stable source.
 pub fn extract_haskell_blocks(response: &str) -> Vec<String> {
-    fn opens_haskell(source: &str) -> bool {
-        let Some(language) = source.strip_prefix("```") else {
-            return false;
-        };
-        let tag = language.split_whitespace().next().unwrap_or("");
-        matches!(tag.to_ascii_lowercase().as_str(), "haskell" | "hs")
+    enum Fence {
+        Haskell(String),
+        Other,
     }
 
-    fn close(blocks: &mut Vec<String>, body: &mut Option<String>) {
-        if let Some(body) = body.take() {
+    fn open_fence(source: &str) -> Option<Fence> {
+        let language = source.strip_prefix("```")?;
+        let tag = language.split_whitespace().next().unwrap_or("");
+        Some(
+            if tag.eq_ignore_ascii_case("haskell") || tag.eq_ignore_ascii_case("hs") {
+                Fence::Haskell(String::new())
+            } else {
+                Fence::Other
+            },
+        )
+    }
+
+    fn close(blocks: &mut Vec<String>, fence: Option<Fence>) {
+        if let Some(Fence::Haskell(body)) = fence {
             let body = body.trim_end().to_string();
             if !body.is_empty() {
                 blocks.push(body);
@@ -30,26 +39,30 @@ pub fn extract_haskell_blocks(response: &str) -> Vec<String> {
     }
 
     let mut blocks = Vec::new();
-    let mut body: Option<String> = None;
+    let mut fence: Option<Fence> = None;
     for line in response.lines() {
         let trimmed = line.trim_start();
-        if body.is_some() {
+        if let Some(open) = fence.as_mut() {
             if let Some(rest) = trimmed.strip_prefix("```") {
-                close(&mut blocks, &mut body);
-                if opens_haskell(rest.trim_start()) {
-                    body = Some(String::new());
+                // A language tag inside an inert example is still part of
+                // that example; only a bare fence (or fused close/open)
+                // ends it.
+                let closes = matches!(open, Fence::Haskell(_))
+                    || rest.trim().is_empty()
+                    || rest.starts_with("```");
+                if closes {
+                    close(&mut blocks, fence.take());
+                    fence = open_fence(rest.trim_start());
                 }
-            } else if let Some(body) = body.as_mut() {
+            } else if let Fence::Haskell(body) = open {
                 body.push_str(line);
                 body.push('\n');
             }
         } else if let Some(index) = trimmed.find("```") {
-            if opens_haskell(&trimmed[index..]) {
-                body = Some(String::new());
-            }
+            fence = open_fence(&trimmed[index..]);
         }
     }
-    close(&mut blocks, &mut body);
+    close(&mut blocks, fence);
     blocks
 }
 
@@ -83,5 +96,18 @@ mod tests {
             extract_haskell_blocks(response),
             ["data X = X", "data Y = Y"]
         );
+    }
+
+    #[test]
+    fn a_haskell_example_inside_another_fence_is_not_runnable() {
+        let response = "```text\nexample:\n```haskell\npure (error \"not runnable\")\n```\n\
+                        ```haskell\npure ()\n```";
+        assert_eq!(extract_haskell_blocks(response), ["pure ()"]);
+    }
+
+    #[test]
+    fn a_fused_close_can_open_haskell_after_an_inert_fence() {
+        let response = "```text\nexample\n``````haskell\npure ()\n```";
+        assert_eq!(extract_haskell_blocks(response), ["pure ()"]);
     }
 }
