@@ -1796,7 +1796,9 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     assert_eq!(first["status"], "committed", "{first}");
     let result = committed(&campaign, examples.next().unwrap()).await;
     assert!(result.to_string().contains("result"), "{result}");
-    assert_eq!(backend.specs.lock()[0].memory, 1024 * 1024 * 1024);
+    // A Haskell command without `withMemory` keeps the `Cmd` default; the
+    // 1024 MiB default belongs to the direct `bash` tool.
+    assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
     assert!(backend.specs.lock()[0].environment.is_empty());
     let description = committed(&campaign, examples.next().unwrap()).await;
     assert!(
