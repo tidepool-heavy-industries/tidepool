@@ -87,6 +87,10 @@ pub struct InteractiveInputTarget {
 
 pub const MAX_INTERACTIVE_INPUT_BYTES: usize = 256 * 1024;
 
+/// Bound on one exchange with a bound native input controller. A caller that
+/// stops waiting at this deadline holds an unconfirmed outcome, not a failure.
+pub const INPUT_CONTROL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(35);
+
 /// One immutable host input. Attempt generations and live binding generations
 /// are intentionally absent from the canonical digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +235,12 @@ pub enum InputAdmission {
     /// acknowledgement. This fences resubmission but cannot reconstruct the
     /// earlier terminal outcome.
     Compacted,
+    /// The operation's outcome is recorded as unknown: native admission
+    /// happened but dispatch did not settle.
     Unknown,
+    /// Native control holds no record of this operation (it was never
+    /// admitted, or native input control is unavailable).
+    EvidenceUnavailable,
 }
 
 /// Result of a producer-level native input control operation.

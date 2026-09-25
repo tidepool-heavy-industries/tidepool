@@ -61,6 +61,20 @@ pub struct WorkbenchExecutionControl {
     settlement: tokio::sync::watch::Sender<Option<crate::KernelWorkbenchReply>>,
 }
 
+impl std::fmt::Debug for WorkbenchExecutionControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkbenchExecutionControl")
+            .field("invocation", &self.invocation)
+            .field(
+                "phase",
+                &self.phase.load(std::sync::atomic::Ordering::Acquire),
+            )
+            .field("settled", &self.terminal_reply().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl WorkbenchExecutionControl {
     pub(crate) fn untracked() -> Arc<Self> {
         Self::new(None)
@@ -176,6 +190,22 @@ impl WorkbenchExecutionControl {
 
     pub(crate) fn cancellation_requested(&self) -> bool {
         self.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_CANCEL_REQUESTED
+    }
+
+    /// Whether this is an unsettled model-visible `haskell` call (no tool
+    /// namespace) that is computing rather than parked in a cancellable
+    /// sleep. Codex cancels exactly such a call before admitting new input,
+    /// and `ResidentToolClient::cancel_workbench` answers `NotSleeping` for
+    /// it, so an input submitted now cannot be admitted until the cell ends.
+    pub(crate) fn is_computing_hosted_cell(&self) -> bool {
+        self.invocation
+            .as_ref()
+            .is_some_and(|invocation| invocation.namespace.is_none())
+            && self.terminal_reply().is_none()
+            && matches!(
+                self.phase.load(std::sync::atomic::Ordering::Acquire),
+                WORKBENCH_IDLE | WORKBENCH_EXPIRED
+            )
     }
 
     async fn settled(&self) -> crate::KernelWorkbenchReply {
@@ -812,6 +842,34 @@ mod tests {
             control.phase.load(std::sync::atomic::Ordering::Acquire),
             WORKBENCH_IDLE
         );
+    }
+
+    #[test]
+    fn only_an_unsettled_unnamespaced_cell_outside_sleep_is_computing() {
+        let mut key = call_key("call-1");
+        key.namespace = None;
+        let control = WorkbenchExecutionControl::new(Some(key));
+        let observation = crate::ActorRuntimeObservationHandle::default();
+        assert!(!observation.hosted_cell_computing());
+        observation.publish_hosted_cell(Some(Arc::clone(&control)));
+        assert!(observation.hosted_cell_computing());
+        control.arm_sleep();
+        assert!(
+            !observation.hosted_cell_computing(),
+            "a sleep is cancellable"
+        );
+        assert!(control.claim_expiry());
+        assert!(observation.hosted_cell_computing());
+        control.finish_sleep();
+        assert!(observation.hosted_cell_computing());
+        control.settle(terminal_reply());
+        assert!(!observation.hosted_cell_computing());
+        observation.publish_hosted_cell(None);
+        assert!(!observation.hosted_cell_computing());
+
+        let namespaced = WorkbenchExecutionControl::new(Some(call_key("call-2")));
+        assert!(!namespaced.is_computing_hosted_cell());
+        assert!(!WorkbenchExecutionControl::untracked().is_computing_hosted_cell());
     }
 
     #[test]

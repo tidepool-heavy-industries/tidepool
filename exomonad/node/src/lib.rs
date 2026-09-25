@@ -11,7 +11,7 @@ mod tmux;
 
 pub use inbox::{
     DeliveryAttempt, DeliveryPhase, DurableEnvelope, DurableInbox, InboxError, InboxWriteOperation,
-    ReceiptEvidence, ReceiptLookup, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
+    ReceiptEvidence, ReceiptLookup, Redelivery, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
     MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
 };
 #[cfg(target_os = "linux")]

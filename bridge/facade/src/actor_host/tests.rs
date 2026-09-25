@@ -2258,6 +2258,8 @@ async fn queued_watch_forgotten_before_delivery_is_acknowledged_without_promptin
         &observation,
         &|owner, watch| owner != actor || watch != notification.watch,
         &|_, _, _| false,
+        &|| false,
+        &Mutex::new(BTreeMap::new()),
     )
     .await
     .unwrap();
@@ -2472,6 +2474,8 @@ async fn queued_watch_notice_already_observed_by_the_owner_is_acknowledged_witho
         &|owner, watch, occurred_at_unix_ms| {
             owner == actor && watch == notification.watch && occurred_at_unix_ms <= 2_000
         },
+        &|| false,
+        &Mutex::new(BTreeMap::new()),
     )
     .await
     .unwrap();
@@ -2543,6 +2547,8 @@ async fn queued_watch_notice_observed_before_the_transition_is_not_suppressed() 
         &|owner, watch, occurred_at_unix_ms| {
             owner == actor && watch == notification.watch && occurred_at_unix_ms <= 500
         },
+        &|| false,
+        &Mutex::new(BTreeMap::new()),
     )
     .await
     .unwrap();
@@ -5485,4 +5491,322 @@ async fn typed_reply_settles_response_and_wakes_registered_watch() {
         .await
         .expect("shutdown root");
     hosted.await.expect("root actor task");
+}
+
+/// Native input control whose first submission loses its reply, whose queries
+/// never find a record, and whose withdrawal answers `withdrawal`.
+struct EvidenceLessNative {
+    withdrawal: exomonad_agent::InputAdmission,
+    lose_next_reply: std::sync::atomic::AtomicBool,
+    submissions: std::sync::Mutex<Vec<(u64, String)>>,
+    withdrawals: std::sync::Mutex<Vec<u64>>,
+}
+
+impl EvidenceLessNative {
+    fn new(withdrawal: exomonad_agent::InputAdmission) -> Self {
+        Self {
+            withdrawal,
+            lose_next_reply: std::sync::atomic::AtomicBool::new(true),
+            submissions: std::sync::Mutex::new(Vec::new()),
+            withdrawals: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl InteractiveAgentBackend for EvidenceLessNative {
+    fn prepare_native_tool_policy(
+        &self,
+        _policy: InteractiveNativeToolPolicy,
+        _root: &Path,
+    ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+        Ok(Vec::new())
+    }
+
+    fn render(
+        &self,
+        _spec: &InteractiveAgentSpec,
+    ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+        Err(AgentBackendError::ProtocolRejected {
+            detail: "render is outside this delivery test".into(),
+        })
+    }
+
+    fn push<'a>(
+        &'a self,
+        _cwd: &'a str,
+        _thread: &'a QueueReadyThread,
+        _message: &'a str,
+    ) -> InteractiveFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn archive<'a>(
+        &'a self,
+        _cwd: &'a str,
+        _thread: &'a QueueReadyThread,
+    ) -> InteractiveFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn submit_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        envelope: &'a InteractiveInputEnvelope,
+    ) -> exomonad_agent::InteractiveInputFuture<'a> {
+        Box::pin(async move {
+            self.submissions.lock().unwrap().push((
+                envelope.id().sequence.get(),
+                String::from_utf8_lossy(envelope.bytes()).into_owned(),
+            ));
+            if self
+                .lose_next_reply
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(exomonad_agent::InteractiveInputError::Unconfirmed(
+                    "native input control exchange timed out".into(),
+                ))
+            } else {
+                Ok(exomonad_agent::InputAdmission::Presented)
+            }
+        })
+    }
+
+    fn query_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _id: &'a InputOperationId,
+    ) -> exomonad_agent::InteractiveInputFuture<'a> {
+        Box::pin(async { Ok(exomonad_agent::InputAdmission::EvidenceUnavailable) })
+    }
+
+    fn withdraw_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        id: &'a InputOperationId,
+    ) -> exomonad_agent::InteractiveInputFuture<'a> {
+        Box::pin(async move {
+            self.withdrawals.lock().unwrap().push(id.sequence.get());
+            Ok(self.withdrawal)
+        })
+    }
+}
+
+async fn tracked_delivery_fixture(
+    root: &Path,
+    messages: &[&str],
+) -> (Arc<ActorInbox>, ActorRef, QueueReadyThread) {
+    let inbox = Arc::new(ActorInbox::open(root.join("rows"), root.join("cursor")).unwrap());
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    for message in messages {
+        inbox
+            .publish_tracked(
+                DurableActorEvent::Text((*message).into()),
+                DeliveryProvenance::Notification {
+                    sender: ActorRef::first(exomonad_actor::ActorId(8)),
+                    target: actor,
+                },
+            )
+            .unwrap();
+    }
+    let binding = root.join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        exomonad_agent::BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba4".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    (inbox, actor, thread)
+}
+
+fn delivery_phase(inbox: &ActorInbox, sequence: u64) -> exomonad_node::DeliveryPhase {
+    match inbox.observe_receipt(sequence).unwrap() {
+        exomonad_node::ReceiptLookup::Retained(evidence) => evidence.phase,
+        exomonad_node::ReceiptLookup::Unavailable => panic!("receipt {sequence} unavailable"),
+    }
+}
+
+/// A tracked message reaching an actor inside a computing `haskell` cell is
+/// not submitted: native control would cancel the cell and wait forever for a
+/// terminal it never records. The row stays `Accepted` and is submitted once
+/// the cell ends.
+#[tokio::test]
+async fn tracked_delivery_waits_for_a_computing_cell_to_end() {
+    use exomonad_node::DeliveryPhase;
+    let root = tempfile::tempdir().unwrap();
+    let (inbox, actor, thread) = tracked_delivery_fixture(root.path(), &["A"]).await;
+    let backend = EvidenceLessNative::new(exomonad_agent::InputAdmission::Withdrawn);
+    backend
+        .lose_next_reply
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+    let computing = std::sync::atomic::AtomicBool::new(true);
+    let without_evidence = Mutex::new(BTreeMap::new());
+    let retained = |_: ActorRef, _: exomonad_actor::WatchId| true;
+    let observed = |_: ActorRef, _: exomonad_actor::WatchId, _: u64| false;
+    let cell = || computing.load(std::sync::atomic::Ordering::SeqCst);
+    let tick = || {
+        deliver_pending_checked(
+            actor,
+            &inbox,
+            &thread,
+            &backend,
+            &producer,
+            &reconciliations,
+            root.path(),
+            &observation,
+            &retained,
+            &observed,
+            &cell,
+            &without_evidence,
+        )
+    };
+
+    for _ in 0..3 {
+        let error = tick().await.unwrap_err();
+        assert!(error.contains("computing haskell cell"), "{error}");
+    }
+    assert!(backend.submissions.lock().unwrap().is_empty());
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Accepted);
+
+    computing.store(false, std::sync::atomic::Ordering::SeqCst);
+    tick().await.unwrap();
+    assert_eq!(
+        backend
+            .submissions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Presented);
+}
+
+/// Drive one tracked message through a lost submit reply and evidence-less
+/// queries past the grace period, then return what native control received.
+async fn withdraw_and_redeliver(withdrawal: exomonad_agent::InputAdmission) -> Vec<(u64, String)> {
+    use exomonad_node::DeliveryPhase;
+    let root = tempfile::tempdir().unwrap();
+    let (inbox, actor, thread) = tracked_delivery_fixture(root.path(), &["A", "B"]).await;
+    let backend = EvidenceLessNative::new(withdrawal);
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+    let without_evidence = Mutex::new(BTreeMap::new());
+    let retained = |_: ActorRef, _: exomonad_actor::WatchId| true;
+    let observed = |_: ActorRef, _: exomonad_actor::WatchId, _: u64| false;
+    let cell = || false;
+    let tick = || {
+        deliver_pending_checked(
+            actor,
+            &inbox,
+            &thread,
+            &backend,
+            &producer,
+            &reconciliations,
+            root.path(),
+            &observation,
+            &retained,
+            &observed,
+            &cell,
+            &without_evidence,
+        )
+    };
+
+    // The exchange times out; the row is fenced as unconfirmed.
+    assert!(tick().await.is_err());
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Unconfirmed);
+    // Native control has no record; within the grace period nothing moves.
+    let error = tick().await.unwrap_err();
+    assert!(error.contains("EvidenceUnavailable"), "{error}");
+    assert!(backend.withdrawals.lock().unwrap().is_empty());
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Unconfirmed);
+    let mut last_message = None;
+    let fenced = observe_inbound_delivery(
+        &inbox,
+        &producer,
+        false,
+        &without_evidence,
+        &mut last_message,
+    );
+    assert!(
+        matches!(
+            &fenced.inbox,
+            exomonad_actor::InboxDelivery::Fenced { reason, .. }
+                if reason == "message 1 unconfirmed, 1 behind"
+        ),
+        "{fenced:?}"
+    );
+    assert_eq!(fenced.next, exomonad_actor::InboundNext::RouteRecovery);
+
+    // Past the grace period the row is withdrawn and re-queued once.
+    let key = without_evidence
+        .lock()
+        .keys()
+        .next()
+        .cloned()
+        .expect("first evidence-less query is recorded");
+    without_evidence.lock().insert(
+        key,
+        std::time::Instant::now()
+            .checked_sub(WITHDRAW_WITHOUT_EVIDENCE_AFTER + Duration::from_secs(1))
+            .unwrap(),
+    );
+    tick().await.unwrap();
+    assert_eq!(*backend.withdrawals.lock().unwrap(), vec![1]);
+    assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Withdrawn);
+    assert_eq!(delivery_phase(&inbox, 3), DeliveryPhase::Accepted);
+    assert!(without_evidence.lock().is_empty());
+    let reopened = observe_inbound_delivery(
+        &inbox,
+        &producer,
+        false,
+        &without_evidence,
+        &mut last_message,
+    );
+    assert_eq!(reopened.inbox, exomonad_actor::InboxDelivery::Open);
+    assert_eq!(
+        reopened
+            .last_message
+            .map(|message| (message.sequence, message.state)),
+        Some((2, exomonad_actor::TrackedMessageState::Queued))
+    );
+
+    // B, which was fenced behind it, and then the re-delivered A go out.
+    tick().await.unwrap();
+    tick().await.unwrap();
+    assert_eq!(delivery_phase(&inbox, 2), DeliveryPhase::Presented);
+    assert_eq!(delivery_phase(&inbox, 3), DeliveryPhase::Presented);
+    assert_eq!(inbox.cursor(), 3);
+    assert_eq!(*backend.withdrawals.lock().unwrap(), vec![1]);
+    let submissions = backend.submissions.lock().unwrap().clone();
+    assert_eq!(
+        submissions
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the withdrawn sequence is never sent again and A is re-sent exactly once"
+    );
+    assert_eq!(submissions[0].1, "A");
+    assert_eq!(submissions[1].1, "B");
+    submissions
+}
+
+#[tokio::test]
+async fn never_admitted_input_is_withdrawn_and_redelivered_once() {
+    let submissions = withdraw_and_redeliver(exomonad_agent::InputAdmission::Withdrawn).await;
+    assert_eq!(submissions[2].1, "A");
+}
+
+#[tokio::test]
+async fn admitted_input_with_unknown_outcome_is_redelivered_as_possibly_seen() {
+    let submissions = withdraw_and_redeliver(exomonad_agent::InputAdmission::Unknown).await;
+    assert_eq!(submissions[2].1, format!("{POSSIBLY_SEEN_PREFIX}\nA"));
 }

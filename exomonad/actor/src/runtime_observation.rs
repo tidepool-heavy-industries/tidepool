@@ -90,6 +90,66 @@ pub enum ActorWorkbenchTransfer {
     CancellationAcknowledgement,
 }
 
+/// Inbound delivery of tracked messages to this actor, as the host's delivery
+/// pump last saw it. The pump republishes it on every tick from the same
+/// state that decides submission, deferral and withdrawal, so a status view
+/// built from it cannot disagree with delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InboundDeliveryObservation {
+    pub inbox: InboxDelivery,
+    pub last_message: Option<TrackedMessageObservation>,
+    pub next: InboundNext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum InboxDelivery {
+    #[default]
+    Open,
+    /// The front message waits for the actor's computing `haskell` cell to
+    /// end before it is submitted.
+    Held { since_unix_ms: u64 },
+    /// The front message is in flight or terminally fenced; no later tracked
+    /// message can be presented before it resolves.
+    Fenced { reason: String, since_unix_ms: u64 },
+}
+
+/// The most recent tracked message at the front of the actor's inbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedMessageObservation {
+    pub sequence: u64,
+    pub state: TrackedMessageState,
+    /// When the pump first observed `state`.
+    pub at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedMessageState {
+    Queued,
+    Submitted,
+    Unconfirmed,
+    Presented,
+    Withdrawn,
+    Rejected,
+    Compacted,
+}
+
+/// What happens next for inbound delivery, named as an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboundNext {
+    /// Nothing is owed; the next event arrives on its own.
+    #[default]
+    AwaitEvent,
+    /// The front message is submitted once the computing cell ends.
+    AwaitCell,
+    /// The front message has no native evidence; after the grace period the
+    /// pump withdraws it and re-delivers it on its own.
+    RouteRecovery,
+    /// The pump is withdrawing or re-delivering the front message.
+    Resubmitting,
+    /// Delivery cannot recover on its own; hand the work off.
+    Handoff,
+}
+
 /// One source layer's active revision against the latest observed on-disk
 /// capture, and which modules' digests differ between them.
 ///
@@ -201,6 +261,11 @@ pub struct ActorRuntimeObservation {
     /// Whether what is running still matches what is on disk. See
     /// [`ActorSourceDriftObservation`].
     pub source_drift: ActorSourceDriftObservation,
+    /// When the host first observed the current provider turn no longer
+    /// active; `None` while a turn is active or no turn is observed.
+    pub provider_idle_since_unix_ms: Option<u64>,
+    /// `None` until the host's delivery pump runs for this actor.
+    pub inbound_delivery: Option<InboundDeliveryObservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +311,90 @@ impl ActorRuntimeObservation {
             }
         }
         Some(text)
+    }
+
+    /// One compact line for a parent's status view of this actor:
+    /// `<label> req=<n> pending; provider=<..>; inbox=<..>; last_message=<..>;
+    /// [source=<head>;] next=<action>`. Every field comes from published
+    /// observations; `source` appears only once a checkout head was observed.
+    pub(crate) fn delivery_status_line(
+        &self,
+        label: &str,
+        requests: usize,
+        now_unix_ms: u64,
+    ) -> String {
+        use exomonad_model::ProviderTurnState;
+        let provider = match (&self.provider_turn, self.provider_observation_stale) {
+            (None, _) | (Some(_), true) => "unknown".to_owned(),
+            (Some(turn), false) => match &turn.state {
+                ProviderTurnState::Active => format!("running turn={}", turn.turn),
+                ProviderTurnState::Succeeded => match self.provider_idle_since_unix_ms {
+                    Some(since) => format!("idle {}", render_age(since, now_unix_ms)),
+                    None => "idle".to_owned(),
+                },
+                ProviderTurnState::Failed(_) => "failed".to_owned(),
+                ProviderTurnState::Interrupted => "interrupted".to_owned(),
+            },
+        };
+        let (inbox, last_message, next) = match &self.inbound_delivery {
+            None => ("unobserved".to_owned(), "none".to_owned(), "await-event"),
+            Some(delivery) => (
+                match &delivery.inbox {
+                    InboxDelivery::Open => "open".to_owned(),
+                    InboxDelivery::Held { since_unix_ms } => format!(
+                        "held(computing cell, {})",
+                        render_age(*since_unix_ms, now_unix_ms)
+                    ),
+                    InboxDelivery::Fenced {
+                        reason,
+                        since_unix_ms,
+                    } => format!(
+                        "fenced({reason}, {})",
+                        render_age(*since_unix_ms, now_unix_ms)
+                    ),
+                },
+                delivery.last_message.as_ref().map_or_else(
+                    || "none".to_owned(),
+                    |message| {
+                        let state = match message.state {
+                            TrackedMessageState::Queued => "queued/not-presented".to_owned(),
+                            TrackedMessageState::Submitted => "submitted/not-presented".to_owned(),
+                            TrackedMessageState::Unconfirmed => {
+                                "unconfirmed/not-presented".to_owned()
+                            }
+                            TrackedMessageState::Presented => {
+                                format!("presented@{}", render_clock(message.at_unix_ms))
+                            }
+                            TrackedMessageState::Withdrawn => "withdrawn/not-presented".to_owned(),
+                            TrackedMessageState::Rejected => "rejected/not-presented".to_owned(),
+                            TrackedMessageState::Compacted => "compacted/unknown".to_owned(),
+                        };
+                        format!("ref{} {state}", message.sequence)
+                    },
+                ),
+                match delivery.next {
+                    InboundNext::AwaitEvent => "await-event",
+                    InboundNext::AwaitCell => "await-cell",
+                    InboundNext::RouteRecovery => "route-recovery",
+                    InboundNext::Resubmitting => "resubmitting",
+                    InboundNext::Handoff => "handoff",
+                },
+            ),
+        };
+        let source = self
+            .source_drift
+            .checkout
+            .as_ref()
+            .map(|checkout| {
+                format!(
+                    " source={};",
+                    checkout.head.get(..7).unwrap_or(&checkout.head)
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "{label} req={requests} pending; provider={provider}; inbox={inbox}; last_message={last_message};{source} next={next}"
+        )
     }
 
     pub(crate) fn disposition(&self, has_requests: bool) -> AgentDisposition {
@@ -333,6 +482,10 @@ impl ActorRuntimeObservation {
 #[derive(Debug, Clone, Default)]
 pub struct ActorRuntimeObservationHandle {
     inner: Arc<RwLock<ActorRuntimeObservation>>,
+    /// Control of the hosted workbench call this actor is executing, if any.
+    /// Kept beside the snapshot rather than in it: its phase is live state
+    /// the delivery pump reads at submit time, not a published value.
+    hosted_cell: Arc<parking_lot::Mutex<Option<Arc<crate::WorkbenchExecutionControl>>>>,
 }
 
 impl ActorRuntimeObservationHandle {
@@ -369,6 +522,14 @@ impl ActorRuntimeObservationHandle {
                 if state.provider_turn.as_ref().is_none_or(|previous| {
                     previous.thread != turn.thread || previous.revision <= turn.revision
                 }) {
+                    let same_turn = state.provider_turn.as_ref().is_some_and(|previous| {
+                        previous.thread == turn.thread && previous.turn == turn.turn
+                    });
+                    if turn.state == exomonad_model::ProviderTurnState::Active {
+                        state.provider_idle_since_unix_ms = None;
+                    } else if !same_turn || state.provider_idle_since_unix_ms.is_none() {
+                        state.provider_idle_since_unix_ms = Some(unix_time_ms());
+                    }
                     state.provider_turn = Some(turn);
                 }
             } else {
@@ -441,6 +602,31 @@ impl ActorRuntimeObservationHandle {
 
     pub fn publish_workbench_posture(&self, posture: ActorWorkbenchPosture) {
         self.inner.write().workbench_posture = posture;
+    }
+
+    pub fn publish_inbound_delivery(&self, delivery: InboundDeliveryObservation) {
+        self.inner.write().inbound_delivery = Some(delivery);
+    }
+
+    /// Record the control of the workbench execution the actor has started,
+    /// or `None` once it has returned.
+    pub(crate) fn publish_hosted_cell(
+        &self,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) {
+        *self.hosted_cell.lock() = control;
+    }
+
+    /// Whether the actor is inside a model-visible `haskell` call that is
+    /// computing rather than sleeping. Codex cancels such a call before
+    /// admitting new input and cannot finish that exchange until the cell
+    /// ends, so the delivery pump defers native submission while this holds.
+    #[must_use]
+    pub fn hosted_cell_computing(&self) -> bool {
+        self.hosted_cell
+            .lock()
+            .as_ref()
+            .is_some_and(|control| control.is_computing_hosted_cell())
     }
 
     /// Record the exact composed developer prompt installed for this actor.
@@ -578,7 +764,29 @@ mod provider_health_tests {
     }
 }
 
-fn unix_time_ms() -> u64 {
+/// Compact elapsed time: `42s`, `27m`, `3h`, `2d`.
+fn render_age(since_unix_ms: u64, now_unix_ms: u64) -> String {
+    let seconds = now_unix_ms.saturating_sub(since_unix_ms) / 1000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86400),
+    }
+}
+
+/// UTC wall-clock time of day, `HH:MM:SSZ`.
+fn render_clock(unix_ms: u64) -> String {
+    let seconds = (unix_ms / 1000) % 86400;
+    format!(
+        "{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        (seconds / 60) % 60,
+        seconds % 60
+    )
+}
+
+pub(crate) fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -589,6 +797,67 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_status_line_names_a_fenced_inbox_and_its_recovery() {
+        let minute = 60_000;
+        let now = 100 * minute;
+        let observation = ActorRuntimeObservation {
+            provider_turn: Some(exomonad_model::ProviderTurnObservation {
+                thread: "thread".into(),
+                turn: "turn-4".into(),
+                revision: 4,
+                state: exomonad_model::ProviderTurnState::Succeeded,
+            }),
+            provider_idle_since_unix_ms: Some(now - 27 * minute),
+            inbound_delivery: Some(InboundDeliveryObservation {
+                inbox: InboxDelivery::Fenced {
+                    reason: "message 2 unconfirmed, 6 behind".into(),
+                    since_unix_ms: now - 41 * minute,
+                },
+                last_message: Some(TrackedMessageObservation {
+                    sequence: 2,
+                    state: TrackedMessageState::Unconfirmed,
+                    at_unix_ms: now - 41 * minute,
+                }),
+                next: InboundNext::RouteRecovery,
+            }),
+            source_drift: ActorSourceDriftObservation {
+                checkout: Some(CheckoutGitDrift {
+                    head: "8d45d32f00ba".into(),
+                    dirty_files: Vec::new(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            observation.delivery_status_line("core-lead", 1, now),
+            "core-lead req=1 pending; provider=idle 27m; inbox=fenced(message 2 unconfirmed, 6 behind, 41m); last_message=ref2 unconfirmed/not-presented; source=8d45d32; next=route-recovery"
+        );
+
+        let healthy = ActorRuntimeObservation {
+            provider_turn: Some(exomonad_model::ProviderTurnObservation {
+                thread: "thread".into(),
+                turn: "turn-5".into(),
+                revision: 5,
+                state: exomonad_model::ProviderTurnState::Active,
+            }),
+            inbound_delivery: Some(InboundDeliveryObservation {
+                last_message: Some(TrackedMessageObservation {
+                    sequence: 9,
+                    state: TrackedMessageState::Presented,
+                    at_unix_ms: (3600 + 2 * 60 + 5) * 1000,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            healthy.delivery_status_line("core-lead", 1, now),
+            "core-lead req=1 pending; provider=running turn=turn-5; inbox=open; last_message=ref9 presented@01:02:05Z; next=await-event"
+        );
+    }
 
     #[test]
     fn first_observation_survives_history_eviction_and_equal_counts_are_distinct() {

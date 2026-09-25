@@ -54,7 +54,8 @@ async fn send(
         OutcomeWire::Withdrawn => InputAdmission::Withdrawn,
         OutcomeWire::Rejected => InputAdmission::Rejected,
         OutcomeWire::Compacted => InputAdmission::Compacted,
-        OutcomeWire::Unknown | OutcomeWire::EvidenceUnavailable => InputAdmission::Unknown,
+        OutcomeWire::Unknown => InputAdmission::Unknown,
+        OutcomeWire::EvidenceUnavailable => InputAdmission::EvidenceUnavailable,
     })
 }
 
@@ -469,7 +470,7 @@ mod tests {
         });
         assert_eq!(
             bind(&challenged_thread(socket)).await.unwrap(),
-            InputAdmission::Unknown
+            InputAdmission::EvidenceUnavailable
         );
         assert_eq!(server.await.unwrap()["operation"], "bind");
     }

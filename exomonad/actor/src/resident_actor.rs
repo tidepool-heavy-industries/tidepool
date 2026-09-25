@@ -1401,9 +1401,23 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     None => format!("{state} provider=unknown"),
                 };
                 let usage = runtime.latest_provider_usage();
+                // Delivery line: one per live child, from the host pump's
+                // published inbound-delivery state.
+                let delivery = if terminal.is_none() {
+                    format!(
+                        "\n    {}",
+                        runtime.delivery_status_line(
+                            record.descriptor.label(),
+                            requests.0.len() + requests.1.len(),
+                            crate::runtime_observation::unix_time_ms(),
+                        )
+                    )
+                } else {
+                    String::new()
+                };
                 if view == StatusView::Concise {
                     return Some(format!(
-                        "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}",
+                        "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}{delivery}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent().map_or_else(
                             || "none".to_owned(),
@@ -1430,7 +1444,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     ));
                 }
                 Some(format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
@@ -7484,6 +7498,8 @@ where
                     .begin(execution, request.clone(), invocation);
             }
             self.active_workbench_control = control.clone();
+            self.runtime_observation
+                .publish_hosted_cell(control.clone());
             self.active_fork_boundary = request.fork_boundary().cloned();
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
@@ -7516,6 +7532,7 @@ where
             call_scope.finish(&call_outcome);
             self.active_fork_boundary = None;
             self.active_workbench_control = None;
+            self.runtime_observation.publish_hosted_cell(None);
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation
