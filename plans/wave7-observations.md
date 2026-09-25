@@ -188,3 +188,22 @@ the run gets slower every hour it lives. Started a redeploy of main (memo
 fix, stale-split fix, background jobs, retirement delivery, daemon reuse,
 display guard) so a relaunch can happen at the next clean boundary; the
 running wave keeps its own binary copy.
+
+## 14:26Z wake: wave 7 bricked, stopped; wave 8 launch failed once
+
+From 14:01Z every compile for the root (its run source layer) and for the
+replay leaf and its reviewer (checkout layer wt-0409b8f5) failed with
+"Could not find module Jev.Host / Jev.Tidepool" at revision 1 of those
+layers; revision 0 had worked all run. The root had called
+reload_agent_spec at about 12:26Z, which publishes source-layer revisions.
+The root reported it could not merge the accepted finalize candidate
+(6d78cc5) because its command workbench failed. Nothing in-run could fix a
+broken layer, so the run was stopped at 14:28Z (the root's uncommitted
+NEXT.md edits stay in the working tree). Lane layer-hostmods is finding why a
+published revision omits the host modules and why it activated.
+
+Wave 8 (run 657019a1) failed at launch: the redeployed build refuses to start
+the hosted tool service because the bash tool description, extended by the
+background-jobs merge, was about 1,100 characters against the 1,024 provider
+limit. Fixed (a30997ff9, 910 characters), redeploying again; lane desc-limit
+adds a test so shipped tool descriptions cannot exceed the limit unnoticed.
