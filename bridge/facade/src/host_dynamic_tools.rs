@@ -469,10 +469,34 @@ async fn cancel_workbench(
         ));
     }
     let invocation = validate_exact_workbench_request(&state, request).await?;
-    state
-        .endpoint
-        .cancel_workbench_boxed(invocation)
-        .await
+    let (thread_id, call_id) = (invocation.thread_id.clone(), invocation.call_id.clone());
+    let outcome = state.endpoint.cancel_workbench_boxed(invocation).await;
+    // One line per validated request. `thread_id` names the actor through its
+    // binding; `run-map` reads these as hosted-call cancellations.
+    match &outcome {
+        Ok(outcome) => {
+            let (label, execution) = match outcome {
+                WorkbenchCancellationOutcome::Cancelled { execution, .. } => {
+                    ("Cancelled", execution)
+                }
+                WorkbenchCancellationOutcome::Expired { execution, .. } => ("Expired", execution),
+                WorkbenchCancellationOutcome::Unconfirmed { execution } => {
+                    ("Unconfirmed", execution)
+                }
+                WorkbenchCancellationOutcome::NotSleeping { execution } => {
+                    ("NotSleeping", execution)
+                }
+                WorkbenchCancellationOutcome::UnknownEvaluation { execution } => {
+                    ("UnknownEvaluation", execution)
+                }
+            };
+            tracing::info!(%thread_id, %call_id, %execution, outcome = label, "hosted workbench cancellation");
+        }
+        Err(error) => {
+            tracing::info!(%thread_id, %call_id, outcome = "Failed", %error, "hosted workbench cancellation");
+        }
+    }
+    outcome
         .map(WorkbenchCancellationResponse::from_outcome)
         .map(Json)
         .map_err(|error| {
