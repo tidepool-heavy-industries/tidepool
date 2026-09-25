@@ -21,56 +21,50 @@ tidepool_mcp::kv_effect_def!(crate::effect_glue::effect_rust_projection);
 pub struct KvHandler {
     store: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     path: PathBuf,
-    // Set when the backing file EXISTED but could not be read at construction
-    // (e.g. transient EACCES). `flush` refuses to write while this is set, so
-    // a startup read failure can never silently overwrite the unreadable file
-    // with an empty in-memory store — the old behavior of a wiped KV file.
-    read_failed: Arc<std::sync::atomic::AtomicBool>,
+    // A failed load cannot authorize an empty in-memory store to replace the
+    // backing file. This state is fixed for the lifetime of the handler.
+    load_failed: bool,
 }
 
 impl KvHandler {
     pub fn new(path: PathBuf) -> Self {
-        let mut read_failed = false;
-        let store = if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => match serde_json::from_str(&contents) {
-                    Ok(map) => map,
-                    Err(e) => {
-                        tracing::warn!(
-                            "KV store at {:?} contains invalid JSON ({}), starting fresh",
-                            path,
-                            e
-                        );
-                        HashMap::new()
-                    }
-                },
-                Err(e) => {
+        let mut load_failed = false;
+        let store = match std::fs::read_to_string(&path) {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(map) => map,
+                Err(error) => {
                     tracing::warn!(
-                        "KV store at {:?} exists but could not be read ({}); starting with an \
-                         empty in-memory store and refusing to flush until restarted, so this \
-                         session cannot overwrite the unreadable file",
+                        "KV store at {:?} contains invalid JSON ({}); refusing to overwrite it",
                         path,
-                        e
+                        error
                     );
-                    read_failed = true;
+                    load_failed = true;
                     HashMap::new()
                 }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(
+                    "KV store at {:?} could not be read ({}); refusing to overwrite it",
+                    path,
+                    error
+                );
+                load_failed = true;
+                HashMap::new()
             }
-        } else {
-            HashMap::new()
         };
         Self {
             store: Arc::new(Mutex::new(store)),
             path,
-            read_failed: Arc::new(std::sync::atomic::AtomicBool::new(read_failed)),
+            load_failed,
         }
     }
 
     fn flush(&self, store: &HashMap<String, serde_json::Value>) {
-        if self.read_failed.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.load_failed {
             tracing::warn!(
-                "KV flush: refusing to write {:?} — the backing file existed but could not be \
-                 read at startup; flushing now would overwrite it with an incomplete store",
+                "KV flush: refusing to write {:?} — the backing file could not be loaded \
+                 at startup; flushing now would overwrite it with an incomplete store",
                 self.path
             );
             return;
@@ -83,7 +77,9 @@ impl KvHandler {
         }
         match serde_json::to_string_pretty(store) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&self.path, json) {
+                if let Err(e) =
+                    tidepool_atomic_write::write_best_effort(&self.path, json.as_bytes())
+                {
                     tracing::warn!("KV flush: failed to write {:?}: {}", self.path, e);
                 }
             }
@@ -225,14 +221,22 @@ impl KvHandler {
                                  refusing to overwrite"
                             ))
                         })?,
-                        Err(_) => HashMap::new(), // absent = empty store
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            HashMap::new()
+                        }
+                        Err(error) => {
+                            return Err(EffectError::Handler(format!(
+                                "KV CAS: backing file {path:?} could not be read ({error}); \
+                                 refusing to overwrite"
+                            )))
+                        }
                     };
                     let actual = disk.get(&key).cloned();
                     if actual == expected_json {
                         disk.insert(key.clone(), new_json.clone());
                         let json = serde_json::to_string_pretty(&disk)
                             .map_err(|e| EffectError::Handler(e.to_string()))?;
-                        std::fs::write(&path, json)
+                        tidepool_atomic_write::write_best_effort(&path, json.as_bytes())
                             .map_err(|e| EffectError::Handler(e.to_string()))?;
                         Ok((disk, Ok(())))
                     } else {
@@ -507,6 +511,45 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn kv_refuses_to_replace_malformed_json_with_an_empty_startup_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.json");
+        let original = b"{ incomplete";
+        std::fs::write(&path, original).unwrap();
+
+        let handler = KvHandler::new(path.clone());
+        handler.flush(&HashMap::from([("new".into(), serde_json::json!(1))]));
+        handler.clone().flush(&HashMap::new());
+
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn kv_cas_refuses_a_backing_path_that_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.json");
+        std::fs::create_dir(&path).unwrap();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let mut handler = KvHandler::new(path.clone());
+        let result = handler.kv_cas(
+            &cx,
+            "key".into(),
+            None,
+            HaskellValue::Lit(tidepool_repr::Literal::LitInt(1)),
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a directory is not a readable KV file"),
+        };
+        assert!(error.to_string().contains("could not be read"), "{error}");
+        assert!(path.is_dir());
     }
 
     /// Cross-process compare-and-swap: two handlers over the SAME backing file

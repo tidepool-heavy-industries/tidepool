@@ -3527,6 +3527,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",

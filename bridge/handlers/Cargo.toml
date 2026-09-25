@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec/Llm/Meta)"
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 tidepool-mcp.workspace = true
 tidepool-effect.workspace = true
 tidepool-runtime.workspace = true

@@ -197,7 +197,11 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
             tag: 1,
             rep_arity: arity,
             field_bangs: vec![],
-            qualified_name: None,
+            qualified_name: match name {
+                "()" => Some("GHC.Tuple.()".into()),
+                "(,,)" => Some("GHC.Tuple.(,,)".into()),
+                _ => None,
+            },
             type_name: String::new(),
         });
         next_id += 1;
