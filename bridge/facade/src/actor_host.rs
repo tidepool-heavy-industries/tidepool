@@ -2086,8 +2086,10 @@ pub(crate) async fn run(
             backend.clone(),
         ))
         .with_child_session_factory(child_session_factory)
-        .with_child_bootstrap_program(Arc::clone(&program))
         .with_image_registry(image_registry);
+    // No child bootstrap program: every launch stays on its launching
+    // session, as before per-actor machines.
+    let _ = &program;
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
