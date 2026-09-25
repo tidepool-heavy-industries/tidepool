@@ -2726,7 +2726,6 @@ async fn request_reminder_ignores_the_turn_visible_at_activation() {
 
     // A completed turn from the prior request must not remind the new request.
     runtime.publish_provider_observation(turn("old", 1, ProviderTurnState::Succeeded));
-    tokio::time::sleep(Duration::from_millis(2)).await;
     runtime.publish_request_activation(request, 2);
     let old_idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
     remind_turn_ended_without_respond(
