@@ -76,6 +76,7 @@ pub(super) struct PreparedWorkspace {
     activation: Mutex<Activation>,
     pub(super) host_path: PathBuf,
     pub(super) worktree: Option<WorktreeId>,
+    pub(super) helper_draft: PathBuf,
     pub(super) view: exomonad_node::MountNamespace,
     pub(super) source: Option<SharedOverlayResource>,
     pub(super) build: Option<SharedOverlayResource>,
@@ -179,6 +180,45 @@ impl PreparedWorkspace {
 }
 
 impl WorkspaceLayout {
+    fn helper_draft(&self, branch: &str) -> PathBuf {
+        self.worktrees
+            .managed_root()
+            .join(".resources")
+            .join(&self.run_namespace)
+            .join("helpers/drafts")
+            .join(branch)
+    }
+
+    fn inherit_helper_branch(&self, parent_draft: &Path, child_branch: &str) -> io::Result<()> {
+        let parent_branch = parent_draft
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::other("parent helper branch has no name"))?;
+        let helper_root = self
+            .worktrees
+            .managed_root()
+            .join(".resources")
+            .join(&self.run_namespace);
+        let parent_layer =
+            crate::exomonad::source::SourceLayer::helpers(&helper_root, parent_branch);
+        let _helper_revision = parent_layer
+            .lock_helpers()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let child_draft = self.helper_draft(child_branch);
+        copy_helper_draft(parent_draft, &child_draft)?;
+        let child_layer = crate::exomonad::source::SourceLayer::helpers(&helper_root, child_branch);
+        let domain = format!("helper-fork:{}", self.run_namespace);
+        let seed = helper_root.join("empty");
+        std::fs::create_dir_all(&seed)?;
+        parent_layer
+            .ensure_active_from(&domain, &[seed])
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        child_layer
+            .inherit_active_from(&parent_layer, std::slice::from_ref(&child_draft))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+
     fn reusable_import(&self, source: &Path, excluded: &[OsString]) -> Option<OverlaySnapshot> {
         let candidate = self.root_imports.lock().get(source).cloned()?;
         if candidate.exclusions != excluded {
@@ -326,6 +366,14 @@ impl WorkspaceLayout {
             root.then(|| root_worktrees.managed_root()),
         );
         let resource_root = self.resource_root(key);
+        let helper_branch = worktree
+            .as_ref()
+            .map(|id| id.as_str().to_owned())
+            .unwrap_or_else(|| "run".to_owned());
+        let helper_draft = self.helper_draft(&helper_branch);
+        std::fs::create_dir_all(&helper_draft)?;
+        let helper_mountpoint = host_path.join(".exomonad/helpers");
+        std::fs::create_dir_all(&helper_mountpoint)?;
         let native_policy = native_tool_policy(policy.native_tools);
         let mounts = self
             .backend
@@ -367,6 +415,17 @@ impl WorkspaceLayout {
                 }
                 .map_err(io::Error::other)?;
         }
+        boundary = boundary
+            .with_read_only_overlay(&helper_draft, &helper_draft)
+            .and_then(|boundary| {
+                if root || policy.workspace == exomonad_actor::WorkspaceAccess::WritableBound {
+                    boundary.with_writable_overlay(&helper_draft, visible.join(".exomonad/helpers"))
+                } else {
+                    boundary
+                        .with_read_only_overlay(&helper_draft, visible.join(".exomonad/helpers"))
+                }
+            })
+            .map_err(io::Error::other)?;
         for InteractivePolicyMount { source, target } in mounts {
             boundary = boundary
                 .with_read_only_overlay(source, target)
@@ -412,6 +471,7 @@ impl WorkspaceLayout {
             activation: Mutex::new(Activation::Prepared),
             host_path,
             worktree,
+            helper_draft,
             view,
             source: source.map(SharedOverlayResource::new),
             build: build.map(SharedOverlayResource::new),
@@ -420,6 +480,74 @@ impl WorkspaceLayout {
             publication: Arc::new(tokio::sync::Mutex::new(WorkspacePublication::default())),
         }))
     }
+}
+
+/// Copy a branch's mutable helper draft at a fork boundary. The caller holds
+/// the parent workspace publication gate; the two manifests additionally make
+/// concurrent file edits fail closed instead of creating a torn child draft.
+fn copy_helper_draft(source: &Path, destination: &Path) -> io::Result<()> {
+    use super::overlay_resource::source_manifest;
+
+    let excluded: [&std::ffi::OsStr; 0] = [];
+    let before = source_manifest(source, &excluded)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("helper draft destination has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    if destination.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "fork helper draft already exists",
+        ));
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let staging = parent.join(format!(".helper-draft-{}-{nonce}", std::process::id()));
+    let result = (|| {
+        copy_helper_tree(source, &staging)?;
+        if source_manifest(source, &excluded)? != before {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "helper draft changed while fork snapshot was copied",
+            ));
+        }
+        std::fs::rename(&staging, destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn copy_helper_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.is_dir() {
+        std::fs::create_dir(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_helper_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        std::fs::set_permissions(
+            destination,
+            std::fs::Permissions::from_mode(metadata.mode()),
+        )?;
+    } else if metadata.is_file() {
+        std::fs::copy(source, destination)?;
+        std::fs::set_permissions(
+            destination,
+            std::fs::Permissions::from_mode(metadata.mode()),
+        )?;
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "helper draft contains a non-file entry",
+        ));
+    }
+    Ok(())
 }
 
 impl NativeForkAdmission {
@@ -434,6 +562,13 @@ impl NativeForkAdmission {
             .clone()
             .ok_or_else(|| io::Error::other("workspace layout unavailable"))?;
         let build = self.build_snapshot(creator, policy.native_tools).await;
+        let creator_helper_draft = self
+            .owners
+            .lock()
+            .get(&creator)
+            .filter(|owner| owner.terminal.is_none())
+            .and_then(|owner| owner.creator_workspace.as_ref())
+            .map(|workspace| workspace.workspace.helper_draft.clone());
         let explicit_ref = matches!(authorized.source(), WorktreeSource::Ref(_));
         let parent = if explicit_ref {
             None
@@ -468,7 +603,14 @@ impl NativeForkAdmission {
             let reason = (!explicit_ref)
                 .then(|| SourceFallback::Unavailable("no unique live source owner".into()));
             return tidepool_runtime::spawn_blocking_in_span(move || {
-                layout.prepare_committed(authorized, policy, build, reason, None)
+                layout.prepare_committed(
+                    authorized,
+                    policy,
+                    build,
+                    reason,
+                    None,
+                    creator_helper_draft,
+                )
             })
             .await
             .map_err(io::Error::other)?;
@@ -517,6 +659,7 @@ impl NativeForkAdmission {
                         "source owner retired while publication was queued".into(),
                     )),
                     None,
+                    creator_helper_draft,
                 )
             })
             .await
@@ -525,6 +668,7 @@ impl NativeForkAdmission {
         // The operation task retains its gate and resources even when its caller
         // abandons the await. Host death ends the wave instead of replaying it.
         let backend = self.backend.clone();
+        let fallback_helper_draft = creator_helper_draft.clone();
         tokio::spawn(async move {
             let donor_view = parent.workspace.view.clone();
             if publication.is_pending() {
@@ -553,6 +697,7 @@ impl NativeForkAdmission {
                             build,
                             Some(SourceFallback::Busy),
                             Some(donor_view),
+                            fallback_helper_draft.clone(),
                         )
                     })
                     .await
@@ -566,6 +711,7 @@ impl NativeForkAdmission {
                             build,
                             Some(SourceFallback::Unavailable(detail)),
                             Some(donor_view),
+                            fallback_helper_draft.clone(),
                         )
                     })
                     .await
@@ -612,6 +758,7 @@ impl NativeForkAdmission {
             };
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
+            let parent_helper_draft = creator_helper_draft.clone();
             let preserved = parent.workspace.source_preserved_mounts.clone();
             let capture_span = tracing::info_span!(
                 "source_capture",
@@ -653,6 +800,7 @@ impl NativeForkAdmission {
                     &host_path,
                     &preserved,
                     source,
+                    parent_helper_draft,
                 );
                 tracing::info!(
                     phase = "git_capture",
@@ -762,6 +910,7 @@ impl WorkspaceLayout {
         source_path: &Path,
         preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
+        parent_helper_draft: Option<PathBuf>,
     ) -> io::Result<CapturedSource> {
         let files = namespace.retained_view_path(Path::new(ACTOR_PROJECT_ROOT))?;
         let excluded = self.source_exclusions(source_path, files.as_path())?;
@@ -780,6 +929,7 @@ impl WorkspaceLayout {
                 .iter()
                 .map(|path| std::ffi::OsString::from(path.trim_matches('/'))),
         );
+        checkpoint_excluded.push(".exomonad/helpers".into());
         self.worktrees
             .git()
             .checkpoint_source(source_path, &checkpoint_excluded)
@@ -787,6 +937,10 @@ impl WorkspaceLayout {
         let git = authorized
             .prepare_source()
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
+        let helper_branch = git.receipt().worktree_id.as_str().to_owned();
+        if let Some(parent_draft) = parent_helper_draft.as_deref() {
+            self.inherit_helper_branch(parent_draft, &helper_branch)?;
+        }
         let source_pathname = self
             .resource_root(git.receipt().worktree_id.as_str())
             .join("source");
@@ -953,6 +1107,7 @@ impl WorkspaceLayout {
         build: Option<OverlaySnapshot>,
         fallback: Option<SourceFallback>,
         donor: Option<MountNamespace>,
+        parent_helper_draft: Option<PathBuf>,
     ) -> io::Result<AdmittedWorkspace> {
         if fallback.is_some() {
             tracing::info!(?fallback, "using committed source fallback");
@@ -961,6 +1116,9 @@ impl WorkspaceLayout {
             .materialize_committed()
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
         let id = WorktreeId::from_raw(&handle.handle_receipt.tree_id.raw);
+        if let Some(parent_draft) = parent_helper_draft.as_deref() {
+            self.inherit_helper_branch(parent_draft, id.as_str())?;
+        }
         if let Some(donor) = donor.as_ref() {
             let domain_handle = self
                 .worktrees

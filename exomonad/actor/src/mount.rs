@@ -78,6 +78,15 @@ pub trait ActorSourceLayers: Send + Sync {
         let _ = (actor, also_check);
         SourceLayerReload::Unavailable("this host installs no source layers".into())
     }
+
+    /// Re-read this actor's session helper draft and publish its last
+    /// typechecked revision. Helpers are branch-local source, not AgentSpec
+    /// tool declarations. Hosts without the helper surface report it as
+    /// unavailable.
+    fn reload_helpers(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
+        let _ = (actor, also_check);
+        SourceLayerReload::Unavailable("this host installs no session helpers".into())
+    }
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to

@@ -2899,6 +2899,13 @@ pub(crate) fn source_service(
             run_root.to_path_buf(),
             config.haskell_root.clone(),
         )
+        .with_helper_root(
+            worktrees
+                .managed_root()
+                .join(".resources")
+                .join(runtime_namespace(run_root))
+                .join("helpers"),
+        )
         .with_worktrees(worktrees),
     ))
 }
@@ -3231,7 +3238,7 @@ fn compile_root(
             ))
         }
     };
-    let descriptor = ActorDescriptor::new(
+    let mut descriptor = ActorDescriptor::new(
         "exomonad-root",
         ActorPlacement {
             session,
@@ -3245,6 +3252,11 @@ fn compile_root(
     .with_effective_role(
         exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy),
     );
+    if let Some(layers) = source {
+        descriptor = descriptor.with_source_layer(
+            exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[]),
+        );
+    }
     // A run that does not supply `Jev.Operators` gets a workbench without `J`,
     // rather than a compile failure over a module nothing on its search path
     // defines. The same answer tells the agent so in its instructions.

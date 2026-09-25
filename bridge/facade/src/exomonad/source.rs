@@ -46,9 +46,10 @@
 //! validation include and the resident machine are shared by the whole
 //! forest.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{fs::File, os::unix::fs::OpenOptionsExt};
 
 use exomonad_worktree::{GitCli, WorktreeId, WorktreeManager};
 use parking_lot::{Mutex, RwLock};
@@ -149,6 +150,34 @@ impl SourceLayer {
         }
     }
 
+    /// One branch-local active snapshot of the session-owned helper modules.
+    /// The writable draft lives beside these layers but is independently
+    /// snapshotted when a child workspace is admitted.
+    pub(crate) fn helpers(helper_root: &Path, branch: &str) -> Self {
+        Self {
+            directory: helper_root.join("layers").join(branch),
+        }
+    }
+
+    /// Serialize helper draft publication with fork capture, including across
+    /// the source service and workspace admission owners.
+    pub(crate) fn lock_helpers(&self) -> Result<File> {
+        std::fs::create_dir_all(&self.directory)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.directory.join("helpers.lock"))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        Ok(lock)
+    }
+
+    pub(crate) fn helper_draft(helper_root: &Path, branch: &str) -> PathBuf {
+        helper_root.join("drafts").join(branch)
+    }
+
     fn active_link(&self) -> PathBuf {
         self.directory.join("active")
     }
@@ -196,6 +225,46 @@ impl SourceLayer {
             return Ok(active);
         }
         let pending = self.capture_from_roots(domain, roots)?;
+        self.publish(pending)
+    }
+
+    /// Seed a private layer from another layer's current immutable revision.
+    /// The source bytes may be shared by identity, but the new layer gets its
+    /// own active link so later publication by either owner cannot upgrade the
+    /// other. `roots` are the draft roots this branch will reload from.
+    pub(crate) fn inherit_active_from(
+        &self,
+        parent: &SourceLayer,
+        roots: &[PathBuf],
+    ) -> Result<SourceRevision> {
+        if let Some(active) = self.read_active()? {
+            return Ok(active);
+        }
+        let active = parent
+            .read_active()?
+            .ok_or("parent source layer has no active revision to inherit")?;
+        let parent_revision = parent.revisions().join(&active.identity);
+        let child_revision = self.revisions().join(&active.identity);
+        std::fs::create_dir_all(self.revisions())?;
+        if !child_revision.exists() {
+            let staged = self
+                .revisions()
+                .join(format!(".inherit-{}", uuid::Uuid::new_v4()));
+            copy_revision_tree(&parent_revision, &staged)?;
+            if let Err(error) = std::fs::rename(&staged, &child_revision) {
+                let _ = std::fs::remove_dir_all(&staged);
+                return Err(error.into());
+            }
+            tidepool_atomic_write::sync_parent_directory(&child_revision)?;
+        }
+        let pending = PendingRevision {
+            directory: child_revision,
+            source_roots: roots.to_vec(),
+            revision: SourceRevision {
+                generation: 0,
+                ..active
+            },
+        };
         self.publish(pending)
     }
 
@@ -427,6 +496,34 @@ impl SourceLayer {
     }
 }
 
+fn copy_revision_tree(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            return Err(format!(
+                "source revision contains a symlink: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+        if kind.is_dir() {
+            copy_revision_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        } else {
+            return Err(format!(
+                "source revision contains an unsupported entry: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn sync_revision_tree(root: &Path) -> Result<()> {
     fn sync(directory: &Path) -> std::io::Result<()> {
         for entry in std::fs::read_dir(directory)? {
@@ -512,6 +609,7 @@ pub(crate) struct ExomonadSourceReload {
     frozen: FrozenWorkspace,
     workspace: PathBuf,
     run_root: PathBuf,
+    helper_root: PathBuf,
     haskell_root: PathBuf,
     layer: SourceLayer,
     /// Resolves a launch worktree id to the checkout on disk. Absent in the
@@ -521,8 +619,12 @@ pub(crate) struct ExomonadSourceReload {
     /// `None` records a checkout that carries no source of its own, so the
     /// answer is not recomputed for every actor that holds it.
     checkouts: Mutex<HashMap<String, Option<CheckoutSource>>>,
+    /// Helper branches are keyed by `run` for the root and by worktree id for
+    /// forked actors. Each branch has its own draft and active revision.
+    helpers: Mutex<HashMap<String, SourceLayer>>,
     /// What each actor's own source calls reach.
     scopes: RwLock<HashMap<PrincipalId, ActorSourceScope>>,
+    helper_scopes: RwLock<HashMap<PrincipalId, String>>,
     /// One reload at a time: a publication's check and its `rename(2)` must
     /// not interleave with another actor's.
     gate: Mutex<()>,
@@ -539,16 +641,20 @@ impl ExomonadSourceReload {
         run_root: PathBuf,
         haskell_root: PathBuf,
     ) -> Self {
+        let helper_root = run_root.join("helpers");
         let layer = SourceLayer::new(&run_root);
         Self {
             frozen,
             workspace,
             run_root,
+            helper_root,
             haskell_root,
             layer,
             worktrees: None,
             checkouts: Mutex::new(HashMap::new()),
+            helpers: Mutex::new(HashMap::new()),
             scopes: RwLock::new(HashMap::new()),
+            helper_scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
             drift_seen: Mutex::new(HashMap::new()),
         }
@@ -562,10 +668,16 @@ impl ExomonadSourceReload {
         self
     }
 
+    pub(crate) fn with_helper_root(mut self, root: PathBuf) -> Self {
+        self.helper_root = root;
+        self
+    }
+
     /// Name the actor that owns the run's own layer. Exactly one actor does,
     /// and the host says which while admitting it.
     pub(crate) fn bind_run(&self, actor: PrincipalId) {
         self.scopes.write().insert(actor, ActorSourceScope::Run);
+        self.helper_scopes.write().insert(actor, "run".to_owned());
     }
 
     /// What `caller`'s own source calls reach.
@@ -582,6 +694,34 @@ impl ExomonadSourceReload {
             .get(&caller)
             .cloned()
             .unwrap_or(ActorSourceScope::RunReadOnly)
+    }
+
+    fn helper_branch(worktrees: &[String]) -> String {
+        match worktrees {
+            [id] => id.clone(),
+            [] => "run".to_owned(),
+            _ => "run".to_owned(),
+        }
+    }
+
+    fn helper_layer(&self, branch: &str) -> SourceLayer {
+        let mut layers = self.helpers.lock();
+        layers
+            .entry(branch.to_owned())
+            .or_insert_with(|| SourceLayer::helpers(&self.helper_root, branch))
+            .clone()
+    }
+
+    fn helper_draft(&self, branch: &str) -> PathBuf {
+        SourceLayer::helper_draft(&self.helper_root, branch)
+    }
+
+    fn ensure_helper_active(&self, branch: &str) -> Result<SourceRevision> {
+        let seed = self.helper_root.join("empty");
+        std::fs::create_dir_all(&seed)?;
+        std::fs::create_dir_all(self.helper_draft(branch))?;
+        self.helper_layer(branch)
+            .ensure_active_from(self.frozen.identity(), &[seed])
     }
 
     /// The layer belonging to the checkout an actor is launched with, made
@@ -700,6 +840,139 @@ impl ExomonadSourceReload {
             also_check,
             intent,
         )
+    }
+
+    fn reload_helper_branch(
+        &self,
+        branch: &str,
+        also_check: &[String],
+    ) -> exomonad_actor::SourceLayerReload {
+        use exomonad_actor::SourceLayerReload;
+
+        let layer = self.helper_layer(branch);
+        let _branch_lock = match layer.lock_helpers() {
+            Ok(lock) => lock,
+            Err(error) => {
+                return SourceLayerReload::Unavailable(format!(
+                    "session helper branch is locked out: {error}"
+                ));
+            }
+        };
+        let draft = self.helper_draft(branch);
+        if let Err(error) = std::fs::create_dir_all(&draft) {
+            return SourceLayerReload::Unavailable(format!(
+                "session helper draft is unavailable: {error}"
+            ));
+        }
+        let active =
+            match layer.ensure_active_from(self.frozen.identity(), std::slice::from_ref(&draft)) {
+                Ok(active) => active,
+                Err(error) => {
+                    return SourceLayerReload::Unavailable(format!(
+                        "session helper revision is unavailable: {error}"
+                    ));
+                }
+            };
+        let pending =
+            match layer.capture_from_roots(self.frozen.identity(), std::slice::from_ref(&draft)) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    return SourceLayerReload::Unavailable(format!(
+                        "session helper draft could not be captured: {error}"
+                    ));
+                }
+            };
+        if pending.revision().identity == active.identity {
+            return SourceLayerReload::Unchanged {
+                revision: active.identity,
+            };
+        }
+        let helpers: Vec<String> = pending
+            .revision()
+            .modules
+            .iter()
+            .map(|(module, _)| module.clone())
+            .collect();
+        if let Some(module) = helpers
+            .iter()
+            .find(|module| *module != "SessionHelpers" && !module.starts_with("SessionHelpers."))
+        {
+            return SourceLayerReload::Rejected {
+                active: active.identity,
+                rejected: pending.revision().identity.clone(),
+                diagnostics: format!(
+                    "helper module `{module}` is outside the reserved SessionHelpers namespace"
+                ),
+            };
+        }
+        let mut protected_modules: BTreeSet<String> = helpers.iter().cloned().collect();
+        protected_modules.extend(active.modules.iter().map(|(module, _)| module.clone()));
+        let mut lower_modules = BTreeSet::new();
+        for module in &protected_modules {
+            if self.frozen.provides_module(module) {
+                lower_modules.insert(module.clone());
+            }
+        }
+        if let Some(run) = self.layer.read_active().ok().flatten() {
+            lower_modules.extend(
+                run.modules
+                    .iter()
+                    .map(|(module, _)| module.clone())
+                    .filter(|module| protected_modules.contains(module)),
+            );
+        }
+        if let Some(checkout) = self.checkout(&[branch.to_owned()]) {
+            if let Some(checkout_active) = checkout.layer.read_active().ok().flatten() {
+                lower_modules.extend(
+                    checkout_active
+                        .modules
+                        .iter()
+                        .map(|(module, _)| module.clone())
+                        .filter(|module| protected_modules.contains(module)),
+                );
+            }
+        }
+        if let Some(module) = lower_modules.first() {
+            return SourceLayerReload::Rejected {
+                active: active.identity,
+                rejected: pending.revision().identity.clone(),
+                diagnostics: format!(
+                    "reserved helper module `{module}` also exists in a lower source layer; removing it would expose that older module"
+                ),
+            };
+        }
+        let mut checked = helpers;
+        for module in also_check {
+            if !checked.contains(module) {
+                checked.push(module.clone());
+            }
+        }
+        let candidate = pending.include_paths(1);
+        if let Err(error) = crate::actor_host::typecheck_candidate_revision(
+            &self.frozen,
+            &self.run_root,
+            &self.haskell_root,
+            &candidate,
+            false,
+            &checked,
+        ) {
+            return SourceLayerReload::Rejected {
+                active: active.identity,
+                rejected: pending.revision().identity.clone(),
+                diagnostics: error.to_string(),
+            };
+        }
+        let changed = changed_modules(&active, pending.revision());
+        match layer.publish(pending) {
+            Ok(published) => SourceLayerReload::Published {
+                previous: active.identity,
+                revision: published.identity,
+                changed,
+            },
+            Err(error) => SourceLayerReload::Unavailable(format!(
+                "session helper revision could not be published: {error}"
+            )),
+        }
     }
 
     /// The publication transaction, which is the same for every layer: an
@@ -1328,20 +1601,44 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
 
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
     fn layer_include(&self, worktrees: &[String]) -> Vec<PathBuf> {
-        self.checkout(worktrees)
-            .map(|checkout| {
-                checkout
-                    .layer
-                    .active_include_paths()
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(%error, "checkout source layer has no include roots");
-                        Vec::new()
-                    })
-            })
-            .unwrap_or_default()
+        let branch = Self::helper_branch(worktrees);
+        let mut helper_paths = match self.ensure_helper_active(&branch) {
+            Ok(_) => self
+                .helper_layer(&branch)
+                .active_include_paths()
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, branch, "session helper layer has no include roots");
+                    Vec::new()
+                }),
+            Err(error) => {
+                tracing::warn!(%error, branch, "session helper layer could not be initialized");
+                Vec::new()
+            }
+        };
+        helper_paths.extend(
+            self.checkout(worktrees)
+                .map(|checkout| {
+                    checkout
+                        .layer
+                        .active_include_paths()
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(%error, "checkout source layer has no include roots");
+                            Vec::new()
+                        })
+                })
+                .unwrap_or_default(),
+        );
+        helper_paths
     }
 
     fn bind(&self, actor: PrincipalId, worktrees: &[String]) {
+        let helper_branch = Self::helper_branch(worktrees);
+        self.helper_scopes
+            .write()
+            .insert(actor, helper_branch.clone());
+        if let Err(error) = self.ensure_helper_active(&helper_branch) {
+            tracing::warn!(%error, branch = helper_branch, "session helper layer unavailable at bind");
+        }
         let scope = match self.checkout(worktrees) {
             Some(checkout) => ActorSourceScope::Checkout(checkout),
             None => ActorSourceScope::RunReadOnly,
@@ -1392,6 +1689,42 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             }
         }
     }
+
+    fn reload_helpers(
+        &self,
+        actor: PrincipalId,
+        also_check: &[String],
+    ) -> exomonad_actor::SourceLayerReload {
+        let _one_at_a_time = self.gate.lock();
+        let Some(branch) = self.helper_scopes.read().get(&actor).cloned() else {
+            return exomonad_actor::SourceLayerReload::Unavailable(
+                "this actor has no session helper branch".into(),
+            );
+        };
+        self.reload_helper_branch(&branch, also_check)
+    }
+}
+
+fn changed_modules(active: &SourceRevision, candidate: &SourceRevision) -> Vec<String> {
+    let before: BTreeMap<&str, &str> = active
+        .modules
+        .iter()
+        .map(|(module, digest)| (module.as_str(), digest.as_str()))
+        .collect();
+    let after: BTreeMap<&str, &str> = candidate
+        .modules
+        .iter()
+        .map(|(module, digest)| (module.as_str(), digest.as_str()))
+        .collect();
+    before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|module| before.get(module) != after.get(module))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1592,6 +1925,164 @@ mod tests {
 
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
+    }
+
+    #[test]
+    fn inherited_active_revision_is_a_private_branch_snapshot() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let roots = frozen.captured_source_roots().to_vec();
+        let parent = SourceLayer::new(run.path());
+        let first = parent.ensure_active(&frozen).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        let parent_at_fork = parent
+            .publish(
+                parent
+                    .capture_from_workspace(&frozen, project.path())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_ne!(first.identity, parent_at_fork.identity);
+
+        let child = SourceLayer::checkout(run.path(), "child");
+        let inherited = child.inherit_active_from(&parent, &roots).unwrap();
+        assert_eq!(inherited.identity, parent_at_fork.identity);
+        assert_eq!(child.read_active().unwrap(), Some(inherited.clone()));
+        assert_ne!(child.active_link(), parent.active_link());
+
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 3\n",
+        )
+        .unwrap();
+        let later_parent = parent
+            .publish(
+                parent
+                    .capture_from_workspace(&frozen, project.path())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_ne!(later_parent.identity, inherited.identity);
+        assert_eq!(child.read_active().unwrap(), Some(inherited));
+        assert!(
+            std::fs::read_to_string(child.include_paths(1)[0].join("Project/Work.hs"))
+                .unwrap()
+                .contains("work = 2")
+        );
+    }
+
+    #[test]
+    fn helper_revision_tracks_added_modules_and_deletions() {
+        let root = tempfile::tempdir().unwrap();
+        let draft = root.path().join("drafts/run");
+        std::fs::create_dir_all(draft.join("SessionHelpers")).unwrap();
+        std::fs::write(
+            draft.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nvalue = 1\n",
+        )
+        .unwrap();
+        let layer = SourceLayer::helpers(root.path(), "run");
+        let first = layer
+            .ensure_active_from("helpers-test", std::slice::from_ref(&draft))
+            .unwrap();
+        std::fs::write(
+            draft.join("SessionHelpers/Extra.hs"),
+            "module SessionHelpers.Extra where\nextra = 2\n",
+        )
+        .unwrap();
+        let added = layer
+            .publish(
+                layer
+                    .capture_from_roots("helpers-test", std::slice::from_ref(&draft))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(added
+            .modules
+            .iter()
+            .any(|(module, _)| module == "SessionHelpers.Extra"));
+        assert_eq!(
+            changed_modules(&first, &added),
+            vec!["SessionHelpers.Extra".to_owned()]
+        );
+
+        std::fs::remove_file(draft.join("SessionHelpers/Extra.hs")).unwrap();
+        let deleted = layer
+            .capture_from_roots("helpers-test", std::slice::from_ref(&draft))
+            .unwrap();
+        assert!(changed_modules(&added, deleted.revision())
+            .contains(&"SessionHelpers.Extra".to_owned()));
+        let published = layer.publish(deleted).unwrap();
+        assert!(!published
+            .modules
+            .iter()
+            .any(|(module, _)| module == "SessionHelpers.Extra"));
+    }
+
+    #[test]
+    fn helper_reload_typechecks_before_publish_and_never_commits_workspace() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        init_git_repo(project.path());
+        let git = GitCli::new();
+        let head_before = git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let helper_root = run.path().join("helpers");
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        )
+        .with_helper_root(helper_root.clone());
+        let draft = SourceLayer::helper_draft(&helper_root, "run");
+        std::fs::create_dir_all(&draft).unwrap();
+        std::fs::write(
+            draft.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nvalue = (\n",
+        )
+        .unwrap();
+        exomonad_actor::ActorSourceLayers::bind(&reload, PrincipalId::SYSTEM, &[]);
+        assert!(reload
+            .helper_layer("run")
+            .read_active()
+            .unwrap()
+            .unwrap()
+            .modules
+            .is_empty());
+        std::fs::write(
+            draft.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nvalue :: Int\nvalue = 2\n",
+        )
+        .unwrap();
+
+        let published =
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, PrincipalId::SYSTEM, &[]);
+        let exomonad_actor::SourceLayerReload::Published { revision, .. } = published else {
+            panic!("valid helper source should publish: {published:?}");
+        };
+        let layer = reload.helper_layer("run");
+        assert_eq!(layer.read_active().unwrap().unwrap().identity, revision);
+
+        std::fs::write(
+            draft.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nvalue = (\n",
+        )
+        .unwrap();
+        let rejected =
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, PrincipalId::SYSTEM, &[]);
+        assert!(matches!(
+            rejected,
+            exomonad_actor::SourceLayerReload::Rejected { .. }
+        ));
+        assert_eq!(layer.read_active().unwrap().unwrap().identity, revision);
+        assert_eq!(
+            git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap(),
+            head_before
+        );
     }
 
     #[test]

@@ -6,6 +6,96 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Stdio};
 
+#[test]
+fn helper_draft_fork_is_an_independent_file_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("helpers/drafts/parent");
+    let child = root.path().join("helpers/drafts/child");
+    std::fs::create_dir_all(parent.join("SessionHelpers")).unwrap();
+    std::fs::write(
+        parent.join("SessionHelpers.hs"),
+        "module SessionHelpers where\nvalue = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        parent.join("SessionHelpers/Child.hs"),
+        "module SessionHelpers.Child where\nchild = 1\n",
+    )
+    .unwrap();
+
+    copy_helper_draft(&parent, &child).unwrap();
+    std::fs::write(
+        parent.join("SessionHelpers.hs"),
+        "module SessionHelpers where\nvalue = 2\n",
+    )
+    .unwrap();
+    assert!(std::fs::read_to_string(child.join("SessionHelpers.hs"))
+        .unwrap()
+        .contains("value = 1"));
+    assert_eq!(
+        std::fs::read_to_string(child.join("SessionHelpers/Child.hs")).unwrap(),
+        "module SessionHelpers.Child where\nchild = 1\n"
+    );
+    assert!(copy_helper_draft(&parent, &child).is_err());
+}
+
+#[test]
+fn helper_fork_keeps_invalid_draft_separate_from_last_active_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let helper_root = root.path().join("helpers");
+    let parent_draft = helper_root.join("drafts/parent");
+    let child_draft = helper_root.join("drafts/child");
+    std::fs::create_dir_all(&parent_draft).unwrap();
+    std::fs::write(
+        parent_draft.join("SessionHelpers.hs"),
+        "module SessionHelpers where\nvalue = 1\n",
+    )
+    .unwrap();
+    let domain = "helper-fork-test";
+    let parent_layer = crate::exomonad::source::SourceLayer::helpers(&helper_root, "parent");
+    let active = parent_layer
+        .ensure_active_from(domain, std::slice::from_ref(&parent_draft))
+        .unwrap();
+
+    std::fs::write(
+        parent_draft.join("SessionHelpers.hs"),
+        "module SessionHelpers where\nvalue = (\n",
+    )
+    .unwrap();
+    copy_helper_draft(&parent_draft, &child_draft).unwrap();
+    let child_layer = crate::exomonad::source::SourceLayer::helpers(&helper_root, "child");
+    let inherited = child_layer
+        .inherit_active_from(&parent_layer, std::slice::from_ref(&child_draft))
+        .unwrap();
+
+    assert_eq!(inherited.identity, active.identity);
+    assert!(
+        std::fs::read_to_string(child_draft.join("SessionHelpers.hs"))
+            .unwrap()
+            .contains("value = (")
+    );
+    assert!(std::fs::read_to_string(
+        child_layer.active_include_paths().unwrap()[0].join("SessionHelpers.hs")
+    )
+    .unwrap()
+    .contains("value = 1"));
+}
+
+#[test]
+fn helper_draft_fork_rejects_symlink_entries() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    let child = root.path().join("child");
+    std::fs::create_dir_all(&parent).unwrap();
+    let outside = root.path().join("outside.hs");
+    std::fs::write(&outside, "module SessionHelpers where").unwrap();
+    symlink(&outside, parent.join("SessionHelpers.hs")).unwrap();
+    assert!(copy_helper_draft(&parent, &child).is_err());
+    assert!(!child.exists());
+}
+
 #[derive(Default)]
 struct Backend {
     identity: Mutex<Option<PublicationIdentity>>,
