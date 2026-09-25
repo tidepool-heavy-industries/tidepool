@@ -567,14 +567,24 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
 -- A source-less value interface activates the session pipeline. Its target is
 -- the final source consumer, so it must prepare successfully without creating
 -- a registration interface solely for itself.
+--
+-- The same resident worker first serves an ordinary request whose target
+-- imports 'SessionUnused' without referencing it, so that module is outside
+-- the Core-reachable closure. The resident memo must still store its body and
+-- interface: the session request imports it on the every-module tier and has
+-- to hit instead of recompiling it.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
       valueModule = SessionModule ValMod (Generation 1)
       seed = root </> "SessionSeed.hs"
       target = root </> "PreparedSessionLeaf.hs"
+      unused = root </> "SessionUnused.hs"
+      ordinary = root </> "OrdinaryFirst.hs"
       scope = SessionScope scopeRoot [valueModule] Nothing
   writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
+  writeFile unused "module SessionUnused (unused) where\nunused :: Int\nunused = 5\n"
+  writeFile ordinary "module OrdinaryFirst where\nimport SessionUnused ()\nresult = 1 :: Int\n"
   seeded <- runPipelineSelected PreparedStg seed [root]
   let environment = prHscEnv (pprPipelineResult seeded)
   iface <- mkThinSessionIface environment valueModule [(mkVarOcc "prior", intTy)]
@@ -582,11 +592,17 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
   writeFile target $ unlines
     [ "module PreparedSessionLeaf where"
     , "import Tidepool.Session.Val.G1 (prior)"
-    , "__result = prior + 1"
+    , "import SessionUnused (unused)"
+    , "__result = prior + unused"
     ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+      (_, ordinaryOutput) <- captureStderr root "prepared-session-ordinary" $
+        runRequest $ \compiler ->
+          compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
+      assertContains "resident memo completes the unreachable import"
+        "tidepool-count name=memo_completion_modules count=1" ordinaryOutput
       (prepared, output) <- captureStderr root "prepared-session-leaf" $
         runRequest $ \compiler ->
           compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
@@ -597,7 +613,9 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
         output
       when (any (isInfixOf "module=PreparedSessionLeaf")
             (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
-        fail "prepared session leaf constructed an unused target interface")
+        fail "prepared session leaf constructed an unused target interface"
+      when ("tidepool-memo-miss module=SessionUnused" `isInfixOf` output) $
+        fail ("session tier recompiled a module the ordinary request memoized: " ++ output))
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do

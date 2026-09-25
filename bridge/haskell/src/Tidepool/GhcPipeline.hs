@@ -104,7 +104,9 @@ import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
-import Control.Exception (finally, try, throwIO, IOException)
+import Control.Exception
+  ( finally, try, throwIO, IOException, SomeException, SomeAsyncException
+  , fromException, displayException )
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
@@ -128,7 +130,8 @@ import Tidepool.Session
   , isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
-  ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
+  ( readTimingEnabled, timeSection, timePhase, emitPhase, emitDetailPhase, emitCount
+  , monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
@@ -1094,6 +1097,12 @@ observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (gmeFacts entry)
 observationFacts (FreshObservation front) = frontFacts front
 
+-- | Whether this observation still lacks an executable body for the memo.
+observationLacksBody :: ModuleObservation -> Bool
+observationLacksBody (CachedObservation _ entry) =
+  isNothing (gmeOutput entry) || isNothing (gmePrepared entry)
+observationLacksBody (FreshObservation _) = True
+
 observationFront :: ModuleObservation -> Maybe ModuleFront
 observationFront (CachedObservation _ _) = Nothing
 observationFront (FreshObservation front) = Just front
@@ -1660,10 +1669,13 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     pure (CachedObservation modSum entry, output, Just prepared)
                   _ -> do
                     recordValidity modSum (isJust cached)
-                    when (isJust cached) (memoMiss modSum
-                      (if needsPreparedInterface interfaceUse
-                        then "required-interface-not-retained"
-                        else "executable-body-not-prepared"))
+                    -- Name the missing half. A validation-only entry (no body)
+                    -- must never be reported as an interface miss: the fix for
+                    -- each cause differs.
+                    forM_ cached $ \entry -> memoMiss modSum
+                      (if isNothing (gmeOutput entry) || isNothing (gmePrepared entry)
+                        then "executable-body-not-prepared"
+                        else "required-interface-not-retained")
                     mf <- compileFront modSum
                     (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
                     prepared <- prepareSelected mf simplified mRegisteredTidy
@@ -1697,9 +1709,10 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               -- Core was ever optimized (see the un-memoized comment below this
               -- tier has always carried), so reusing a MORE-optimized cached
               -- version for a module this cycle finds non-reachable would still
-              -- be safe — but it can't even arise: a NON-reachable module is
-              -- never core2core'd, so the memo is never asked to serve one where
-              -- reachability differs from what produced the entry.
+              -- be safe. Without a memo a NON-reachable module is never
+              -- core2core'd. With a resident memo it is completed below (body
+              -- and interface stored, output unchanged), because the session
+              -- tier needs a body for every module.
               observations' <- forM summaries $ \modSum -> do
                 cpBeforeModule plan modSum
                 cached <- lookupValidMemo modSum
@@ -1749,6 +1762,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   reachableMods = case forceValidationOnly of
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
+              completionRef <- liftIO (newIORef (0 :: Int, 0 :: Integer))
               let rememberExecutable modSum output prepared mInterface moduleFacts =
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
@@ -1774,6 +1788,23 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     prepared <- prepareSelected f simplified mRegisteredTidy
                     rememberExecutable modSum r prepared mInterface moduleFacts
                     pure [(r, prepared)]
+                  validationOnly observation modSum moduleFacts =
+                    case (observation, mMemoRef) of
+                      (FreshObservation _, Just ref) -> liftIO (modifyIORef' ref
+                        (Map.insert (ms_mod_name modSum)
+                          (GutsMemoEntry
+                            (MemoValidity
+                              (ms_hs_hash modSum)
+                              (retainedFor modSum)
+                              (homeDependencyWitnesses modSum)
+                              incarnation)
+                            moduleFacts
+                            Nothing
+                            Nothing
+                            Nothing
+                            requestIdentity
+                            (directWitnesses modSum))))
+                      _ -> pure ()
               rs <- fmap concat $ forM (zip3 observations' facts interfaceUses) $ \(observation, moduleFacts, interfaceUse) ->
                 let modSum = observationSummary observation
                 in if ms_mod_name modSum `Set.member` reachableMods
@@ -1793,28 +1824,40 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                       memoMiss modSum "validation-only-promoted"
                       compileReachable interfaceUse modSum moduleFacts
                     FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
+                  -- Not reachable, resident memo active: complete the entry with
+                  -- a body and its interface anyway, and return nothing to this
+                  -- request's output. The session tier ('OptimizeEveryModule')
+                  -- needs a body for every module it visits, so a
+                  -- validation-only entry left here is a guaranteed later
+                  -- session miss that recompiles on the critical path. Paying
+                  -- once here, typically in the daemon pre-warm, moves that cost
+                  -- off it. A one-shot compile has no later request and keeps
+                  -- the validation-only path below. This request never needed
+                  -- the body, so a failure to complete it cannot fail the
+                  -- request: the entry stays validation-only instead.
+                  else if isJust mMemoRef && observationLacksBody observation then do
+                    (attempt, ms) <- timeSection $ reifyGhc $ \session ->
+                      try (reflectGhc (compileReachable interfaceUse modSum moduleFacts) session)
+                        :: IO (Either SomeException [(ModuleOutput, Maybe PreparedModule)])
+                    case attempt of
+                      Right _ -> liftIO (modifyIORef' completionRef (\(n, total) -> (n + 1, total + ms)))
+                      Left exception
+                        | Just (_ :: SomeAsyncException) <- fromException exception -> liftIO (throwIO exception)
+                        | otherwise -> do
+                            memoMiss modSum ("completion-failed:" ++ takeWhile (/= '\n') (displayException exception))
+                            validationOnly observation modSum moduleFacts
+                    pure []
                   -- Not reachable: retain only dependency and type facts. A
                   -- later cycle that finds the module reachable promotes it by
                   -- compiling a real executable body; compact validation facts
                   -- are never used as a stand-in for Core or prepared STG.
-                  else do
-                    case (observation, mMemoRef) of
-                      (FreshObservation _, Just ref) -> liftIO (modifyIORef' ref
-                        (Map.insert (ms_mod_name modSum)
-                          (GutsMemoEntry
-                            (MemoValidity
-                              (ms_hs_hash modSum)
-                              (retainedFor modSum)
-                              (homeDependencyWitnesses modSum)
-                              incarnation)
-                            moduleFacts
-                            Nothing
-                            Nothing
-                            Nothing
-                            requestIdentity
-                            (directWitnesses modSum))))
-                      _ -> pure ()
-                    pure []
+                  else validationOnly observation modSum moduleFacts >> pure []
+              (completed, completedMs) <- liftIO (readIORef completionRef)
+              -- Nested under lowering (which already counts this work), so
+              -- flat-sum readers do not double count it.
+              when (completed > 0) $ liftIO $ do
+                emitCount timing "memo_completion_modules" (toInteger completed)
+                emitDetailPhase timing "lowering" "memo_completion" completedMs
               pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
           totalLoweringMs <- liftIO (readIORef loweringMsRef)
