@@ -262,9 +262,10 @@ pub(super) fn render_bindings_section(
     lines.join("\n")
 }
 
-/// One caller's last rendered summary roster: each row's rendered text by
-/// its row key (label and exact incarnation), and when it was rendered. The
-/// actor keeps exactly one, replaced on every summary-family status call.
+/// One caller's last rendered summary roster: each row's rendered text,
+/// with ages normalized out ([`without_ages`]), by its row key (label and
+/// exact incarnation), and when it was rendered. The actor keeps exactly
+/// one, replaced on every summary-family status call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct RosterSnapshot {
     pub(super) rendered_at_unix_ms: u64,
@@ -275,15 +276,51 @@ impl RosterSnapshot {
     pub(super) fn new(rendered_at_unix_ms: u64, rows: &[(String, String)]) -> Self {
         Self {
             rendered_at_unix_ms,
-            rows: rows.iter().cloned().collect(),
+            rows: rows
+                .iter()
+                .map(|(key, row)| (key.clone(), without_ages(row)))
+                .collect(),
         }
     }
 }
 
-/// The `changed` roster: rows whose rendered text differs from `previous`
-/// (new rows included) in `current`'s order, then rows `previous` listed
-/// that `current` no longer does, then one `N unchanged since <time>` line.
-/// Compares rendered text only; `current` is `(row key, rendered row)`.
+/// A rendered row with every age token (`3m`, `40s`, `2h`, `1d`: digits
+/// then one unit letter, standing alone) replaced by `<age>`, so a row whose
+/// only change is elapsed time compares equal. Printed rows keep their ages.
+fn without_ages(row: &str) -> String {
+    let bytes = row.as_bytes();
+    let standalone = |index: Option<&u8>| index.is_none_or(|byte| !byte.is_ascii_alphanumeric());
+    let mut out = String::with_capacity(row.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        if bytes[index].is_ascii_digit() && (start == 0 || standalone(bytes.get(start - 1))) {
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if matches!(bytes.get(end), Some(b's' | b'm' | b'h' | b'd'))
+                && standalone(bytes.get(end + 1))
+            {
+                out.push_str("<age>");
+                index = end + 1;
+                continue;
+            }
+            out.push_str(&row[start..end]);
+            index = end;
+            continue;
+        }
+        let character = row[index..].chars().next().unwrap_or_default();
+        out.push(character);
+        index += character.len_utf8().max(1);
+    }
+    out
+}
+
+/// The `changed` roster: rows whose rendered text, ages normalized out,
+/// differs from `previous` (new rows included) in `current`'s order, then
+/// rows `previous` listed that `current` no longer does, then one
+/// `N unchanged since <time>` line. `current` is `(row key, rendered row)`.
 pub(super) fn render_roster_changes(
     previous: &RosterSnapshot,
     current: &[(String, String)],
@@ -291,7 +328,7 @@ pub(super) fn render_roster_changes(
     let mut lines = Vec::new();
     let mut unchanged = 0usize;
     for (key, row) in current {
-        if previous.rows.get(key) == Some(row) {
+        if previous.rows.get(key) == Some(&without_ages(row)) {
             unchanged += 1;
         } else {
             lines.push(row.clone());
@@ -751,6 +788,30 @@ mod tests {
         assert_eq!(
             gone,
             "  - \"worker-b\" (3@1) no longer listed\n  1 unchanged since 12:00:00Z"
+        );
+    }
+
+    #[test]
+    fn status_roster_changes_ignore_a_row_whose_only_change_is_an_age() {
+        let row = |age: &str, fence: &str| {
+            (
+                "\"worker-a\" (2@1)".to_owned(),
+                format!(
+                    "  - \"worker-a\" (2@1) state=running\n    worker-a req=0 pending; provider=idle {age}; inbox=fenced(turn, {fence}); last_message=ref3 presented@11:58:00Z; next=await-event"
+                ),
+            )
+        };
+        let snapshot = RosterSnapshot::new(43_200_000, &[row("3m", "40s")]);
+        assert_eq!(
+            render_roster_changes(&snapshot, &[row("4m", "1m")]),
+            "  1 unchanged since 12:00:00Z"
+        );
+        // A non-age change on the same row still renders it, ages as printed.
+        let (key, moved) = row("4m", "1m");
+        let moved = moved.replace("await-event", "await-cell");
+        assert_eq!(
+            render_roster_changes(&snapshot, &[(key, moved.clone())]),
+            format!("{moved}\n  0 unchanged since 12:00:00Z")
         );
     }
 
