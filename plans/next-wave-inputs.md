@@ -398,3 +398,8 @@ Deferred, one card each:
   receiver, two arrivals carrying different imported values (a mutated
   imported MutVar); both received closures read the receiver's seeded value.
   Rule stated in `tidepool/codegen/src/prepared_program/evacuation.rs`.
+- Flaky test: `resolve_codex_binary_unset_is_none` (exomonad/agent
+  backend/codex/process.rs) mutates a process environment variable while
+  sibling tests run on parallel threads in the same binary; it failed once
+  and passed on rerun (2026-09-24). Serialize its env access or take the
+  variable as an argument.
