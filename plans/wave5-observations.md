@@ -63,3 +63,18 @@ commits since the unstick: 1cc372a (core inbox-fence report and
 checkpoint), ffe20e5 and d8097c3 (async-schema slice integrated), 8d45d32
 (open live gate recorded). 28 calls since 03:45: checkout_wait p50 0 ms,
 max 216 ms. No intervention.
+
+## 03:56Z root recommends stand-down
+
+Core lead replied Blocked (notification 7 to root): b integrated at
+d8097c3, findings candidate 1513e95 merged by root at 06148a1, c/d
+unimplemented because the settings work needs a harness-authored
+provenance/initial-pin seam across Item, Store, Engine, verbs and fork
+runtime, and no further children were allowed. Root then answered the
+operator's question: stand down from implementation, shift to the
+retrospective/UX interview, master is clean and recoverable, next run
+starts a fresh routable lead from the documented master state after the
+fence is diagnosed. New friction: the watchdog classified core's
+sendMessage checkpoint as destructive_command (0.9) from quoted text;
+root recorded it in docs/exomonad-friction.md at 0553f8c. Fix lanes
+running off main: delivery-fence, agent-ux, observability.
