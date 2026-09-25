@@ -781,3 +781,16 @@ wait 0 ms. Root interview: harness docs/exomonad-friction.md at 73f3816.
   first-task contract), and the resident evaluator protocol. Release test:
   a long cell survives three envelopes at successive request boundaries and
   yields one strict final result that survives a restart.
+- **Session memo wiped by anonymous transactions (fixed 72a9843db, not yet
+  deployed):** `sanitizeMemo` kept `Tidepool.Session.*` entries only when the
+  FINISHING transaction carried an incarnation; lookups and plain evals carry
+  none and land between most of a session's transactions, so every Val.G
+  module missed (`reason=absent`) on the next bind. Wave 7 root binds cost
+  45 to 48 s at 250 modules (0 misses at 08:15, 42 at 08:42, 145 at 10:28,
+  253 at 13:25; per-module build 76 ms / 205 MB and growing). Now entries are
+  kept by their own recorded incarnation; `lookupValidMemo` still limits reuse
+  to the same incarnation. Expected: about 44 s saved per root bind
+  transaction, 3 s per leaf turn. Left: recovery caches still drop session
+  modules each transaction (65 ms); lookups could pass
+  `--session-incarnation`; a stale comment at the lookup still describes the
+  old rule; the per-module interface build grows with the session.
