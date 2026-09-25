@@ -54,3 +54,12 @@ payloads into actor 2's composer as an operator note telling it not to
 wait for or fork further children and to reply to root through its
 intact outbound path. Actor 2 resumed (tests, cells) within seconds and
 root was working again by 03:47Z.
+
+## 03:49Z wake
+
+Alive (tmux, host process), 16 GiB free, 7 windows, no Failed/Retired, no
+latched machine. Root active (bash calls, working). Four new master
+commits since the unstick: 1cc372a (core inbox-fence report and
+checkpoint), ffe20e5 and d8097c3 (async-schema slice integrated), 8d45d32
+(open live gate recorded). 28 calls since 03:45: checkout_wait p50 0 ms,
+max 216 ms. No intervention.
