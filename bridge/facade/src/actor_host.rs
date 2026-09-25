@@ -1232,6 +1232,9 @@ type WatchRetentionCheck = Arc<dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool
 /// by `ResidentForest::watch_observed_since`.
 type WatchObservationCheck =
     Arc<dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync>;
+/// The request presented to an actor that it has not begun replying to.
+/// Backed by `ResidentForest::open_request_without_reply`.
+type OpenRequestCheck = Arc<dyn Fn(ActorRef) -> Option<exomonad_actor::RequestId> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -1962,6 +1965,7 @@ struct InteractiveFleet {
     worktree_authority: ActorWorktreeAuthority,
     watch_retention: WatchRetentionCheck,
     watch_observation: WatchObservationCheck,
+    open_request: OpenRequestCheck,
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s usage poll).
@@ -2252,6 +2256,9 @@ pub(crate) async fn run(
     let watch_observation: WatchObservationCheck = Arc::new(move |owner, watch, occurred_at| {
         watch_observation_forest.watch_observed_since(owner, watch, occurred_at)
     });
+    let open_request_forest = Arc::clone(&forest);
+    let open_request: OpenRequestCheck =
+        Arc::new(move |actor| open_request_forest.open_request_without_reply(actor));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2267,6 +2274,7 @@ pub(crate) async fn run(
             worktree_authority: worktree_authority.clone(),
             watch_retention,
             watch_observation,
+            open_request,
             source_layers,
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
@@ -3370,6 +3378,7 @@ async fn run_interactive_applications(
         worktree_authority,
         watch_retention,
         watch_observation,
+        open_request,
         source_layers,
         actor_recovery,
         recovered_threads,
@@ -4118,6 +4127,7 @@ async fn run_interactive_applications(
                             deployment.local_actor.clone(),
                             Arc::clone(&watch_retention),
                             Arc::clone(&watch_observation),
+                            (actor != root_identity).then(|| Arc::clone(&open_request)),
                             source_layers.clone(),
                             worktrees.clone(),
                             stop_delivery,
@@ -6301,12 +6311,15 @@ async fn run_delivery_pump(
     local_actor: LocalActorRef,
     watch_retained: WatchRetentionCheck,
     watch_observed_since: WatchObservationCheck,
+    // `None` for the root, which no parent waits on.
+    open_request: Option<OpenRequestCheck>,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: WorktreeManager,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
-    let mut usage_poll = tokio::time::interval(Duration::from_secs(10));
+    let mut usage_poll = tokio::time::interval(PROVIDER_POLL_INTERVAL);
+    let mut reminded_idle_since = None;
     let hosted_cell_computing = move || local_actor.hosted_cell_computing();
     let without_evidence = Mutex::new(BTreeMap::new());
     let mut pending: Option<PendingDeliveryWarning> = None;
@@ -6358,10 +6371,84 @@ async fn run_delivery_pump(
                         tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
                     }
                 }
+                if let Some(open_request) = &open_request {
+                    let now = u64::try_from(current_time_ms()).unwrap_or_default();
+                    if let Err(error) = remind_turn_ended_without_respond(
+                        actor,
+                        &thread,
+                        backend.as_ref(),
+                        &workspace.to_string_lossy(),
+                        &runtime_observation.snapshot(),
+                        || open_request(actor),
+                        &mut reminded_idle_since,
+                        now,
+                    ).await {
+                        tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
+                    }
+                }
                 poll_source_drift(actor, &runtime_observation, source_layers.as_ref(), &worktrees).await;
             }
         }
     }
+}
+
+const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Push one reminder to an actor whose provider turn ended while the request
+/// presented to it is still open. The idle age is the status line's
+/// `provider_idle_since_unix_ms`; the reminder waits one poll interval of
+/// idleness so a model about to call `respond` is not interrupted, and fires
+/// once per idle period (`reminded_idle_since` holds the period reminded;
+/// a new turn publishes a new `provider_idle_since_unix_ms`).
+#[allow(clippy::too_many_arguments)]
+async fn remind_turn_ended_without_respond(
+    actor: ActorRef,
+    thread: &QueueReadyThread,
+    backend: &dyn InteractiveAgentBackend,
+    cwd: &str,
+    observation: &exomonad_actor::ActorRuntimeObservation,
+    open_request: impl FnOnce() -> Option<exomonad_actor::RequestId>,
+    reminded_idle_since: &mut Option<u64>,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    if observation.provider_observation_stale
+        || !observation
+            .provider_turn
+            .as_ref()
+            .is_some_and(|turn| turn.state == exomonad_agent::ProviderTurnState::Succeeded)
+    {
+        return Ok(());
+    }
+    let Some(idle_since) = observation.provider_idle_since_unix_ms else {
+        return Ok(());
+    };
+    let poll_ms = u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+    if *reminded_idle_since == Some(idle_since) || now_unix_ms.saturating_sub(idle_since) < poll_ms
+    {
+        return Ok(());
+    }
+    let Some(request) = open_request() else {
+        return Ok(());
+    };
+    backend
+        .push(cwd, thread, &turn_end_reminder(request))
+        .await
+        .map_err(|error| error.to_string())?;
+    *reminded_idle_since = Some(idle_since);
+    tracing::info!(
+        actor = ?actor,
+        request = request.0,
+        idle_since_unix_ms = idle_since,
+        "reminded an actor whose turn ended with its request open"
+    );
+    Ok(())
+}
+
+fn turn_end_reminder(request: exomonad_actor::RequestId) -> String {
+    format!(
+        "Your request {} is still open. End with respond (Produced ...) or respond (Blocked reason evidence); a turn that ends in prose settles nothing.",
+        request.0
+    )
 }
 
 /// The inbound-delivery observation for a parent's status view, derived from
