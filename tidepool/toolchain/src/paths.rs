@@ -34,6 +34,13 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("tidepool")
 }
 
+/// Socket of the persistent compile daemon `just daemon-start` keeps warm:
+/// `<cache_dir>/battery-daemon/extract.sock`. `scripts/lib-extract.sh`
+/// (`_persistent_daemon_dir`) mirrors this layout for the shell wrappers.
+pub fn persistent_compile_daemon_socket() -> PathBuf {
+    cache_dir().join("battery-daemon").join("extract.sock")
+}
+
 /// Where the content-addressed compiled-artifact memo lives:
 /// `$TIDEPOOL_COMPILE_CACHE_DIR` if set,
 /// else [`cache_dir`]. **The default layout is unchanged** — nobody's existing

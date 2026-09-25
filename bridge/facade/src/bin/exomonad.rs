@@ -132,6 +132,12 @@ enum Command {
         /// Override `.exomonad/config.toml` for this run.
         #[arg(long, value_enum)]
         effort: Option<Effort>,
+        /// Skip the launch preflight (workspace pin, interactive Codex, compile daemons).
+        #[arg(long, conflicts_with = "strict_preflight")]
+        no_preflight: bool,
+        /// Treat launch preflight warnings as failures.
+        #[arg(long)]
+        strict_preflight: bool,
     },
     /// Intentionally stop a supervised run, then close its tmux diagnostics session.
     Stop {
@@ -344,7 +350,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             no_attach,
             model,
             effort,
+            no_preflight,
+            strict_preflight,
         } => {
+            use tidepool::exomonad::PreflightMode;
             tidepool::exomonad::init(tidepool::exomonad::InitOptions {
                 workspace,
                 session,
@@ -352,6 +361,13 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 no_attach,
                 model,
                 effort: effort.map(Into::into),
+                preflight: if no_preflight {
+                    PreflightMode::Skip
+                } else if strict_preflight {
+                    PreflightMode::Strict
+                } else {
+                    PreflightMode::Warn
+                },
             })
             .await
         }
@@ -489,9 +505,25 @@ mod tests {
             Command::Init {
                 workspace: Some(workspace),
                 no_attach: true,
+                no_preflight: false,
+                strict_preflight: false,
                 ..
             } if workspace == std::path::Path::new("/tmp/project")
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["exomonad", "init", "--strict-preflight"])
+                .unwrap()
+                .command,
+            Command::Init {
+                strict_preflight: true,
+                no_preflight: false,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["exomonad", "init", "--no-preflight", "--strict-preflight"])
+                .is_err()
+        );
         let help = Cli::try_parse_from(["exomonad", "--help"]).unwrap_err();
         let rendered = help.to_string();
         for command in ["new", "init", "host", "run-map", "proxy"] {

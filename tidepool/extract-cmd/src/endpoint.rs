@@ -353,6 +353,10 @@ impl CompilerEndpoint {
                 });
             }
         }
+        Self::bind_direct(cmd)
+    }
+
+    pub(crate) fn bind_direct(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
         Self::bind_launch(LaunchSpec::direct(cmd.program.clone()))
     }
 
