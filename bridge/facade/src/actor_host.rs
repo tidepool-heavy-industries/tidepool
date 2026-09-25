@@ -6625,7 +6625,7 @@ impl PendingDeliveryWarning {
 ///
 /// Each of the three rows is observed independently, and a row this actor
 /// has nothing to observe for (no source service on the run, no assigned
-/// worktree) is simply left unpublished rather than published as clean —
+/// worktree outside the root's own checkout) is simply left unpublished rather than published as clean —
 /// `ActorRuntimeObservation::source_drift` distinguishes "not observed" from
 /// "checked, identical" for exactly this reason. All filesystem and Git work
 /// runs on a blocking thread; nothing here runs on the async executor.
@@ -6635,10 +6635,25 @@ async fn poll_source_drift(
     source_layers: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: &WorktreeManager,
 ) {
-    let worktree_id = runtime_observation
-        .snapshot()
+    let observation = runtime_observation.snapshot();
+    let worktree_id = observation
         .workspace
-        .and_then(|workspace| workspace.worktree_id);
+        .as_ref()
+        .and_then(|workspace| workspace.worktree_id.clone());
+    // The root holds no managed worktree: its checkout is the run's
+    // workspace repository, the operator checkout other actors' `revisions`
+    // status compares against.
+    let root_checkout = observation
+        .workspace
+        .as_ref()
+        .filter(|workspace| {
+            workspace.worktree_id.is_none()
+                && observation
+                    .launch_role
+                    .as_ref()
+                    .is_some_and(|role| role.role() == exomonad_actor::ActorRole::Root)
+        })
+        .map(|workspace| workspace.host_storage_path.clone());
     let source_layers = source_layers.cloned();
     let worktrees = worktrees.clone();
     let caller = tidepool_repr::PrincipalId::from(actor);
@@ -6659,13 +6674,19 @@ async fn poll_source_drift(
                 })
                 .ok()
         });
-        let checkout = worktree_id.and_then(|id| {
-            checkout_git_drift(&worktrees, &id)
+        let checkout = match (worktree_id, root_checkout) {
+            (Some(id), _) => checkout_git_drift(&worktrees, &id)
                 .inspect_err(|error| {
                     tracing::debug!(?actor, worktree = %id, %error, "checkout drift unavailable");
                 })
-                .ok()
-        });
+                .ok(),
+            (None, Some(path)) => git_drift_at(worktrees.git(), &path)
+                .inspect_err(|error| {
+                    tracing::debug!(?actor, path = %path.display(), %error, "root checkout drift unavailable");
+                })
+                .ok(),
+            (None, None) => None,
+        };
         (layer, frozen, checkout)
     })
     .await
@@ -6693,13 +6714,20 @@ fn checkout_git_drift(
         .lookup(&WorktreeId::from_raw(worktree_id))
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("worktree {worktree_id:?} is not allocated"))?;
-    let git = worktrees.git();
+    git_drift_at(worktrees.git(), handle.cwd())
+}
+
+/// A checkout's Git head and dirty files at `cwd`.
+fn git_drift_at(
+    git: &GitCli,
+    cwd: &std::path::Path,
+) -> std::result::Result<exomonad_actor::CheckoutGitDrift, String> {
     let head = git
-        .try_run(handle.cwd(), &["rev-parse", "HEAD"])
+        .try_run(cwd, &["rev-parse", "HEAD"])
         .map_err(|error| error.to_string())?
         .trimmed()
         .to_owned();
-    let dirty = exomonad_worktree::git::inspect::dirty_summary(git, handle.cwd())
+    let dirty = exomonad_worktree::git::inspect::dirty_summary(git, cwd)
         .map_err(|error| error.to_string())?;
     let mut dirty_files: Vec<String> = dirty
         .staged
