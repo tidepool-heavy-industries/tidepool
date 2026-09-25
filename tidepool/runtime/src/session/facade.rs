@@ -236,6 +236,7 @@ mod tests {
             visible_values: Vec::new(),
             visible_value_names: Vec::new(),
             injected_values: Vec::new(),
+            reachable_values: Vec::new(),
             next_value_generation: Generation(1),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),

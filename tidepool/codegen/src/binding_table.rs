@@ -774,6 +774,40 @@ impl BindingTable {
         self.live.values().map(|e| e.module)
     }
 
+    /// The live `Val.G<g>` modules a turn compiled at `scope` can reach:
+    /// every generation, shadowed ones included, bound in a frame that
+    /// [`Self::iter_current_in`] reads for `scope`, plus the values its
+    /// inherited tip holds.
+    ///
+    /// A seeded scope reads only its own frame over its immutable tip, so an
+    /// ancestor's later binds are outside this set; an unseeded scope reads
+    /// its whole lookup chain. Bindings owned by any other scope (a sibling,
+    /// a descendant, an unrelated actor's isolated root) are never imported
+    /// by such a turn, and whatever an imported value reaches through them is
+    /// leased by its owner's custody rather than named here.
+    pub fn scope_reachable_modules(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> impl Iterator<Item = SessionModule> + '_ {
+        let tip = self.tips.get(&scope);
+        let frames = if tip.is_some() {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        let owned = self
+            .live
+            .values()
+            .filter(move |entry| frames.contains(&entry.scope))
+            .map(|entry| entry.module);
+        let inherited = tip
+            .into_iter()
+            .flat_map(|tip| tip.visible.values().chain(tip.retained.iter()))
+            .filter_map(|id| self.live.get(id).map(|entry| entry.module));
+        owned.chain(inherited)
+    }
+
     /// Number of live bindings.
     #[must_use]
     pub fn len(&self) -> usize {

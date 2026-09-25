@@ -714,6 +714,11 @@ impl PersistentSession {
             .live_modules()
             .filter(|module| !self.is_stub_module(*module))
             .collect();
+        let reachable_values = self
+            .bindings
+            .scope_reachable_modules(&self.scopes, scope)
+            .filter(|module| !self.is_stub_module(*module))
+            .collect();
         let mut shadowing = lib
             .current_declarations_in(scope)
             .into_iter()
@@ -737,6 +742,7 @@ impl PersistentSession {
                 visible_values,
                 visible_value_names,
                 injected_values,
+                reachable_values,
                 next_value_generation: self.val_gen.next(),
                 shadowing,
                 staged_hiding: Vec::new(),
