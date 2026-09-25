@@ -41,3 +41,21 @@ coarser than what their compiles depend on. Median wait stays 0 ms. Engine
 lane stale-view started to narrow `compile_relevant_eq` to the actor's own
 scope and the cell's imports. No note to the root: nothing is stalled and
 integrations are landing.
+
+## 09:56Z wake
+
+Alive; 13.4 GiB available; 16 windows; no latched machine; no rejections.
+Checkout wait since 09:26: 180 calls, p50 0 ms, max 32 s. (c): the settings
+lead's reviewed stack (visibility, model-facing set_effort verb, effort
+provenance, forged-settings drop at envelope ingress) was integrated at
+09:49Z (f1334be); the root aligned it with the Compactor source first
+(b0e1480). Remaining (c): the Here-fork gate, reassigned to a fresh Here
+wave (test design plus recovery) whose conflicts sit in the Here owner's
+files. (d): Server component integrated at 09:03Z; the Engine::run consumer
+seam is the root's own and was untouched.
+
+Costliest delta: the root announced it would wait for the Here candidate
+while its own (d) seam sat idle. One note sent: do the Engine::run consumer
+now, return to Here when its candidate arrives. Also: the set_effort reviewer
+(21@1) got the "tried this before" watchdog nudge 8 times in 2.5 minutes;
+carded as watchdog noise to look at after the run.
