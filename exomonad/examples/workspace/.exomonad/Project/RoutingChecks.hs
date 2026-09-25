@@ -117,7 +117,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
   void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel Medium projectHead task))"
   worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|]"
+  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|] :: Label"
   if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
   if failAfterAdmission then do
     source <- readFile owner (checkSource "review-continuation")
