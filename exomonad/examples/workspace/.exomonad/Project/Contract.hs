@@ -28,7 +28,7 @@ module Project.Contract
   , ImplNote (..)
   , ReviewVerdict (..)
   , ReviewBrief (..)
-  , RepairTask (..)
+  , RepairBrief (..)
     -- What the reviewer is told, and how it is instructed
   , renderBrief
   , reviewerInstructions
@@ -121,7 +121,7 @@ data ImplNote = ImplNote
   } deriving (Show, Eq)
 
 data ReviewVerdict
-  = Accepted Text
+  = Approved Text
   | RepairRequested [Text]
   | PremiseProblem Text
   deriving (Show, Eq)
@@ -139,11 +139,11 @@ data ReviewBrief = ReviewBrief
   , briefCheckOutput :: Maybe Text
   } deriving (Show, Eq)
 
-data RepairTask = RepairTask
-  { repairTaskName :: Text
-  , repairCandidate :: Text
-  , repairFindings :: [Text]
-  , repairChecklist :: [Text]
+data RepairBrief = RepairBrief
+  { repairBriefTask :: Text
+  , repairBriefCandidate :: Text
+  , repairBriefFindings :: [Text]
+  , repairBriefChecklist :: [Text]
   } deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ reviewerInstructions :: Text
 reviewerInstructions = Text.unlines
   [ "You are a fresh read-only reviewer. You read the supplied hunks and the"
   , "acceptance checklist; you do not run the repository and you do not edit."
-  , "Return Accepted with the scope your reading establishes, RepairRequested"
+  , "Return Approved with the scope your reading establishes, RepairRequested"
   , "with findings that each name a file and a checklist item, or PremiseProblem"
   , "when the task's own contract is what is wrong."
   ]

@@ -85,7 +85,7 @@ data MergeResult
   | RedRolledBack GitOid GitOid CheckResult
     -- ^ checked head, the head the worktree was rolled back to, the red check
   | Conflict Text [Text]
-  | Blocked Text
+  | MergeBlocked Text
     -- ^ the merge actor refuses every request until `reconcile` clears the
     -- reason: publication drift, a rollback that did not restore the head,
     -- an advance that was refused, or the publication branch checked out
@@ -166,7 +166,7 @@ runPublish request = do
   case (blocked, bound) of
     (Just reason, _) -> do
       history "refused_while_blocked" reason
-      pure (Blocked reason)
+      pure (MergeBlocked reason)
     (Nothing, Left failure) -> do
       history "unbound" (Text.pack (show failure))
       pure (MergeFailed ("the merge actor holds no worktree: " <> Text.pack (show failure)))
@@ -252,7 +252,7 @@ runPublish request = do
     block key reason = do
       R.modify' (\state -> state { mergeBlocked = Just reason })
       history key reason
-      pure (Blocked reason)
+      pure (MergeBlocked reason)
 
 ownTree :: Handler MergeState MergeEffects (Either WorktreeError WorktreeHandle)
 ownTree = do

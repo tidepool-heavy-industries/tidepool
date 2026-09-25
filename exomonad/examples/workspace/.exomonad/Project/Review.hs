@@ -738,7 +738,7 @@ onReview result = do
         notify' Alert (Just (evidenceCandidate evidence))
           ("the reviewer says the contract is wrong: " <> reason) RanHere index
           "amend the task contract, then re-admit"
-      Accepted scope -> do
+      Approved scope -> do
         void (record "verdict" (Just (evidenceCandidate evidence)) RanHere
           "accepted" scope "score the risk, then merge")
         scoreRisk contract evidence
@@ -858,11 +858,11 @@ requestRepair own oid findings = do
         RanHere index "take the task over, or raise the budget"
     else do
       attempt <- requestWith (responseActor (reviewWorker state))
-        ((assignment [label|repair|] RepairTask
-            { repairTaskName = contractTask contract
-            , repairCandidate = renderGitOid oid
-            , repairFindings = findings
-            , repairChecklist = contractChecklist contract
+        ((assignment [label|repair|] RepairBrief
+            { repairBriefTask = contractTask contract
+            , repairBriefCandidate = renderGitOid oid
+            , repairBriefFindings = findings
+            , repairBriefChecklist = contractChecklist contract
             })
           { guidance = Just (Text.unlines
               ("Repair your own candidate. Address exactly these findings:" : map ("  - " <>) findings))
@@ -992,7 +992,7 @@ publishCandidate own contract evidence = do
       notify' Alert (Just oid)
         ("merge conflict in " <> Text.intercalate ", " paths) RanHere index
         "resolve in the integration worktree, then tell the review"
-    Blocked reason -> do
+    MergeBlocked reason -> do
       index <- record "merge" (Just oid) RanHere "integration_blocked" reason "notify the root"
       notify' Alert (Just oid) ("integration is blocked: " <> reason) RanHere index
         "fix the worktree and branch, R.send (reconcile (R.client mergeActor)) note, then re-request"
