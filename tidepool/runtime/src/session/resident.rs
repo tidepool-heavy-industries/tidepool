@@ -1727,9 +1727,7 @@ where
     /// with. The composition root that owns a run's sibling sessions is the
     /// intended caller.
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
-        if let Some(engine) = self.state.prepared_mut() {
-            engine.set_image_registry(registry);
-        }
+        self.state.set_image_registry(registry);
     }
 
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's

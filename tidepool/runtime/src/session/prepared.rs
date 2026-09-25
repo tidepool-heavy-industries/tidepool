@@ -1862,12 +1862,37 @@ impl PreparedEngine {
         prepared: PreparedProgram,
         nursery_bytes: usize,
     ) -> Result<(Self, ProgramId), PreparedRuntimeError> {
+        Self::bootstrap_shared(prepared, nursery_bytes, None)
+    }
+
+    /// As [`Self::bootstrap_with_nursery_bytes`], installing the first
+    /// program through `registry` when one is given: a machine bootstrapped
+    /// from a program another machine already compiled installs that same
+    /// image, so the two never hold two copies of one program's descriptors
+    /// and statics. The engine keeps the registry for every later install.
+    pub fn bootstrap_shared(
+        prepared: PreparedProgram,
+        nursery_bytes: usize,
+        registry: Option<Arc<ImageRegistry>>,
+    ) -> Result<(Self, ProgramId), PreparedRuntimeError> {
         let facts = ProgramFacts::of(&prepared);
         let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
-        let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
+        let image = match &registry {
+            Some(registry) => match registry.lookup(&linked) {
+                Some(image) => image,
+                None => {
+                    let compiled =
+                        CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
+                    registry.insert(linked, Arc::new(compiled))
+                }
+            },
+            None => Arc::new(
+                CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?,
+            ),
+        };
         let (machine, program) =
-            PreparedMachine::new(compiled, PreparedMachineOptions { nursery_bytes })
+            PreparedMachine::new_shared(image, PreparedMachineOptions { nursery_bytes })
                 .map_err(PreparedRuntimeError::Run)?;
         let mut engine = Self {
             machine,
@@ -1879,7 +1904,7 @@ impl PreparedEngine {
             old_bytes_at_last_major: 0,
             major_collections: 0,
             code_exports: BTreeMap::new(),
-            registry: None,
+            registry,
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;

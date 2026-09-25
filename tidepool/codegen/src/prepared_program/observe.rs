@@ -207,9 +207,9 @@ pub(super) fn append_exact_starts(
         let descriptor = registry
             .get(&(header & !7))
             .map(|metadata| &metadata.descriptor)
-            .ok_or(DescriptorTraceError::UnknownDescriptor {
+            .ok_or_else(|| { eprintln!("DIAG observe site 1"); DescriptorTraceError::UnknownDescriptor {
                 address: header & !7,
-            })?;
+            } })?;
         let available = (nursery.len() - offset) * 8;
         let state = unsafe { descriptor.state(nursery.as_ptr().add(offset).cast(), available)? };
         if !matches!(
@@ -317,9 +317,9 @@ impl<'a> ObservationHeap<'a> {
             let descriptor =
                 descriptors
                     .get(&(header & !7))
-                    .ok_or(DescriptorTraceError::UnknownDescriptor {
+                    .ok_or_else(|| { eprintln!("DIAG observe site 2"); DescriptorTraceError::UnknownDescriptor {
                         address: header & !7,
-                    })?;
+                    } })?;
             let available = (nursery.len() - offset) * 8;
             // The borrowed slice proves allocation bounds before any object read.
             let state =
@@ -379,10 +379,9 @@ impl<'a> ObservationHeap<'a> {
             // `admit` proved an exact initialized start and the arena keeps
             // its bytes stable for this borrow; read the header only now.
             let header = unsafe { std::ptr::read(address as *const usize) };
-            let descriptor = self.descriptors.get(header & !7).ok_or(
-                DescriptorTraceError::UnknownDescriptor {
+            let descriptor = self.descriptors.get(header & !7).ok_or_else(|| { eprintln!("DIAG observe site 3"); DescriptorTraceError::UnknownDescriptor {
                     address: header & !7,
-                },
+                } },
             )?;
             descriptor.allocation_extent() as usize
         } else {
@@ -406,9 +405,9 @@ impl<'a> ObservationHeap<'a> {
         let descriptor =
             self.descriptors
                 .get(header & !7)
-                .ok_or(DescriptorTraceError::UnknownDescriptor {
+                .ok_or_else(|| { eprintln!("DIAG observe site 4: address {address:#x} header {header:#x} nursery {:#x}..+{} registry {}", self.nursery.as_ptr() as usize, self.nursery.len()*8, match &self.descriptors { DescriptorSource::Registry(r) => r.len(), #[cfg(test)] DescriptorSource::Owned(m) => m.len() }); DescriptorTraceError::UnknownDescriptor {
                     address: header & !7,
-                })?;
+                } })?;
         // Exact-start membership was proved by a validated immutable region,
         // retained arena, or nursery walk; all owners remain borrowed through
         // this observation.

@@ -1943,13 +1943,14 @@ impl<H, O> ResidentActorRunner<H, O> {
         // as the composition-root facade test
         // (`composition_root_child_session_factory_runs_a_cell`) already
         // does for the same call.
+        if let Some(registry) = &self.access.image_registry {
+            // Before the bootstrap, so the child's first install is the
+            // run's shared driver image rather than a second compile of it.
+            machine.set_image_registry(Arc::clone(registry));
+        }
         machine
             .run_with_sites("child_session_bootstrap", bootstrap_program.code())
             .map_err(|error| format!("child session bootstrap install: {error}"))?;
-        if let Some(registry) = &self.access.image_registry {
-            // No longer a no-op: the engine exists now.
-            machine.set_image_registry(Arc::clone(registry));
-        }
         // Atomic check-and-insert (`try_insert_idle`, not `insert_idle`):
         // the collision check must happen before any registry mutation, not
         // after — `insert_idle` would already have replaced whatever was at
