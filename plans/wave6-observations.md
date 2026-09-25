@@ -66,3 +66,17 @@ worktrees on the same box (swap). No intervention by the observer rule
 and is due to be wound down. Trial 4: the core lead sent admission and
 settlement checkpoints (root interview); the root itself did not. Trial 3:
 no real fence yet.
+
+## 06:16Z wake
+
+Alive; 8 GiB free, swap 25 GiB; 21 windows; no Failed/Retired, no latched
+machine. Root mid-turn (5m48s, a 103 s cell); master gained b3c3546
+(item2-trace amend). run-map (deployed binary) labels the root's own row
+fenced: ref36 submitted, host_input=ready, 3 behind, since 06:11; by the
+host's rules that is in flight, not fenced (the corrected run-map on main
+renders it open). No rejections, nudges or cancellations in the window.
+Contention unchanged: 109 calls since 05:46, checkout_wait p50 6.7 s, max
+152 s; the core lead's two largest cells took 319 s and 271 s, each about
+145 s waiting and 49 s compiling. The operator lanes' builds and the
+wave's 21 actors share the box. No intervention; wind-down still pending
+the operator. No new trial evidence.
