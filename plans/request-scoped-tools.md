@@ -124,6 +124,13 @@ requires a request specific spec entry for differently typed assignments.
 It also must preserve one registered tool surface across `reviewAgain`. That
 is more machinery than a generic typed scope access at tool invocation.
 
+The existing `requestConfiguredSited`/`runRequest` composition only submits a
+typed request; it does not construct a tool record. `serveToolsWith` can close
+over Haskell state, but owns an alternative ToolAwait serving policy, not an
+extension of the attached interactive policy. Reusing it here still requires a
+new request-local dispatcher/rebinding boundary and stable provider declarations.
+There is no existing request-local tool-builder path that removes this work.
+
 A workspace-only helper can make the Haskell expression shorter today, but
 an installed handler cannot read the authoritative current request. A native
 `submit_review` that generates Haskell source or decodes `Project.Types` in

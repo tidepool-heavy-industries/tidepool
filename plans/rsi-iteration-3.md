@@ -80,3 +80,65 @@ does not yet justify a new registry. Measure contract amendments, stale candidat
 or checkout incidents, zero-match runs, reply retries, and defects caught before
 versus during review. Preserve independent review: wave 10 caught consequential
 bugs despite green happy-path tests.
+
+## Implementation record
+
+- Shared prompts/fork skill: workspace `5864ae1` (published), Tidepool pin and
+  template `8b92c6eea`, harness prompt/pin `7953684` and `5dd21b9`. Establish an
+  executable shared boundary and failure invariant before dependent forks;
+  distinguish delivered corrections from verified incorporation; choose ready
+  obligations rather than compulsory recursive fan-out; retain reviewers through
+  repairs and rebase when required by dependencies/conflicts. The harness Label
+  example now matches the existing compiled shared recipe. Four changed shared
+  files match the template byte-for-byte.
+- Focused-test guard: harness `4f9199b` and `28798f2`, documented and used by
+  project prompts at `5192e07`/`9bdcb3e`. No invocation wrapper existed; Reflex
+  only classifies output. The new project script requires package/target/filter,
+  refuses zero runnable selection, checks actual libtest execution counts and
+  preserves failure exits. It supports ordinary libtest, not custom harnesses.
+  Eight stub-runner regressions passed after binary-target support (`a105009`).
+  Real Driver follow-up lifecycle tests passed 2/2 through that binary target.
+  Real dynamic reply tests passed 2/2 in
+  the isolated checkout; the integrated adapter-readiness target passed 1/1.
+  Nonexistent and ignored-only filters were refused without running live tests.
+- Reminder fix: `42e4947dc`, with timing-free regression adjustment `f52951121`.
+  Request activation retains the original provider turn/time across duplicate
+  publications; reminders require a later turn and matching open request. A
+  pushed reminder cannot be retracted by this change; its wording identifies the
+  request and explicitly says to ignore it after submission. Two facade and two
+  actor observation tests passed in the isolated checkout. On integrated main,
+  both facade regressions and the workspace-pin test passed (3/3, 488 skipped).
+- Typed-tool design: `9f4b0128c`, [request-scoped-tools.md](request-scoped-tools.md).
+  Existing installed handlers lack typed current-request access. The proposed
+  primitive belongs to Replies, with structural site-type checks and exact scoped
+  binding identity before borrowing input. No runtime primitive or review tool
+  is implemented yet; the first next step is the focused type/borrow proof.
+
+Verification logs live in /tmp/rsi-iteration3-*.log during this session. The first
+review-recipe invocation selected a Nix-store extractor and was stopped without
+claiming results; its replacement explicitly selects the matched local frontend
+and worker built by `just exomonad-build`. The isolated reminder test initially
+could not compile because required pinned submodules were absent; after initializing
+them its focused checks passed. Future worktree setup should check required
+submodule availability before spending a compile attempt.
+
+The matched local reviewProvenance recipe completed: 6/6 assertions passed,
+including exact-scope repair and retention of assigned Task decisions/gates.
+It launched no native workers or providers. The direct focused invocation took
+over 20 minutes with repeated compiler-worker startup; investigate a focused
+entry through the existing shared-daemon recipe runner rather than duplicating
+its process owner. No speedup is claimed from this observation.
+
+Wave-11 preparation: the user explicitly requests a Sol root with multiple Luna
+subtrees. Harness docs/rsi-iteration-3.md and NEXT.md now prescribe at least two
+Luna component owners each delegating two meaningful Luna obligations, targeting
+three domains: durable Store recovery, Engine boundary recovery, and Driver/CLI
+restart. Root retains cross-component contracts and crash acceptance. This is a
+deliberate topology experiment, not a standing every-leaf-must-fork rule. Existing
+tree CLI refuses any prior root; supported restart admission is a concrete product
+gap, while ambiguous interrupted states must fail closed rather than replay
+arbitrary work. Power-loss durability and exactly-once remote attempts are not
+claimed. Wave-10 history is archived in harness docs/wave10-handoff.md.
+
+After its completed interview and handoff, wave 10 was stopped through the CLI
+(exit 0); its tmux session no longer exists. No wave 11 run has been launched.
