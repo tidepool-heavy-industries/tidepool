@@ -175,3 +175,40 @@ and the lock boundary. No active run was restarted for validation.
 - Rust formatting and diff checks passed. Real systemd crash/restart integration
   was not exercised; the running wave is not a test fixture.
 - Retained logs: target/tidepool-test-runs/launch-cleanup/{worktree,facade}.log.
+
+### First live review-basis observation
+
+Wave 10 root admitted the Store exact review at 18:46:18Z with the five-argument
+reviewCommit call, base f9ab1a9 and candidate 5b2741a. Reviewer accepted at
+18:48:21Z using ReviewedCandidate (reviewBasis current), without constructing a
+Task. Root integrated at 176a271 at 18:49:04Z, then the owning provenance test
+executed 1/1 on the integrated head. This is one successful real opportunity for
+the new API, not a claim that the whole wave or automation experiment succeeded.
+The reviewer had a multiline-cell parse rejection before a successful one-line
+retry, and explicitly left unexecuted race/cleanup gates open. Evidence: wave-10
+root/reviewer rollouts, Git, and read-only observer report.
+
+### Background debt audit
+
+- Implemented in `d23e0193a`: predecessor recovery carries typed actor identity
+  instead of deciding root safety through starts_with("1-"). Original directory
+  labels remain available for notices; root-ID convention is unchanged. Four
+  focused recovery tests passed (486 skipped), including numeric root label
+  `01-2`. Formatting and diff checks passed. Retained log:
+  target/tidepool-test-runs/launch-cleanup/typed-predecessor.log.
+- A pre-root retry still receives generation-based lost-state/recovery wording.
+  Determine startup vs recovery from evidence for status/notice accuracy; this
+  is an observability follow-up, not permission to weaken recovery requirements.
+- Session-level and run-level root binding paths share ambiguous names and
+  scattered existence checks. Consider a typed observation and explicit names
+  after tracing all consumers; no new path resolver or registry is warranted.
+
+### Engine review observation
+
+Read-only monitor observed a successful Repair submission at 18:51:57Z for exact
+Engine candidate `2d12a4a`. Findings were state consumption before dynamic schema
+validation and ignored string patterns. These remain reviewer findings pending
+repair and integration checks. The reviewer reported two tests executing 1/1
+each and excluded an earlier zero-match invocation. Four rejected Haskell reply
+cells preceded the successful reply: parse errors and unavailable bindings after
+failed cells. Retain this as model-facing friction for the post-wave interview.
