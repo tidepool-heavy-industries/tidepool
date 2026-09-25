@@ -170,3 +170,21 @@ three minutes. That points at the memo path (possibly tonight's memo
 completion, deployed in this build), not queueing. Opus lane memo-miss is
 building the per-request table and will fix it on a branch if the cause is
 ours. No note to the root.
+
+## 13:56Z wake
+
+Alive; 14.6 GiB available; 25 windows; no latched machine. No master commit
+since 12:36Z (the adapter contract and stubs): the replay leaf (39@1) is in a
+review-repair loop and hit UpdatePending x3 while its repair steer waited for
+a turn end; finalize (38@1) and the contract review (40@1) are still running;
+two watchdog nudges. Not a stall by the rule (reviews and repairs active), so
+no note.
+
+Costliest delta: compile, now dominating. Since 13:26: checkout wait p50
+114 ms, max 105 s; the root's 13:28 cell compiled for 102 s (8 compiles),
+the contract reviewer's for 43 s. That is the session-memo wipe (fixed on
+main 72a9843db, 253 Val.G modules recompiled per root bind and growing), so
+the run gets slower every hour it lives. Started a redeploy of main (memo
+fix, stale-split fix, background jobs, retirement delivery, daemon reuse,
+display guard) so a relaunch can happen at the next clean boundary; the
+running wave keeps its own binary copy.
