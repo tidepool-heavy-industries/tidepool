@@ -15,6 +15,8 @@ module Tidepool.Inspection.Display
   ( Display (..),
     WorkbenchDisplay (..),
     application,
+    displayRecord,
+    opaqueHandle,
   )
 where
 
@@ -37,6 +39,11 @@ class WorkbenchDisplay a where
   -- retain their ordinary compact presentation; the host also caps UTF-8 bytes.
   workbenchActivationDisplay :: Int -> a -> (Text, Bool)
   workbenchActivationDisplay _ = workbenchDisplay
+
+  -- | A settled reply as its owner reads it in the settlement notice: whole,
+  -- up to the budget, not the compact observation prefix.
+  workbenchReplyDisplay :: Int -> a -> (Text, Bool)
+  workbenchReplyDisplay _ = workbenchDisplay
 
 -- | Budgeted text rendering. Containers pass their remaining budget to children.
 class Display a where
@@ -66,6 +73,18 @@ class Display a where
 application :: Int -> Text -> [DisplayTree] -> DisplayTree
 application precedence constructor arguments =
   precedenceParens precedence (Concat (TextLeaf constructor : concatMap (\argument -> [TextLeaf " ", argument]) arguments))
+
+-- | One record constructor with named fields, laid out as derived 'Show'
+-- would name them: @displayRecord p "Candidate" [("candidateCommit", displayTree c)]@.
+displayRecord :: Int -> Text -> [(Text, DisplayTree)] -> DisplayTree
+displayRecord precedence constructor fields =
+  precedenceParens precedence $ treeParts (constructor <> " {") "}"
+    [Concat [TextLeaf (name <> " = "), value] | (name, value) <- fields]
+
+-- | A runtime-issued handle: what it refers to, in a form no one mistakes for
+-- Haskell syntax to retype. Use the bound name to act on it.
+opaqueHandle :: Text -> DisplayTree
+opaqueHandle description = TextLeaf ("<" <> description <> ">")
 
 instance {-# OVERLAPPABLE #-} (Show a) => Display a where
   displayTree = displayTreePrec 0
@@ -146,13 +165,16 @@ renderParts budget opening closing values =
 instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplay = displayWith 512
   workbenchDisplayWithout keys = displayWithout keys 512
+  workbenchReplyDisplay = displayWith
 
 instance WorkbenchDisplay Text where
   workbenchDisplay = rawText 512
   workbenchActivationDisplay limit = rawText limit
+  workbenchReplyDisplay limit = rawText limit
 
 -- | A top-level 'String' renders raw, mirroring 'Text'. Without this the
 -- 'Display'-derived {-# OVERLAPPABLE #-} instance answers instead and quotes it.
 instance WorkbenchDisplay [Char] where
   workbenchDisplay = workbenchDisplay . Text.pack
   workbenchActivationDisplay limit = workbenchActivationDisplay limit . Text.pack
+  workbenchReplyDisplay limit = workbenchReplyDisplay limit . Text.pack

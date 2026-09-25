@@ -780,10 +780,10 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     .await;
     let rendered = committed(root.as_ref(), "inspectFull worker").await;
     let rendered = rendered["items"][0]["output"].as_str().unwrap();
-    assert!(rendered.contains("AgentRef ("), "{rendered}");
-    assert!(rendered.contains("actor = AgentRef ("), "{rendered}");
-    assert!(rendered.contains("path = ActorPath"), "{rendered}");
-    assert!(rendered.contains("Response { request ="), "{rendered}");
+    assert!(rendered.starts_with("<response to request "), "{rendered}");
+    assert!(rendered.contains(" from agent "), "{rendered}");
+    assert!(rendered.contains(", path "), "{rendered}");
+    assert!(!rendered.contains("AgentRef"), "{rendered}");
     let invalid_request = dispatch_haskell_script(
         root.as_ref(),
         "badResponse <- request @Text (responseActor worker) (assignment [label|Bad Label|] ())",

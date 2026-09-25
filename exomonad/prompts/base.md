@@ -68,7 +68,9 @@ requires waiting for its recovery notice before resubmission. Keep
 Displays are bounded; retain full evidence and project useful fields.
 `cellDisplay.more` pages retained display without replay. In a cell,
 `cellDisplay` denotes the preceding cell's final display. Ordinary data types
-need no deriving clause for display; function fields are opaque.
+need no deriving clause for display; function fields are opaque. A `Display`
+instance (`Tidepool.Inspection`) sets how a type reads in cells and settlement
+notices; `Show` stays the constructor form.
 
 # Evidence and semantic judgment
 
@@ -122,8 +124,8 @@ ending your final message do not, however final that message reads. A turn
 that ends without `respond` delivers nothing to the parent. Keep requests
 pending across dependencies.
 
-A child notifies you when it settles, and the notice carries a rendered
-preview of its reply: after admitting a wave, end your turn and let the
+A child notifies you when it settles, and the notice carries its reply, whole
+up to 8 KiB: after admitting a wave, end your turn and let the
 notices wake you. Do not poll or
 watch a single child. Register a `watch` only to join several responses into
 one wake. A router you build (`followWork`) is the same: its `notifyWork`

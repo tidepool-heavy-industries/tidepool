@@ -1018,9 +1018,20 @@ pub(crate) enum SettlePlan {
 /// the walk against a deeply nested value even when each layer prints short.
 const RETAINED_PREVIEW_MAX_DEPTH: usize = 8;
 
-/// Note [`truncate_preview_at_line`] appends after a cut, so a reader never
-/// mistakes a truncated preview for the whole value.
-const PREVIEW_TRUNCATED_NOTE: &str = "\n[reply preview truncated]";
+/// The note [`truncate_preview_at_line`] appends after a cut: it names the
+/// budget, so a reader never mistakes a cut preview for the whole value, and
+/// says where the rest is. A preview within budget carries no note.
+fn preview_truncated_note(budget: usize) -> String {
+    let budget = if budget.is_multiple_of(1024) {
+        format!("{} KiB", budget / 1024)
+    } else {
+        format!("{budget}-byte")
+    };
+    format!(
+        "\n[reply exceeds the {budget} notice budget; shown to the last whole line. \
+         `pollResponse` on the retained `Response` has the complete value.]"
+    )
+}
 
 /// Append `text` to `out`, spending it from `budget` one byte at a time; once
 /// `budget` reaches zero the remainder is dropped and `…` is appended in its
@@ -1048,7 +1059,7 @@ fn push_bounded(out: &mut String, text: &str, budget: &mut usize) {
 
 /// Enforce `budget` characters (bytes) on a finished preview, cutting at the
 /// last line boundary at or before the limit rather than mid-line, and
-/// appending [`PREVIEW_TRUNCATED_NOTE`] when anything was cut. A value with
+/// appending [`preview_truncated_note`] when anything was cut. A value with
 /// no newline before `budget` cuts at the nearest earlier char boundary
 /// instead -- still bounded, just without a line to cut at.
 ///
@@ -1066,7 +1077,7 @@ pub fn truncate_preview_at_line(text: String, budget: usize) -> String {
         cut -= 1;
     }
     let mut truncated = text[..cut].to_string();
-    truncated.push_str(PREVIEW_TRUNCATED_NOTE);
+    truncated.push_str(&preview_truncated_note(budget));
     truncated
 }
 
@@ -4937,4 +4948,29 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
         "resident turn panicked: {detail}"
     ))))
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::truncate_preview_at_line;
+
+    #[test]
+    fn reply_within_budget_renders_whole_without_a_note() {
+        let reply = "Candidate {\n  candidateCommit = 3f2a\n}".to_owned();
+        assert_eq!(truncate_preview_at_line(reply.clone(), 8192), reply);
+    }
+
+    #[test]
+    fn reply_over_budget_is_cut_at_a_line_and_names_the_budget() {
+        let line = "x".repeat(99);
+        let reply = vec![line.as_str(); 100].join("\n");
+        let rendered = truncate_preview_at_line(reply, 8192);
+        let (body, note) = rendered.split_once("\n[").expect("a truncation note");
+        assert!(body.len() <= 8192 && body.ends_with(&line), "{body}");
+        assert_eq!(
+            note,
+            "reply exceeds the 8 KiB notice budget; shown to the last whole line. \
+             `pollResponse` on the retained `Response` has the complete value.]"
+        );
+    }
 }

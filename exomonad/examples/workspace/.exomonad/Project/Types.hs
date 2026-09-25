@@ -7,6 +7,7 @@ import Tidepool.Actors.Exomonad
   , CampaignLabel, campaignLabel, batch
   )
 import Tidepool.Agent.Assignment (labelText)
+import Tidepool.Inspection (Display (..), application, displayRecord)
 import Tidepool.Worktree (renderGitOid)
 
 -- A task is the understanding handed to a fresh context, not a workflow stage.
@@ -20,6 +21,21 @@ data Task = Task
   , acceptance :: Text
   , acceptedDecisions :: [AcceptedDecision]
   } deriving (Show, Eq)
+
+-- Display is what the workbench and settlement notices show; Show stays the
+-- constructor dump for debugging.
+instance Display Task where
+  displayTree = displayTreePrec 0
+  displayTreePrec p t = displayRecord p "Task"
+    [ ("taskGroup", displayTree (taskGroup t))
+    , ("planPath", displayTree (planPath t))
+    , ("taskSource", displayTree (taskSource t))
+    , ("obligation", displayTree (obligation t))
+    , ("rationale", displayTree (rationale t))
+    , ("ownedPaths", displayTree (ownedPaths t))
+    , ("acceptance", displayTree (acceptance t))
+    , ("acceptedDecisions", displayTree (acceptedDecisions t))
+    ]
 
 -- Turn an already-validated fork Label into a group path's campaign segment.
 -- Label and CampaignLabel share the same kebab-case, <=48-char validator
@@ -67,6 +83,14 @@ data Candidate = Candidate
   , remainingGates :: [Text]
   } deriving (Show, Eq)
 
+instance Display Candidate where
+  displayTree = displayTreePrec 0
+  displayTreePrec p c = displayRecord p "Candidate"
+    [ ("candidateCommit", displayTree (candidateCommit c))
+    , ("checkedCommands", displayTree (checkedCommands c))
+    , ("remainingGates", displayTree (remainingGates c))
+    ]
+
 -- Queuing a repair to the owner of a pending delivery would deadlock it.
 -- A separate implementer is available for repair after returning its candidate.
 data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef
@@ -112,6 +136,12 @@ data RepairTask = RepairTask
 -- The remaining product gates stay attached to the exact reviewed candidate.
 data Outcome value = Produced value | Blocked Text [Text]
   deriving (Show, Eq)
+
+instance Display value => Display (Outcome value) where
+  displayTree = displayTreePrec 0
+  displayTreePrec p (Produced value) = application p "Produced" [displayTreePrec 11 value]
+  displayTreePrec p (Blocked reason evidence) =
+    application p "Blocked" [displayTreePrec 11 reason, displayTreePrec 11 evidence]
 
 data CheckedDelivery = Delivered ReviewedCandidate GitOid [Text]
   deriving (Show, Eq)
@@ -174,6 +204,13 @@ data WorkProgress = WorkProgress
   { workEvidence :: [Candidate]
   , workQuestions :: Attention
   } deriving (Show, Eq)
+
+instance Display WorkProgress where
+  displayTree = displayTreePrec 0
+  displayTreePrec p w = displayRecord p "WorkProgress"
+    [ ("workEvidence", displayTree (workEvidence w))
+    , ("workQuestions", displayTree (workQuestions w))
+    ]
 
 -- Only unresolved decisions/blockers needing the recipient's action. Successful
 -- incorporation and unchanged standing gates belong to evidence, not questions.
