@@ -281,6 +281,46 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
     format!("watch registration was rejected: {detail}")
 }
 
+/// What an actor sees when its own reply or cancellation acknowledgement for
+/// `request` cannot settle.
+///
+/// An update in flight is refused, not held. The requester's update reaches
+/// the target's model only as provider input between model rounds, so a hold
+/// inside the cell would hold the very tool call that has to end before the
+/// update can be delivered. Settling once presentation is confirmed would
+/// instead publish an answer written before the model read the update, which
+/// is what the fence exists to prevent. The refusal therefore tells the model
+/// where the update will appear and that retrying earlier fails the same way.
+///
+/// The workspace template's `Project.Watchdog.hostSettlementRefusal` reads the
+/// `<settlement> not settled: ` prefix to tell request state from a failed
+/// approach; keep the two in step.
+fn settlement_refusal(
+    settlement: &str,
+    request: crate::RequestId,
+    error: crate::request::ReplyError,
+) -> String {
+    use crate::request::ReplyError;
+    let request = request.0;
+    let detail = match error {
+        ReplyError::UpdatePending => format!(
+            "your parent sent an update to request {request} that has not been confirmed as \
+             shown to you yet. It arrives as a new message after this tool call, or once you \
+             end your turn. Read it, then send this again; sending it before the update \
+             arrives is refused the same way"
+        ),
+        ReplyError::CancellationRequested => {
+            format!("request {request} is being cancelled; acknowledge the cancellation instead")
+        }
+        ReplyError::AlreadySettled => format!("request {request} is already settled"),
+        ReplyError::Stale => format!("request {request} is not active for this actor"),
+        ReplyError::Unauthorized | ReplyError::WrongIncarnation => {
+            format!("request {request} was not assigned to this actor")
+        }
+    };
+    format!("{settlement} not settled: {detail}. Nothing was sent.")
+}
+
 /// Phrase a unix-ms timestamp relative to this actor's own session start,
 /// the same "+Xm Ys into your session" idiom the facade uses for queued
 /// watch/settlement notices, so a model reads one consistent clock.
@@ -5225,7 +5265,7 @@ where
                                 );
                                 drop(attempt.result);
                                 return Ok(ResidentWorkbenchStep::Rejected(
-                                    format!("reply rejected: {error:?}").into(),
+                                    settlement_refusal("reply", attempt.request, error).into(),
                                 ));
                             }
                         },
@@ -5284,8 +5324,12 @@ where
                                         WorkbenchOperationDisposition::Rejected,
                                     );
                                     return Ok(ResidentWorkbenchStep::Rejected(
-                                        format!("cancellation acknowledgement rejected: {error:?}")
-                                            .into(),
+                                        settlement_refusal(
+                                            "cancellation acknowledgement",
+                                            acknowledgement.request,
+                                            error,
+                                        )
+                                        .into(),
                                     ));
                                 }
                             }
@@ -7714,7 +7758,7 @@ where
                                 }
                                 Err(error) => {
                                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                        format!("reply rejected: {error:?}"),
+                                        settlement_refusal("reply", attempt.request, error),
                                     ));
                                 }
                             }
@@ -9099,8 +9143,8 @@ fn lookup_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        disposition_for_non_command_failure, lookup_response, workbench_failure_after_operations,
-        workbench_response, ChildExitObservations,
+        disposition_for_non_command_failure, lookup_response, settlement_refusal,
+        workbench_failure_after_operations, workbench_response, ChildExitObservations,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
@@ -9110,6 +9154,24 @@ mod tests {
         WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
         WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRunStatus,
     };
+
+    /// A reply fenced by an update still in delivery tells the model which
+    /// request is waiting, where the update will appear, and that an earlier
+    /// retry fails the same way; it never shows the bare error constructor.
+    #[test]
+    fn update_pending_refusal_says_where_the_update_arrives() {
+        let text = settlement_refusal(
+            "reply",
+            crate::RequestId(2),
+            crate::request::ReplyError::UpdatePending,
+        );
+        assert!(text.starts_with("reply not settled: "), "{text}");
+        assert!(text.contains("update to request 2"), "{text}");
+        assert!(text.contains("after this tool call"), "{text}");
+        assert!(text.contains("refused the same way"), "{text}");
+        assert!(text.ends_with("Nothing was sent."), "{text}");
+        assert!(!text.contains("UpdatePending"), "{text}");
+    }
 
     /// The `watches` status view names the settled state, when the watch
     /// registered and last transitioned (relative to the actor's own

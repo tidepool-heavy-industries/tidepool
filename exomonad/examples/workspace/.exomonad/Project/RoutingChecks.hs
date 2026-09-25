@@ -207,6 +207,11 @@ handlerCall = do
   check ("a handler awaiting another record actor's reply is serviced: " <> replied) ("[6]" `Text.isInfixOf` replied)
   calls <- turn owner "state <- R.call (boxView (R.client box)) ()\ninspectFull (boxCalls state)"
   check "the callee ran exactly once" (lastOutput calls == "1")
+  -- Every module in `modules` is imported unqualified into cells, so an
+  -- exported constructor or field must not share a name with another
+  -- module's. These are the names prompts and skills tell a model to write.
+  outcome <- turn owner "case (Blocked \"reason\" [] :: Outcome ReviewDecision) of { Blocked _ _ -> null (map repairFindings []); Produced (Accepted _) -> False; Produced (Repair _ _) -> False }"
+  check ("a cell names reply constructors and fields unqualified: " <> output outcome) (output outcome == "True")
 
 forwardingFailure :: Member RecipeCheck effects => Eff effects ()
 forwardingFailure = do

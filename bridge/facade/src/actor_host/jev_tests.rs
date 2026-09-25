@@ -1914,6 +1914,39 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
     campaign.hosted.await.unwrap();
 }
 
+/// `Project.Watchdog` classifies the invoked tool before its payload text. A
+/// `haskell` cell that is one `sendMessage` is abstained on without asking
+/// Jev, even when the message quotes a destructive command; a cell that runs
+/// anything else first, or a different tool, is not. A result the resident
+/// actor wrote when it refused to settle a reply is recognized as request
+/// state, so it never counts as a failed approach in `recent_calls`.
+#[tokio::test]
+async fn watchdog_judges_the_tool_before_message_text_and_skips_host_refusals() {
+    let backend = Arc::new(ScriptedNoulJev {
+        requests: Mutex::new(Vec::new()),
+        likelihood: 0.9,
+    });
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    let policy = campaign.root_installation.policy.clone();
+    let judged = dispatch_haskell_script(
+        policy.as_ref(),
+        r#"import qualified Project.Watchdog as Watchdog
+import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..), annotationToJson)
+import Tidepool.Aeson.Value (Value (String), encodeValue)
+let sent = ToolCall "haskell" (String "Right receipt <- sendMessage p \"reset: git reset --hard master && rm -rf target\"")
+annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haskell" "toolResult1" 1 "Right (NotificationReceipt ((2,1),((1,1),(\"run:1:1\",7))))")
+(encodeValue (annotationToJson annotation), Watchdog.messageSend (ToolCall "haskell" (String "_ <- command \"rm -rf x\"\nsendMessage p \"done\"")), Watchdog.messageSend (ToolCall "bash" (String "sendMessage p \"x\"")), Watchdog.hostSettlementRefusal "reply not settled: your parent sent an update to request 2 that has not been confirmed as shown to you yet. Nothing was sent.", Watchdog.hostSettlementRefusal "error: build failed")"#,
+    )
+    .await
+    .to_string();
+    assert!(judged.contains("abstained"), "{judged}");
+    assert!(judged.contains("message send: sendMessage"), "{judged}");
+    assert!(judged.contains("Nothing,Nothing,True,False)"), "{judged}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// `Project.Watchdog.watchBy` forwards a finished call's own displayed text
 /// into its own Jev ask (`rawState`'s `result` field, and each entry of
 /// `recent_calls`). Before `Watchdog.hs`'s `boundedEvidence`, that text was
