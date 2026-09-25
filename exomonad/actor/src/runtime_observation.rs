@@ -750,7 +750,7 @@ fn render_age(since_unix_ms: u64, now_unix_ms: u64) -> String {
 }
 
 /// UTC wall-clock time of day, `HH:MM:SSZ`.
-fn render_clock(unix_ms: u64) -> String {
+pub(crate) fn render_clock(unix_ms: u64) -> String {
     let seconds = (unix_ms / 1000) % 86400;
     format!(
         "{:02}:{:02}:{:02}Z",

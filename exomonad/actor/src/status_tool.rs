@@ -8,9 +8,21 @@ pub(crate) const STATUS_TOOL: &str = "status";
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StatusView {
+    /// Only the roster rows whose rendered line changed since this caller's
+    /// previous summary-family status call, then one `N unchanged since`
+    /// line. The default when `view` is omitted; with no previous call it
+    /// renders the full summary.
     #[default]
+    Changed,
+    /// Every roster row. `all` names the same view.
+    #[serde(alias = "all")]
     Summary,
     Detailed,
+    /// The revision identities this actor works against: operator checkout,
+    /// its own checked head, its assignment base, live children's checked
+    /// heads, and the installed source layer against disk. Also part of
+    /// `detailed`.
+    Revisions,
     Recovery,
     Lineage,
     Trace,
@@ -42,19 +54,19 @@ struct StatusArguments {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("status arguments must be an object with optional `view` (summary, detailed, recovery, lineage, trace, bindings, live, watches): {0}")]
+#[error("status arguments must be an object with optional `view` (changed, summary, all, revisions, detailed, recovery, lineage, trace, bindings, live, watches): {0}")]
 pub(crate) struct StatusInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
         name: STATUS_TOOL.into(),
-        description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for a compact summary; use detailed, lineage, trace, bindings, live, or watches for other perspectives.".into(),
+        description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for the compact summary's rows that changed since your previous status call; use summary (or all) for every row, revisions for the source revisions you are working against, or detailed, lineage, trace, bindings, live, or watches for other perspectives.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "view": {
                     "type": "string",
-                    "enum": ["summary", "detailed", "recovery", "lineage", "trace", "bindings", "live", "watches"]
+                    "enum": ["changed", "summary", "all", "revisions", "detailed", "recovery", "lineage", "trace", "bindings", "live", "watches"]
                 }
             },
             "additionalProperties": false
@@ -85,7 +97,16 @@ mod tests {
         assert_eq!(
             tool.input_schema["properties"]["view"]["enum"],
             serde_json::json!([
-                "summary", "detailed", "recovery", "lineage", "trace", "bindings", "live",
+                "changed",
+                "summary",
+                "all",
+                "revisions",
+                "detailed",
+                "recovery",
+                "lineage",
+                "trace",
+                "bindings",
+                "live",
                 "watches"
             ])
         );
@@ -94,9 +115,12 @@ mod tests {
 
     #[test]
     fn parser_defaults_and_rejects_invalid_arguments() {
-        assert_eq!(parse(serde_json::json!({})).unwrap(), StatusView::Summary);
+        assert_eq!(parse(serde_json::json!({})).unwrap(), StatusView::Changed);
         for (name, expected) in [
+            ("changed", StatusView::Changed),
             ("summary", StatusView::Summary),
+            ("all", StatusView::Summary),
+            ("revisions", StatusView::Revisions),
             ("detailed", StatusView::Detailed),
             ("recovery", StatusView::Recovery),
             ("lineage", StatusView::Lineage),

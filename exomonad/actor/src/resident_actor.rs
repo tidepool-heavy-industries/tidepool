@@ -12,7 +12,10 @@ mod replacement;
 mod status_rendering;
 mod workbench_ledger;
 
-use status_rendering::{render_bindings_section, render_job_line, render_source_drift_section};
+use status_rendering::{
+    render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
+    render_source_drift_section, RevisionIdentities, RosterSnapshot,
+};
 use workbench_ledger::{WorkbenchBoundaryRecord, WorkbenchExecutions, WorkbenchReplayFailure};
 
 use parking_lot::Mutex;
@@ -993,6 +996,12 @@ pub struct ResidentKernelBehavior<H, O> {
     active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
     pending_fork_publications: Vec<PendingForkPublication>,
+    /// This actor's last summary-family status roster, for the `changed`
+    /// view. One per actor, replaced on each such call.
+    roster_snapshot: Mutex<Option<status_rendering::RosterSnapshot>>,
+    /// `taskSource` of the current request's session input, read from its
+    /// rendered preview when the request was presented.
+    assignment_base: Option<String>,
 }
 
 struct PendingForkPublication {
@@ -1137,6 +1146,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             active_workbench_control: None,
             settled_fork_boundaries: Vec::new(),
             pending_fork_publications: Vec::new(),
+            roster_snapshot: Mutex::new(None),
+            assignment_base: None,
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
@@ -1374,7 +1385,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
-    fn status_text(&self, kernel: &KernelContext, actor: ActorRef, view: StatusView) -> String {
+    /// `changes_only` applies to the concise view: once this actor has a
+    /// previous summary-family roster, render only rows whose text changed.
+    fn status_text(
+        &self,
+        kernel: &KernelContext,
+        actor: ActorRef,
+        view: StatusView,
+        changes_only: bool,
+    ) -> String {
         if view == StatusView::Watches {
             return self.watches_status_text(actor);
         }
@@ -1415,6 +1434,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .iter()
             .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
             .filter_map(|(identity, record)| {
+                let key = format!(
+                    "{:?} ({}@{})",
+                    record.descriptor.label(),
+                    identity.id.0,
+                    identity.incarnation.0
+                );
                 let terminal = record.terminal.clone().or_else(|| {
                     kernel
                         .resolve(*identity)
@@ -1456,7 +1481,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     String::new()
                 };
                 if view == StatusView::Concise {
-                    return Some(format!(
+                    return Some((key, format!(
                         "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}{delivery}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent().map_or_else(
@@ -1466,10 +1491,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         record.descriptor.effective_role().role(),
                         record.bound_worktree,
                         runtime.usage_summary_display(),
-                    ));
+                    )));
                 }
                 if view == StatusView::Lineage {
-                    return Some(format!(
+                    return Some((key, format!(
                         "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
@@ -1481,9 +1506,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         usage.map(|sample| sample.uncached_input_tokens),
                         record.bound_worktree,
                         runtime.usage_summary_display(),
-                    ));
+                    )));
                 }
-                Some(format!(
+                Some((key, format!(
                     "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
                     identity.id.0,
                     identity.incarnation.0,
@@ -1500,11 +1525,25 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     runtime.workbench_posture,
                     state,
                     runtime.usage_summary_display(),
-                ))
+                )))
             })
             .collect::<Vec<_>>();
         drop(records);
-        roster.sort();
+        roster.sort_by(|left, right| left.1.cmp(&right.1));
+        let roster_text = if view == StatusView::Concise {
+            let mut snapshot = self.roster_snapshot.lock();
+            let text = match snapshot.as_ref().filter(|_| changes_only) {
+                Some(previous) => render_roster_changes(previous, &roster),
+                None => join_roster_rows(&roster),
+            };
+            *snapshot = Some(RosterSnapshot::new(
+                crate::runtime_observation::unix_time_ms(),
+                &roster,
+            ));
+            text
+        } else {
+            join_roster_rows(&roster)
+        };
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
         let unavailable_responses = format!("{:?}", requests.unavailable_responses);
@@ -1669,18 +1708,24 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 rows => format!("\n  after-tool:\n    {}", rows.join("\n    ")),
             },
         };
+        let revisions = match view {
+            StatusView::Expanded => format!(
+                "\n{}",
+                render_revisions_section(&self.revision_identities(kernel, actor))
+            ),
+            _ => String::new(),
+        };
         let status = format!(
-            "{current}{failure}{spec}{after_tool}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}{spec}{after_tool}\n  {workspace}\n  deadlines: [{}]\nactors:\n{roster_text}{revisions}",
             requests
                 .deadlines
                 .iter()
                 .map(|(_, deadline)| deadline.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-            roster.join("\n")
         );
         if view == StatusView::Lineage {
-            let lineage = roster.join("\n");
+            let lineage = roster_text;
             format!(
                 "actor {}@{} lineage\n  supervisor={:?}\n  context_parent={:?}\n  fork_group={:?}\nactors:\n{lineage}",
                 actor.id.0,
@@ -1692,6 +1737,83 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         } else {
             status
         }
+    }
+
+    /// The revision identities this actor works against, all read from
+    /// observations the host already publishes (no Git here): the root's
+    /// checkout head for the operator checkout, this actor's own checked
+    /// head and source layer drift, its current assignment base, and each
+    /// live descendant's checked head.
+    fn revision_identities(&self, kernel: &KernelContext, actor: ActorRef) -> RevisionIdentities {
+        let own = self.runtime_observation.snapshot();
+        let records = self.environment.actors.lock();
+        let live = |identity: &ActorRef, record: &ResidentActorRecord| {
+            record.terminal.is_none()
+                && kernel
+                    .resolve(*identity)
+                    .and_then(|actor| actor.terminal().get())
+                    .is_none()
+        };
+        let operator_checkout = if self.descriptor.effective_role().role() == crate::ActorRole::Root
+        {
+            own.source_drift
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.head.clone())
+        } else {
+            records
+                .iter()
+                .filter(|(identity, record)| {
+                    record.descriptor.effective_role().role() == crate::ActorRole::Root
+                        && live(identity, record)
+                })
+                .find_map(|(_, record)| {
+                    record
+                        .runtime_observation
+                        .snapshot()
+                        .source_drift
+                        .checkout
+                        .map(|checkout| checkout.head)
+                })
+        };
+        let mut children = records
+            .iter()
+            .filter(|(identity, record)| {
+                **identity != actor
+                    && actor_in_creation_tree(actor, **identity, &records)
+                    && live(identity, record)
+            })
+            .map(|(_, record)| {
+                (
+                    record.descriptor.label().to_owned(),
+                    record
+                        .runtime_observation
+                        .snapshot()
+                        .source_drift
+                        .checkout
+                        .map(|checkout| checkout.head),
+                )
+            })
+            .collect::<Vec<_>>();
+        drop(records);
+        children.sort();
+        RevisionIdentities {
+            operator_checkout,
+            checked: own.source_drift.checkout,
+            assignment_base: self.assignment_base.clone(),
+            children,
+            layer: own.source_drift.layer,
+        }
+    }
+
+    /// The `status` tool's `revisions` view.
+    fn revisions_status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
+        format!(
+            "actor {}@{} revisions\n{}",
+            actor.id.0,
+            actor.incarnation.0,
+            render_revisions_section(&self.revision_identities(kernel, actor))
+        )
     }
 
     /// The `status` tool's `watches` view: one line per retained watch (id,
@@ -1849,6 +1971,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             refusal,
         }
     }
+}
+
+fn join_roster_rows(roster: &[(String, String)]) -> String {
+    roster
+        .iter()
+        .map(|(_, row)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4319,6 +4449,7 @@ where
                 request.response.declaration_modules.clone(),
             )
             .await?;
+        self.assignment_base = status_rendering::assignment_base_from_input(&input_preview);
         let contract = crate::interactive_session::ActivationContract {
             input_type: request.input_type.clone(),
             response: request.response.clone(),
@@ -6021,20 +6152,26 @@ where
                 )
             })?;
             let output = match view {
+                crate::status_tool::StatusView::Changed => {
+                    self.status_text(kernel, context.actor, StatusView::Concise, true)
+                }
                 crate::status_tool::StatusView::Summary => {
-                    self.status_text(kernel, context.actor, StatusView::Concise)
+                    self.status_text(kernel, context.actor, StatusView::Concise, false)
+                }
+                crate::status_tool::StatusView::Revisions => {
+                    self.revisions_status_text(kernel, context.actor)
                 }
                 crate::status_tool::StatusView::Detailed => {
-                    self.status_text(kernel, context.actor, StatusView::Expanded)
+                    self.status_text(kernel, context.actor, StatusView::Expanded, false)
                 }
                 crate::status_tool::StatusView::Lineage => {
-                    self.status_text(kernel, context.actor, StatusView::Lineage)
+                    self.status_text(kernel, context.actor, StatusView::Lineage, false)
                 }
                 crate::status_tool::StatusView::Trace => {
-                    self.status_text(kernel, context.actor, StatusView::Trace)
+                    self.status_text(kernel, context.actor, StatusView::Trace, false)
                 }
                 crate::status_tool::StatusView::Watches => {
-                    self.status_text(kernel, context.actor, StatusView::Watches)
+                    self.status_text(kernel, context.actor, StatusView::Watches, false)
                 }
                 crate::status_tool::StatusView::Recovery => workbench
                     .status_discovery(

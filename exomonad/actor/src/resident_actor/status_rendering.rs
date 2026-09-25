@@ -262,6 +262,214 @@ pub(super) fn render_bindings_section(
     lines.join("\n")
 }
 
+/// One caller's last rendered summary roster: each row's rendered text,
+/// with ages normalized out ([`without_ages`]), by its row key (label and
+/// exact incarnation), and when it was rendered. The actor keeps exactly
+/// one, replaced on every summary-family status call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RosterSnapshot {
+    pub(super) rendered_at_unix_ms: u64,
+    pub(super) rows: std::collections::BTreeMap<String, String>,
+}
+
+impl RosterSnapshot {
+    pub(super) fn new(rendered_at_unix_ms: u64, rows: &[(String, String)]) -> Self {
+        Self {
+            rendered_at_unix_ms,
+            rows: rows
+                .iter()
+                .map(|(key, row)| (key.clone(), without_ages(row)))
+                .collect(),
+        }
+    }
+}
+
+/// A rendered row with every age token (`3m`, `40s`, `2h`, `1d`: digits
+/// then one unit letter, standing alone) replaced by `<age>`, so a row whose
+/// only change is elapsed time compares equal. Printed rows keep their ages.
+fn without_ages(row: &str) -> String {
+    let bytes = row.as_bytes();
+    let standalone = |index: Option<&u8>| index.is_none_or(|byte| !byte.is_ascii_alphanumeric());
+    let mut out = String::with_capacity(row.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        if bytes[index].is_ascii_digit() && (start == 0 || standalone(bytes.get(start - 1))) {
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if matches!(bytes.get(end), Some(b's' | b'm' | b'h' | b'd'))
+                && standalone(bytes.get(end + 1))
+            {
+                out.push_str("<age>");
+                index = end + 1;
+                continue;
+            }
+            out.push_str(&row[start..end]);
+            index = end;
+            continue;
+        }
+        let character = row[index..].chars().next().unwrap_or_default();
+        out.push(character);
+        index += character.len_utf8().max(1);
+    }
+    out
+}
+
+/// The `changed` roster: rows whose rendered text, ages normalized out,
+/// differs from `previous` (new rows included) in `current`'s order, then
+/// rows `previous` listed that `current` no longer does, then one
+/// `N unchanged since <time>` line. `current` is `(row key, rendered row)`.
+pub(super) fn render_roster_changes(
+    previous: &RosterSnapshot,
+    current: &[(String, String)],
+) -> String {
+    let mut lines = Vec::new();
+    let mut unchanged = 0usize;
+    for (key, row) in current {
+        if previous.rows.get(key) == Some(&without_ages(row)) {
+            unchanged += 1;
+        } else {
+            lines.push(row.clone());
+        }
+    }
+    let listed = current
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    lines.extend(
+        previous
+            .rows
+            .keys()
+            .filter(|key| !listed.contains(key.as_str()))
+            .map(|key| format!("  - {key} no longer listed")),
+    );
+    lines.push(format!(
+        "  {unchanged} unchanged since {}",
+        crate::runtime_observation::render_clock(previous.rendered_at_unix_ms)
+    ));
+    lines.join("\n")
+}
+
+/// The revision identities one actor works against, each already observed
+/// by the host; `None` means not observed (or, for `assignment_base`, that
+/// the current request carries none).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RevisionIdentities {
+    /// HEAD of the run's workspace repository, as the root's checkout poll
+    /// last observed it.
+    pub(super) operator_checkout: Option<String>,
+    /// This actor's own assigned checkout, as its checkout poll last
+    /// observed it.
+    pub(super) checked: Option<crate::CheckoutGitDrift>,
+    /// `taskSource` of the current request's session input.
+    pub(super) assignment_base: Option<String>,
+    /// Each live descendant's label and last observed checked head.
+    pub(super) children: Vec<(String, Option<String>)>,
+    /// This actor's installed source layer against its on-disk capture.
+    pub(super) layer: Option<crate::SourceLayerDrift>,
+}
+
+fn short_oid(oid: &str) -> &str {
+    oid.get(..7).unwrap_or(oid)
+}
+
+fn short_identity(identity: &str) -> &str {
+    identity.get(..12).unwrap_or(identity)
+}
+
+/// The `revisions` section: which revision each identity names, in the
+/// delivery line's `key=value; key=value` style, and what a source reload
+/// would publish. Unobserved values say so; nothing is inferred.
+pub(super) fn render_revisions_section(revisions: &RevisionIdentities) -> String {
+    let operator = revisions
+        .operator_checkout
+        .as_deref()
+        .map_or("unobserved", short_oid);
+    let checked = revisions.checked.as_ref().map_or_else(
+        || "unobserved".to_owned(),
+        |checkout| {
+            let state = if checkout.dirty_files.is_empty() {
+                "clean".to_owned()
+            } else {
+                format!("dirty={}", checkout.dirty_files.len())
+            };
+            format!("{} {state}", short_oid(&checkout.head))
+        },
+    );
+    let base = revisions
+        .assignment_base
+        .as_deref()
+        .map_or("none", short_oid);
+    let (layer, publish) = match &revisions.layer {
+        None => (
+            "source_layer=unobserved".to_owned(),
+            "unknown (source layer unobserved)".to_owned(),
+        ),
+        Some(drift) => (
+            format!(
+                "source_layer={}@{}; disk={}@{}; drifted={}",
+                short_identity(&drift.active_identity),
+                drift.active_generation,
+                short_identity(&drift.disk_identity),
+                drift.disk_generation,
+                if drift.changed_modules.is_empty() {
+                    "no"
+                } else {
+                    "yes"
+                },
+            ),
+            if drift.changed_modules.is_empty() {
+                "nothing".to_owned()
+            } else {
+                drift.changed_modules.join(", ")
+            },
+        ),
+    };
+    let mut lines = vec![
+        "revisions:".to_owned(),
+        format!("  operator_checkout={operator}; checked_head={checked}; assignment_base={base}"),
+        format!("  {layer}"),
+        format!("  a reload would publish: {publish}"),
+    ];
+    lines.extend(revisions.children.iter().map(|(label, head)| {
+        format!(
+            "  descendant {label:?} checked_head={}",
+            head.as_deref().map_or("unobserved", short_oid)
+        )
+    }));
+    lines.join("\n")
+}
+
+/// The Git OID a session input's rendered `taskSource` field names: the
+/// first 40-hex-digit run within a short distance after the field name,
+/// whatever wrapper the rendering puts around it. `None` when the input has
+/// no such field.
+pub(super) fn assignment_base_from_input(rendered_input: &str) -> Option<String> {
+    const SEARCH_BYTES: usize = 64;
+    let start = rendered_input.find("taskSource")? + "taskSource".len();
+    let bytes = rendered_input.get(start..)?.as_bytes();
+    let mut run = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_hexdigit() {
+            run += 1;
+            let boundary = bytes
+                .get(index + 1)
+                .is_none_or(|next| !next.is_ascii_hexdigit());
+            if run == 40 && boundary {
+                let oid = &bytes[index + 1 - 40..=index];
+                return Some(String::from_utf8_lossy(oid).to_ascii_lowercase());
+            }
+        } else if index >= SEARCH_BYTES {
+            return None;
+        } else {
+            run = 0;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +747,133 @@ mod tests {
         assert!(
             text.contains("frozen workspace: changed_modules=[\"Project.Types\"]"),
             "{text}"
+        );
+    }
+    fn roster_row(label: &str, id: u64, delivery: &str) -> (String, String) {
+        (
+            format!("{label:?} ({id}@1)"),
+            format!(
+                "  - {label:?} ({id}@1) supervisor=1@1 role=Coding state=running\n    {label} req=0 pending; provider=idle; inbox=open; last_message=none; next={delivery}"
+            ),
+        )
+    }
+
+    #[test]
+    fn status_roster_changes_list_only_rows_whose_rendered_text_changed() {
+        let first = vec![
+            roster_row("worker-a", 2, "await-event"),
+            roster_row("worker-b", 3, "await-event"),
+        ];
+        // 12:00:00Z
+        let snapshot = RosterSnapshot::new(43_200_000, &first);
+
+        // Nothing changed: no rows, only the unchanged line.
+        let unchanged = render_roster_changes(&snapshot, &first);
+        assert_eq!(unchanged, "  2 unchanged since 12:00:00Z");
+
+        // One child's rendered line changed: exactly that row renders.
+        let second = vec![
+            roster_row("worker-a", 2, "await-event"),
+            roster_row("worker-b", 3, "await-cell"),
+        ];
+        let changed = render_roster_changes(&snapshot, &second);
+        assert_eq!(
+            changed,
+            format!("{}\n  1 unchanged since 12:00:00Z", second[1].1)
+        );
+        assert!(!changed.contains("\"worker-a\""), "{changed}");
+
+        // A row that is no longer listed is named, not silently dropped.
+        let gone = render_roster_changes(&snapshot, &first[..1]);
+        assert_eq!(
+            gone,
+            "  - \"worker-b\" (3@1) no longer listed\n  1 unchanged since 12:00:00Z"
+        );
+    }
+
+    #[test]
+    fn status_roster_changes_ignore_a_row_whose_only_change_is_an_age() {
+        let row = |age: &str, fence: &str| {
+            (
+                "\"worker-a\" (2@1)".to_owned(),
+                format!(
+                    "  - \"worker-a\" (2@1) state=running\n    worker-a req=0 pending; provider=idle {age}; inbox=fenced(turn, {fence}); last_message=ref3 presented@11:58:00Z; next=await-event"
+                ),
+            )
+        };
+        let snapshot = RosterSnapshot::new(43_200_000, &[row("3m", "40s")]);
+        assert_eq!(
+            render_roster_changes(&snapshot, &[row("4m", "1m")]),
+            "  1 unchanged since 12:00:00Z"
+        );
+        // A non-age change on the same row still renders it, ages as printed.
+        let (key, moved) = row("4m", "1m");
+        let moved = moved.replace("await-event", "await-cell");
+        assert_eq!(
+            render_roster_changes(&snapshot, &[(key, moved.clone())]),
+            format!("{moved}\n  0 unchanged since 12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn status_revisions_section_renders_every_identity() {
+        let revisions = RevisionIdentities {
+            operator_checkout: Some("1884c03c8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            checked: Some(crate::CheckoutGitDrift {
+                head: "9a1b2c3dbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                dirty_files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
+            }),
+            assignment_base: Some("c427057eccccccccccccccccccccccccccccccccc".into()),
+            children: vec![
+                (
+                    "worker-a".into(),
+                    Some("77aa001ddddddddddddddddddddddddddddddddd".into()),
+                ),
+                ("worker-b".into(), None),
+            ],
+            layer: Some(crate::SourceLayerDrift {
+                active_identity: "5f0e2d4c3b2a19180706".into(),
+                active_generation: 3,
+                disk_identity: "e1d2c3b4a5968778695a".into(),
+                disk_generation: 0,
+                changed_modules: vec!["Project.Shell".into(), "Project.Work".into()],
+            }),
+        };
+        assert_eq!(
+            render_revisions_section(&revisions),
+            "revisions:\n  operator_checkout=1884c03; checked_head=9a1b2c3 dirty=2; assignment_base=c427057\n  source_layer=5f0e2d4c3b2a@3; disk=e1d2c3b4a596@0; drifted=yes\n  a reload would publish: Project.Shell, Project.Work\n  descendant \"worker-a\" checked_head=77aa001\n  descendant \"worker-b\" checked_head=unobserved"
+        );
+
+        // Nothing observed: every identity says so, nothing is inferred.
+        assert_eq!(
+            render_revisions_section(&RevisionIdentities::default()),
+            "revisions:\n  operator_checkout=unobserved; checked_head=unobserved; assignment_base=none\n  source_layer=unobserved\n  a reload would publish: unknown (source layer unobserved)"
+        );
+    }
+
+    #[test]
+    fn status_assignment_base_reads_task_source_from_the_rendered_input() {
+        let oid = "c427057e0123456789abcdef0123456789abcdef";
+        for rendered in [
+            format!("Task {{ taskGroup = \"work\", planPath = \"p\", taskSource = GitOid \"{oid}\", obligation = \"x\" }}"),
+            format!("Task {{taskSource = GitOid {{unGitOid = \"{oid}\"}}}}"),
+            format!("{{\"taskSource\":\"{oid}\"}}"),
+        ] {
+            assert_eq!(
+                assignment_base_from_input(&rendered).as_deref(),
+                Some(oid),
+                "{rendered}"
+            );
+        }
+        assert_eq!(
+            assignment_base_from_input("CommitReview { commit = \"abc\" }"),
+            None
+        );
+        // A longer hex run (a content digest) is not a Git OID.
+        let digest = "a".repeat(64);
+        assert_eq!(
+            assignment_base_from_input(&format!("taskSource = {digest}")),
+            None
         );
     }
 }
