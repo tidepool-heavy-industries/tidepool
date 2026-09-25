@@ -139,3 +139,19 @@ proposals plus a root-contracts-first rule (harness 7bf6d29). Sent the root
 the next milestone: adapter readiness, first vertical slice, harness side
 (amendment 1, minimal amendment 8, CellJob interface, strict typed finalize,
 offline ReplayProvider fixture), with its own release test.
+
+## 12:56Z wake
+
+Alive; 14.4 GiB available; 24 windows; no latched machine; no rejections or
+nudges. The root is executing the adapter-readiness slice exactly as it
+proposed: NEXT.md's top obligation rewritten; the shared cell-boundary
+contract (3a634ae) and leaf stubs (264b5a9) landed first; then one wave of
+disjoint leaves: adapter-replay (39@1), adapter-finalize (38@1), and an
+independent contract review (40@1). The item-13 audit (36@1) is still open.
+
+Delta: none in behaviour. Runtime: two cells at 12:45 took 223 s and 218 s,
+with 90 s and 50 s of compile (6 and 4 compiles) and 130 s / 79 s waits.
+No memo misses and no worker replacement near then (replacements at 08:55 and
+10:26, both at the 1024-request rotation), so the compile time is probably
+daemon queueing while three leaves compile at once. Carded for a look at the
+compiler log's per-request queue time after the run. No note.
