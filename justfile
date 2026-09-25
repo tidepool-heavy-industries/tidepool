@@ -44,6 +44,14 @@ test-lib crate filter="":
     if [[ -n "$2" ]]; then args+=(-E "$2"); fi
     {{ nix }} scripts/battery.sh "${args[@]}"
 
+# Build and run only one binary's unit-test target.
+[positional-arguments]
+test-bin crate binary filter="":
+    #!/usr/bin/env bash
+    args=(-p "$1" --bin "$2")
+    if [[ -n "$3" ]]; then args+=(-E "$3"); fi
+    {{ nix }} scripts/battery.sh "${args[@]}"
+
 # Test shared extractor resolution and daemon lifecycle without compiler builds.
 test-toolchain-scripts:
     {{ nix }} python3 scripts/tests/test_lib_extract.py -v

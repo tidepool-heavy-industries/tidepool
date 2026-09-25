@@ -4,7 +4,8 @@
 Usage: scripts/test-find.py NAME
 
 NAME matches a test function name (substring). Unit tests under a crate's
-src/ run through `just test-lib`; integration tests under tests/ run through
+src/ run through `just test-lib` (binary entry points use `just test-bin`);
+integration tests under tests/ run through
 `just test-target` with the Cargo target (a suite root or a standalone file)
 that compiles them. Nothing is built: this reads `cargo metadata` and the
 sources, so it answers in about a second.
@@ -81,6 +82,9 @@ def command(package, path, name) -> str:
     crate = package["name"]
     pkg_dir = os.path.dirname(package["manifest_path"])
     tests_dir = os.path.join(pkg_dir, "tests") + os.sep
+    for target in package["targets"]:
+        if target["kind"] == ["bin"] and os.path.abspath(target["src_path"]) == path:
+            return f"just test-bin {crate} {target['name']} 'test({name})'"
     if not path.startswith(tests_dir):
         return f"just test-lib {crate} 'test({name})'"
     targets = [t for t in package["targets"] if t["kind"] == ["test"]]
