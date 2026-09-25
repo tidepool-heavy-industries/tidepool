@@ -5620,12 +5620,14 @@ async fn deliver_pending_checked(
     let Some(last) = pending.last() else {
         // The front row is tracked (a native request update/notification).
         // `deliver_tracked_message` below only ever advances that exact
-        // sequence, one at a time; if it is stuck (`Submitted`/`Unconfirmed`
-        // and not resolving), any settlement/watch notice queued behind it
-        // would otherwise never reach the model. Surface those out of band
-        // before attempting the stuck row itself.
-        deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
-            .await?;
+        // sequence, one at a time; if it is stuck in flight (`Submitted` or
+        // `Unconfirmed`), any settlement/watch notice queued behind it would
+        // otherwise never reach the model, so those surface out of band. Any
+        // other phase, a rejection included, stays a hard barrier.
+        if front_tracked_row_is_in_flight(inbox) {
+            deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
+                .await?;
+        }
         return deliver_tracked_message(
             actor,
             inbox,
@@ -5789,6 +5791,24 @@ async fn deliver_pending_checked(
 /// stuck tracked row, pushed to the backend out of order and marked so the
 /// ordinary batch path above does not render them again once the barrier
 /// clears. See `ActorInbox::legacy_notices_beyond_barrier`.
+/// Whether the inbox's front tracked row is in flight: submitted or
+/// unconfirmed, and so expected to resolve. Only then may notices overtake
+/// it; any other phase keeps the barrier.
+fn front_tracked_row_is_in_flight(inbox: &ActorInbox) -> bool {
+    let Some(sequence) = inbox.cursor().checked_add(1) else {
+        return false;
+    };
+    matches!(
+        inbox.observe_receipt(sequence),
+        Ok(exomonad_node::ReceiptLookup::Retained(evidence))
+            if matches!(
+                evidence.phase,
+                exomonad_node::DeliveryPhase::Submitted
+                    | exomonad_node::DeliveryPhase::Unconfirmed
+            )
+    )
+}
+
 async fn deliver_out_of_order_notices(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -5804,6 +5824,20 @@ async fn deliver_out_of_order_notices(
     .await
     .map_err(|error| format!("inbox reader task: {error}"))?
     .map_err(|error| error.to_string())?;
+    // Only notices overtake a stuck row; ordinary messages keep their order.
+    let beyond: Vec<_> = beyond
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message.payload,
+                DurableActorEvent::Typed(
+                    TypedActorEvent::SettlementChanged { .. }
+                        | TypedActorEvent::WatchChanged { .. }
+                        | TypedActorEvent::RequestCancellation { .. }
+                )
+            )
+        })
+        .collect();
     if beyond.is_empty() {
         return Ok(());
     }
