@@ -163,32 +163,7 @@ impl ActorRecoveryJournal {
             tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
                 "repaired torn actor lifecycle journal tail");
         }
-        let mut expected = 1;
-        let mut records = BTreeMap::new();
-        let mut created = false;
-        for row in rows {
-            if row.sequence != expected {
-                return Err(std::io::Error::other(format!(
-                    "actor lifecycle journal sequence mismatch: expected {expected}, found {}",
-                    row.sequence
-                )));
-            }
-            expected += 1;
-            match row.event {
-                EventKind::Created if !created => created = true,
-                EventKind::Created => {
-                    return Err(std::io::Error::other(
-                        "duplicate actor lifecycle journal creation marker",
-                    ));
-                }
-                event if created => apply_event(&mut records, event)?,
-                _ => {
-                    return Err(std::io::Error::other(
-                        "actor lifecycle event precedes durable creation marker",
-                    ));
-                }
-            }
-        }
+        let (records, expected, created) = replay(rows)?;
         if existed && !created {
             return Err(std::io::Error::other(
                 "actor lifecycle journal lacks a durable creation marker",
@@ -207,6 +182,19 @@ impl ActorRecoveryJournal {
             journal.append(&mut state, EventKind::Created)?;
         }
         Ok(journal)
+    }
+
+    /// Replays the journal at `path` for an observer of a live run: the file is
+    /// neither created nor repaired, and a torn final row is left in place and
+    /// excluded from the returned records.
+    pub fn read_observed(path: &std::path::Path) -> std::io::Result<Vec<DurableActorRecord>> {
+        let (rows, _torn) = tidepool_repr::jsonl::read_tail(
+            path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Observe,
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(replay(rows)?.0.into_values().collect())
     }
 
     pub fn records(&self) -> Vec<DurableActorRecord> {
@@ -405,6 +393,40 @@ fn ensure_writable(state: &State) -> std::io::Result<()> {
     }
 }
 
+type Replayed = (BTreeMap<ActorRef, DurableActorRecord>, u64, bool);
+
+/// Validates row order and the creation marker, returning the records, the
+/// next sequence, and whether the creation marker was present.
+fn replay(rows: Vec<Row>) -> std::io::Result<Replayed> {
+    let mut expected = 1;
+    let mut records = BTreeMap::new();
+    let mut created = false;
+    for row in rows {
+        if row.sequence != expected {
+            return Err(std::io::Error::other(format!(
+                "actor lifecycle journal sequence mismatch: expected {expected}, found {}",
+                row.sequence
+            )));
+        }
+        expected += 1;
+        match row.event {
+            EventKind::Created if !created => created = true,
+            EventKind::Created => {
+                return Err(std::io::Error::other(
+                    "duplicate actor lifecycle journal creation marker",
+                ));
+            }
+            event if created => apply_event(&mut records, event)?,
+            _ => {
+                return Err(std::io::Error::other(
+                    "actor lifecycle event precedes durable creation marker",
+                ));
+            }
+        }
+    }
+    Ok((records, expected, created))
+}
+
 fn apply_event(
     records: &mut BTreeMap<ActorRef, DurableActorRecord>,
     event: EventKind,
@@ -568,6 +590,28 @@ mod tests {
             Some("conversation-7")
         );
         assert_eq!(records[0].terminal.as_ref().unwrap().summary, "done");
+    }
+
+    #[test]
+    fn observed_read_leaves_a_live_journal_and_its_torn_tail_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        journal
+            .admit(ActorRef::first(ActorId(4)), &descriptor("observed"), &[])
+            .unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"version\":2,\"sequence\":3,");
+        std::fs::write(&path, &bytes).unwrap();
+        let records = ActorRecoveryJournal::read_observed(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].admission.label, "observed");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let missing = directory.path().join("missing.jsonl");
+        assert!(ActorRecoveryJournal::read_observed(&missing)
+            .unwrap()
+            .is_empty());
+        assert!(!missing.exists());
     }
 
     #[test]

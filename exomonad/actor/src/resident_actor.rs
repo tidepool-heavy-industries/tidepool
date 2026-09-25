@@ -5175,6 +5175,7 @@ where
                                 });
                             }
                             Err(error) if attempt.recoverable => {
+                                tracing::info!(rejection = ?error, "reply rejected");
                                 record_workbench_operation(
                                     unit.operations,
                                     unit.execution,
@@ -5198,6 +5199,7 @@ where
                                 continue;
                             }
                             Err(error) => {
+                                tracing::info!(rejection = ?error, "reply rejected");
                                 record_workbench_operation(
                                     unit.operations,
                                     unit.execution,
