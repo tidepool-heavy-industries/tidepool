@@ -3201,7 +3201,7 @@ where
     /// already-validated declaration into the shared session root for the
     /// first time only now ([`finalize_cell_install`]). Each re-checkout
     /// detects a stale snapshot via
-    /// [`crate::ActorCompileView::compile_relevant_eq`] and an unchanged
+    /// [`crate::ActorCompileView::is_current_for`] and an unchanged
     /// `next_declaration_module()` ([`split_staleness`]).
     ///
     /// The split is attempted once. The first stale re-checkout falls
@@ -3397,7 +3397,7 @@ where
                 // which only still matches when nothing else wrote to this
                 // scope between the check and `reserve_cell_generations`
                 // above; a mismatch here means the two disagree despite
-                // `compile_relevant_eq` passing (should not happen, but is
+                // `is_current_for` passing (should not happen, but is
                 // cheap to guard) and this attempt falls back to an
                 // ordinary compile rather than installing a wrong binder.
                 Some(folded)
@@ -3513,7 +3513,8 @@ where
                     let revalidate_source = source.clone();
                     let revalidate_type_modules = Arc::clone(&type_modules);
                     let revalidate_against = c_view.clone();
-                    let revalidate_candidate_module = snapshot.candidate_module;
+                    let revalidate_candidate_module =
+                        declaration_index.map(|_| snapshot.candidate_module);
                     let revalidation = self
                         .access
                         .with_machine(context.clone(), move |session, context, _| {
@@ -8472,7 +8473,7 @@ struct CellSplitSnapshot {
     /// the retained-imports snapshot an ordinary item compile would take
     /// under `reserve_cell_generations`'s later, fresher checkout. Reusing
     /// this earlier one is safe only because the fold's result is later
-    /// installed through the SAME `compile_relevant_eq` staleness check
+    /// installed through the SAME `is_current_for` staleness check
     /// every other off-checkout compile in this split already goes through;
     /// a stale value here just makes the fold's compile itself fail or the
     /// later re-checkout discard its result, never a wrong install.
@@ -8690,9 +8691,9 @@ enum CellReservation {
 /// [`log_split_stale`] writes for every stale attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitStaleView {
-    /// [`crate::ActorCompileView::compile_relevant_eq`] failed: a scope this
-    /// cell reads (for an inherited-context fork, usually the parent's)
-    /// committed a value, import, or declaration.
+    /// [`crate::ActorCompileView::is_current_for`] failed: a scope this
+    /// cell reads committed a value, import, or declaration, or a value
+    /// module the cell could reach was released.
     CompileView,
     /// The session-wide declaration log's next module advanced, so this
     /// cell's declaration candidate names a generation someone else took.
@@ -8761,7 +8762,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    if !fresh.compile_relevant_eq(compiled_against) {
+    if !fresh.is_current_for(compiled_against) {
         return Some(SplitStaleView::CompileView);
     }
     match candidate_module {
@@ -8807,9 +8808,9 @@ where
     // `next_declaration_module()` is the session-wide declaration log's
     // NEXT generation counter (`SessionLib::next_module`, one monotonic
     // counter for the whole session, not scoped per lexical scope the way
-    // `library`/`compile_relevant_eq` already are — see
-    // `ActorCompileView::compile_relevant_eq`'s doc comment and
-    // `SessionCompileView::compile_relevant_eq`). It only names the
+    // `library`/`is_current_for` already are — see
+    // `ActorCompileView::is_current_for`'s doc comment and
+    // `SessionCompileView::is_current_for`). It only names the
     // candidate module THIS cell's own `Decl` item would claim; a cell
     // with no `Decl` item never reads or writes that module, so another
     // actor committing a declaration and advancing the counter cannot make
@@ -8993,7 +8994,7 @@ fn revalidate_cell_rejection<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     type_modules: &[String],
-    candidate_module: tidepool_repr::SessionModule,
+    candidate_module: Option<tidepool_repr::SessionModule>,
     compiled_against: &crate::ActorCompileView,
 ) -> Result<CellRejectionRevalidation, ResidentActorWorkbenchError>
 where
@@ -9006,12 +9007,8 @@ where
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
-    if let Some(changed) = split_staleness(
-        session,
-        &fresh_view,
-        compiled_against,
-        Some(candidate_module),
-    ) {
+    if let Some(changed) = split_staleness(session, &fresh_view, compiled_against, candidate_module)
+    {
         return Ok(CellRejectionRevalidation::Stale(changed));
     }
     Ok(CellRejectionRevalidation::StillCurrent)
@@ -9059,12 +9056,10 @@ where
         return Err(ResidentActorWorkbenchError::MachineLost);
     }
     let fresh_view = actor_compile_view(session, context, source, type_modules)?;
-    if let Some(changed) = split_staleness(
-        session,
-        &fresh_view,
-        compiled_against,
-        Some(candidate_module),
-    ) {
+    // Only a cell with a `Decl` item claims the next declaration module; the
+    // counter moving under any other cell is another actor's declaration.
+    let candidate = staged.as_ref().map(|_| candidate_module);
+    if let Some(changed) = split_staleness(session, &fresh_view, compiled_against, candidate) {
         return Ok(CellInstall::Stale(changed));
     }
     if let Some(staged) = staged {
@@ -9353,7 +9348,7 @@ where
 /// already-taken `view` with no session or checkout held. A split compile
 /// (see `bind_command_job`) snapshots `view` and reserves `generation` under
 /// a short checkout, calls this off-checkout, then re-checks out only to
-/// revalidate ([`crate::ActorCompileView::compile_relevant_eq`]) and install.
+/// revalidate ([`crate::ActorCompileView::is_current_for`]) and install.
 #[allow(clippy::too_many_arguments)]
 fn compile_host_binding_off_checkout(
     view: &crate::ActorCompileView,
@@ -9908,7 +9903,7 @@ fn compile_block_off_checkout(
     // Search it ahead of every other root so `import Tidepool.Session.Lib.G<g>`
     // resolves against the exact candidate this cell's `Decl` item validated,
     // without touching `compile_view`'s own `root` — that stays the real
-    // session root, so a later `compile_relevant_eq` against a freshly
+    // session root, so a later `is_current_for` against a freshly
     // re-derived view is unaffected by this private, per-attempt directory.
     if let Some(candidate_dir) = candidate_dir {
         prepared.include.insert(0, candidate_dir.to_path_buf());
@@ -10576,7 +10571,7 @@ mod request_tests {
 
         let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
         assert!(
-            fresh_view.compile_relevant_eq(&view),
+            fresh_view.is_current_for(&view),
             "no mutation happened between snapshot and install: views must still match"
         );
 
@@ -10598,7 +10593,7 @@ mod request_tests {
 
     /// A write to the same scope between a split compile's snapshot and its
     /// re-checkout (here, another mount standing in for a concurrent
-    /// actor's install) must be detected by `compile_relevant_eq` before
+    /// actor's install) must be detected by `is_current_for` before
     /// installing the stale compile, and a fresh snapshot must still recover.
     #[test]
     fn a_mutation_between_split_checkouts_invalidates_the_snapshot_and_blocks_install() {
@@ -10640,7 +10635,7 @@ mod request_tests {
 
         let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
         assert!(
-            !fresh_view.compile_relevant_eq(&view),
+            !fresh_view.is_current_for(&view),
             "an interleaved mutation to the same scope must invalidate the snapshot"
         );
 
@@ -10773,7 +10768,7 @@ mod request_tests {
         let fresh_view = actor_compile_view(&split_session, &split_context, &split_source, &[])
             .expect("fresh view");
         assert!(
-            fresh_view.compile_relevant_eq(&snapshot.view),
+            fresh_view.is_current_for(&snapshot.view),
             "no mutation happened between snapshot and install: views must still match"
         );
 
@@ -10918,7 +10913,7 @@ mod request_tests {
         let fresh_view = actor_compile_view(&split_session, &split_context, &split_source, &[])
             .expect("fresh view");
         assert!(
-            fresh_view.compile_relevant_eq(&snapshot.view),
+            fresh_view.is_current_for(&snapshot.view),
             "no mutation happened between snapshot and install: views must still match"
         );
 
@@ -10971,7 +10966,7 @@ mod request_tests {
 
     /// A write to the same scope between an ordinary fragment's split-compile
     /// snapshot and its re-checkout (here, another mount standing in for a
-    /// concurrent actor's install) must be detected by `compile_relevant_eq`
+    /// concurrent actor's install) must be detected by `is_current_for`
     /// before installing the stale compile, and a fresh snapshot must still
     /// recompile and install cleanly — the same invariant
     /// `a_mutation_between_split_checkouts_invalidates_the_snapshot_and_
@@ -11026,7 +11021,7 @@ mod request_tests {
 
         let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
         assert!(
-            !fresh_view.compile_relevant_eq(&snapshot.view),
+            !fresh_view.is_current_for(&snapshot.view),
             "an interleaved mutation to the same scope must invalidate the snapshot"
         );
 
@@ -11057,7 +11052,7 @@ mod request_tests {
         };
         let retry_fresh_view =
             actor_compile_view(&session, &context, &source, &[]).expect("retry fresh view");
-        assert!(retry_fresh_view.compile_relevant_eq(&retry_snapshot.view));
+        assert!(retry_fresh_view.is_current_for(&retry_snapshot.view));
 
         let step = begin_ready_block(
             &mut session,
@@ -11939,7 +11934,7 @@ mod request_tests {
     /// (`compile_cell_items_off_checkout`) and its final re-checkout
     /// (`finalize_cell_install`) — here, another mount standing in for a
     /// concurrent actor's install — must be detected by
-    /// `compile_relevant_eq` before installing the stale compile, and a
+    /// `is_current_for` before installing the stale compile, and a
     /// fresh snapshot must still recover, the same invariant
     /// `a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile`
     /// proves for an ordinary fragment.
@@ -12093,6 +12088,141 @@ mod request_tests {
             retry_install,
             CellInstall::Ready(PreparedCell::Ready { .. })
         ));
+    }
+
+    /// Actors co-resident on one machine share its live value set, but a
+    /// split compile reads only its own scope's frames and inherited tip.
+    /// A sibling actor binding and then retiring, and a forked child of this
+    /// actor binding, between the snapshot and the install must leave the
+    /// split current: the cell installs off-checkout.
+    #[test]
+    fn cell_split_other_actors_commits_between_snapshot_and_install_stay_current() {
+        let (mut session, context, base_source, _root) = host_mount_fixture();
+        let cell = "onlyItem <- pure (1 :: Int)";
+        let sibling_scope = session.mint_isolated_scope();
+        let sibling = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(2)),
+            placement: crate::ActorPlacement {
+                lexical_scope: sibling_scope,
+                ..context.placement
+            },
+            ..context.clone()
+        };
+        let child_scope = session
+            .mint_scope(context.placement.lexical_scope)
+            .expect("fork scope");
+        let child = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(3)),
+            placement: crate::ActorPlacement {
+                lexical_scope: child_scope,
+                ..context.placement
+            },
+            ..context.clone()
+        };
+
+        let (source, snapshot) = snapshot_cell_split(
+            &mut session,
+            &context,
+            base_source.clone(),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot");
+        let (checked, _folded) =
+            check_cell_off_checkout(&snapshot, &source, &context.haskell_effects_alias, cell)
+                .expect("whole-cell check");
+        let reservation = reserve_cell_generations(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            &snapshot,
+            checked.items.len(),
+            None,
+        )
+        .expect("reserve generations");
+        let CellReservation::Ready(ready) = reservation else {
+            panic!("no interleaved mutation yet: the reservation must be fresh");
+        };
+        let CellReservationReady {
+            view,
+            retained,
+            visible_names,
+            declaration: _,
+        } = *ready;
+        let outcome = compile_cell_items_off_checkout(
+            &context,
+            &source,
+            &context.haskell_effects_alias,
+            &checked,
+            cell,
+            view.clone(),
+            &retained,
+            &visible_names,
+            None,
+            None,
+        )
+        .expect("item compile");
+        let CellItemsOutcome::Ready(items) = outcome else {
+            panic!("the item must compile");
+        };
+
+        for (actor, name) in [(&sibling, "siblingValue"), (&child, "childValue")] {
+            mount_text_binding(
+                &mut session,
+                actor,
+                &base_source,
+                &[],
+                name,
+                "another actor's value",
+                None,
+            )
+            .expect("another actor's binding mounts");
+        }
+        let fresh = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        assert_ne!(
+            fresh.injected_module_names(),
+            view.injected_module_names(),
+            "the other actors' binds joined the machine's injected set"
+        );
+        assert_eq!(split_staleness(&session, &fresh, &view, None), None);
+
+        session.retire_scope(sibling_scope);
+
+        let install = finalize_cell_install(
+            &mut session,
+            &context,
+            &source,
+            &[],
+            snapshot.candidate_module,
+            &view,
+            &checked,
+            items,
+            None,
+        )
+        .expect("finalize install");
+        assert!(
+            matches!(install, CellInstall::Ready(PreparedCell::Ready { .. })),
+            "other actors' binds and retirement must not invalidate this actor's split"
+        );
+
+        // The fork inherited a snapshot, not a live link: its parent binding
+        // afterwards leaves the fork's compile view current.
+        let child_before = actor_compile_view(&session, &child, &source, &[]).expect("child view");
+        mount_text_binding(
+            &mut session,
+            &context,
+            &base_source,
+            &[],
+            "parentValue",
+            "the parent's later value",
+            None,
+        )
+        .expect("parent binding mounts");
+        let child_after = actor_compile_view(&session, &child, &source, &[]).expect("child view");
+        assert!(child_after.is_current_for(&child_before));
     }
 
     /// A registry-backed [`ResidentActorWorkbench`] sharing one resident
@@ -13694,7 +13824,7 @@ mod request_tests {
             &context,
             &source,
             &[],
-            snapshot.candidate_module,
+            Some(snapshot.candidate_module),
             &view,
         )
         .expect("revalidate against the unmutated view");
@@ -13721,7 +13851,7 @@ mod request_tests {
             &context,
             &source,
             &[],
-            snapshot.candidate_module,
+            Some(snapshot.candidate_module),
             &view,
         )
         .expect("revalidate against the mutated view");

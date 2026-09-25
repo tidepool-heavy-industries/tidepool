@@ -201,17 +201,18 @@ impl ActorCompileView {
         self.session.next_value_generation()
     }
 
-    /// Whether `other` still names the same source-side environment this
-    /// view compiled against, ignoring `next_value_generation` (a caller
-    /// that reserved its own generation before releasing its checkout
-    /// expects that counter alone to have moved). A split compile takes this
-    /// view, releases its checkout, compiles off-checkout, then re-derives a
-    /// fresh view on re-checkout; a `false` here means something else wrote
-    /// to a scope this compile actually read from, and the compiled result
-    /// must not be installed.
+    /// Whether a split compile made against `compiled_against` may still be
+    /// installed now that the session presents this view. A split compile
+    /// takes a view, releases its checkout, compiles off-checkout, then
+    /// re-derives a fresh view on re-checkout; a `false` here means a scope
+    /// this compile reads changed what the cell imports, or a value module the
+    /// cell could reach is no longer live, and the compiled result must not
+    /// be installed. Other actors' binds and releases do not count, and
+    /// neither does `next_value_generation` alone moving on
+    /// ([`tidepool_runtime::session::SessionCompileView::is_current_for`]).
     #[must_use]
-    pub fn compile_relevant_eq(&self, other: &Self) -> bool {
-        self.session.compile_relevant_eq(&other.session)
+    pub fn is_current_for(&self, compiled_against: &Self) -> bool {
+        self.session.is_current_for(&compiled_against.session)
     }
 
     /// Opaque identity for compiler evidence produced against this exact

@@ -142,6 +142,12 @@ pub struct SessionCompileView {
     /// commits them.
     pub(super) visible_value_names: Vec<(SessionModule, Vec<String>)>,
     pub(super) injected_values: Vec<SessionModule>,
+    /// The part of `injected_values` a turn compiled at `lexical_scope` can
+    /// actually reach: the value modules owned by the frames its lookup reads
+    /// and by its inherited tip. Every other live module is injected only so
+    /// the whole session stays findable; another actor's binds and releases
+    /// move it without touching what this turn compiled against.
+    pub(super) reachable_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
     pub(super) staged_hiding: Vec<(SessionModule, Vec<super::ExportItem>)>,
@@ -157,6 +163,7 @@ impl SessionCompileView {
             names.dedup();
         }
         sort_modules(&mut self.injected_values);
+        sort_modules(&mut self.reachable_values);
         self
     }
 
@@ -226,27 +233,37 @@ impl SessionCompileView {
         self.next_value_generation
     }
 
-    /// Equality over everything a compiled turn actually depended on:
-    /// session identity, scope, lexical root, imports, visible/injected
-    /// value modules, and shadowing. Deliberately excludes
-    /// `next_value_generation`: a caller that reserved its own generation
-    /// before releasing its checkout (`ResidentSession::
+    /// Whether a turn compiled against `compiled_against` may still be
+    /// installed now that the session presents `self` for the same scope.
+    ///
+    /// Everything the turn imported must be identical: session identity,
+    /// scope, lexical root, imports, the declaration module, the visible
+    /// value modules and names, and shadowing. Of the injected value
+    /// modules, only the ones the turn could reach
+    /// (`compiled_against.reachable_values`) must still be live; the rest of
+    /// the session's live set is injected for findability alone, so another
+    /// actor binding or releasing its own values cannot invalidate this turn.
+    /// A newly injected module the turn did not import is likewise harmless.
+    ///
+    /// `next_value_generation` is excluded: a caller that reserved its own
+    /// generation before releasing its checkout (`ResidentSession::
     /// reserve_value_generations_through`) expects that counter to have
-    /// moved on by the time it re-derives a view to install against, and an
-    /// unrelated concurrent reservation must not by itself invalidate this
-    /// turn's compile.
+    /// moved on by the time it re-derives a view to install against.
     #[must_use]
-    pub fn compile_relevant_eq(&self, other: &Self) -> bool {
-        self.session == other.session
-            && self.lexical_scope == other.lexical_scope
-            && self.root == other.root
-            && self.persistent_imports == other.persistent_imports
-            && self.library == other.library
-            && self.visible_values == other.visible_values
-            && self.visible_value_names == other.visible_value_names
-            && self.injected_values == other.injected_values
-            && self.shadowing == other.shadowing
-            && self.staged_hiding == other.staged_hiding
+    pub fn is_current_for(&self, compiled_against: &Self) -> bool {
+        self.session == compiled_against.session
+            && self.lexical_scope == compiled_against.lexical_scope
+            && self.root == compiled_against.root
+            && self.persistent_imports == compiled_against.persistent_imports
+            && self.library == compiled_against.library
+            && self.visible_values == compiled_against.visible_values
+            && self.visible_value_names == compiled_against.visible_value_names
+            && self.shadowing == compiled_against.shadowing
+            && self.staged_hiding == compiled_against.staged_hiding
+            && compiled_against
+                .reachable_values
+                .iter()
+                .all(|module| self.injected_values.contains(module))
     }
 
     /// Use a declaration module that has been validated for a cell but is not
@@ -287,6 +304,7 @@ impl SessionCompileView {
         self.visible_values.push(module);
         self.visible_value_names.push((module, visible_names));
         self.injected_values.push(module);
+        self.reachable_values.push(module);
         self.next_value_generation = module.gen().next();
         self.canonicalize()
     }
@@ -430,6 +448,7 @@ mod tests {
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(5)),
             ],
+            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
@@ -454,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_relevant_eq_ignores_next_value_generation_but_not_visible_values() {
+    fn is_current_for_ignores_other_scopes_values_but_not_imports_or_reachable_modules() {
         let base = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
@@ -463,29 +482,54 @@ mod tests {
             library: Some(SessionModule::lib(Generation(3))),
             visible_values: vec![SessionModule::val(Generation(5))],
             visible_value_names: Vec::new(),
-            injected_values: vec![SessionModule::val(Generation(5))],
+            injected_values: vec![
+                SessionModule::val(Generation(2)),
+                SessionModule::val(Generation(4)),
+                SessionModule::val(Generation(5)),
+            ],
+            reachable_values: vec![
+                SessionModule::val(Generation(2)),
+                SessionModule::val(Generation(5)),
+            ],
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
         }
         .canonicalize();
 
-        // Only the reserved generation moved forward — the compile-relevant
-        // fields a split compile actually depended on did not change, so a
-        // caller that reserved its own generation before releasing its
-        // checkout must not see this as staleness.
+        // Only the reserved generation moved forward: a caller that reserved
+        // its own generation before releasing its checkout must not see this
+        // as staleness.
         let mut reserved_further = base.clone();
         reserved_further.next_value_generation = Generation(9);
-        assert!(base.compile_relevant_eq(&reserved_further));
-        assert!(reserved_further.compile_relevant_eq(&base));
+        assert!(reserved_further.is_current_for(&base));
 
-        // A concurrent write that actually changes what the turn imported
-        // must be caught.
+        // Another scope bound G7 and released G4: neither was reachable from
+        // this turn, so the compile still stands.
+        let mut other_scope_moved = base.clone();
+        other_scope_moved
+            .injected_values
+            .retain(|module| *module != SessionModule::val(Generation(4)));
+        other_scope_moved
+            .injected_values
+            .push(SessionModule::val(Generation(7)));
+        assert!(other_scope_moved.is_current_for(&base));
+
+        // A reachable module (here a shadowed generation of this scope) that
+        // is no longer live must be caught.
+        let mut reachable_released = base.clone();
+        reachable_released
+            .injected_values
+            .retain(|module| *module != SessionModule::val(Generation(2)));
+        assert!(!reachable_released.is_current_for(&base));
+
+        // A concurrent write that changes what the turn imported must be
+        // caught.
         let mut visible_changed = base.clone();
         visible_changed
             .visible_values
             .push(SessionModule::val(Generation(7)));
-        assert!(!base.compile_relevant_eq(&visible_changed));
+        assert!(!visible_changed.is_current_for(&base));
 
         let mut shadowing_changed = base.clone();
         shadowing_changed
@@ -493,13 +537,11 @@ mod tests {
             .push(super::super::ExportItem::Value {
                 name: "interloper".into(),
             });
-        assert!(!base.compile_relevant_eq(&shadowing_changed));
+        assert!(!shadowing_changed.is_current_for(&base));
 
-        let mut injected_changed = base.clone();
-        injected_changed
-            .injected_values
-            .push(SessionModule::val(Generation(2)));
-        assert!(!base.compile_relevant_eq(&injected_changed));
+        let mut library_changed = base.clone();
+        library_changed.library = Some(SessionModule::lib(Generation(8)));
+        assert!(!library_changed.is_current_for(&base));
     }
 
     #[test]
@@ -513,6 +555,7 @@ mod tests {
             visible_values: vec![SessionModule::val(Generation(5))],
             visible_value_names: Vec::new(),
             injected_values: vec![SessionModule::val(Generation(5))],
+            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
@@ -548,6 +591,7 @@ mod tests {
                 vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
             )],
             injected_values: vec![old],
+            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
