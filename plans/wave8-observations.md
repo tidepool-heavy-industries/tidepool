@@ -36,3 +36,14 @@ one candidate), and the root is 25 minutes into one turn running cargo
 tests, past its own 15-minute rule, so the gate's replies wait unseen in its
 queue. Costliest delta: the root's long turn. Sent one note into the root's
 pane (lands after its next tool call): end the turn; keep one reviewer.
+
+## 16:19Z wake: milestone done, interview sent
+
+The note landed: the root ended its long turn, merged the reviewed offline
+release test (703005f, 15:49Z) and wrote a stop handoff (83624df). The
+adapter-readiness harness-side slice is integrated, 1h12m after launch
+(finalize 14:39Z, Engine seam 14:46Z, Store-backed replay 15:14Z, release
+test 15:49Z). All children have retired; only the root remains. Sent the
+wave-8 interview (fastest and why, waits, the double review on the gate,
+rules that helped or hurt, what the exomonad-side adapter needs from the
+harness, next milestone, open).
