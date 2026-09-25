@@ -111,6 +111,7 @@ serial_test = "3"
 static_assertions = "1.1"
 syn = { version = "3", features = ["full"] }
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros"] }
 tracing = "0.1"
