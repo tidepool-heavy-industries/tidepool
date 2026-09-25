@@ -554,3 +554,36 @@ required before history-discarding Git operations, refusal text included
 work implements what they need. Sequence: F and G first (no overlap with the
 delivery lanes), A/B/C after the delivery-fence lane lands (same inbox
 rows), D with per-actor machines, E as its own design.
+
+## Fork-cell latency (wave 5, root 54.7 s, core lead 39.0 s)
+
+Timelines from the host and compiler logs; no per-child compiles, no
+provider startup inside either cell (both launched Codex after the cell
+settled), git capture 1 to 2 s total.
+- **Root, about 40 s:** two per-worker memo misses (`required-interface-not-
+  retained`, requests f20f1c on worker 1 and f6036b on worker 0). Earlier
+  requests compiled about 60 library modules with no interface because no
+  later home module imported them (`registerPreparedInterface`,
+  bridge/haskell/src/Tidepool/GhcPipeline.hs ~2361-2375); the cell's new
+  session value modules did import them, so a memo hit then needed an
+  interface (~1656-1665) and every module recompiled from scratch. The
+  worker-0 miss was the display render, which runs inside `with_machine`
+  and held the checkout 24.6 s. Fix: with a resident memo active, register
+  and keep the interface for every freshly compiled home module (about
+  35 ms each, absorbed by pre-warm). Est. 55 s to about 15 s.
+- **Core lead, about 22 s:** the split-compile stale-retry loop. An
+  InheritedContext fork shares the root's scope chain; the root committed a
+  cell every 7 to 10 s, `compile_relevant_eq` (runtime/src/session/view.rs:239)
+  compares visible_values, so each commit invalidated the install; three
+  attempts of 8 sequential GHC round trips (~7 s each, MAX_SPLIT_ATTEMPTS = 3,
+  resident_workbench.rs ~3203) all went stale, then the fourth ran under the
+  checkout. Per-actor machines do not touch this (inherited forks are
+  ineligible). Fix: fall through to the single-checkout compile after the
+  first Stale. Est. 39 s to about 25 s. Follow-ups: narrow the stale test to
+  "a newly visible module exports a name the cell references" (attempt 1
+  would install, ~22 s); batch the per-item GHC requests (0.5 s fixed cost
+  each).
+- **Per provider child, about 2 s unlogged** inside `prepare_captured` /
+  `settle_publication` (actor_host/workspace.rs ~686-706: bubblewrap
+  prepare_view, mounts, install_view). Could leave the cell and settle with
+  the provider launch. Needs a phase log first.
