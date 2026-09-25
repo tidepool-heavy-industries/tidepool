@@ -685,3 +685,4 @@ plans/wave6-root-interview-digest.md)
   goal-style mechanism needs; wait for the new harness. Interim (lane
   turn-end-reminder): the host itself pushes one line when a provider turn
   ends with the actor's own request still open.
+- **Possibly pre-existing test failure:** `invalid_label_literals_fail_before_actor_side_effects` fails with `watch ("Bad Label" :: WatchLabel)` throwing InvalidWatchLabel instead of returning a rejection (seen by the model-facing-text lane on its branch; not confirmed on main). Check at the next gate.
