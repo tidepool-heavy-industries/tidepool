@@ -42,7 +42,98 @@ tidepool_extract_worker_sources() {
     "$PWD/bridge/haskell/lib/Tidepool/Double.hs"
 }
 
+# Print, relative to the checkout root, every path whose content determines
+# the persistent daemon's producer: the Rust frontend (its crate, the workspace
+# manifest, lockfile, toolchain pin and cargo config, plus the Haskell sources
+# it include_str!s, which lie under bridge/haskell/src), the worker's build
+# inputs (tidepool_extract_worker_sources plus the cabal project files), and the
+# Nix inputs that pick the GHC libdir. The eval stdlib is not listed: requests
+# carry it as an include path from the caller's own checkout.
+tidepool_extract_producer_sources() {
+  local source
+  while IFS= read -r source; do
+    printf '%s\n' "${source#"$PWD"/}"
+  done < <(tidepool_extract_worker_sources)
+  printf '%s\n' \
+    bridge/haskell/cabal.project \
+    bridge/haskell/cabal.project.freeze \
+    tidepool/extract-cmd \
+    Cargo.toml \
+    Cargo.lock \
+    rust-toolchain.toml \
+    .cargo/config.toml \
+    flake.nix \
+    flake.lock \
+    nix
+}
+
+# Content fingerprint of this checkout's producer sources, including
+# uncommitted and untracked (non-ignored) edits: each file's path and Git blob
+# hash, hashed together. It is location-independent, so a linked worktree and
+# the main checkout agree whenever those files agree. Prints nothing and fails
+# outside a Git checkout.
+tidepool_extract_source_fingerprint() (
+  set -o pipefail
+  local paths=() files=() file
+  mapfile -t paths < <(tidepool_extract_producer_sources)
+  while IFS= read -r file; do
+    [ -f "$file" ] && files+=("$file")
+  done < <(git ls-files --cached --others --exclude-standard -- "${paths[@]}" 2>/dev/null | sort -u)
+  [ "${#files[@]}" -gt 0 ] || return 1
+  printf '%s\n' "${files[@]}" | git hash-object --stdin-paths | paste <(printf '%s\n' "${files[@]}") - \
+    | sha256sum | cut -d' ' -f1
+)
+
+# Adopt the persistent daemon's extractor when this checkout's producer sources
+# match the ones it was built from: export its frontend and worker as
+# TIDEPOOL_EXTRACT/TIDEPOOL_EXTRACT_WORKER and set
+# TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=1 so start_battery_daemon reuses its
+# socket without probing. The recorded frontend must still report the recorded
+# producer, so a rebuild in the daemon's own checkout since its start is not
+# mistaken for the running daemon.
+_adopt_persistent_daemon_extractor() {
+  local dir fingerprint recorded exe worker producer
+  [ "${TIDEPOOL_EXTRACT_NO_DAEMON:-0}" != "1" ] || return 1
+  dir="$(_persistent_daemon_dir)"
+  [ -f "$dir/sources" ] && [ -f "$dir/daemon.exe" ] && [ -f "$dir/producer" ] || return 1
+  _battery_daemon_socket_alive "$dir/extract.sock" || return 1
+  recorded="$(cat "$dir/sources" 2>/dev/null)" || return 1
+  fingerprint="$(tidepool_extract_source_fingerprint)" || return 1
+  if [ "$fingerprint" != "$recorded" ]; then
+    TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER=1
+    return 1
+  fi
+  exe="$(cat "$dir/daemon.exe")"
+  worker="$(cat "$dir/daemon.worker" 2>/dev/null || true)"
+  [ -x "$exe" ] || return 1
+  [ -z "$worker" ] || [ -x "$worker" ] || return 1
+  producer="$(
+    export TIDEPOOL_EXTRACT="$exe"
+    if [ -n "$worker" ]; then export TIDEPOOL_EXTRACT_WORKER="$worker"; else unset TIDEPOOL_EXTRACT_WORKER; fi
+    _current_producer_hex 2>/dev/null
+  )" || return 1
+  [ "$producer" = "$(cat "$dir/producer")" ] || return 1
+  TIDEPOOL_EXTRACT="$exe"
+  if [ -n "$worker" ]; then
+    TIDEPOOL_EXTRACT_WORKER="$worker"
+    export TIDEPOOL_EXTRACT_WORKER
+  fi
+  TIDEPOOL_EXTRACT_SOURCES="$fingerprint"
+  TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=1
+  export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_SOURCES
+  echo "==> producer sources match the persistent compile daemon's; using its extractor $exe" >&2
+}
+
+# Resolves and validates $TIDEPOOL_EXTRACT (and $TIDEPOOL_EXTRACT_WORKER),
+# building both halves from this checkout when unset. Test entry points pass
+# --prefer-persistent-daemon: when this checkout's producer sources match the
+# live persistent daemon's, they adopt its extractor instead of building one
+# whose path-bearing producer identity could never match it.
 resolve_tidepool_extract() {
+  local _prefer_persistent=0
+  [ "${1:-}" != "--prefer-persistent-daemon" ] || _prefer_persistent=1
+  TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=0
+  TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER=0
   # Captured BEFORE the build-if-unset branch below: the staleness check
   # after it only applies to a caller-SUPPLIED TIDEPOOL_EXTRACT — a binary
   # this function just built itself is trivially fresh (see
@@ -51,8 +142,16 @@ resolve_tidepool_extract() {
   local _was_preset=0
   [ -n "${TIDEPOOL_EXTRACT:-}" ] && _was_preset=1
 
+  if [ -z "${TIDEPOOL_EXTRACT:-}" ] && [ "$_prefer_persistent" = 1 ]; then
+    _adopt_persistent_daemon_extractor || true
+  fi
+
   if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
     echo "==> TIDEPOOL_EXTRACT not set — building the Rust frontend and Haskell worker"
+    # Recorded by daemon_start_persistent so later checkouts with the same
+    # producer sources can reuse the daemon it starts from this build.
+    TIDEPOOL_EXTRACT_SOURCES="$(tidepool_extract_source_fingerprint 2>/dev/null)" || TIDEPOOL_EXTRACT_SOURCES=""
+    export TIDEPOOL_EXTRACT_SOURCES
     # The worker loads Tidepool modules at runtime, so it needs the repository
     # with-packages compiler rather than a bare GHC. The Just recipes enter the
     # Nix shell that provides it; refuse an incomplete ambient shell instead of
@@ -110,7 +209,10 @@ resolve_tidepool_extract() {
     exit 1
   fi
 
-  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
+  # An adopted worker was matched by source content, not by this checkout's
+  # file times, so the mtime check below does not apply to it.
+  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ] \
+    && [ "$TIDEPOOL_PERSISTENT_DAEMON_ADOPTED" != 1 ]; then
     _worker_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT_WORKER" 2>/dev/null || echo 0)"
     if [ "$_worker_mtime" -gt 946684800 ]; then
       # `bridge/haskell/lib` is loaded by the worker at evaluation time; it is not a
@@ -337,14 +439,21 @@ start_battery_daemon() {
   unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
 
   # No caller-supplied socket: check for a `just daemon-start`-managed
-  # persistent daemon before booting a per-run one. Reused only when it is
-  # both alive and current (producer identity matches this invocation's
-  # resolved $TIDEPOOL_EXTRACT/$TIDEPOOL_EXTRACT_WORKER); a stale one is left
-  # running (never killed out from under whoever started it) and this run
-  # falls back to its own per-run daemon below.
-  local _persistent_sock _persistent_producer_file
+  # persistent daemon before booting a per-run one. Reused when
+  # resolve_tidepool_extract adopted its extractor (matching producer
+  # sources), or when it is alive and current (producer identity matches this
+  # invocation's resolved $TIDEPOOL_EXTRACT/$TIDEPOOL_EXTRACT_WORKER). A stale
+  # one is left running (never killed out from under whoever started it) and
+  # this run falls back to its own per-run daemon below, capped at one GHC
+  # worker so it fits beside the warm one.
+  local _persistent_sock _persistent_producer_file _per_run_args=()
   _persistent_sock="$(_persistent_daemon_dir)/extract.sock"
   _persistent_producer_file="$(_persistent_daemon_dir)/producer"
+  if [ "${TIDEPOOL_PERSISTENT_DAEMON_ADOPTED:-0}" = 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
+    export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$_persistent_sock"
+    echo "==> reusing persistent compile daemon at $_persistent_sock (producer sources match)" >&2
+    return 0
+  fi
   if _battery_daemon_socket_alive "$_persistent_sock"; then
     local _current_producer
     _current_producer="$(_current_producer_hex 2>/dev/null)" || _current_producer=""
@@ -354,7 +463,13 @@ start_battery_daemon() {
       echo "==> reusing persistent compile daemon at $_persistent_sock" >&2
       return 0
     fi
-    echo "==> persistent compile daemon at $_persistent_sock is stale (producer mismatch) — run 'just daemon-stop && just daemon-start' to refresh it; starting a per-run daemon instead" >&2
+    local _why="producer mismatch"
+    [ "${TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER:-0}" != 1 ] || _why="producer sources differ from this checkout"
+    case " ${TIDEPOOL_DAEMON_ARGS:-} " in
+      *" --workers "*) ;;
+      *) _per_run_args=(--workers 1) ;;
+    esac
+    echo "==> persistent compile daemon at $_persistent_sock is stale ($_why) — run 'just daemon-stop && just daemon-start' to refresh it; starting a per-run daemon${_per_run_args[*]:+ with one GHC worker} instead" >&2
   fi
 
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
@@ -380,7 +495,7 @@ start_battery_daemon() {
   # Rotation, RSS, and worker-count flags are omitted so the frontend owns
   # their defaults (a persistent daemon defaults to several concurrent GHC
   # workers; see tidepool/extract-cmd/CLAUDE.md).
-  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} >"$log" 2>&1 &
+  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" "${_per_run_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   BATTERY_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still
@@ -500,6 +615,12 @@ teardown_battery_daemon() {
 #   compiler.log  - the daemon's --log-path detailed/trace log
 #   producer      - hex producer identity recorded at the daemon's last
 #                   successful start, used to detect staleness below
+#   daemon.exe    - the frontend it runs (TIDEPOOL_EXTRACT)
+#   daemon.worker - the worker it runs (TIDEPOOL_EXTRACT_WORKER, may be empty)
+#   sources       - tidepool_extract_source_fingerprint of the checkout that
+#                   built them; absent when the extractor was supplied
+#                   externally. Checkouts with the same fingerprint adopt this
+#                   daemon (_adopt_persistent_daemon_extractor).
 
 # Mirrors tidepool-toolchain's paths::persistent_compile_daemon_socket, which
 # `exomonad init`'s preflight reads; change both together.
@@ -549,6 +670,16 @@ _current_producer_hex() {
 # daemon left in the directory is cleaned up (recorded pid terminated if
 # still alive) before a fresh one is launched. Must run after
 # resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
+_record_persistent_daemon_sources() {
+  local dir="$1"
+  printf '%s\n' "${TIDEPOOL_EXTRACT_WORKER:-}" >"$dir/daemon.worker"
+  if [ -n "${TIDEPOOL_EXTRACT_SOURCES:-}" ]; then
+    printf '%s\n' "$TIDEPOOL_EXTRACT_SOURCES" >"$dir/sources"
+  else
+    rm -f "$dir/sources"
+  fi
+}
+
 daemon_start_persistent() {
   local dir sock pidfile log compiler_log producer_file
   dir="$(_persistent_daemon_dir)"
@@ -567,6 +698,9 @@ daemon_start_persistent() {
 
   if _battery_daemon_socket_alive "$sock"; then
     if [ -f "$producer_file" ] && [ "$(cat "$producer_file" 2>/dev/null)" = "$current_producer" ]; then
+      # The producer matches this checkout's fresh build, so its sources
+      # describe the running daemon too; record them if an older start did not.
+      [ -f "$dir/sources" ] || _record_persistent_daemon_sources "$dir"
       export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
       echo "==> persistent compile daemon already running: socket=$sock" >&2
       echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
@@ -633,6 +767,7 @@ daemon_start_persistent() {
   # calls resolve_tidepool_extract itself) can still ask THIS daemon to stop
   # gracefully with its own binary, matching producer_file's convention.
   printf '%s\n' "$TIDEPOOL_EXTRACT" >"$dir/daemon.exe"
+  _record_persistent_daemon_sources "$dir"
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
   echo "==> persistent compile daemon up: pid=$pid socket=$sock" >&2
   echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
@@ -690,5 +825,5 @@ daemon_stop_persistent() {
       fi
     fi
   fi
-  rm -f "$sock" "$pidfile" "$producer_file" "$exe_file"
+  rm -f "$sock" "$pidfile" "$producer_file" "$exe_file" "$dir/daemon.worker" "$dir/sources"
 }

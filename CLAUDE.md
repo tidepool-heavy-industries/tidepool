@@ -73,6 +73,12 @@ current extractor and worker; after a rebuild they start their own daemon
 instead, so a restart only restores warmth. Other agents and test runs share
 the persistent daemon: restart it once, at a quiet point, never per parcel.
 `just daemon-stop` lets an in-flight compile finish before the daemon exits.
+Test recipes in any checkout, linked worktrees included, reuse the persistent
+daemon and its extractor whenever the checkout's extractor sources match the
+fingerprint it recorded at start (`scripts/lib-extract.sh`,
+`tidepool_extract_producer_sources`), without building an extractor of their
+own. A checkout whose extractor sources differ starts its own daemon capped
+at one GHC worker beside the warm one.
 Leave the host cargo config's incremental compilation on (no
 `CARGO_INCREMENTAL=0`) and cap jobs to fit beside the daemon's GHC workers —
 sized from memory actually available at daemon start (up to three 7 GiB

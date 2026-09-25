@@ -83,10 +83,10 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    truncate_preview_at_line, HostBindingType, HostCarrier, HostPayload, PendingPreparedInstall,
-    PendingPreparedMode, ProgramProvenance, ProgramProvenanceError, ResidentDisplayBundle,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, SessionRunContext,
+    truncate_preview_at_line, HostBindingType, HostCarrier, HostPayload, PendingDisplayInstall,
+    PendingPreparedInstall, PendingPreparedMode, ProgramProvenance, ProgramProvenanceError,
+    ResidentDisplayBundle, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
+    ResidentSession, RootCustody, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};

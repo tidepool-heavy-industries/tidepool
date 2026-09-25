@@ -932,6 +932,41 @@ impl PendingPreparedInstall {
     }
 }
 
+/// Everything [`ResidentSession::snapshot_display_bundle`] produces under a
+/// machine checkout for a display bundle's off-checkout Cranelift compile;
+/// the display counterpart of [`PendingPreparedInstall`].
+pub struct PendingDisplayInstall {
+    snapshot: super::prepared::InstallSnapshot,
+    provenance: Arc<ProgramProvenance>,
+    generation: Generation,
+}
+
+impl PendingDisplayInstall {
+    /// Step (b): compile the bundle's linked program off any checkout.
+    pub fn compile_off_checkout(
+        &mut self,
+    ) -> Result<
+        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        tidepool_codegen::prepared_program::CompileError,
+    > {
+        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    }
+}
+
+/// A display bundle's three binders come from one compiler value module.
+fn check_display_bundle_binders(
+    page: &BoundBinder,
+    metadata: &BoundBinder,
+    alias: &BoundBinder,
+) -> Result<(), ResidentError> {
+    if page.module != metadata.module || page.module != alias.module {
+        return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+            "display bundle binders do not share one compiler value module".into(),
+        ))));
+    }
+    Ok(())
+}
+
 /// The `Send` projection of one prepared run that crosses the eval thread:
 /// handles are ids, the observed value is an owned tree.
 pub(crate) enum PreparedRun {
@@ -1018,9 +1053,20 @@ pub(crate) enum SettlePlan {
 /// the walk against a deeply nested value even when each layer prints short.
 const RETAINED_PREVIEW_MAX_DEPTH: usize = 8;
 
-/// Note [`truncate_preview_at_line`] appends after a cut, so a reader never
-/// mistakes a truncated preview for the whole value.
-const PREVIEW_TRUNCATED_NOTE: &str = "\n[reply preview truncated]";
+/// The note [`truncate_preview_at_line`] appends after a cut: it names the
+/// budget, so a reader never mistakes a cut preview for the whole value, and
+/// says where the rest is. A preview within budget carries no note.
+fn preview_truncated_note(budget: usize) -> String {
+    let budget = if budget.is_multiple_of(1024) {
+        format!("{} KiB", budget / 1024)
+    } else {
+        format!("{budget}-byte")
+    };
+    format!(
+        "\n[reply exceeds the {budget} notice budget; shown to the last whole line. \
+         `pollResponse` on the retained `Response` has the complete value.]"
+    )
+}
 
 /// Append `text` to `out`, spending it from `budget` one byte at a time; once
 /// `budget` reaches zero the remainder is dropped and `…` is appended in its
@@ -1048,7 +1094,7 @@ fn push_bounded(out: &mut String, text: &str, budget: &mut usize) {
 
 /// Enforce `budget` characters (bytes) on a finished preview, cutting at the
 /// last line boundary at or before the limit rather than mid-line, and
-/// appending [`PREVIEW_TRUNCATED_NOTE`] when anything was cut. A value with
+/// appending [`preview_truncated_note`] when anything was cut. A value with
 /// no newline before `budget` cuts at the nearest earlier char boundary
 /// instead -- still bounded, just without a line to cut at.
 ///
@@ -1066,7 +1112,7 @@ pub fn truncate_preview_at_line(text: String, budget: usize) -> String {
         cut -= 1;
     }
     let mut truncated = text[..cut].to_string();
-    truncated.push_str(PREVIEW_TRUNCATED_NOTE);
+    truncated.push_str(&preview_truncated_note(budget));
     truncated
 }
 
@@ -3915,11 +3961,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
-        if page.module != metadata.module || page.module != alias.module {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                "display bundle binders do not share one compiler value module".into(),
-            ))));
-        }
+        check_display_bundle_binders(page, metadata, alias)?;
         let prepared = code.prepared;
         let provenance = self.provenance_for(&code.sites)?;
         self.state
@@ -3935,6 +3977,89 @@ where
             install_prepared_started.elapsed(),
             0,
         );
+        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+    }
+
+    /// Step (a) of the off-checkout split for a display bundle, the
+    /// counterpart of [`Self::snapshot_run_prepared`]: merge `code`'s table,
+    /// claim `generation`, and resolve and link the install without the
+    /// Cranelift compile. Compile the result with
+    /// [`PendingDisplayInstall::compile_off_checkout`] with no checkout
+    /// held, then finish through [`Self::revalidate_and_run_display_bundle`].
+    /// The caller checks [`Self::prepared_machine_ready`] first; a session
+    /// with no machine is refused with `MachineNotInstalled`.
+    pub fn snapshot_display_bundle(
+        &mut self,
+        code: TurnCode<'static>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+    ) -> Result<PendingDisplayInstall, ResidentError> {
+        check_display_bundle_binders(page, metadata, alias)?;
+        let prepared = code.prepared;
+        let provenance = self.provenance_for(&code.sites)?;
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        self.state.set_val_gen(generation);
+        let snapshot = self
+            .state
+            .snapshot_install_prepared(prepared.into_owned())?
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        Ok(PendingDisplayInstall {
+            snapshot,
+            provenance,
+            generation,
+        })
+    }
+
+    /// Step (c) of the display-bundle split: revalidate `pending`'s imports
+    /// under this checkout and, when still current, install `compiled` and
+    /// run the bundle exactly as [`Self::run_display_bundle_with_sites`]
+    /// does. `Ok(None)` means an import changed (or the machine went away)
+    /// since the snapshot; the caller recompiles from a fresh snapshot.
+    pub fn revalidate_and_run_display_bundle(
+        &mut self,
+        pending: PendingDisplayInstall,
+        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        page: &BoundBinder,
+        alias: &BoundBinder,
+    ) -> Result<Option<ResidentDisplayBundle>, ResidentError> {
+        let PendingDisplayInstall {
+            snapshot,
+            provenance,
+            generation,
+        } = pending;
+        let install_started = std::time::Instant::now();
+        let Some(program) = self
+            .state
+            .revalidate_and_install_prepared(snapshot, compiled)?
+        else {
+            return Ok(None);
+        };
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_INSTALL_PREPARED,
+            install_started.elapsed(),
+            0,
+        );
+        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+            .map(Some)
+    }
+
+    /// Run an installed (and pinned) display-bundle program and settle its
+    /// three fields: the page is bound before metadata is forced, then the
+    /// `cellDisplay` alias is published over the page's root.
+    fn run_installed_display_bundle(
+        &mut self,
+        program: ProgramId,
+        provenance: Arc<ProgramProvenance>,
+        page: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+    ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
         let park = ParkPolicy {
@@ -4937,4 +5062,29 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
         "resident turn panicked: {detail}"
     ))))
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::truncate_preview_at_line;
+
+    #[test]
+    fn reply_within_budget_renders_whole_without_a_note() {
+        let reply = "Candidate {\n  candidateCommit = 3f2a\n}".to_owned();
+        assert_eq!(truncate_preview_at_line(reply.clone(), 8192), reply);
+    }
+
+    #[test]
+    fn reply_over_budget_is_cut_at_a_line_and_names_the_budget() {
+        let line = "x".repeat(99);
+        let reply = vec![line.as_str(); 100].join("\n");
+        let rendered = truncate_preview_at_line(reply, 8192);
+        let (body, note) = rendered.split_once("\n[").expect("a truncation note");
+        assert!(body.len() <= 8192 && body.ends_with(&line), "{body}");
+        assert_eq!(
+            note,
+            "reply exceeds the 8 KiB notice budget; shown to the last whole line. \
+             `pollResponse` on the retained `Response` has the complete value.]"
+        );
+    }
 }

@@ -685,3 +685,51 @@ plans/wave6-root-interview-digest.md)
   goal-style mechanism needs; wait for the new harness. Interim (lane
   turn-end-reminder): the host itself pushes one line when a provider turn
   ends with the actor's own request still open.
+- **Possibly pre-existing test failure:** `invalid_label_literals_fail_before_actor_side_effects` fails with `watch ("Bad Label" :: WatchLabel)` throwing InvalidWatchLabel instead of returning a rejection (seen by the model-facing-text lane on its branch; not confirmed on main). Check at the next gate.
+- **Codex shows queued hosted input only at turn end, one per turn end
+  (update-pending investigation, wave 6):** `ext/queue/src/service.rs`
+  delivers only from `dispatch_if_idle` (the idle hook) and a 10 s poll
+  that returns while the thread runs, and returns after starting one item,
+  so `startOrSteer` never steers a running turn. Effect: every
+  notification, request update and assignment to a busy actor waits for
+  its turn end (3.5 to 51 minutes observed), and each turn end shows only
+  one queued message. It is the cause of the UpdatePending retries (5 of 6
+  refusals came before the update was shown). Fork fix, three lines: steer
+  a head-of-queue startOrSteer host item into a Running thread (admit and
+  poll), and keep looping in dispatch_if_idle after Started/Steered; the
+  host's hold during computing cells stays. Needs a Codex rebuild and
+  redeploy: operator decision. Interim: refusal text now says queued
+  messages show only at a turn end (resident_actor.rs `settlement_refusal`).
+
+## Wave 6 trajectory: what happened versus what should have (2026-09-25)
+
+Run 02a1c2fd, 3h15m, 51 actors. Remaining obligations at launch: (b) live
+gates, (c) settings items, (d) Compactor.
+- **Nothing from (c) or (d) reached master.** The core lead (2@1) did the
+  work: settings impl and tests by about 05:10Z, a Compactor implementation
+  twice (the first blocked on schemars, then a fresh one), Here-fork claim
+  snapshots, and ten reviews. Its only reply to the root was the opening plan
+  at 04:57Z; it never delivered, and its own branch integrated only the
+  settings test. Ideal: each reviewed slice integrated to master within one
+  turn and delivered, so (c) lands in the first hour and (d) in the second.
+  Levers: lead prompt (deliver per reviewed slice; never batch to the end),
+  the root pulling a lead that has reviewed candidates and no delivery.
+- **Review churn.** Settings: six reviews (two wasted on the CommitReview
+  shape; most on an expected-red test). Item-2 trace: six reviews of one
+  opt-in trace slice over two hours. Ideal: one review per candidate plus one
+  re-review after a repair by the same reviewer (reviewAgain); an expected-red
+  test is confirmed red, not reviewed. Levers: review policy in the lead and
+  owner prompts.
+- **The root's effort went to (b)'s instrument, not to integration.** Three
+  hours on an opt-in transport trace that ended with a failed manual trace
+  (HTTP 400), while the core lead's reviewed (c)/(d) work sat unmerged. Ideal:
+  the root is the integration owner first; bounded tooling for a live gate
+  runs beside it, not instead of it.
+- **Handoff lost the work.** NEXT.md's table (written from commit messages)
+  says (c) is unassigned, so wave 7 restarted both from scratch; the operator
+  pointed it at the stranded branches at 08:20Z. Lever: stopping a run records
+  every unmerged candidate branch with its last commit in NEXT.md.
+- **Slow loop, not wrong loop:** the core lead's cells took 270 to 320 s,
+  mostly checkout wait, and messages to busy actors waited for turn ends; both
+  stretched every cycle (off-checkout fix live in wave 7; mailbox classes are
+  a harness amendment).

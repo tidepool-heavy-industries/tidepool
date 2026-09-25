@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/lib-extract.sh
 source scripts/lib-steps.sh
-resolve_tidepool_extract
+resolve_tidepool_extract --prefer-persistent-daemon
 prepare_battery_artifacts check just check
 nextest_pid=""
 cleanup_exit() {

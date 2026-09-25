@@ -56,13 +56,14 @@ module Tidepool.Agent.Reply.Internal
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Kind (Type)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Void (Void)
 import Prelude
 import Tidepool.Duration (Duration)
 import Tidepool.Agent.Assignment (Label, SettlementReporting (..), labelText)
-import Tidepool.Agent.Ref (AgentRef)
-import Tidepool.Agent.Launch (AdmissionReceipt, allocatedPath)
-import Tidepool.Inspection.Display (WorkbenchDisplay (workbenchActivationDisplay))
+import Tidepool.Agent.Ref (AgentRef, agentAddressText)
+import Tidepool.Agent.Launch (ActorPath (..), AdmissionReceipt, allocatedPath)
+import Tidepool.Inspection.Display (Display (..), WorkbenchDisplay (workbenchReplyDisplay), opaqueHandle)
 
 import Tidepool.Internal.ExitCell
   ( ExitCell
@@ -91,17 +92,34 @@ instance Show (Response result) where
     "Response { request = " <> show request <> ", actor = " <> show actor
       <> maybe "" (\receipt -> ", path = " <> show (allocatedPath receipt)) admission <> " }"
 
+-- | The owner's handle, as the workbench shows it: which request, which
+-- actor, and where that actor runs. 'Show' keeps the constructor form.
+instance Display (Response result) where
+  displayTree (Response (RequestId request) actor admission _) =
+    opaqueHandle $
+      "response to request " <> tshow request <> " from agent " <> agentAddressText actor
+        <> maybe "" (\receipt -> let ActorPath path = allocatedPath receipt in ", path " <> path) admission
+
 newtype Reply result = Reply RequestId
   deriving (Show, Eq)
+
+instance Display (Reply result) where
+  displayTree (Reply (RequestId request)) = opaqueHandle ("reply for request " <> tshow request)
 
 -- | Independent observers carry their own last-seen revision. Handles do not
 -- contain a shared read position and observing never consumes an update.
 newtype Progress (progress :: Type) = Progress RequestId
   deriving (Show, Eq)
 
+instance Display (Progress progress) where
+  displayTree (Progress (RequestId request)) = opaqueHandle ("progress of request " <> tshow request)
+
 -- | Publication authority is mounted only for the active request's target.
 newtype ProgressSink (progress :: Type) = ProgressSink RequestId
   deriving (Show, Eq)
+
+instance Display (ProgressSink progress) where
+  displayTree (ProgressSink (RequestId request)) = opaqueHandle ("progress sink for request " <> tshow request)
 
 newtype ProgressCursor = ProgressCursor Int
   deriving (Show, Eq, Ord)
@@ -131,6 +149,13 @@ data PendingProgress = PendingProgress
 -- | An observation of presentation for one exact request, not a new assignment.
 data RequestUpdate = RequestUpdate RequestId Int
   deriving (Show, Eq)
+
+instance Display RequestUpdate where
+  displayTree (RequestUpdate (RequestId request) update) =
+    opaqueHandle ("update " <> tshow update <> " to request " <> tshow request)
+
+tshow :: Int -> Text
+tshow = Text.pack . show
 
 data RequestUpdateState
   = UpdateQueued
@@ -336,14 +361,13 @@ replyRequestId (Reply request) = request
 readResponse :: Response result -> Maybe (ResponseResult result)
 readResponse (Response _ _ _ cell) = readExitCell () cell
 
--- | Character budget for the rendered preview 'reply' and 'attemptReply'
--- carry alongside the live value. Generous relative to the settlement
--- notice's own display budget (the host's
--- @SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET@, 2048 characters): the host cuts to
--- its exact budget at a line boundary, so this side only needs to avoid
--- rendering far more than that could ever need, not match it exactly.
+-- | Character budget for the rendered reply 'reply' and 'attemptReply'
+-- carry alongside the live value. Twice the settlement notice's byte budget
+-- (the host's @SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET@, 8 KiB), so a rendering
+-- this side cuts is always over the host's budget too: the host alone cuts,
+-- at a line boundary, and names its budget when it does.
 replyPreviewCharBudget :: Int
-replyPreviewCharBudget = 8192
+replyPreviewCharBudget = 16384
 
 attemptReply
   :: (Member Replies effs, WorkbenchDisplay result)
@@ -351,12 +375,12 @@ attemptReply
   -> result
   -> Eff effs (Either ReplyError Void)
 attemptReply (Reply (RequestId request)) result =
-  let (preview, _) = workbenchActivationDisplay replyPreviewCharBudget result
+  let (preview, _) = workbenchReplyDisplay replyPreviewCharBudget result
    in send (AttemptReplyWith request result preview)
 
 reply :: (Member Replies effs, WorkbenchDisplay result) => Reply result -> result -> Eff effs Void
 reply (Reply (RequestId request)) result =
-  let (preview, _) = workbenchActivationDisplay replyPreviewCharBudget result
+  let (preview, _) = workbenchReplyDisplay replyPreviewCharBudget result
    in send (ReplyWith request result preview)
 
 pollResponse

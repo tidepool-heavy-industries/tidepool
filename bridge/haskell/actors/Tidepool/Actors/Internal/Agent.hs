@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -62,6 +64,7 @@ module Tidepool.Actors.Internal.Agent
 
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Prelude
 
 import qualified Tidepool.Actor as Actor
@@ -95,6 +98,8 @@ import Tidepool.Agent.Assignment
   , assignment, labelFromText, labelText
   )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
+import Tidepool.Inspection
+  ( Display (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
 import Tidepool.Agent.Session
   ( attachAgent
   , requestSessionSited
@@ -727,6 +732,33 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
   deriving (Show, Eq)
 
+-- | Nested in another value: which notification, to whom.
+instance Display NotificationReceipt where
+  displayTree receipt =
+    opaqueHandle ("notification " <> notificationSummary receipt)
+
+-- | A cell's own result reads as what happened: admitted, not yet presented.
+instance PageDisplay effects NotificationReceipt where
+  displayPage budget receipt =
+    pageWithContinuation budget (TextLeaf (notificationAccepted receipt)) Nothing
+
+-- | 'sendMessage''s result, bound or observed as a cell's value.
+instance PageDisplay effects (Either NotificationError NotificationReceipt) where
+  displayPage budget (Right receipt) = displayPage budget receipt
+  displayPage budget (Left failure) =
+    pageWithContinuation budget
+      (Concat [TextLeaf "notification not accepted: ", displayTree failure]) Nothing
+
+notificationSummary :: NotificationReceipt -> Text
+notificationSummary (NotificationReceipt (_, ((target, incarnation), (_, sequence)))) =
+  Text.pack (show sequence) <> " to agent "
+    <> Text.pack (show target) <> "@" <> Text.pack (show incarnation)
+
+notificationAccepted :: NotificationReceipt -> Text
+notificationAccepted receipt =
+  "notification " <> notificationSummary receipt
+    <> " accepted; `pollNotification` on this receipt reports whether it was presented"
+
 -- | Admit normal steering into the existing TUI conversation. The receipt is
 -- admission evidence, not incorporation or successful execution. No response
 -- obligation is created, and uncertain presentation must not be retried blindly.
@@ -736,13 +768,14 @@ sendMessage
 sendMessage recipient message =
   fmap (fmap NotificationReceipt) (send (NotifyWith (agentIdentity recipient) message))
 
--- | The actor that spawned this one, if any. A root actor, which has no
--- parent, answers 'Nothing'. The reference carries bare identity — no bound
--- worktree — sufficient for 'sendMessage' and other identity-addressed calls.
+-- | The supervising actor: it receives this actor's 'sendMessage' and
+-- settles its request. Every child has one, whether its context was
+-- inherited or selected; a root answers 'Nothing'. The reference carries bare
+-- identity, no bound worktree.
 parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)
 parentAgent = do
   context <- Core.actorContext
-  pure $ case (contextParentId context, contextParentIncarnation context) of
+  pure $ case (contextSupervisorId context, contextSupervisorIncarnation context) of
     (Just parent, Just incarnation) -> Just (internalAgentRef parent incarnation)
     _ -> Nothing
 

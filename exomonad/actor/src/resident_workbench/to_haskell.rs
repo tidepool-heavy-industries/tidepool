@@ -813,13 +813,13 @@ impl ToHaskell for ActorContextProjection {
             actor_haskell_int(self.context.actor.incarnation.0, "actor incarnation")?
                 .visit(table, v)?;
             self.descriptor
-                .context_parent()
-                .map(|x| actor_haskell_int(x.id.0, "context parent id"))
+                .supervisor_parent()
+                .map(|x| actor_haskell_int(x.id.0, "supervisor id"))
                 .transpose()?
                 .visit(table, v)?;
             self.descriptor
-                .context_parent()
-                .map(|x| actor_haskell_int(x.incarnation.0, "context parent incarnation"))
+                .supervisor_parent()
+                .map(|x| actor_haskell_int(x.incarnation.0, "supervisor incarnation"))
                 .transpose()?
                 .visit(table, v)?;
             self.descriptor.label().to_owned().visit(table, v)?;

@@ -410,21 +410,30 @@ escalationNote context call escalated =
          | (h, likelihood, reason) <- escalated
          ]
 
--- | Bounded source excerpts, not model-generated citations. Line numbers refer
--- to the displayed tool output, not a source file or a command's full stdout.
--- Handles are child-local; a parent requests further evidence from that child.
+-- | The tool output the child saw, whole up to 'escalationOutputBudget'
+-- characters, then the child's reference to the retained result. Only an
+-- output over the budget is cut, and the cut names the budget, so the parent
+-- asks the child for more only when the output shown is actually partial.
 escalationEvidence :: ToolCall -> ToolResult -> Text
 escalationEvidence call result =
   "Parent decision requested: inspect this observation and decide whether to steer the child. "
     <> "The tool has already run; this is not a pre-execution safety gate.\n"
     <> "Tool arguments (JSON prefix, at most 1200 characters):\n"
     <> T.take 1200 (encodeValue (toolCallArguments call))
-    <> "\nResult reference (child-local): " <> toolResultHandle result
-    <> "\nDisplayed-output excerpt (first 12 lines; each capped at 240 characters):\n"
-    <> T.unlines
-         [ T.pack (show n) <> ": " <> T.take 240 line
-             <> if T.length line > 240 then " [line truncated]" else ""
-         | (n, line) <- zip ([1..] :: [Int]) (take 12 (T.lines (toolResultOutput result)))
-         ]
-    <> "This prefix may omit the triggering evidence. Ask the named child for the "
-    <> "full retained result and relevant history before deciding if the excerpt is insufficient."
+    <> "\n" <> outputSection
+    <> "\nResult reference (held by the child): " <> toolResultHandle result
+  where
+    output = toolResultOutput result
+    total = T.length output
+    budget = T.pack (show escalationOutputBudget)
+    outputSection
+      | total <= escalationOutputBudget = "Tool output (complete):\n" <> output
+      | otherwise =
+          "Tool output (first " <> budget <> " of " <> T.pack (show total)
+            <> " characters; over the " <> budget <> "-character escalation budget):\n"
+            <> T.take escalationOutputBudget output
+            <> "\n[output cut at the escalation budget; the child holds the rest under the reference below]"
+
+-- | Characters of tool output an escalation carries whole.
+escalationOutputBudget :: Int
+escalationOutputBudget = 8192

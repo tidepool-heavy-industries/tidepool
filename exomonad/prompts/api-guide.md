@@ -112,7 +112,8 @@ In a cell, `Cmd.run` returns a retained result: `Cmd.stdout` is complete
 successful stdout or an explicit issue; for failed commands inspect outcome and
 stderr. `J.ask` batches semantic questions over supplied evidence; load
 `exomonad-jev` for the worked composition. `me` is lexically captured;
-`parentAgent` is the spawning actor or `Nothing` for a root.
+`parentAgent` is your supervising actor, which receives `sendMessage` and
+settles your request, or `Nothing` for a root.
 
 ## Discover missing information
 

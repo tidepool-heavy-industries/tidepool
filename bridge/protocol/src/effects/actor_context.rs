@@ -163,8 +163,8 @@ fn type_defs() -> Vec<TypeDef> {
                 fields: vec![
                     field("contextActorId", HsType::Int),
                     field("contextActorIncarnation", HsType::Int),
-                    field("contextParentId", HsType::maybe(HsType::Int)),
-                    field("contextParentIncarnation", HsType::maybe(HsType::Int)),
+                    field("contextSupervisorId", HsType::maybe(HsType::Int)),
+                    field("contextSupervisorIncarnation", HsType::maybe(HsType::Int)),
                     field("contextActorPath", HsType::Text),
                     field("contextRole", HsType::Named("ActorContextRole")),
                     field("contextEffectRow", HsType::Text),

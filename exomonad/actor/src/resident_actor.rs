@@ -308,10 +308,10 @@ fn settlement_refusal(
     let request = request.0;
     let detail = match error {
         ReplyError::UpdatePending => format!(
-            "your parent sent an update to request {request} that has not been confirmed as \
-             shown to you yet. It arrives as a new message after this tool call, or once you \
-             end your turn. Read it, then send this again; sending it before the update \
-             arrives is refused the same way"
+            "your parent sent an update to request {request} that has not been shown to you \
+             yet. Queued messages are shown only when your turn ends, one per turn end: end \
+             your turn now, read the update, then send this again (changed if the update \
+             asks for it). Sending it again before then is refused the same way"
         ),
         ReplyError::CancellationRequested => {
             format!("request {request} is being cancelled; acknowledge the cancellation instead")
@@ -2522,10 +2522,11 @@ where
         }
     }
 
-    /// Upper bound, in characters, on the reply-value preview a settlement
-    /// notice carries -- generous enough for an ordinary reply record, small
-    /// enough that a notice never dwarfs the wake it accompanies.
-    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 2048;
+    /// Byte budget for the reply a settlement notice carries. A reply within
+    /// it is shown whole, so the owner reads the child's result in the notice
+    /// rather than asking for it again; only a larger reply is cut, and the
+    /// cut names this budget.
+    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 8192;
 
     /// Both authored tool replies and route callbacks resume the one active
     /// request continuation, then hand it back to the ordinary actor scheduler.
@@ -9342,7 +9343,7 @@ mod tests {
     };
 
     /// A reply fenced by an update still in delivery tells the model which
-    /// request is waiting, where the update will appear, and that an earlier
+    /// request is waiting, that queued messages appear only at a turn end, and that an earlier
     /// retry fails the same way; it never shows the bare error constructor.
     #[test]
     fn update_pending_refusal_says_where_the_update_arrives() {
@@ -9353,7 +9354,7 @@ mod tests {
         );
         assert!(text.starts_with("reply not settled: "), "{text}");
         assert!(text.contains("update to request 2"), "{text}");
-        assert!(text.contains("after this tool call"), "{text}");
+        assert!(text.contains("end your turn now"), "{text}");
         assert!(text.contains("refused the same way"), "{text}");
         assert!(text.ends_with("Nothing was sent."), "{text}");
         assert!(!text.contains("UpdatePending"), "{text}");

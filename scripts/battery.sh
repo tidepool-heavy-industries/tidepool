@@ -29,7 +29,7 @@ if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev
 fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
-resolve_tidepool_extract
+resolve_tidepool_extract --prefer-persistent-daemon
 
 # Per-run resident compile daemon amortizes the GHC startup and stdlib
 # typecheck cost across every extraction in this run.

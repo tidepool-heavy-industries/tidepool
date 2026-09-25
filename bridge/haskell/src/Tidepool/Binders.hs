@@ -632,17 +632,35 @@ automaticGenericDeclarations flags qualifier declarations =
     renderTarget target = CellGenericDeclaration (targetName target)
       ("deriving instance " ++ qualifier ++ ".Generic " ++ targetApplication target ++ "\n")
 
+-- | A type whose cell authors its own 'Show' instance keeps that presentation:
+-- the generated structural 'Display' would outrank the 'Show'-backed one and
+-- never call the authored 'show', so no instance is generated for it.
 automaticDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellDisplayTarget]
 automaticDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->
     let decls = hsmodDecls (unLoc parsed)
+        authoredShow = mapMaybe authoredShowTarget decls
      in [ CellDisplayTarget (targetName target) (targetApplication target)
-        | target <- mapMaybe genericTarget decls ]
+        | target <- mapMaybe genericTarget decls
+        , targetName target `notElem` authoredShow ]
   where
     source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
     parserState = initParserState (initParserOpts flags)
       (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
+
+-- | The type constructor an authored @instance Show T@ names, qualified or not.
+-- A @deriving@ clause or standalone @deriving instance@ is not authored: its
+-- 'show' is the structure the generated 'Display' renders anyway.
+authoredShowTarget :: LHsDecl GhcPs -> Maybe String
+authoredShowTarget declaration = case unLoc declaration of
+  InstD _ ClsInstD { cid_inst = ClsInstDecl { cid_poly_ty = instanceType } }
+    | Just cls <- getLHsInstDeclClass_maybe instanceType
+    , occStr (unLoc cls) == "Show"
+    , HsAppTy _ _ argument <- unLoc (getLHsInstDeclHead instanceType)
+    , Just constructor <- hsTyGetAppHead_maybe argument ->
+        Just (occStr (unLoc constructor))
+  _ -> Nothing
 
 data GenericTarget = GenericTarget
   { targetName :: String
