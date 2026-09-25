@@ -301,3 +301,19 @@ continuations, signature/equation groups, whole binding classification, generate
 module compilation, and rejection classification of the under-indented wave
 forms. Parent reviewed the diff; no active wave binary/compiler was replaced.
 This does not make the original malformed cells valid or add a diagnostic hint.
+
+### Deferred: notebook indentation assistance
+
+Deferred at the user's request. Wave 10 reviewers wrote under-indented list
+right-hand sides such as `let checks =` followed by `  ["first", "second"]`.
+Their apparent intent is understandable, but compiler acceptance of a rewritten
+cell does not prove that the rewrite preserves the author's intended meaning.
+
+Any future assistance must leave valid Haskell unchanged. Prefer an actionable
+diagnostic with a suggested corrected cell, without automatically executing it.
+An explicitly opted-in notebook shorthand with defined semantics is another
+possible experiment. Silent indentation repair is not approved: it could absorb
+a subsequent declaration or effectful statement and turn rejected input into
+unintended execution. Do not describe compiler-validated rewriting as "never
+wrong". This idea is separate from the completed valid-layout placement fix;
+no automatic normalization or new syntax is implemented or scheduled.
