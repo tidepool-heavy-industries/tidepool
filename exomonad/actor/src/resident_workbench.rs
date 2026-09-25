@@ -3571,12 +3571,7 @@ where
             }
         };
 
-        tracing::info!(
-            actor = context.actor.id.0,
-            stage,
-            changed = ?changed,
-            "split cell compile went stale; compiling under one checkout"
-        );
+        log_split_fallback("cell", &context, stage, changed);
         if let Some(guard) = leased_input.take() {
             guard.retire(&self.access).await;
         }
@@ -4093,10 +4088,10 @@ where
     /// install-and-run step, released for the GHC compile in between. The
     /// same split [`Self::bind_command_job`] applies to the Job carrier
     /// compile (Problem 1 of the compile-path design note), reusing
-    /// [`crate::ActorCompileView::compile_relevant_eq`] to detect a stale
-    /// snapshot and recompile against a fresh one, up to `MAX_SPLIT_ATTEMPTS`
-    /// times; beyond that this falls back to the original single-checkout
-    /// [`begin_fragment`].
+    /// [`split_staleness`] to detect a stale snapshot. The split is attempted
+    /// once; a stale snapshot falls straight through to the original
+    /// single-checkout [`begin_fragment`], for the reason
+    /// [`Self::prepare_cell`] gives.
     pub(crate) async fn begin_fragment_split(
         &self,
         context: crate::ActorSessionContext,
@@ -4105,7 +4100,6 @@ where
         block: ParsedBlock,
         verdict: Option<TurnClassification>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        const MAX_SPLIT_ATTEMPTS: u32 = 3;
         // Carries one cancellation edge across every off-checkout GHC call
         // this split makes, the same shape `prepare_cell_single_checkout`
         // arms for its own (single-checkout) compile: dropping this future
@@ -4113,7 +4107,7 @@ where
         // rather than leaving it to finish unobserved.
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-        for _ in 0..MAX_SPLIT_ATTEMPTS {
+        let (stage, changed) = 'split: {
             let snapshot_source = source.clone();
             let snapshot_type_modules = type_modules.clone();
             let snapshot_block = block.clone();
@@ -4162,12 +4156,12 @@ where
                     // Re-derive the view once more before trusting it: if
                     // something else wrote to a scope this compile actually
                     // read from in the meantime, the rejection is stale and
-                    // this attempt must recompile against a fresh snapshot,
-                    // exactly as an install-time mismatch already does.
+                    // the fragment recompiles under one checkout, exactly as
+                    // an install-time mismatch does.
                     let revalidate_source = source.clone();
                     let revalidate_type_modules = type_modules.clone();
                     let revalidate_against = snapshot.view.clone();
-                    let still_current = self
+                    let stale = self
                         .access
                         .with_machine(context.clone(), move |session, context, _| {
                             if session.machine_disposition()
@@ -4181,14 +4175,21 @@ where
                                 &revalidate_source,
                                 &revalidate_type_modules,
                             )?;
-                            Ok(fresh_view.compile_relevant_eq(&revalidate_against))
+                            Ok(split_staleness(
+                                session,
+                                &fresh_view,
+                                &revalidate_against,
+                                None,
+                            ))
                         })
                         .await?;
-                    if still_current {
-                        cancel_on_drop.0 = None;
-                        return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+                    match stale {
+                        None => {
+                            cancel_on_drop.0 = None;
+                            return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+                        }
+                        Some(changed) => break 'split ("rejection revalidation", changed),
                     }
-                    continue;
                 }
                 CompiledBlock::Ready(ready) => *ready,
             };
@@ -4203,7 +4204,7 @@ where
             // `begin_ready_block`'s whole install-and-run.
             let install_source = source.clone();
             let install_type_modules = type_modules.clone();
-            let still_fresh = self
+            let stale = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
                     if session.machine_disposition()
@@ -4217,11 +4218,11 @@ where
                         &install_source,
                         &install_type_modules,
                     )?;
-                    Ok(fresh_view.compile_relevant_eq(&snapshot.view))
+                    Ok(split_staleness(session, &fresh_view, &snapshot.view, None))
                 })
                 .await?;
-            if !still_fresh {
-                continue;
+            if let Some(changed) = stale {
+                break 'split ("install", changed);
             }
             let install_source = source.clone();
             let install_type_modules = type_modules.clone();
@@ -4238,11 +4239,9 @@ where
             .await?;
             cancel_on_drop.0 = None;
             return Ok(step);
-        }
+        };
 
-        // Contention exhausted the bounded split-compile retries — fall back
-        // to the original single-checkout path, whose one exclusive borrow
-        // cannot itself observe a stale view.
+        log_split_fallback("fragment", &context, stage, changed);
         cancel_on_drop.0 = None;
         self.access
             .with_machine(context, move |session, context, _| {
@@ -4394,12 +4393,11 @@ where
     /// only to revalidate and run the compiled bundle
     /// ([`ResidentSession::run_display_bundle_with_sites`], which executes
     /// the already-compiled page and must stay under checkout). A stale
-    /// snapshot (`ActorCompileView::compile_relevant_eq` fails against a
-    /// freshly re-derived view) retries from a fresh one, bounded by
-    /// `MAX_SPLIT_ATTEMPTS`; on exhaustion this falls back to the original
-    /// single-checkout `render_cell_observation`, exactly as
+    /// snapshot ([`split_staleness`] against a freshly re-derived view) falls
+    /// straight through to the original single-checkout
+    /// `render_cell_observation`, exactly as
     /// `prepare_cell`/`begin_fragment_split` fall back to their own
-    /// single-checkout paths.
+    /// single-checkout paths after one attempt.
     async fn settle_observation_render_split(
         &self,
         context: crate::ActorSessionContext,
@@ -4432,10 +4430,9 @@ where
         let warnings = fragment.warnings;
         let presented = fragment.presented;
 
-        const MAX_SPLIT_ATTEMPTS: u32 = 3;
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-        for _ in 0..MAX_SPLIT_ATTEMPTS {
+        let changed = 'split: {
             let snapshot_source = source.clone();
             let snapshot_type_modules = type_modules.clone();
             let snapshot = self
@@ -4509,7 +4506,7 @@ where
                     // handling: the rejection was derived from a snapshot
                     // taken before this checkout was released, so a fresh
                     // view might no longer agree it applies. Report it as a
-                    // failed display, not a retry target — a genuine
+                    // failed display, not a fallback target — a genuine
                     // Haskell error in the rendering path is not the
                     // transient staleness this split guards against, and
                     // `render_cell_observation`'s own single-checkout path
@@ -4553,8 +4550,10 @@ where
                         &install_source,
                         &install_type_modules,
                     )?;
-                    if !fresh_view.compile_relevant_eq(&install_snapshot_view) {
-                        return Ok(None);
+                    if let Some(changed) =
+                        split_staleness(session, &fresh_view, &install_snapshot_view, None)
+                    {
+                        return Ok(Err(changed));
                     }
                     let TurnResult::Bind {
                         bound, compiled, ..
@@ -4575,14 +4574,12 @@ where
                             ready.generation,
                         )
                         .map_err(ResidentActorWorkbenchError::Resident)?;
-                    decode_display_bundle(&bundle, &install_name).map(Some)
+                    decode_display_bundle(&bundle, &install_name).map(Ok)
                 })
                 .await?;
-            let Some(receipt) = receipt else {
-                // Revalidation found a stale view: another actor's turn
-                // changed a shared binding between the snapshot and this
-                // checkout. Retry from a fresh snapshot.
-                continue;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(changed) => break 'split changed,
             };
             cancel_on_drop.0 = None;
             let mut output = transcript_prefix;
@@ -4595,10 +4592,9 @@ where
                 warnings,
                 installed_bindings,
             });
-        }
+        };
 
-        // Contention exhausted the bounded split-compile retries — fall
-        // back to the original single-checkout render.
+        log_split_fallback("observation render", &context, "install", changed);
         cancel_on_drop.0 = None;
         let fallback_source = source;
         let fallback_type_modules = type_modules;
@@ -4734,7 +4730,7 @@ where
 /// The GHC-compile half of a split fragment compile: everything
 /// [`snapshot_fragment_compile`]'s checkout-only prerequisites make
 /// possible once they are already in hand. No session or checkout touched
-/// here; `begin_fragment_split`'s retry loop runs this with the machine
+/// here; `begin_fragment_split` runs this with the machine
 /// released. Restricted to `begin_fragment`'s own calling convention (no
 /// binder pins, no staged cell prefix, no prologue/expression-plan
 /// override) — the shape the tool installer and every other
@@ -5025,8 +5021,8 @@ fn pending_mode_for(
 }
 
 /// An owned, `'static` [`TurnCode`] cloned from `turn` without consuming it,
-/// so a bounded split-install retry can take a fresh snapshot from the same
-/// compiled turn instead of needing a second GHC compile.
+/// so the single-checkout fallback after a stale split install can still run
+/// the same compiled turn instead of needing a second GHC compile.
 fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
     TurnCode {
         table: std::borrow::Cow::Owned(turn.table.clone()),
@@ -5055,10 +5051,11 @@ enum PreparedSnapshotAttempt {
 /// call's `compile_ms` bucket rather than `checkout_hold_ms`), then
 /// revalidate and install under a fresh checkout
 /// ([`ResidentSession::revalidate_and_run_prepared`]). An import that
-/// changed between snapshot and revalidation (`Ok(None)`) retries from a
-/// fresh snapshot, bounded by `MAX_SPLIT_ATTEMPTS`; a session with no
-/// machine yet, or split attempts exhausted, falls back to the original
-/// single-checkout install-and-run, unchanged from [`begin_ready_block`].
+/// changed between snapshot and revalidation (`Ok(None)`), or a session with
+/// no machine yet, falls straight through to the original single-checkout
+/// install-and-run, unchanged from [`begin_ready_block`]. The split is
+/// attempted once, for the reason
+/// [`ResidentActorWorkbench::prepare_cell`] gives.
 async fn begin_ready_block_split<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: crate::ActorSessionContext,
@@ -5072,7 +5069,6 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    const MAX_SPLIT_ATTEMPTS: u32 = 3;
     let ReadyBlock {
         result,
         generation,
@@ -5128,7 +5124,7 @@ where
     };
     let warnings = compiled_turn.warnings.warnings.clone();
 
-    for _ in 0..MAX_SPLIT_ATTEMPTS {
+    'split: {
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
         let attempt = access
@@ -5143,7 +5139,7 @@ where
             })
             .await?;
         let pending = match attempt {
-            PreparedSnapshotAttempt::Bootstrap => break,
+            PreparedSnapshotAttempt::Bootstrap => break 'split,
             PreparedSnapshotAttempt::Ready(pending) => pending,
         };
 
@@ -5194,12 +5190,17 @@ where
             return Ok(step);
         }
         // Revalidation found a stale import: another actor's turn changed
-        // a shared binding between the snapshot and this checkout. Retry
-        // from a fresh snapshot.
+        // a shared binding between the snapshot and this checkout.
+        log_split_fallback(
+            "prepared install",
+            &context,
+            "install",
+            SplitStaleView::PreparedImports,
+        );
     }
 
     // Fallback: either this session had no machine yet to snapshot against
-    // (the bootstrap case), or every split attempt hit a stale import.
+    // (the bootstrap case), or the split attempt hit a stale import.
     // Single checkout, exactly as `begin_ready_block`'s Bind arm.
     access
         .with_machine(context, move |session, context, _| {
@@ -8463,6 +8464,27 @@ enum SplitStaleView {
     /// Adopting the already-validated declaration candidate lost the race
     /// for its generation.
     StagedDeclaration,
+    /// [`ResidentSession::revalidate_and_run_prepared`] found an import of
+    /// the compiled program changed since its snapshot.
+    PreparedImports,
+}
+
+/// Every split compile path makes one attempt; when it goes stale it falls
+/// through to its single-checkout path and logs this one line naming the
+/// path, the stage that found the snapshot stale, and what changed.
+fn log_split_fallback(
+    path: &'static str,
+    context: &crate::ActorSessionContext,
+    stage: &'static str,
+    changed: SplitStaleView,
+) {
+    tracing::info!(
+        actor = context.actor.id.0,
+        path,
+        stage,
+        changed = ?changed,
+        "split compile went stale; compiling under one checkout"
+    );
 }
 
 /// The freshness check every split-compile re-checkout makes: the compile
@@ -10335,9 +10357,7 @@ mod request_tests {
             .all(|binding| binding.name != "job_binding"));
         drop((binder, compiled, generation));
 
-        // A fresh snapshot recompiles and installs cleanly — the same
-        // staleness recovery `begin_fragment_split` and `prepare_cell`'s own
-        // split paths rely on.
+        // A fresh snapshot recompiles and installs cleanly.
         let retry_view = actor_compile_view(&session, &context, &source, &[]).expect("retry view");
         let retry_generation = retry_view.next_value_generation();
         session.reserve_value_generations_through(retry_generation);
@@ -10712,8 +10732,7 @@ mod request_tests {
             .all(|binding| binding.name != "x"));
         drop(ready);
 
-        // A fresh snapshot recompiles and installs cleanly — the
-        // bounded-retry recovery `begin_fragment_split` relies on.
+        // A fresh snapshot recompiles and installs cleanly.
         let retry_snapshot =
             snapshot_fragment_compile(&mut session, &context, &source, &[], &block, Some(&verdict))
                 .expect("retry snapshot");
