@@ -1352,6 +1352,21 @@ impl DurableActorEvent {
                 notification.current,
                 elapsed(notification.occurred_at_unix_ms),
             ),
+            Self::Typed(TypedActorEvent::SettlementChanged { notification })
+                if notification.command_job.is_some() =>
+            {
+                let job = notification.command_job.as_deref().unwrap_or_default();
+                match (&notification.transition, &notification.reply_preview) {
+                    (exomonad_actor::SettlementTransition::Ready, Some(report)) => format!(
+                        "job {job} finished ({}).\n{report}",
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                    (transition, _) => format!(
+                        "job {job} settlement {transition:?} ({}). Inspect it with read_output session_id={job}; nothing reruns.",
+                        elapsed(notification.occurred_at_unix_ms),
+                    ),
+                }
+            }
             Self::Typed(TypedActorEvent::SettlementChanged { notification }) => {
                 let identity = settlement_identity_line(notification);
                 match &notification.reply_preview {

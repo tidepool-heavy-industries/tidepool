@@ -70,21 +70,27 @@ where
                 CommandsReq::CommandStartWith(spec) => answer!({
                     match jobs.start(kernel, spec).await {
                         Ok((id, request)) => {
-                            if self
-                                .environment
-                                .deployments
-                                .try_send(LocalResidentDeployment::CommandBackend(request.clone()))
-                                .is_err()
-                            {
-                                request.supply(Err(CommandError::CommandUnavailable(
-                                    "native host unavailable".into(),
-                                )));
-                            }
+                            super::command_settlement::dispatch_backend(
+                                &self.environment.deployments,
+                                request,
+                            );
                             started_job = Some(id.clone());
                             Ok(id)
                         }
                         Err(error) => Err(error),
                     }
+                }),
+                // Returns at once; the job's completion settles a request
+                // whose notice (or a watch on the job) wakes the owner.
+                CommandsReq::CommandBackgroundWith(spec) => answer!({
+                    let started =
+                        super::command_settlement::CommandSettlements::new(&self.environment)
+                            .start(kernel, spec)
+                            .await;
+                    if let Ok(id) = &started {
+                        started_job = Some(id.clone());
+                    }
+                    started
                 }),
                 CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
                 CommandsReq::CommandAwaitWith(id, milliseconds) => {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
-    CommandPosition, CommandResult, CommandSpec, CommandStatus, CommandStream,
+    CommandPosition, CommandReport, CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -162,6 +162,12 @@ struct Shared {
     sinks: Mutex<Vec<std::sync::Weak<CompletionSink>>>,
     observers: Mutex<HashMap<ActorRef, usize>>,
     displayed: Mutex<HashMap<ActorRef, [i64; 2]>>,
+    /// The argv as authored, before the discard hold wraps it.
+    command: Vec<String>,
+    /// The request that settles when this job finishes, once one is armed.
+    settlement: Mutex<Option<crate::RequestId>>,
+    /// The completion report, recorded once when that settlement is made.
+    report: Mutex<Option<CommandReport>>,
 }
 impl Shared {
     // Checked again by the serialized control worker, since earlier queued EOF
@@ -385,6 +391,7 @@ impl CommandJobs {
             )),
             error => error,
         })?;
+        let command = spec.argv.clone();
         let spec = discard_hold::install(spec);
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
@@ -400,6 +407,9 @@ impl CommandJobs {
             sinks: Mutex::new(Vec::new()),
             observers: Mutex::new(Default::default()),
             displayed: Mutex::new(Default::default()),
+            command,
+            settlement: Mutex::new(None),
+            report: Mutex::new(None),
         });
         let cleanup_shared = shared.clone();
         let cleanup_id = id.clone();
@@ -481,6 +491,81 @@ impl CommandJobs {
             .get(id)
             .ok_or_else(|| CommandError::CommandUnavailable("unknown command job".into()))?;
         Ok(entry.shared.clone())
+    }
+
+    /// The request that settles when this job finishes. The first caller
+    /// arms it with `reserve`; later callers receive the same request, so a
+    /// job has at most one settlement however many watches depend on it.
+    /// The boolean is true for the caller that armed it.
+    pub(crate) fn settlement(
+        &self,
+        id: &str,
+        reserve: impl FnOnce(ActorRef) -> crate::RequestId,
+    ) -> Result<(crate::RequestId, bool), CommandError> {
+        let shared = self.shared(id)?;
+        let mut settlement = shared.settlement.lock();
+        if let Some(request) = *settlement {
+            return Ok((request, false));
+        }
+        let request = reserve(shared.owner);
+        *settlement = Some(request);
+        Ok((request, true))
+    }
+
+    /// The actor that started and controls a job.
+    pub(crate) fn owner(&self, id: &str) -> Result<ActorRef, CommandError> {
+        Ok(self.shared(id)?.owner)
+    }
+
+    /// The authored argv of a job, as it was started.
+    pub(crate) fn command(&self, id: &str) -> Result<Vec<String>, CommandError> {
+        Ok(self.shared(id)?.command.clone())
+    }
+
+    /// Wait for the job to finish and return its result, confirming cleanup
+    /// with the backend as the job's owner would. A job whose execution ended
+    /// without a terminal status reports an unconfirmed outcome.
+    pub(crate) async fn finished(&self, id: &str) -> Result<CommandResult, CommandError> {
+        let shared = self.shared(id)?;
+        self.wait(shared.owner, id, -1).await?;
+        match shared.status(shared.owner, id).await {
+            CommandStatus::CommandFinished(result) => Ok(result),
+            other => Ok(unconfirmed(format!(
+                "job ended without a terminal status: {other:?}"
+            ))),
+        }
+    }
+
+    /// Wait until the job has left admission: it is running, stopping, or
+    /// finished. A job still queued for memory or a backend keeps waiting.
+    pub(crate) async fn admitted(&self, id: &str) -> Result<(), CommandError> {
+        let shared = self.shared(id)?;
+        let mut phase = shared.phase.subscribe();
+        loop {
+            if !matches!(
+                *phase.borrow_and_update(),
+                CommandStatus::CommandQueued | CommandStatus::CommandStarting
+            ) {
+                return Ok(());
+            }
+            if phase.changed().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    pub(crate) fn record_report(
+        &self,
+        id: &str,
+        report: CommandReport,
+    ) -> Result<(), CommandError> {
+        *self.shared(id)?.report.lock() = Some(report);
+        Ok(())
+    }
+
+    /// The completion report of a job whose settlement has been made.
+    pub(crate) fn report(&self, id: &str) -> Result<Option<CommandReport>, CommandError> {
+        Ok(self.shared(id)?.report.lock().clone())
     }
 
     pub async fn status(&self, caller: ActorRef, id: &str) -> Result<CommandStatus, CommandError> {
@@ -1158,6 +1243,9 @@ mod bounded_backend_tests {
             sinks: Mutex::new(Vec::new()),
             observers: Mutex::new(Default::default()),
             displayed: Mutex::new(Default::default()),
+            command: vec!["true".into()],
+            settlement: Mutex::new(None),
+            report: Mutex::new(None),
         }
     }
 

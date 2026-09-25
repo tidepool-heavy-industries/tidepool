@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+mod command_settlement;
 mod commands;
 mod replacement;
 mod status_rendering;
@@ -1306,70 +1307,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         &self,
         notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
     ) {
-        for notification in notifications {
-            // A watch forgotten by campaign cleanup keeps no state to poll.
-            // Delivering a transition for it would send its owner to
-            // `pollWatch`, which can only answer `WatchUnavailable
-            // (WatchRejected ReplyStale)` — a notice about nothing.
-            if !self
-                .environment
-                .requests
-                .retains_watch(notification.owner, notification.watch)
-            {
-                continue;
-            }
-            let owner = notification.owner;
-            let watch = notification.watch;
-            match self
-                .environment
-                .deployments
-                .send(LocalResidentDeployment::WatchChanged { notification })
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    actor = ?owner,
-                    watch = ?watch,
-                    kind = "watch_changed",
-                    outcome = "sent",
-                    "publishing watch notice"
-                ),
-                Err(_closed) => tracing::warn!(
-                    actor = ?owner,
-                    watch = ?watch,
-                    kind = "watch_changed",
-                    outcome = "closed",
-                    "publishing watch notice: deployment observer channel has no consumer"
-                ),
-            }
-        }
-        for notification in self.environment.requests.take_settlement_notifications() {
-            let owner = notification.owner;
-            let request = notification.request;
-            let preview_len = notification.reply_preview.as_ref().map(String::len);
-            match self
-                .environment
-                .deployments
-                .send(LocalResidentDeployment::SettlementChanged { notification })
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    actor = ?owner,
-                    request = ?request,
-                    kind = "settlement_changed",
-                    preview_len,
-                    outcome = "sent",
-                    "publishing settlement notice"
-                ),
-                Err(_closed) => tracing::warn!(
-                    actor = ?owner,
-                    request = ?request,
-                    kind = "settlement_changed",
-                    preview_len,
-                    outcome = "closed",
-                    "publishing settlement notice: deployment observer channel has no consumer"
-                ),
-            }
-        }
+        publish_request_notifications(
+            &self.environment.requests,
+            &self.environment.deployments,
+            notifications,
+        )
+        .await;
     }
 
     fn publish_request_cancellation(
@@ -4134,13 +4077,15 @@ where
                 let owner = kernel.resolve(context.actor).ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
                 })?;
+                let dependencies = command_settlement::CommandSettlements::new(&self.environment)
+                    .resolve(registration.dependencies)?;
                 let (watch, notifications) = self
                     .environment
                     .requests
                     .register_watch_groups_with_route(
                         context.actor,
                         registration.label,
-                        registration.dependencies,
+                        dependencies,
                         Some(crate::request::routes::WatchRoute::new(owner, entry)),
                     )
                     .map_err(|error| {
@@ -4189,13 +4134,15 @@ where
                         "invalid watch label: {error}"
                     ))
                 })?;
+                let dependencies = command_settlement::CommandSettlements::new(&self.environment)
+                    .resolve(registration.dependencies)?;
                 let (watch, notifications) = self
                     .environment
                     .requests
                     .register_watch_requirement_groups(
                         context.actor,
                         registration.label,
-                        registration.dependencies,
+                        dependencies,
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
@@ -4238,6 +4185,16 @@ where
                     .resume_progress_observation(context.clone(), continuation, observation)
                     .await
             }),
+            ResidentActorBoundary::CommandReportPoll { continuation, job } => {
+                Box::pin(async move {
+                    let report =
+                        command_settlement::CommandSettlements::new(&self.environment).report(&job);
+                    self.environment
+                        .runner
+                        .resume_value(context.clone(), continuation, report)
+                        .await
+                })
+            }
             ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
                 let outcome = self
                     .environment
@@ -9283,6 +9240,73 @@ fn lookup_response(
         workspace_modules,
         crate::UsagePointerTable::default(),
     )
+}
+
+/// The one publication path for request-registry notices: watch transitions,
+/// then every queued settlement. The resident actor calls it after each
+/// registry transition it makes; a command completion task calls it after
+/// settling a job outside any actor turn.
+pub(crate) async fn publish_request_notifications(
+    requests: &RequestRegistry,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
+) {
+    for notification in notifications {
+        // A watch forgotten by campaign cleanup keeps no state to poll.
+        // Delivering a transition for it would send its owner to
+        // `pollWatch`, which can only answer `WatchUnavailable
+        // (WatchRejected ReplyStale)` — a notice about nothing.
+        if !requests.retains_watch(notification.owner, notification.watch) {
+            continue;
+        }
+        let owner = notification.owner;
+        let watch = notification.watch;
+        match deployments
+            .send(LocalResidentDeployment::WatchChanged { notification })
+            .await
+        {
+            Ok(()) => tracing::info!(
+                actor = ?owner,
+                watch = ?watch,
+                kind = "watch_changed",
+                outcome = "sent",
+                "publishing watch notice"
+            ),
+            Err(_closed) => tracing::warn!(
+                actor = ?owner,
+                watch = ?watch,
+                kind = "watch_changed",
+                outcome = "closed",
+                "publishing watch notice: deployment observer channel has no consumer"
+            ),
+        }
+    }
+    for notification in requests.take_settlement_notifications() {
+        let owner = notification.owner;
+        let request = notification.request;
+        let preview_len = notification.reply_preview.as_ref().map(String::len);
+        match deployments
+            .send(LocalResidentDeployment::SettlementChanged { notification })
+            .await
+        {
+            Ok(()) => tracing::info!(
+                actor = ?owner,
+                request = ?request,
+                kind = "settlement_changed",
+                preview_len,
+                outcome = "sent",
+                "publishing settlement notice"
+            ),
+            Err(_closed) => tracing::warn!(
+                actor = ?owner,
+                request = ?request,
+                kind = "settlement_changed",
+                preview_len,
+                outcome = "closed",
+                "publishing settlement notice: deployment observer channel has no consumer"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

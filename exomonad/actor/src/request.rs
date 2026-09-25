@@ -245,8 +245,13 @@ pub struct SettlementNotification {
     /// one (an unforked target has none).
     pub target_path: Option<String>,
     /// The exact commit the target was seeded from, when it was launched
-    /// from a fork workspace.
+    /// from a fork workspace. For a command settlement, the commit its
+    /// working directory was at when the command started.
     pub target_revision: Option<String>,
+    /// The command job this settlement reports, when the settled request is
+    /// a command job's completion rather than an actor's reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_job: Option<String>,
     pub occurred_at_unix_ms: u64,
     pub sequence: ActorEventSequence,
     pub watermark: ActorEventSequence,
@@ -312,6 +317,11 @@ struct RequestRecord {
     /// launched from a fork workspace. `None` for a target with no fork
     /// workspace (an unforked `startActor`/`startAgent`, or the root actor).
     target_revision: Option<String>,
+    /// Set when this record is a command job's completion, owned and targeted
+    /// by the actor that owns the job. Such a record never enters a mailbox:
+    /// it is excluded from target-side work and settles only through
+    /// [`RequestRegistry::settle_command`].
+    command_job: Option<String>,
 }
 
 /// Snapshots share ownership, not a consumption cursor. Replacing the latest
@@ -499,8 +509,11 @@ fn cleanup_blockers(
         .requests
         .iter()
         .filter_map(|(request, record)| {
-            (targets.contains(&record.owner) || targets.contains(&record.target))
-                .then_some((*request, record))
+            // A running command does not hold its owner: retiring the owner
+            // cancels the job, and its settlement then reports that.
+            (record.command_job.is_none()
+                && (targets.contains(&record.owner) || targets.contains(&record.target)))
+            .then_some((*request, record))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut requests = scoped
@@ -828,6 +841,7 @@ impl RequestRegistry {
             .iter()
             .filter(|(_, record)| {
                 record.target == target
+                    && record.command_job.is_none()
                     && !matches!(
                         record.target_state,
                         TargetState::Reserved | TargetState::Closed
@@ -844,7 +858,7 @@ impl RequestRegistry {
         let mut current = Vec::new();
         let mut queued = Vec::new();
         for (id, record) in &state.requests {
-            if record.target != target {
+            if record.target != target || record.command_job.is_some() {
                 continue;
             }
             match record.target_state {
@@ -1058,9 +1072,79 @@ impl RequestRegistry {
                 reply_preview: None,
                 target_path: None,
                 target_revision: None,
+                command_job: None,
             },
         );
         id
+    }
+
+    /// Reserve the settlement of one command job. The record is owned and
+    /// targeted by `owner`, is already running, and settles only through
+    /// [`Self::settle_command`], so watches, routes and the settlement notice
+    /// treat the job's completion exactly like a reply.
+    pub(crate) fn reserve_command_settlement(
+        &self,
+        owner: ActorRef,
+        job: String,
+        notify_owner: bool,
+    ) -> RequestId {
+        let mut state = self.state.lock();
+        // Same per-process counter as `reserve_labeled_with_reporting`.
+        #[allow(clippy::expect_used)]
+        {
+            state.next_request = state
+                .next_request
+                .checked_add(1)
+                .expect("request identity exhausted");
+        }
+        let id = RequestId(state.next_request);
+        state.requests.insert(
+            id,
+            RequestRecord {
+                sources: Vec::new(),
+                updates: Vec::new(),
+                owner,
+                target: owner,
+                label: format!("job {job}"),
+                target_state: TargetState::Presented,
+                owner_state: OwnerState::Observing,
+                deadline: None,
+                progress: None,
+                notify_owner,
+                settlement_notified: false,
+                registered_at_unix_ms: unix_time_ms(),
+                reply_preview: None,
+                target_path: None,
+                target_revision: None,
+                command_job: Some(job),
+            },
+        );
+        id
+    }
+
+    /// Settle a command job's completion with its rendered report and the
+    /// commit it started at. A record already released or no longer
+    /// observed by its owner (the owner stopped) is left as it is.
+    pub(crate) fn settle_command(
+        &self,
+        request: RequestId,
+        report: String,
+        revision: Option<String>,
+    ) -> Vec<WatchNotification> {
+        let mut state = self.state.lock();
+        let Some(record) = state.requests.get_mut(&request) else {
+            return Vec::new();
+        };
+        if record.command_job.is_none() || record.target_state == TargetState::Closed {
+            return Vec::new();
+        }
+        record.target_state = TargetState::Closed;
+        if record.owner_state == OwnerState::Observing {
+            record.owner_state = OwnerState::Ready;
+        }
+        record.reply_preview = Some(report);
+        record.target_revision = revision;
+        reevaluate_watches(&mut state)
     }
 
     pub(crate) fn take_settlement_notifications(&self) -> Vec<SettlementNotification> {
@@ -1817,8 +1901,9 @@ impl RequestRegistry {
             .requests
             .iter()
             .filter(|(_, record)| {
-                record.target == actor
-                    || (record.owner == actor && record.target_state != TargetState::Closed)
+                record.command_job.is_none()
+                    && (record.target == actor
+                        || (record.owner == actor && record.target_state != TargetState::Closed))
             })
             .map(|(request, _)| *request)
             .collect::<Vec<_>>();
@@ -1869,7 +1954,11 @@ impl RequestRegistry {
             }
         }
         for record in state.requests.values_mut() {
-            if record.target == actor {
+            if record.command_job.is_some() {
+                if record.owner == actor && record.owner_state == OwnerState::Observing {
+                    record.owner_state = OwnerState::Unavailable(ResponseFailure::RequesterStopped);
+                }
+            } else if record.target == actor {
                 if record.target_state != TargetState::Closed {
                     record.target_state = TargetState::Closed;
                     if record.owner_state == OwnerState::Observing {
@@ -2112,12 +2201,21 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                     reply_preview,
                     record.target_path.clone(),
                     record.target_revision.clone(),
+                    record.command_job.clone(),
                 ));
             }
         }
     }
-    for (owner, request, label, transition, reply_preview, target_path, target_revision) in
-        settlements
+    for (
+        owner,
+        request,
+        label,
+        transition,
+        reply_preview,
+        target_path,
+        target_revision,
+        command_job,
+    ) in settlements
     {
         let sequence = next_event_sequence(state, owner);
         state.settlement_notifications.push(SettlementNotification {
@@ -2128,6 +2226,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             reply_preview,
             target_path,
             target_revision,
+            command_job,
             occurred_at_unix_ms: unix_time_ms(),
             sequence,
             watermark: sequence,
@@ -2354,6 +2453,76 @@ mod tests {
             SettlementTransition::Unavailable(ResponseFailure::TargetUnavailable)
         ));
         assert!(registry.take_settlement_notifications().is_empty());
+    }
+
+    #[test]
+    fn command_settlement_notifies_its_owner_and_is_never_target_work() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let notified = registry.reserve_command_settlement(owner, "job-a".into(), true);
+        let watched = registry.reserve_command_settlement(owner, "job-b".into(), false);
+        let stopped = registry.reserve_command_settlement(owner, "job-c".into(), true);
+
+        // A running job is not work presented to its owner, and does not hold
+        // the owner's retirement.
+        assert!(registry.active_for_target(owner).is_empty());
+        assert_eq!(registry.work_for_target(owner), (Vec::new(), Vec::new()));
+        let owners = std::collections::HashSet::from([owner]);
+        assert_eq!(
+            registry.campaign_cleanup_blockers(&owners, &owners),
+            (Vec::new(), Vec::new())
+        );
+
+        let (watch, _) = registry
+            .register_watch_requirement_groups(
+                owner,
+                "job-b-done".into(),
+                vec![vec![(
+                    watched,
+                    WatchRequirement::Response {
+                        allow_failure: false,
+                    },
+                )]],
+            )
+            .unwrap();
+        let ready = registry.settle_command(watched, "job-b report".into(), None);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].watch, watch);
+        assert_eq!(ready[0].transition, WatchTransition::Ready);
+
+        registry.settle_command(notified, "job-a report".into(), Some("abc123".into()));
+        // Settling twice keeps the first report.
+        assert!(registry
+            .settle_command(notified, "later".into(), None)
+            .is_empty());
+        let notices = registry.take_settlement_notifications();
+        assert_eq!(
+            notices.len(),
+            1,
+            "the watched job's wake belongs to its watch"
+        );
+        assert_eq!(notices[0].request, notified);
+        assert_eq!(notices[0].command_job.as_deref(), Some("job-a"));
+        assert_eq!(notices[0].reply_preview.as_deref(), Some("job-a report"));
+        assert_eq!(notices[0].target_revision.as_deref(), Some("abc123"));
+
+        // The owner stopping ends observation as the requester, not a target.
+        registry.actor_stopped(
+            owner,
+            &ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: String::new(),
+            },
+        );
+        assert!(registry
+            .settle_command(stopped, "after stop".into(), None)
+            .is_empty());
+        assert_eq!(
+            registry.observe_response(owner, stopped),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::RequesterStopped
+            ))
+        );
     }
 
     #[test]

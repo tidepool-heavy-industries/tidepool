@@ -130,29 +130,49 @@ pub(crate) enum WatchesReq {
     ObserveWatchWith(i64),
     ForgetWatchWith(i64),
     ObserveWatchProgressWith(i64, i64, i64),
+    ObserveCommandWith(String),
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the stable Haskell constructor names"
+)]
 pub(crate) enum AwaitDependency {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     AwaitDependency(i64, bool),
     AwaitProgress(i64, i64),
+    AwaitCommand(String),
+}
+
+/// What one watch dependency names before registration. A command job is
+/// resolved to the request its completion settles by the actor that owns the
+/// job table, at registration time.
+pub(crate) enum WatchSubject {
+    Request(RequestId),
+    Command(String),
 }
 
 impl AwaitDependency {
     pub(crate) fn checked(
         self,
-    ) -> Result<(RequestId, crate::request::WatchRequirement), BridgeError> {
+    ) -> Result<(WatchSubject, crate::request::WatchRequirement), BridgeError> {
         Ok(match self {
             Self::AwaitDependency(request, allow_failure) => (
-                request_id(request)?,
+                WatchSubject::Request(request_id(request)?),
                 crate::request::WatchRequirement::Response { allow_failure },
             ),
             Self::AwaitProgress(request, cursor) => (
-                request_id(request)?,
+                WatchSubject::Request(request_id(request)?),
                 crate::request::WatchRequirement::ProgressAfter(u64::try_from(cursor).map_err(
                     |_| BridgeError::UnsupportedType("negative progress cursor".into()),
                 )?),
+            ),
+            Self::AwaitCommand(job) => (
+                WatchSubject::Command(job),
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
             ),
         })
     }
@@ -218,7 +238,7 @@ pub(crate) struct CancellationAcknowledgement {
 
 pub(crate) struct WatchRegistration {
     pub continuation: ResidentHole,
-    pub dependencies: Vec<Vec<(RequestId, crate::request::WatchRequirement)>>,
+    pub dependencies: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
     pub label: String,
 }
 
