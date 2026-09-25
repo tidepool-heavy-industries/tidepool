@@ -647,3 +647,26 @@ branch; engine fixes 1 and 2 in the parent-handle branch.
   carriers do (runtime plus extractor design); or remove the retry, which
   the UpdatePending refusal text now does. Decision: no cache; revisit
   rebasing only if per-actor machines leave cell latency compile-bound.
+
+## Wave 6 root interview (harness ddacd42, 260b694; digest in
+plans/wave6-root-interview-digest.md)
+
+- **Reload is not atomic (engine, bug class):** `reload_agent_spec` was
+  refused ("prepared engine: missing imported value
+  Project.Shell.presentSelected") after it had already published the new
+  source layer, leaving the old typed tool record active; "after the
+  reload" became ambiguous for the root. Make publication and spec rebuild
+  one transaction, or roll the layer back on refusal and name the stale
+  symbol.
+- **Revision-identity view (workspace/engine):** six partially independent
+  revision identities (checkout head, child head, assignment base, branch
+  tip, review seed, source layer) desync silently; the root wants one
+  "what revision am I using, what would this action publish" view.
+- **Background jobs (engine, lane background-jobs):** the root's notice
+  contract is in the digest; carries source revision so a stale pass can be
+  refused.
+- **Prompt-level (lane wave6-prompts-2):** first-call-ready brief template;
+  one-page next-run entry at the top of NEXT.md; the root's own admission
+  checkpoint.
+- **Typed message states** and **manifest ownership in the admission
+  checklist**: cards, wait for the new harness.
