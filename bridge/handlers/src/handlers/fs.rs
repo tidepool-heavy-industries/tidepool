@@ -101,6 +101,15 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+/// Absence is a CAS value; every other read failure is an I/O failure.
+fn read_if_exists(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Build the `grepGlob` regex-compile error, always surfacing the underlying
 /// regex error and appending the hint that applies to the two common footguns:
 /// (a) arg-order — a path glob passed as the (regex, glob) first arg; (b)
@@ -541,11 +550,9 @@ impl FsBackend {
         // read half of the CAS loop (#330). Read the hash, compute new
         // content, then `FsWriteCas` back with this as the expectation.
         let resolved = self.resolve(&path)?;
-        let hash: Option<String> = match std::fs::read(&resolved) {
-            Ok(bytes) => Some(blake3_hex(&bytes)),
-            Err(_) => None,
-        };
-        Ok(hash)
+        read_if_exists(&resolved)
+            .map(|bytes| bytes.map(|bytes| blake3_hex(&bytes)))
+            .map_err(|error| FsError::FsIo(format!("read '{path}' failed: {error}")))
     }
 
     fn fs_write_cas(
@@ -574,10 +581,7 @@ impl FsBackend {
         let outcome = with_dir_flock(
             &parent,
             || -> std::io::Result<Result<(), Option<String>>> {
-                let actual: Option<String> = match std::fs::read(&resolved) {
-                    Ok(bytes) => Some(blake3_hex(&bytes)),
-                    Err(_) => None,
-                };
+                let actual = read_if_exists(&resolved)?.map(|bytes| blake3_hex(&bytes));
                 if actual == expected {
                     std::fs::write(&resolved, &contents)?;
                     Ok(Ok(()))
@@ -1069,6 +1073,30 @@ mod tests {
             !root.join("f.txt").exists(),
             "a failed CAS must not recreate a missing file"
         );
+    }
+
+    #[test]
+    fn hash_and_cas_do_not_treat_an_unreadable_path_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("directory")).unwrap();
+        let mut handler = FsBackend::new(dir.path().to_path_buf());
+
+        assert!(matches!(
+            handler.fs_hash("directory".into()),
+            Err(FsError::FsIo(_))
+        ));
+
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let result = handler.fs_write_cas(
+            &cx,
+            "directory".into(),
+            Some("stale".into()),
+            "replacement".into(),
+        );
+        assert!(result.is_err());
+        assert!(dir.path().join("directory").is_dir());
     }
 
     #[test]
