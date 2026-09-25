@@ -7,8 +7,8 @@
 use super::trace::{CallTiming, Cancellation, TraceEvents};
 use super::{ActorNode, Evidence, TimeWindow};
 use exomonad_actor::ActorRecoveryJournal;
-use exomonad_node::{DeliveryPhase, ReceiptEvidence};
-use serde::{Deserialize, Serialize};
+use exomonad_node::DeliveryPhase;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -566,26 +566,6 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
     Section::Available { rows: ordered }
 }
 
-/// The durable inbox checkpoint written by `exomonad_node::DurableInbox`:
-/// `{"version", "checkpoint": {..}}`, or the unversioned `{"sequence", ..}`
-/// shape that carries no receipts.
-#[derive(Deserialize)]
-struct Checkpoint {
-    sequence: u64,
-    #[serde(default)]
-    receipts: BTreeMap<u64, ReceiptEvidence<Value>>,
-}
-
-fn read_checkpoint(path: &Path) -> Result<Checkpoint, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let checkpoint = match value.get("checkpoint") {
-        Some(checkpoint) if value.get("version").is_some() => checkpoint.clone(),
-        _ => value,
-    };
-    serde_json::from_value(checkpoint).map_err(|error| error.to_string())
-}
-
 type HostInputs = BTreeMap<String, BTreeMap<u64, HostInput>>;
 
 struct ActorState {
@@ -677,10 +657,10 @@ fn actor_state(
     };
     let cursor_path = node.directory.join("inbox.cursor");
     let rows_path = node.directory.join("inbox.jsonl");
-    let (cursor, receipts) = match read_checkpoint(&cursor_path) {
+    // Missing checkpoint reads as sequence 0 with no receipts: the inbox
+    // writes its checkpoint on first acknowledgement.
+    let (cursor, receipts) = match exomonad_node::read_checkpoint::<Value>(&cursor_path) {
         Ok(checkpoint) => (checkpoint.sequence, checkpoint.receipts),
-        // The inbox writes its checkpoint on first acknowledgement.
-        Err(_) if !cursor_path.exists() => (0, BTreeMap::new()),
         Err(error) => {
             state.unavailable = Some(format!("{}: {error}", cursor_path.display()));
             return state;
@@ -792,18 +772,29 @@ fn read_host_inputs(
                 ))
             })
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        // Mirrors `notification_inbox_key` at the actor's launch site
+        // (`actor_host::launch_interactive_application`); the producer id
+        // itself is built through the shared `input_producer_id`, never
+        // re-derived from its wire format here.
+        let inbox_key = format!(
+            "{}:{}:{}",
+            run_name
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default(),
+            node.actor,
+            node.incarnation
+        );
+        let actor_ref = exomonad_actor::ActorRef {
+            id: exomonad_actor::ActorId(node.actor),
+            incarnation: exomonad_actor::Incarnation(node.incarnation),
+        };
+        let expected = crate::actor_host::input_producer_id(run, actor_ref, &inbox_key)
+            .map_err(|error| error.to_string())?;
         let entry = result.entry(actor).or_default();
         for row in rows {
             let (producer, sequence, state, updated) =
                 row.map_err(|error| format!("{}: {error}", path.display()))?;
-            let parts: Vec<&str> = producer.split('\0').collect();
-            let [root, _, id, incarnation] = parts[..] else {
-                continue;
-            };
-            if Path::new(root).file_name() != run_name
-                || id != node.actor.to_string()
-                || incarnation != node.incarnation.to_string()
-            {
+            if producer != expected.as_str() {
                 continue;
             }
             if let Ok(sequence) = u64::try_from(sequence) {

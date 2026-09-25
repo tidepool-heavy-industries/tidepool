@@ -2545,7 +2545,10 @@ fn runtime_namespace(run_root: &Path) -> String {
         .to_owned()
 }
 
-fn input_producer_id(
+/// Builds the exact producer identity `input_control` and the host-input
+/// queue key rows against. The only owner of this format; a reader matching
+/// queue rows (`run_map`'s review) must call this rather than re-deriving it.
+pub(crate) fn input_producer_id(
     run_root: &Path,
     actor: ActorRef,
     inbox_key: &str,

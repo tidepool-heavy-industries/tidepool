@@ -10,9 +10,9 @@ pub mod systemd_slice;
 mod tmux;
 
 pub use inbox::{
-    DeliveryAttempt, DeliveryPhase, DurableEnvelope, DurableInbox, InboxError, InboxWriteOperation,
-    ReceiptEvidence, ReceiptLookup, Redelivery, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
-    MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
+    read_checkpoint, CheckpointView, DeliveryAttempt, DeliveryPhase, DurableEnvelope, DurableInbox,
+    InboxError, InboxWriteOperation, ReceiptEvidence, ReceiptLookup, Redelivery,
+    MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS, MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
 };
 #[cfg(target_os = "linux")]
 pub use mount_namespace::{
