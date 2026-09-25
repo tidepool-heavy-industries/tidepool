@@ -10,6 +10,7 @@ description = "Prepared-STG semantic corpus runner"
 publish = false
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tidepool-heap.workspace = true
 tidepool-codegen.workspace = true

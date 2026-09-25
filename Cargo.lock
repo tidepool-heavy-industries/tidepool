@@ -3561,6 +3561,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "serde_json",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-effect",
@@ -3576,6 +3577,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-codegen",
  "tidepool-heap",

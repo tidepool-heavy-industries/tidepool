@@ -816,9 +816,7 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let bytes = serde_json::to_vec_pretty(value)?;
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
+    tidepool_atomic_write::write_best_effort(path, &bytes)?;
     Ok(())
 }
 

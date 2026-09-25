@@ -251,17 +251,9 @@ pub(crate) fn write_module_dir(
 }
 
 /// Atomically write `<module_dir>/<rel>` with `src` if it does not already
-/// exist (write to a temp file then rename, so a concurrent GHC process never
-/// sees a partial module — the rename is atomic on POSIX). `rel` may itself
-/// contain a directory separator (e.g. `"Effects/Core.hs"`), whose parent is
-/// created alongside `module_dir`.
-///
-/// The temp filename is UNIQUE per writer (pid + monotonic counter): two
-/// processes/threads racing on the same fresh content-addressed dir must not
-/// share one `*.tmp` path, or the slower writer's `rename` source can vanish
-/// (the faster writer already renamed it) → spurious `NotFound`. The rename
-/// target is the same for all, and POSIX rename-onto-existing is atomic, so a
-/// double write just no-ops the loser.
+/// exist. `rel` may itself contain a directory separator (e.g.
+/// `"Effects/Core.hs"`), whose parent is created alongside `module_dir`.
+/// Concurrent writers use distinct temporary files and publish by rename.
 pub(crate) fn write_module_file(module_dir: &Path, rel: &str, src: &str) -> std::io::Result<()> {
     let module_path = module_dir.join(rel);
     if !module_path.exists() {
@@ -272,17 +264,7 @@ pub(crate) fn write_module_file(module_dir: &Path, rel: &str, src: &str) -> std:
             ));
         };
         std::fs::create_dir_all(parent)?;
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let uniq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let file_name = module_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "generated".to_string());
-        let tmp_path = parent.join(format!("{file_name}.{}.{uniq}.tmp", std::process::id()));
-        std::fs::write(&tmp_path, src)?;
-        // rename overwrites an existing destination atomically; a concurrent
-        // writer that already created `module_path` is harmless.
-        std::fs::rename(&tmp_path, &module_path)?;
+        tidepool_atomic_write::write_best_effort(&module_path, src.as_bytes())?;
     }
     Ok(())
 }

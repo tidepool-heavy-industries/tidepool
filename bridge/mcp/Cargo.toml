@@ -11,6 +11,7 @@ description = "Effect declarations, Haskell source assembly, and validation for 
 readme = "../../README.md"
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true
 parking_lot.workspace = true
