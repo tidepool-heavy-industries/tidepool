@@ -155,3 +155,18 @@ No memo misses and no worker replacement near then (replacements at 08:55 and
 10:26, both at the 1024-request rotation), so the compile time is probably
 daemon queueing while three leaves compile at once. Carded for a look at the
 compiler log's per-request queue time after the run. No note.
+
+## 13:26Z wake
+
+Alive; 13.6 GiB available; 25 windows; no latched machine; no rejections;
+one watchdog nudge. No master commits in 30 minutes: the replay leaf's
+candidate is under review (41@1), finalize and the contract review are still
+running. Not a stall.
+
+Costliest delta: compile time in the root's cells (136 s and 135 s; 98 s of
+compile in one). The worker logged two requests at about 46 s each with no
+named phase over 1.1 s, and about 470 `memo_miss` phases of about 75 ms in
+three minutes. That points at the memo path (possibly tonight's memo
+completion, deployed in this build), not queueing. Opus lane memo-miss is
+building the per-request table and will fix it on a branch if the cause is
+ours. No note to the root.
