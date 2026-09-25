@@ -747,7 +747,7 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
     let captured =
         dispatch_haskell_script(root.as_ref(), include_str!("progress_observe.hs")).await;
     assert_eq!(captured["status"], "committed", "{captured:?}");
-    assert!(captured.to_string().contains("(13,30)"), "{captured:?}");
+    assert!(captured.to_string().contains("(13, 30)"), "{captured:?}");
     assert_eq!(captured["items"][7]["output"], "40", "{captured:?}");
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond (42 :: Int)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
