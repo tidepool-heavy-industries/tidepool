@@ -93,3 +93,15 @@ rejections, nudges or cancellations. Contention: 143 calls since 06:16,
 checkout_wait p50 5.2 s, max 174 s (a core-lead cell waited 174 s for a
 3 s compile). No intervention; the wave is past its useful load and the
 wind-down is the operator's call. No new trial evidence.
+
+## 07:16Z wake
+
+Alive; 17 GiB free (the operator's lanes finished), swap 24 GiB; 26
+windows; no Failed/Retired, no latched machine. Root mid-cell. Master
+gained the item2 trace slice: a86dea0, 2d5ab7e, fb80016 (leaf commits) and
+cf189ff (integrated, reviewed leaf plus root consumer). run-map: 26@1's
+row is an admitted in-flight delivery, not a fence. No rejections, nudges
+or cancellations. Contention: 170 calls since 06:46, checkout_wait p50
+5.9 s, max 169 s. No intervention. Trial evidence: the item2 integration
+followed the review-then-merge path with an exact-commit review; nothing
+new on the four trials.
