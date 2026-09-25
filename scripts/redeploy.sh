@@ -124,44 +124,21 @@ else
   echo; echo "(skipped: --no-servers)"
 fi
 
-# Step 5: clear stale CBOR + stdlib materialization cache.
-#
-#   Scoped to exactly the toolchain/compile-cache paths a redeploy can make
-#   stale (tidepool-toolchain::paths — see its module doc's "regenerable
-#   cache" scope, and cache.rs's key-file layout): the materialized stdlib
-#   (`stdlib/`), the generated `Tidepool.Effects` module (`effects/`), the
-#   module-granular GHC interface cache (`build-products/`), and the
-#   content-addressed compile-cache key files that cache.rs writes as loose
-#   files directly under the cache root (`<key>.ok`, `<key>.cbor` and its
-#   `.meta`/`.prepared` variants, `<key>.asks.json`, `<key>.a<N>`).
-#
-#   Deliberately NOT a wholesale `rm -rf ~/.cache/tidepool/`: that root also
-#   holds `actor-builds/`, `exomonad/` (Exomonad actor-worktree state), and
-#   `toolchain-stamp.json` itself
-#   — none of which a redeploy invalidates, and on a shared box the worktree
-#   state under `exomonad/actor-worktrees/**` belongs to OTHER agents' live
-#   work. `toolchain-stamp.json` is left alone here too: Step 6 overwrites it
-#   atomically regardless of its prior content, so there is nothing to clear
-#   pre-emptively, and the old MUST-run-after-Step-5 ordering concern
-#   (deleting a stamp Step 6 just wrote) no longer applies.
-
-step "Step 5: clear the toolchain/compile-cache subdirectories of ~/.cache/tidepool/"
-cache_dir="${HOME}/.cache/tidepool"
-run rm -rf "${cache_dir}/stdlib" "${cache_dir}/effects" "${cache_dir}/build-products"
-if [ "$DRY" -eq 1 ]; then
-  echo "  \$ find ${cache_dir} -maxdepth 1 -type f \\( -name '*.ok' -o -name '*.cbor' -o -name '*.asks.json' -o -name '*.a[0-9]*' -o -name 'binfp-*' \\) -delete"
-else
-  find "${cache_dir}" -maxdepth 1 -type f \
-    \( -name '*.ok' -o -name '*.cbor' -o -name '*.asks.json' -o -name '*.a[0-9]*' -o -name 'binfp-*' \) \
-    -delete 2>/dev/null || true
-fi
+# No cache clear. Everything a deploy could supersede under ~/.cache/tidepool/
+#   is keyed by its content or its producer: the materialized stdlib
+#   (`stdlib/<content hash>`), the generated effects modules
+#   (`effects/tidepool-effects-<hash>`), the GHC interface cache
+#   (`build-products/<producer identity>`) and the compile-memo key files
+#   (recipe + producer identity). A new build writes fresh entries beside the
+#   old ones, so nothing is stale. Deleting them is not harmless: a running
+#   swarm executes its own pinned binaries from `runs/<id>/bin` and keeps
+#   compiling against the library tree its binary materialized, so wiping
+#   `stdlib/` makes every later compile in that run fail with "Could not find
+#   module" for every library module.
 
 # Step 6: write the toolchain deploy stamp — content fingerprints of the
 #   extract + stdlib just deployed, checked by every server at startup
-#   (tidepool/toolchain/src/toolchain.rs). Runs after Step 5 by convention
-#   (mirrors the deploy order: invalidate stale cache, then bless the fresh
-#   pair), though Step 5 no longer touches toolchain-stamp.json, so ordering
-#   between them is no longer load-bearing.
+#   (tidepool/toolchain/src/toolchain.rs).
 #   Skipped when --no-servers was passed: the tidepool binary this stamp
 #   describes was not (re)installed this run, so there is nothing fresh to
 #   fingerprint. Call by ABSOLUTE path (do not trust PATH), same discipline
