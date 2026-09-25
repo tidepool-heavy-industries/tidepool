@@ -670,3 +670,9 @@ plans/wave6-root-interview-digest.md)
   checkpoint.
 - **Typed message states** and **manifest ownership in the admission
   checklist**: cards, wait for the new harness.
+- **Root checkpoints have no target (engine, card):** the root sends no
+  admission checkpoint because it has no parent; give it the operator as a
+  notify target (the operator socket exists), rendered in run-map and the
+  Host window, so the root's own decisions are data instead of pane text.
+  Interim: the root writes its checkpoint into NEXT.md's obligations table
+  (wave6-prompts-2).
