@@ -6,6 +6,7 @@
 //! entry may resume it from a fresh evaluation thread.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
@@ -75,6 +76,9 @@ pub struct PersistentSession {
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
     machine: Option<PreparedEngine>,
+    /// The image registry the machine installs through, held here so a
+    /// registry given before the first turn reaches the bootstrap install.
+    image_registry: Option<Arc<tidepool_codegen::prepared_program::ImageRegistry>>,
     /// The constructor metadata unioned across turns (`insert_checked`, monotone:
     /// later turns are a subset), so an ADT value bound earlier renders with real
     /// con names later.
@@ -164,6 +168,7 @@ impl PersistentSession {
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
             machine: None,
+            image_registry: None,
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
@@ -338,6 +343,18 @@ impl PersistentSession {
         self.machine.is_some()
     }
 
+    /// Share `registry` with this session's machine: applied to the engine
+    /// now if it exists, and to the bootstrap install otherwise.
+    pub fn set_image_registry(
+        &mut self,
+        registry: Arc<tidepool_codegen::prepared_program::ImageRegistry>,
+    ) {
+        if let Some(engine) = self.machine.as_mut() {
+            engine.set_image_registry(Arc::clone(&registry));
+        }
+        self.image_registry = Some(registry);
+    }
+
     /// The prepared engine, once the first prepared turn has installed it.
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
         self.machine.as_mut()
@@ -489,8 +506,11 @@ impl PersistentSession {
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
         match self.machine.as_mut() {
             None => {
-                let (engine, program) =
-                    PreparedEngine::bootstrap_with_nursery_bytes(prepared, self.nursery_size)?;
+                let (engine, program) = PreparedEngine::bootstrap_shared(
+                    prepared,
+                    self.nursery_size,
+                    self.image_registry.clone(),
+                )?;
                 self.machine = Some(engine);
                 Ok(program)
             }

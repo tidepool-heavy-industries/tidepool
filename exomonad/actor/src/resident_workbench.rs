@@ -631,6 +631,41 @@ struct ResidentMachineAccess<H, O> {
     /// [`crate::start::child_session_eligibility`] for the one caller that
     /// consults this.
     child_session_factory: Option<ChildSessionFactory<H, O>>,
+    /// The compiled turn a fresh child session bootstraps with before
+    /// anything imports into it — the SAME program the composition root
+    /// itself bootstrapped with (`bridge/facade`'s `compile_root`), so a
+    /// child's image matches the parent's for whatever a transferred entry's
+    /// constituent objects need to resolve. Installed once by the
+    /// composition root, alongside [`Self::child_session_factory`]; `None`
+    /// makes [`ResidentActorRunner::provision_child_session`] refuse
+    /// (there's a factory but nothing to bootstrap the machine it builds
+    /// with — `ResidentSession::import_parcel` and `set_image_registry` both
+    /// require an already-bootstrapped engine).
+    child_bootstrap_program: Option<Arc<tidepool_runtime::session::CompiledTurn>>,
+    /// This run's shared [`tidepool_runtime::session::ImageRegistry`], if
+    /// the composition root installed one — `None` leaves every session
+    /// compiling its own images, unchanged. Applied to a session's engine
+    /// on every checkout ([`Self::with_host_machine`]): a no-op before that
+    /// session's own first turn bootstraps its engine (there is nothing yet
+    /// to share an image with — see
+    /// [`tidepool_runtime::session::ResidentSession::set_image_registry`]),
+    /// so a session's bootstrap install is never a hit, but every later
+    /// install on that session, root or child alike, can be.
+    image_registry: Option<Arc<tidepool_runtime::session::ImageRegistry>>,
+    /// Sessions `provision_child_session` built — a launch's OWN
+    /// dedicated machine, as opposed to the run's single shared session
+    /// (never a member here, and never torn down). Membership is what makes
+    /// a session id eligible for `ResidentActorRunner::retire_child_session`
+    /// at all.
+    child_sessions: Arc<std::sync::Mutex<std::collections::HashSet<tidepool_repr::SessionId>>>,
+    /// Dedicated child sessions whose actor has already retired but whose
+    /// machine still held at least one live value handle the last time
+    /// anyone checked — `retire_child_session`'s doc comment has the full
+    /// invariant. Retried opportunistically the next time that session is
+    /// checked out for any reason ([`Self::with_host_machine`]'s
+    /// settlement), never by this map being polled on its own.
+    pending_child_teardown:
+        Arc<std::sync::Mutex<std::collections::HashMap<tidepool_repr::SessionId, String>>>,
     // The `compile_blocking` span omits `include_roots` from every line (the
     // full search path is long and rarely changes turn to turn); this tracks
     // the last-logged roots per session so a diagnostic reader still sees
@@ -662,6 +697,12 @@ impl<H, O> ResidentMachineAccess<H, O> {
             machines,
             source,
             child_session_factory: None,
+            child_bootstrap_program: None,
+            image_registry: None,
+            child_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            pending_child_teardown: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
@@ -678,6 +719,10 @@ impl<H, O> ResidentMachineAccess<H, O> {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
             child_session_factory: self.child_session_factory.clone(),
+            child_bootstrap_program: self.child_bootstrap_program.clone(),
+            image_registry: self.image_registry.clone(),
+            child_sessions: Arc::clone(&self.child_sessions),
+            pending_child_teardown: Arc::clone(&self.pending_child_teardown),
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::clone(&self.carriers),
         }
@@ -1756,6 +1801,46 @@ impl<H, O> ResidentActorRunner<H, O> {
         self
     }
 
+    /// Install the compiled turn a fresh child session bootstraps with —
+    /// see [`ResidentMachineAccess::child_bootstrap_program`]. Required
+    /// alongside [`Self::with_child_session_factory`] for
+    /// [`Self::provision_child_session`] to succeed.
+    #[must_use]
+    pub fn with_child_bootstrap_program(
+        mut self,
+        program: Arc<tidepool_runtime::session::CompiledTurn>,
+    ) -> Self {
+        self.access.child_bootstrap_program = Some(program);
+        self
+    }
+
+    /// Whether this host can give a launch its own dedicated machine at
+    /// all: both [`Self::with_child_session_factory`] and
+    /// [`Self::with_child_bootstrap_program`] were installed.
+    /// `try_start_child`/`replacement.rs`'s matching resolution consult
+    /// this before calling [`Self::provision_child_session`], so a host
+    /// that never opted into per-actor machines (most test harnesses
+    /// included) still runs every launch on the session that admitted it,
+    /// exactly as before this capability existed, rather than failing an
+    /// otherwise-ordinary fork over a host capability nothing asked for.
+    #[must_use]
+    pub fn supports_child_sessions(&self) -> bool {
+        self.access.child_session_factory.is_some() && self.access.child_bootstrap_program.is_some()
+    }
+
+    /// Install this run's shared [`tidepool_runtime::session::ImageRegistry`].
+    /// Omitted, every session compiles its own images unchanged. Applied to
+    /// a session's engine on every checkout, root and child alike — see
+    /// [`ResidentMachineAccess::image_registry`].
+    #[must_use]
+    pub fn with_image_registry(
+        mut self,
+        registry: Arc<tidepool_runtime::session::ImageRegistry>,
+    ) -> Self {
+        self.access.image_registry = Some(registry);
+        self
+    }
+
     /// Build a fresh machine for `session_id` and register it idle in the
     /// shared registry, using the installed [`ChildSessionFactory`]. Returns
     /// an error naming why when no factory is installed, the factory itself
@@ -1764,10 +1849,11 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// not expected, but silently overwriting a live session is never safe).
     #[allow(
         dead_code,
-        reason = "installed by the composition root (actor_host.rs's compile_root), \
-                  but nothing calls it outside tests yet: capture_decoded still keeps \
-                  every launch on the shared session until the next parcel wires \
-                  child_session_eligibility's callsite"
+        reason = "installed by the composition root (actor_host.rs's compile_root); \
+                  every production launch path now goes through \
+                  Self::provision_child_session instead (an eligible launch \
+                  always has an entry to import, never an empty child), so this \
+                  stays exercised by tests only"
     )]
     pub(crate) fn spawn_child_session(
         &self,
@@ -1783,17 +1869,204 @@ impl<H, O> ResidentActorRunner<H, O> {
             .clone()
             .ok_or_else(|| "no child-session factory installed".to_string())?;
         let machine = factory(session_id)?;
+        self.access
+            .machines
+            .try_insert_idle(session_id, machine)
+            .map_err(|_machine| {
+                format!("session {session_id} already had a live entry; refusing to overwrite it")
+            })
+    }
+
+    /// [`Self::spawn_child_session`], but the one runtime-owned operation
+    /// that gives an eligible `SelectedContext` launch a genuinely running
+    /// machine of its own (`crate::start::child_session_eligibility`;
+    /// called by `try_start_child`/`replacement.rs`'s matching resolution
+    /// once the checkout that captured the launch has long since been
+    /// released): construct the private session, bootstrap it (install the
+    /// same compiled program the root itself bootstrapped with — required
+    /// before either `set_image_registry` or a later
+    /// [`ResidentActorRunner::transfer_custody`] import will do anything
+    /// but no-op/refuse on a virgin engine), install this run's shared
+    /// image registry, and mint the child's OWN lexical scope on the
+    /// machine that will actually own it (never the parent's — copying a
+    /// `ScopeId` across sessions is not evidence of destination scope
+    /// membership). Only once every one of those succeeds does the machine
+    /// publish into the shared registry. A failure at any step drops the
+    /// private machine and the reserved session id without ever publishing
+    /// it — the shared registry is unchanged.
+    ///
+    /// `resource_scope` is the descriptor's own resource scope, minted at
+    /// capture time (`crate::start::capture_decoded`'s `child_realm`) — the
+    /// SAME realm `transfer_custody` will later import the entry under, not
+    /// a second one of this call's own minting nothing afterward would use.
+    ///
+    /// Returns the child's own freshly minted lexical scope
+    /// (`ActorDescriptor::with_lexical_scope` replaces the placeholder the
+    /// parent minted at capture time with this one). The caller still owns
+    /// crossing the entry itself into this machine — `transfer_custody`,
+    /// not this call, which never touches any value's custody.
+    pub(crate) async fn provision_child_session(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        resource_scope: RealmId,
+    ) -> Result<tidepool_codegen::scope::ScopeId, String>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let factory = self
+            .access
+            .child_session_factory
+            .clone()
+            .ok_or_else(|| "no child-session factory installed".to_string())?;
+        let bootstrap_program = self
+            .access
+            .child_bootstrap_program
+            .clone()
+            .ok_or_else(|| "no child bootstrap program installed".to_string())?;
+        let mut machine = factory(session_id)?;
+        let lexical_scope = machine.mint_isolated_scope();
+        machine
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    resource_scope,
+                    lexical_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .map_err(|error| format!("child session bootstrap context: {error}"))?;
+        // Installs the shared program, bootstrapping the engine. Its own
+        // suspended boot handshake belongs to nobody here — only the
+        // install side effect matters, so the outcome is discarded exactly
+        // as the composition-root facade test
+        // (`composition_root_child_session_factory_runs_a_cell`) already
+        // does for the same call.
+        if let Some(registry) = &self.access.image_registry {
+            // Before the bootstrap, so the child's first install is the
+            // run's shared driver image rather than a second compile of it.
+            machine.set_image_registry(Arc::clone(registry));
+        }
+        machine
+            .run_with_sites("child_session_bootstrap", bootstrap_program.code())
+            .map_err(|error| format!("child session bootstrap install: {error}"))?;
+        // Atomic check-and-insert (`try_insert_idle`, not `insert_idle`):
+        // the collision check must happen before any registry mutation, not
+        // after — `insert_idle` would already have replaced whatever was at
+        // `session_id` by the time its return value said so.
+        self.access
+            .machines
+            .try_insert_idle(session_id, machine)
+            .map_err(|_machine| {
+                format!("session {session_id} already had a live entry; refusing to overwrite it")
+            })?;
+        self.access
+            .child_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id);
+        Ok(lexical_scope)
+    }
+
+    /// Attempt to release `session_id`'s dedicated machine now that its
+    /// actor has retired — the other half of
+    /// [`Self::provision_child_session`]'s lifecycle. A no-op,
+    /// immediately, for any session that call never built (the run's
+    /// shared session in particular is never a member of
+    /// [`ResidentMachineAccess::child_sessions`] and is never removed).
+    ///
+    /// The invariant: a dedicated child session is dropped only once its
+    /// actor has retired AND no live [`RootCustody`] still roots a value on
+    /// its machine. Parcel 6 delivers replies and retained progress to
+    /// other sessions as imported copies, and `export_custody` already
+    /// releases the source-side handle the instant each one crosses, so
+    /// this reduces to one cheap check: the session's own
+    /// [`ResidentSession::value_handle_count`]. Zero means the session
+    /// drops right here. Nonzero means something this actor produced has
+    /// not yet been exported off its machine (still in flight, most
+    /// likely); the release is deferred (logged once, here) and retried
+    /// the next time anything checks this session out for any reason — see
+    /// [`Self::with_host_machine`]'s settlement. This call itself never
+    /// waits for that: it performs one checkout, one check, and returns
+    /// either way, so an actor's retirement is never blocked on whoever
+    /// still needs this machine's output.
+    pub(crate) async fn retire_child_session(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> Result<(), ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        if !self
+            .access
+            .child_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&session_id)
+        {
+            return Ok(());
+        }
+        // Marked pending BEFORE the checkout, not after a separate read: the
+        // checkout's own settlement (`Self::with_host_machine`) is the ONLY
+        // place a dedicated child session is ever removed from the
+        // registry, so this reuses that one atomic decision (made while
+        // still holding the exclusive checkout) instead of a second,
+        // separately-racing read-then-remove after releasing it.
+        self.access
+            .pending_child_teardown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                session_id,
+                "actor retired; checking for outstanding custody".to_string(),
+            );
+        self.access
+            .with_host_machine("child-teardown", session_id, None, |session, _| {
+                Ok(session.value_handle_count())
+            })
+            .await?;
+        // `with_host_machine`'s settlement already either removed the
+        // session (zero live handles) or left it idle and logged the
+        // deferral (nonzero) — nothing further to do here either way.
+        Ok(())
+    }
+
+    /// Discard `session_id`'s dedicated machine immediately, unconditionally
+    /// — for a `provision_child_session` that succeeded (the machine is
+    /// registered) but something later in the same launch failed before any
+    /// actor ever admitted onto it (a `transfer_custody`/shared-import
+    /// failure, most likely). No actor exists yet to retire, so there is no
+    /// "outstanding custody" worth deferring for, unlike
+    /// [`Self::retire_child_session`]: this call site is the one place a
+    /// child session with nothing depending on it is removed outright, so
+    /// a failed launch never orphans a registered-but-unowned machine.
+    /// Called from both `try_start_child` and `replacement.rs`'s matching
+    /// resolution on any error after their own `provision_child_session`
+    /// call succeeds.
+    pub(crate) fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
+        self.access
+            .child_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+        self.access
+            .pending_child_teardown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
         if self
             .access
             .machines
-            .insert_idle(session_id, machine)
+            .remove(
+                session_id,
+                "child session launch failed before any actor admitted",
+            )
             .is_some()
         {
-            return Err(format!(
-                "session {session_id} already had a live entry; refusing to overwrite it"
-            ));
+            tracing::info!(session = ?session_id, "discarded a dedicated child session after a failed launch");
         }
-        Ok(())
     }
 
     pub(crate) fn resident_session_state(
@@ -2143,8 +2416,17 @@ where
         crate::call_timing::add_checkout_wait_ms(admission_started.elapsed().as_millis());
         let held_since = std::time::Instant::now();
         let (mut session, receipt) = checkout.into_parts();
+        if let Some(registry) = &self.image_registry {
+            // No-op before this session's own first turn bootstraps its
+            // engine; cheap (an `Arc` clone into a `Option` slot) and safe
+            // to repeat on every checkout otherwise — see
+            // `ResidentMachineAccess::image_registry`.
+            session.set_image_registry(Arc::clone(registry));
+        }
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
+        let pending_child_teardown = Arc::clone(&self.pending_child_teardown);
+        let child_sessions = Arc::clone(&self.child_sessions);
 
         let task = spawn_blocking_in_span(move || {
             // The blocking task owns the machine and its linear checkout
@@ -2170,6 +2452,42 @@ where
                             held_ms = held_since.elapsed().as_millis(),
                             "resident machine checkout released (retired)");
                         return outcome;
+                    }
+
+                    // A dedicated child session whose actor already retired
+                    // (`ResidentActorRunner::retire_child_session` found it
+                    // still holding live custody and deferred) gets a fresh
+                    // look on every later checkout of it for any reason —
+                    // the opportunistic retry `retire_child_session`'s own
+                    // doc comment promises. Once nothing is left, the
+                    // machine is removed outright instead of settling back
+                    // to idle.
+                    let still_pending_teardown = pending_child_teardown
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(&session_id);
+                    if still_pending_teardown {
+                        let live_handles = session.value_handle_count();
+                        if live_handles == 0 {
+                            pending_child_teardown
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&session_id);
+                            child_sessions
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&session_id);
+                            machines.settle_retire(
+                                receipt,
+                                "actor retired, deferred custody now released",
+                            );
+                            tracing::info!(actor = %actor, session = ?session_id,
+                                held_ms = held_since.elapsed().as_millis(),
+                                "dedicated child session released (deferred teardown completed)");
+                            return outcome;
+                        }
+                        tracing::info!(actor = %actor, session = ?session_id,
+                            live_handles, "dedicated child session release still deferred");
                     }
 
                     let holes = session
@@ -7546,6 +7864,24 @@ where
             .await
     }
 
+    /// Mint a fresh, isolated lexical scope on `session_id`'s own scope
+    /// forest, alone — for a launch `child_session_eligibility` marked
+    /// eligible (so `capture_decoded` minted it no real scope, only a
+    /// placeholder) but whose host offers no dedicated-machine primitive
+    /// (`Self::supports_child_sessions` false): it falls back to running on
+    /// the launching session, which still needs an actual scope of its own,
+    /// same as any other launch there.
+    pub(crate) async fn mint_lexical_scope(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine("mint-lexical-scope", session_id, None, move |session, _| {
+                Ok(session.mint_isolated_scope())
+            })
+            .await
+    }
+
     pub(crate) async fn close_realm(
         &self,
         context: crate::ActorSessionContext,
@@ -11800,6 +12136,117 @@ mod request_tests {
             .spawn_child_session(tidepool_repr::SessionId(999_999))
             .expect_err("no factory installed");
         assert!(error.contains("no child-session factory"));
+    }
+
+    /// A dedicated child session whose actor has retired, but which still
+    /// holds a live value handle (standing in for a reply/retained progress
+    /// value not yet exported off it — parcel 6's territory, not
+    /// reconstructed here), is not torn down: the release defers. Once that
+    /// handle is released, the NEXT checkout of the session (a second
+    /// `retire_child_session` call, exactly as `with_host_machine`'s own
+    /// settlement retries it for any other reason a session gets checked
+    /// out) completes the teardown and the session is gone from the
+    /// registry. Exercises `ResidentActorRunner::retire_child_session`
+    /// directly (`child_sessions` membership is normally recorded by
+    /// `provision_child_session`; set here by hand since this test
+    /// only needs a dedicated session to already exist, not the full
+    /// parcel-crossing launch path that builds one).
+    #[tokio::test]
+    async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
+        let (mut child_session, _child_root) = bare_session_at(child_id);
+        let lexical_scope = child_session.mint_isolated_scope();
+        let resource_scope = RealmId::fresh();
+        child_session
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope,
+                    resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("actor execution context");
+        let child_context = crate::ActorSessionContext {
+            placement: crate::ActorPlacement {
+                session: child_id,
+                resource_scope,
+                lexical_scope,
+            },
+            ..context.clone()
+        };
+        // A real compiled/mounted binding: bootstraps the session's engine
+        // and roots a live value handle, standing in for output this
+        // actor's last cell produced but nothing has exported off the
+        // machine yet.
+        mount_text_binding(
+            &mut child_session,
+            &child_context,
+            &source,
+            &[],
+            "outstanding",
+            "still here",
+            None,
+        )
+        .expect("mount a real binding to hold a live handle");
+        assert!(
+            child_session.value_handle_count() > 0,
+            "the mounted binding must hold at least one live handle"
+        );
+        machines.insert_idle(child_id, Box::new(child_session));
+
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        runner
+            .access
+            .child_sessions
+            .lock()
+            .unwrap()
+            .insert(child_id);
+
+        runner
+            .retire_child_session(child_id)
+            .await
+            .expect("retirement check itself does not fail");
+        assert!(
+            machines.kind(child_id).is_some(),
+            "outstanding custody must defer the release"
+        );
+        assert!(
+            runner
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap()
+                .contains_key(&child_id),
+            "the deferral must be recorded"
+        );
+
+        // Release the custody: evict the mounted binding's scope, exactly
+        // as an ordinary actor's own lexical-scope retirement does.
+        machines
+            .peek(child_id, |_| ())
+            .expect("session still present to release custody on");
+        let released = runner
+            .access
+            .with_host_machine("test-release", child_id, None, move |session, _| {
+                session.retire_scope(lexical_scope);
+                Ok(session.value_handle_count())
+            })
+            .await
+            .expect("releasing the mounted binding's scope");
+        assert_eq!(released, 0, "retiring its only scope must clear the handle");
+
+        runner
+            .retire_child_session(child_id)
+            .await
+            .expect("retirement recheck itself does not fail");
+        assert_eq!(
+            machines.kind(child_id),
+            None,
+            "the deferred release completes once custody clears"
+        );
     }
 
     /// Like [`actor_registry_fixture`], but mints a second, isolated lexical

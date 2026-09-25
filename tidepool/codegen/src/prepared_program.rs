@@ -254,6 +254,13 @@ unsafe extern "C" fn prepared_case_trap(
         // SAFETY: generated code passes a nonzero scrutinee only for an
         // algebraic case, whose value is a managed reference in this call.
         let header = unsafe { std::ptr::read(object as *const usize) };
+        {
+            let descriptor = unsafe { &*(header as *const tidepool_heap::execution_descriptor::ObjectDescriptor) };
+            eprintln!(
+                "DIAG case trap: scrutinee {scrutinee:#x} tag {} header {header:#x} kind {:?} descriptor tag {} constructor_tag {:?} owner {owner}",
+                scrutinee & 7, descriptor.kind(), descriptor.tag(), descriptor.constructor_tag()
+            );
+        }
         machine.prepared_constructor_at(header)
     };
     machine.set_first_cause(match constructor {

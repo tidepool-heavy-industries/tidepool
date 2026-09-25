@@ -240,6 +240,19 @@ where
         let placement = definition.child.descriptor.placement();
         let result = self.stage_replacement_inner(actor, definition).await;
         if let Err(error) = &result {
+            // If this replacement minted itself a fresh session
+            // (`child_session_eligibility`) and provisioning got as far as
+            // publishing it into the shared registry before something else
+            // failed, it is now orphaned — nothing will ever admit onto it.
+            // Discarding a session that was never provisioned in the first
+            // place (ineligible, or the host fell back to the predecessor's
+            // own session) is always safe: it is simply not a member of
+            // `child_sessions`.
+            if placement.session != self.descriptor.placement().session {
+                self.environment
+                    .runner
+                    .discard_child_session(placement.session);
+            }
             // Temporary roots drop before retiring this isolated scope.
             if let Err(cleanup) = self
                 .environment
@@ -274,30 +287,83 @@ where
             }
         };
         let crate::start::CapturedChildLaunch {
-            descriptor,
+            mut descriptor,
             entry,
             launch_worktrees,
             fork_workspace,
         } = definition.child;
-        // Left as a hard gate, not converted to a transfer: same reasoning
-        // as the child-entry gate in `resident_actor.rs` -- a replacement's
-        // child descriptor can only name the session it will actually start
-        // on once per-actor machines parcel 7 lets a launch mint a session
-        // independent of its parent. Until then this can never fire, and
-        // there is no destination machine yet for anything to transfer into.
-        if descriptor.placement().session != self.descriptor.placement().session {
-            return Err(reject("replacement crossed a resident machine boundary"));
-        }
         if launch_worktrees != self.launch_worktrees || fork_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",
             ));
         }
+        // See `resident_actor.rs::try_start_child`'s matching resolution: a
+        // replacement that names the predecessor's own session needs
+        // nothing further. One that names a freshly minted session instead
+        // (an eligible `SelectedContext` replacement) provisions that
+        // session's dedicated machine and crosses the entry into it with
+        // `ResidentActorRunner::transfer_custody`, getting the new
+        // session's own lexical scope, never the predecessor's.
+        let (entry, request_value) =
+            if descriptor.placement().session == self.descriptor.placement().session {
+                (entry, checkpoint.value.clone())
+            } else if !self.environment.runner.supports_child_sessions() {
+                // See `resident_actor.rs::try_start_child`'s matching fallback:
+                // `capture_decoded` minted no real lexical scope for this
+                // (eligible) replacement, only a placeholder.
+                let lexical_scope = self
+                    .environment
+                    .runner
+                    .mint_lexical_scope(self.descriptor.placement().session)
+                    .await?;
+                descriptor = descriptor
+                    .with_session(self.descriptor.placement().session)
+                    .with_lexical_scope(lexical_scope);
+                (entry, checkpoint.value.clone())
+            } else {
+                let child_session = descriptor.placement().session;
+                let lexical_scope = self
+                    .environment
+                    .runner
+                    .provision_child_session(child_session, descriptor.placement().resource_scope)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                descriptor = descriptor.with_lexical_scope(lexical_scope);
+                let entry = self
+                    .environment
+                    .runner
+                    .transfer_custody(
+                        entry,
+                        self.descriptor.placement().session,
+                        child_session,
+                        descriptor.placement().resource_scope,
+                    )
+                    .await?;
+                // `checkpoint.value` is a shared, non-consuming root: several
+                // callers may still read the predecessor's own checkpoint (a
+                // retry, or recovery after this replacement itself fails), so
+                // it crosses through the SAME borrow-export path
+                // `resume_progress_observation` uses for a published progress
+                // snapshot (`import_shared_custody`), never a consuming
+                // `transfer_custody` — the predecessor's own copy stays exactly
+                // as it was.
+                let request_value = self
+                    .environment
+                    .runner
+                    .import_shared_custody(
+                        Arc::clone(&checkpoint.value),
+                        self.descriptor.placement().session,
+                        child_session,
+                        descriptor.placement().resource_scope,
+                    )
+                    .await?;
+                (entry, Arc::new(request_value))
+            };
         let context = descriptor.session_context(actor);
         let realm = context.placement.resource_scope;
         let runner = &self.environment.runner;
         let mut outcome = runner
-            .run_rooted_application(context.clone(), entry, checkpoint.value.clone(), realm)
+            .run_rooted_application(context.clone(), entry, request_value, realm)
             .await?;
         let mut shutdown_hook = None;
         let mut sources = Vec::new();

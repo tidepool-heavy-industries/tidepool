@@ -741,11 +741,19 @@ impl PreparedMachine<'static> {
         program: CompiledProgram,
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
+        Self::new_shared(Arc::new(program), options)
+    }
+
+    /// As [`Self::new`], from an image another machine may already have
+    /// installed: the first program on this machine is that same `Arc`, so
+    /// its descriptors, code and static region are the ones every other
+    /// holder of the image shares.
+    pub fn new_shared(
+        program: Arc<CompiledProgram>,
+        options: PreparedMachineOptions,
+    ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(
-            ProgramCustody::Shared(Arc::new(program)),
-            &ImportBindings::new(),
-        )?;
+        let id = machine.install(ProgramCustody::Shared(program), &ImportBindings::new())?;
         Ok((machine, id))
     }
 }

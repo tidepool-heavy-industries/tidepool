@@ -583,7 +583,7 @@ pub(crate) unsafe fn prepare_descriptor_copy(
             let descriptor = descriptors
                 .descriptors
                 .get(&identity)
-                .ok_or(DescriptorTraceError::UnknownDescriptor { address: identity })?;
+                .ok_or_else(|| { eprintln!("DIAG gc raw copy: unknown header {identity:#x}"); DescriptorTraceError::UnknownDescriptor { address: identity } })?;
             let extent = descriptor.allocation_extent() as usize;
             if extent < 16 || !extent.is_multiple_of(8) {
                 return Err(DescriptorTraceError::InvalidRange);

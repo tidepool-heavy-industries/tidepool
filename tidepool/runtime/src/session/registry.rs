@@ -289,6 +289,34 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         previous
     }
 
+    /// [`Self::insert_idle`], but atomically refusing a collision instead of
+    /// silently replacing whatever was already at `id`: the check and the
+    /// insert happen under the same lock acquisition (`HashMap::entry`), so
+    /// there is no window where a caller can observe "no entry yet" and then
+    /// have this call clobber a concurrently-inserted one. On `Err`, `id`'s
+    /// existing entry is untouched and `machine` is handed back so the
+    /// caller can decide what to do with the machine it just built (drop
+    /// it, most likely — a `SessionId` collision is not expected in the
+    /// first place, never mind a race on one, but silently overwriting a
+    /// live session is never safe).
+    pub fn try_insert_idle(&self, id: SessionId, machine: Box<M>) -> Result<(), Box<M>> {
+        let mut slots = self.slots.lock();
+        if slots.contains_key(&id) {
+            return Err(machine);
+        }
+        let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        slots.insert(
+            id,
+            Entry {
+                epoch,
+                slot: Slot::Idle(machine),
+            },
+        );
+        drop(slots);
+        self.availability_for(id).changed.notify_waiters();
+        Ok(())
+    }
+
     /// Remove a session entirely, returning its slot (drops the machine when
     /// the returned slot is dropped). The get-unstuck / teardown path. A
     /// checkout still outstanding for `id` finds its epoch stale on
@@ -855,6 +883,47 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// The collision refusal must happen BEFORE any registry mutation, not
+    /// after a replace-then-report: `insert_idle`'s "previous entry" return
+    /// value tells the caller a collision happened only once the collision
+    /// has already overwritten the entry, which is exactly the defect
+    /// `try_insert_idle` exists to not have.
+    #[test]
+    fn try_insert_idle_refuses_a_collision_without_touching_the_existing_entry() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(42);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
+
+        let refused = reg.try_insert_idle(id, Box::new(FakeMachine { turns: 99 }));
+        assert!(
+            refused.is_err(),
+            "a second insert at the same id must be refused"
+        );
+        let handed_back = refused.err().unwrap();
+        assert_eq!(
+            *handed_back,
+            FakeMachine { turns: 99 },
+            "the refused machine is handed back to the caller, not dropped silently"
+        );
+        assert_eq!(
+            reg.peek(id, |machine| machine.turns),
+            Some(1),
+            "the original entry must be exactly what it was before the refused insert \
+             — never replaced, not even transiently"
+        );
+        assert!(is_idle(&reg, id));
+    }
+
+    #[test]
+    fn try_insert_idle_succeeds_into_a_vacant_id() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(43);
+        assert!(reg
+            .try_insert_idle(id, Box::new(FakeMachine { turns: 5 }))
+            .is_ok());
+        assert_eq!(reg.peek(id, |machine| machine.turns), Some(5));
     }
 
     #[test]

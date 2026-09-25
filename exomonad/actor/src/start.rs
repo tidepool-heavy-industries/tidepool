@@ -209,6 +209,16 @@ pub struct ActorReplacementDefinition {
 
 pub(crate) struct CapturedChildLaunch {
     pub descriptor: ActorDescriptor,
+    /// Still resident on the LAUNCHING session's machine, whether or not
+    /// the descriptor's own placement names a different, freshly minted
+    /// one (an eligible `SelectedContext` launch — see
+    /// `child_session_eligibility`). Crossing it to the child's own machine
+    /// is the launch path's job, not capture's: `resident_actor.rs`'s
+    /// `try_start_child` (and `replacement.rs`'s matching resolution)
+    /// provisions that session and calls
+    /// `ResidentActorRunner::transfer_custody` once the checkout that
+    /// captured this launch has long since been released — never here,
+    /// while it is still held.
     pub entry: RootCustody,
     pub launch_worktrees: Vec<String>,
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
@@ -315,7 +325,10 @@ impl ResidentActorStart {
                 parent_actor,
                 // `Tidepool.Actor`'s own `start`/`fork` (this entry point's
                 // caller) always carries a caller-authored `ActorDefinition`,
-                // never the stdlib's `agentDefinitionUnbound` — never eligible.
+                // never the stdlib's `agentDefinitionUnbound` — but that no
+                // longer decides eligibility (see `child_session_eligibility`):
+                // a `SelectedContext` launch from here is eligible for its
+                // own machine session too, its entry crossing as a parcel.
                 unbound_label: None,
             },
         )
@@ -360,13 +373,6 @@ impl ResidentActorStart {
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let facade = materialize_entry_facade(session, &entry)?;
-        let lexical_scope = if context_fork {
-            session
-                .mint_scope(session.run_context().lexical_scope)
-                .ok_or(ActorStartCaptureError::ParentScopeRetired)?
-        } else {
-            session.mint_isolated_scope()
-        };
         let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
@@ -394,16 +400,42 @@ impl ResidentActorStart {
             reason = eligibility.reason,
             "selected-context child session eligibility decided"
         );
-        // The fresh-machine factory (a shared "spawn child session" primitive
-        // extracted from `bridge/facade`'s root bootstrap) does not exist yet
-        // — see plans/wave3/dives/per-child-sessions-design.md parcel 2.
-        // Every launch, eligible or not, still gets the launching session's
-        // id until that factory lands and its caller wires it in; this call
-        // site is the seam.
+        // An eligible launch gets its own fresh session id here, recorded
+        // in the descriptor's placement — but the entry itself stays
+        // resident on THIS, the parent's, session; crossing it to the
+        // child's machine is `try_start_child`'s job, once the checkout
+        // that captured this launch is long since released (never both
+        // sessions checked out at once). An ineligible launch, or any
+        // `InheritedContext` fork, is unchanged: it keeps the launching
+        // session's id, and never crosses at all.
+        //
+        // The lexical scope is minted on THIS, the parent's, session too —
+        // but only when there is no later child session to mint it on
+        // instead: an eligible launch's own scope belongs to the CHILD's
+        // scope forest, minted there once `try_start_child` provisions it
+        // (`ActorDescriptor::with_lexical_scope` replaces this placeholder).
+        // Minting one here anyway, for a scope nothing on the parent will
+        // ever use, would leak an empty scope into the parent's forest on
+        // every eligible launch.
+        let (launch_session, lexical_scope) = if eligibility.eligible {
+            (
+                tidepool_runtime::session::fresh_session_id(),
+                tidepool_codegen::scope::ScopeId::ROOT,
+            )
+        } else if context_fork {
+            (
+                session_id,
+                session
+                    .mint_scope(session.run_context().lexical_scope)
+                    .ok_or(ActorStartCaptureError::ParentScopeRetired)?,
+            )
+        } else {
+            (session_id, session.mint_isolated_scope())
+        };
         let mut descriptor = ActorDescriptor::new(
             label,
             crate::ActorPlacement {
-                session: session_id,
+                session: launch_session,
                 resource_scope: child_realm,
                 lexical_scope,
             },
@@ -437,58 +469,59 @@ impl ResidentActorStart {
     }
 }
 
-/// Whether a launch's `entry` closure is reconstructible on a fresh session,
-/// decided from data the wire request already carries — never by inspecting
-/// the captured `entry` value itself (closures/thunks never cross the bridge;
-/// see `tidepool_bridge::HaskellValue`'s doc comment).
+/// Whether a launch gets its own machine session, decided from data the wire
+/// request already carries — never by inspecting the captured `entry` value
+/// itself (closures/thunks never cross the bridge; see
+/// `tidepool_bridge::HaskellValue`'s doc comment). The entry no longer has to
+/// be reconstructible on the fresh session: `try_start_child` crosses the
+/// closure itself (whatever it closes over) to the child's machine as a
+/// detached parcel (`ResidentActorRunner::transfer_custody`), so an eligible
+/// launch no longer needs the stdlib's `agentDefinitionUnbound <label>`
+/// shape — a caller-authored `ActorDefinition` is just as eligible.
 struct ChildSessionEligibility {
     eligible: bool,
     reason: &'static str,
 }
 
-/// A launch is eligible for its own machine session only when BOTH: the
-/// model asked for a selected (not inherited) context, AND the entry is the
-/// stdlib's `agentDefinitionUnbound <label>` — the one shape whose captured
-/// `entry` closes over nothing but that label (see
-/// `bridge/haskell/actors/Tidepool/Actors/Internal/Agent.hs`'s
-/// `agentDefinitionUnbound`/`startForkedAgent`). Every other launch (a
-/// caller-authored `ActorDefinition`, or any `InheritedContext` fork) keeps
-/// running on the launching session, unchanged.
+/// A launch is eligible for its own machine session exactly when the model
+/// asked for a selected (not inherited) context, and the resolved effect row
+/// does not need RepoEvent (a fresh session's `RepoEventHandler` is always
+/// the inert one — see below). Any `InheritedContext` fork keeps running on
+/// the launching session, unchanged: it shares the parent's lexical scope
+/// chain and declaration generations, which only make sense on one machine.
 fn child_session_eligibility(
     context: ForkContext,
-    unbound_label: Option<&str>,
+    // No longer decides eligibility (every `SelectedContext` launch is
+    // eligible, unbound label or not — see this function's doc comment) but
+    // kept as a parameter: every caller already has it in hand from the wire
+    // request, and it stays useful as tracing context for the "selected-context
+    // child session eligibility decided" log line at the one call site.
+    _unbound_label: Option<&str>,
     resolved_effect_keys: &[crate::ActorEffectKey],
 ) -> ChildSessionEligibility {
-    match (context, unbound_label) {
-        (ForkContext::SelectedContext, Some(_)) => {
+    match context {
+        ForkContext::SelectedContext => {
             // The inert `RepoEventHandler` a fresh session installs for this
             // actor never dispatches RepoEvent; if the RESOLVED row somehow
             // grants that key anyway, refuse instead of reaching it. Checked
-            // here, not assumed from `agentDefinitionUnbound`'s fixed
-            // `ReadOnlyEffects AgentProtocol` shape, precisely so a later row
-            // change is caught by this check rather than by a runtime error
-            // inside the inert source.
+            // here, not assumed from any particular launch shape, precisely
+            // so a later row change is caught by this check rather than by a
+            // runtime error inside the inert source.
             if resolved_effect_keys.contains(&crate::ActorEffectKey::RepoEvent) {
                 ChildSessionEligibility {
                     eligible: false,
-                    reason: "selected context, unbound agent launch, but the resolved \
-                             effect row includes RepoEvent — a fresh session's \
-                             RepoEventHandler cannot serve it",
+                    reason: "selected context, but the resolved effect row includes \
+                             RepoEvent — a fresh session's RepoEventHandler cannot \
+                             serve it",
                 }
             } else {
                 ChildSessionEligibility {
                     eligible: true,
-                    reason:
-                        "selected context, unbound agent launch, no RepoEvent in the resolved row",
+                    reason: "selected context, no RepoEvent in the resolved row",
                 }
             }
         }
-        (ForkContext::SelectedContext, None) => ChildSessionEligibility {
-            eligible: false,
-            reason: "selected context, but entry is a caller-authored ActorDefinition \
-                     (may close over live state beyond the label)",
-        },
-        (ForkContext::InheritedContext, _) => ChildSessionEligibility {
+        ForkContext::InheritedContext => ChildSessionEligibility {
             eligible: false,
             reason: "inherited context shares the parent's scope chain and generations",
         },
@@ -775,10 +808,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_context_without_unbound_label_is_ineligible() {
+    fn selected_context_without_unbound_label_is_eligible() {
+        // A caller-authored `ActorDefinition` (no `agentDefinitionUnbound`
+        // label) is now just as eligible as an unbound launch: its entry
+        // crosses to the child session as a parcel instead of being
+        // reconstructed there.
         use super::{child_session_eligibility, ForkContext};
         let decision = child_session_eligibility(ForkContext::SelectedContext, None, &[]);
-        assert!(!decision.eligible);
+        assert!(decision.eligible);
     }
 
     #[test]
@@ -802,6 +839,20 @@ mod tests {
             "a resolved row granting RepoEvent must turn eligibility off, \
              since a fresh session's RepoEventHandler cannot serve it"
         );
+    }
+
+    #[test]
+    fn bound_launch_is_also_ineligible_when_the_resolved_row_grants_repo_event() {
+        // The RepoEvent exclusion is decided from the resolved effect row
+        // alone, independent of whether the entry is an unbound stdlib
+        // launch or a caller-authored `ActorDefinition`.
+        use super::{child_session_eligibility, ForkContext};
+        let decision = child_session_eligibility(
+            ForkContext::SelectedContext,
+            None,
+            &[crate::ActorEffectKey::RepoEvent],
+        );
+        assert!(!decision.eligible);
     }
 
     #[test]
