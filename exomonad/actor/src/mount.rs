@@ -196,6 +196,17 @@ impl ActorCompileView {
         self.session.injected_module_names()
     }
 
+    /// Names of the injected value modules this actor's turn can reach: the
+    /// part of the injected set that compiler evidence depends on.
+    #[must_use]
+    pub(crate) fn reachable_module_names(&self) -> Vec<String> {
+        self.session
+            .reachable_values()
+            .iter()
+            .map(tidepool_repr::SessionModule::module_name)
+            .collect()
+    }
+
     #[must_use]
     pub fn next_value_generation(&self) -> Generation {
         self.session.next_value_generation()
@@ -244,7 +255,7 @@ impl ActorCompileView {
             .library()
             .into_iter()
             .chain(self.session.visible_values().iter().copied())
-            .chain(self.session.injected_values().iter().copied())
+            .chain(self.session.reachable_values().iter().copied())
         {
             field(&mut hasher, module.module_name().as_bytes());
         }

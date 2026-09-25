@@ -785,6 +785,12 @@ impl BindingTable {
     /// a descendant, an unrelated actor's isolated root) are never imported
     /// by such a turn, and whatever an imported value reaches through them is
     /// leased by its owner's custody rather than named here.
+    ///
+    /// For a seeded scope, an inherited declaration module may import an
+    /// ancestor's value generation the ancestor has since shadowed. That
+    /// module is owned by the ancestor's frame and is not named here; it is
+    /// safe to leave out only because an ancestor scope outlives its
+    /// descendants, so it stays live while this scope does.
     pub fn scope_reachable_modules(
         &self,
         tree: &ScopeTree,

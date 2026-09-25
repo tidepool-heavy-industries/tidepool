@@ -9725,7 +9725,10 @@ fn cell_check_evidence(
     for path in prepared.include.iter() {
         field(&mut evidence, path.as_os_str().as_encoded_bytes());
     }
-    for module in &prepared.injected {
+    // Only the injected modules this scope can reach: the rest are injected
+    // for findability, and another actor's binds must not invalidate the
+    // evidence (`SessionCompileView::is_current_for`).
+    for module in view.reachable_module_names() {
         field(&mut evidence, module.as_bytes());
     }
     evidence.finalize().to_hex().to_string()
@@ -12092,33 +12095,199 @@ mod request_tests {
 
     /// Actors co-resident on one machine share its live value set, but a
     /// split compile reads only its own scope's frames and inherited tip.
-    /// A sibling actor binding and then retiring, and a forked child of this
-    /// actor binding, between the snapshot and the install must leave the
-    /// split current: the cell installs off-checkout.
+    /// While the cell's install checkout is held, a sibling actor binds and
+    /// retires and a forked child of this actor binds. The cell, which reads
+    /// this actor's own earlier binding, must still install off-checkout
+    /// with no single-checkout fallback, and settle to the right value.
+    #[tokio::test]
+    async fn cell_split_other_actors_commits_between_snapshot_and_install_stay_current() {
+        use std::sync::atomic::Ordering;
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let (sibling_scope, child_scope) = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                let sibling = session.mint_isolated_scope();
+                let child = session
+                    .mint_scope(context.placement.lexical_scope)
+                    .expect("fork scope");
+                Ok((sibling, child))
+            })
+            .await
+            .expect("scopes mint");
+        let actor_at = |id: u64, lexical_scope| crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(id)),
+            placement: crate::ActorPlacement {
+                lexical_scope,
+                ..context.placement
+            },
+            ..context.clone()
+        };
+        let sibling = actor_at(2, sibling_scope);
+        let child = actor_at(3, child_scope);
+
+        let own = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "ownValue <- pure (41 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .expect("the actor's own binding installs");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = own {
+            workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("the actor's own binding settles");
+        }
+
+        let probe = Arc::new(split_probe::SplitProbe {
+            held_installs: 1,
+            ..Default::default()
+        });
+        let cell = "derived <- pure (ownValue + 1)".to_string();
+        let prepare = split_probe::PROBE.scope(
+            Arc::clone(&probe),
+            workbench.prepare_cell(context.clone(), cell.clone()),
+        );
+        let interlope = async {
+            probe.install_reached.notified().await;
+            for (actor, name) in [(&sibling, "siblingValue"), (&child, "childValue")] {
+                let mount_source = workbench.access.source.clone();
+                workbench
+                    .access
+                    .with_machine(actor.clone(), move |session, context, _| {
+                        mount_text_binding(
+                            session,
+                            context,
+                            &mount_source,
+                            &[],
+                            name,
+                            "another actor's value",
+                            None,
+                        )
+                    })
+                    .await
+                    .expect("another actor's binding mounts");
+            }
+            workbench
+                .access
+                .with_machine(sibling.clone(), move |session, _, _| {
+                    session.retire_scope(sibling_scope);
+                    Ok(())
+                })
+                .await
+                .expect("the sibling retires");
+            probe.resume_install.notify_one();
+        };
+        let (prepared, ()) = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            tokio::join!(prepare, interlope)
+        })
+        .await
+        .expect("the split settles");
+        let (_checked, prepared) = prepared.expect("the cell prepares");
+        let PreparedCell::Ready { mut items, .. } = prepared else {
+            panic!("the cell must prepare as Ready");
+        };
+        assert_eq!(probe.install_checkouts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            probe.single_checkout_compiles.load(Ordering::SeqCst),
+            0,
+            "other actors' binds and retirement must not force the single-checkout fallback"
+        );
+
+        assert_eq!(items.len(), 1);
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: cell,
+                },
+                items.remove(0),
+                4096,
+            )
+            .await
+            .expect("the installed item runs");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
+            workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("the installed item settles");
+        }
+        let shown = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "derived".into(),
+                },
+                None,
+            )
+            .await
+            .expect("the bound value displays");
+        let shown = match shown {
+            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("the display settles"),
+            step => step,
+        };
+        let ResidentWorkbenchStep::Committed { output, .. } = shown else {
+            panic!("the display did not commit");
+        };
+        assert!(output.contains("42"), "{output}");
+
+        // The fork inherited a snapshot, not a live link: its parent binding
+        // afterwards leaves the fork's compile view current.
+        let parent_source = workbench.access.source.clone();
+        let child_current = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let before = actor_compile_view(session, &child, &parent_source, &[])?;
+                mount_text_binding(
+                    session,
+                    context,
+                    &parent_source,
+                    &[],
+                    "parentValue",
+                    "the parent's later value",
+                    None,
+                )?;
+                let after = actor_compile_view(session, &child, &parent_source, &[])?;
+                Ok(after.is_current_for(&before))
+            })
+            .await
+            .expect("the parent binds");
+        assert!(child_current);
+    }
+
+    /// Retiring this actor's own carrier between the split's compile and
+    /// its install changes what the cell could import, so the install must
+    /// report the view stale.
     #[test]
-    fn cell_split_other_actors_commits_between_snapshot_and_install_stay_current() {
+    fn cell_split_retiring_own_carrier_before_install_is_stale() {
         let (mut session, context, base_source, _root) = host_mount_fixture();
         let cell = "onlyItem <- pure (1 :: Int)";
-        let sibling_scope = session.mint_isolated_scope();
-        let sibling = crate::ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(2)),
-            placement: crate::ActorPlacement {
-                lexical_scope: sibling_scope,
-                ..context.placement
-            },
-            ..context.clone()
-        };
-        let child_scope = session
-            .mint_scope(context.placement.lexical_scope)
-            .expect("fork scope");
-        let child = crate::ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(3)),
-            placement: crate::ActorPlacement {
-                lexical_scope: child_scope,
-                ..context.placement
-            },
-            ..context.clone()
-        };
+        let carrier = mount_json_input(
+            &mut session,
+            &context,
+            &base_source,
+            &[],
+            &serde_json::json!({"greeting": "hi"}),
+            None,
+        )
+        .expect("own carrier mounts");
 
         let (source, snapshot) = snapshot_cell_split(
             &mut session,
@@ -12169,27 +12338,9 @@ mod request_tests {
             panic!("the item must compile");
         };
 
-        for (actor, name) in [(&sibling, "siblingValue"), (&child, "childValue")] {
-            mount_text_binding(
-                &mut session,
-                actor,
-                &base_source,
-                &[],
-                name,
-                "another actor's value",
-                None,
-            )
-            .expect("another actor's binding mounts");
-        }
-        let fresh = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
-        assert_ne!(
-            fresh.injected_module_names(),
-            view.injected_module_names(),
-            "the other actors' binds joined the machine's injected set"
-        );
-        assert_eq!(split_staleness(&session, &fresh, &view, None), None);
-
-        session.retire_scope(sibling_scope);
+        let session_root = carrier_mount_session_root(&session, context.placement.lexical_scope)
+            .expect("session root");
+        session.retire_host_binding_owner(&session_root, &carrier.binder);
 
         let install = finalize_cell_install(
             &mut session,
@@ -12204,25 +12355,9 @@ mod request_tests {
         )
         .expect("finalize install");
         assert!(
-            matches!(install, CellInstall::Ready(PreparedCell::Ready { .. })),
-            "other actors' binds and retirement must not invalidate this actor's split"
+            matches!(install, CellInstall::Stale(SplitStaleView::CompileView)),
+            "retiring the actor's own carrier must invalidate the snapshot"
         );
-
-        // The fork inherited a snapshot, not a live link: its parent binding
-        // afterwards leaves the fork's compile view current.
-        let child_before = actor_compile_view(&session, &child, &source, &[]).expect("child view");
-        mount_text_binding(
-            &mut session,
-            &context,
-            &base_source,
-            &[],
-            "parentValue",
-            "the parent's later value",
-            None,
-        )
-        .expect("parent binding mounts");
-        let child_after = actor_compile_view(&session, &child, &source, &[]).expect("child view");
-        assert!(child_after.is_current_for(&child_before));
     }
 
     /// A registry-backed [`ResidentActorWorkbench`] sharing one resident

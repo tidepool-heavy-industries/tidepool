@@ -147,6 +147,12 @@ pub struct SessionCompileView {
     /// and by its inherited tip. Every other live module is injected only so
     /// the whole session stays findable; another actor's binds and releases
     /// move it without touching what this turn compiled against.
+    ///
+    /// An inherited declaration module can import an ancestor's value
+    /// generation that the ancestor has since shadowed; that module is not
+    /// in this set. Leaving it out is safe only because an ancestor scope
+    /// outlives its descendants, so the ancestor's frame keeps it live for as
+    /// long as this scope exists.
     pub(super) reachable_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
@@ -226,6 +232,13 @@ impl SessionCompileView {
     #[must_use]
     pub fn injected_values(&self) -> &[SessionModule] {
         &self.injected_values
+    }
+
+    /// The injected value modules a turn compiled at this scope can reach;
+    /// see the field's documentation for what is outside it.
+    #[must_use]
+    pub fn reachable_values(&self) -> &[SessionModule] {
+        &self.reachable_values
     }
 
     #[must_use]
