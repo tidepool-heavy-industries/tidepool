@@ -59,3 +59,19 @@ while its own (d) seam sat idle. One note sent: do the Engine::run consumer
 now, return to Here when its candidate arrives. Also: the set_effort reviewer
 (21@1) got the "tried this before" watchdog nudge 8 times in 2.5 minutes;
 carded as watchdog noise to look at after the run.
+
+## 10:26Z wake
+
+Alive; 13 GiB available; 20 windows; no latched machine. The 09:56 note
+landed: the root wired the Server Compactor into Engine::run with a persisted
+window boundary (2b5e152, 10:08Z) and integrated a production demo consumer
+(5c17907, 10:19Z); its repair review is pending with the same reviewer (the
+one-review rule held). (c): the root passed durable request identity to the
+spawn verbs for the Here seam (e28126e); the Here wave is active. One
+UpdatePending (28@1, once); no nudges.
+
+Costliest delta: checkout tail, not behaviour. Since 09:56, p50 6 ms but the
+root's own cell waited 96 s at 10:22 and another took 45 s of compile. That
+is the stale-split fallback class fixed on main (7d4a108b4, 43d320dbe) and not
+in this build. No note: nothing stalled, integrations landing, (d) is one
+review from done and (c) one seam from done.
