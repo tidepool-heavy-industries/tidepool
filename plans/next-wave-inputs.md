@@ -403,3 +403,8 @@ Deferred, one card each:
   sibling tests run on parallel threads in the same binary; it failed once
   and passed on rerun (2026-09-24). Serialize its env access or take the
   variable as an argument.
+- From Sol's quality pass (2026-09-24), for later review:
+  `version_ladder::found_version` treats an invalid present version as
+  unstamped version 0; and KV `flush` logs write failures (including the
+  refused flush after a failed load) while its callers still report success,
+  though the effect contract says I/O faults abort.
