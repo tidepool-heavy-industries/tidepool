@@ -117,7 +117,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
   void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel Medium projectHead task))"
   worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|]"
+  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|] :: Label"
   if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
   if failAfterAdmission then do
     source <- readFile owner (checkSource "review-continuation")
@@ -305,7 +305,7 @@ independentSources = do
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "left progresses while right is silent" (output first == "True")
   void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
@@ -316,13 +316,13 @@ independentSources = do
   both <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "same-key questions retain both source identities" (output both == "True")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "closure retains unanswered questions" (output closed == "True")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
   resolved <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "one resolution cannot erase another source's questions" (output resolved == "True")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map sourceStatus . collectedWork <$> readWork collection"
+  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork collection"
   check "both sources close without rearming" (output final == "True")
   void $ turn owner "finishWork collection"
 

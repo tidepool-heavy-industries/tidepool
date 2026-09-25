@@ -1727,9 +1727,7 @@ where
     /// with. The composition root that owns a run's sibling sessions is the
     /// intended caller.
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
-        if let Some(engine) = self.state.prepared_mut() {
-            engine.set_image_registry(registry);
-        }
+        self.state.set_image_registry(registry);
     }
 
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
@@ -1850,6 +1848,16 @@ where
     /// (via a [`ResidentHole::Binding`]) materialize at the same `g`.
     pub fn val_gen(&self) -> Generation {
         self.state.val_gen()
+    }
+
+    /// Raise this session's value-binding generation counter to at least
+    /// `generation` — [`super::persistent::PersistentSession::set_val_gen`]'s
+    /// own monotonic-max, never lowers it. A fresh child session seeded with
+    /// a copy of another session's `Tidepool.Session.Val`/`Lib.G<n>` source
+    /// files uses this so its own later declarations never mint a
+    /// generation a just-copied file already occupies.
+    pub fn set_val_gen(&mut self, generation: Generation) {
+        self.state.set_val_gen(generation);
     }
 
     /// Retain prepared closure dependencies through the existing binding owner.
@@ -2349,7 +2357,59 @@ where
                 "cannot import a parcel: the prepared machine is not installed".to_string(),
             ))));
         };
-        let handle = engine.import_parcel(parcel, owner)?;
+        let (handle, imports) = engine.import_parcel(parcel, owner)?;
+        // One root-slot lookup per import while `engine` is still borrowed;
+        // the actual binding-store record happens after, since
+        // `PersistentSession::bind` below needs `&mut self.state` and
+        // `engine` already holds it exclusively.
+        let resolved: Vec<(
+            SymbolIdentity,
+            PreparedHandle,
+            tidepool_codegen::old_space::RootSlot,
+        )> = imports
+            .into_iter()
+            .filter_map(|(identity, imported)| {
+                engine
+                    .handle_slot(imported.raw())
+                    .map(|root| (identity, imported, root))
+            })
+            .collect();
+        for (identity, imported, root) in resolved {
+            // Only an identity whose module is a `Lib.G<n>` declaration
+            // module names a generation this way -- the shape every
+            // `Tidepool.Actor.Surface.H<digest>` facade re-export uses
+            // (`start.rs`'s `facade_heads`); anything else is left for
+            // `code_exports`'s package-top fallback in `resolve_imports`
+            // instead of a binding-store entry this session cannot mint a
+            // meaningful generation for.
+            let Some(digits) = identity.module.strip_prefix("Tidepool.Session.Lib.G") else {
+                continue;
+            };
+            let Ok(generation) = digits.parse::<u64>() else {
+                continue;
+            };
+            let module = SessionModule::lib(Generation(generation));
+            // The SAME id a later cell's OWN reference to this name mints
+            // (`session_var_id` hashes `"<module>:<occ>"` identically on
+            // both sides -- see its doc comment), so a compiled program's
+            // `NVar` for `Lib.G<n>.foo` matches this entry by raw equality
+            // exactly as it would on the session the value came from.
+            let id =
+                SessionVarId::from_extract(session_var_id(&identity.module, &identity.occurrence));
+            self.state.bind(BindingEntry {
+                name: BindingName(identity.occurrence.clone()),
+                id,
+                module,
+                value: BoundValue {
+                    root,
+                    handle: imported,
+                    identity,
+                },
+                type_display: None,
+                defining_expr: None,
+                scope: ScopeId::ROOT,
+            });
+        }
         Ok(RootCustody::new(
             handle,
             Arc::clone(&self.custody_cleanup),
@@ -4536,6 +4596,27 @@ where
             }
         }
         count + binding_count
+    }
+
+    /// How many [`RootCustody`] tokens for THIS session are alive right now,
+    /// OUTSIDE the session itself — every one holds its own `Arc::clone` of
+    /// `self.custody_cleanup`, so `Arc::strong_count` less the one the
+    /// session holds for itself is exactly that count. Settles dropped
+    /// custody first ([`Self::settle_dropped_custody`]), so a token whose
+    /// owner already dropped it — queued for release, not yet drained —
+    /// does not count as outstanding.
+    ///
+    /// `BindingLease` and the transient `CustodyTransfer` also clone this
+    /// `Arc`, so in principle they inflate this count too — but neither
+    /// lives past the synchronous call that built it (`CustodyTransfer`
+    /// commits or drops within `into_transfer`'s one caller;
+    /// `BindingLease`'s own doc comment: reclaimed "on the next session
+    /// entry or at teardown", never held across a turn boundary), so
+    /// neither can be alive at a call site like actor retirement, which
+    /// only ever runs between turns.
+    pub fn outstanding_custody(&mut self) -> usize {
+        self.settle_dropped_custody();
+        Arc::strong_count(&self.custody_cleanup).saturating_sub(1)
     }
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:

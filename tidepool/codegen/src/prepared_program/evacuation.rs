@@ -31,10 +31,11 @@ use crate::suspension::RealmId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tidepool_heap::descriptor_region::DescriptorArena;
-use tidepool_heap::execution_descriptor::DescriptorTraceError;
+use tidepool_heap::execution_descriptor::{DescriptorTraceError, ObjectDescriptor};
 use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::gc::evacuate::{export_reachable, MachineSpaces, NurseryView};
 use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
+use tidepool_repr::DataConId;
 
 /// For each import slot of an image: the identity imported and the index
 /// (into the parcel's roots) of the copied value the importer binds it to.
@@ -47,17 +48,32 @@ pub struct ParcelImage {
     pub imports: ParcelImports,
 }
 
+/// A constructor descriptor the copied objects use. Interned constructors
+/// belong to no image (an image that declares one shares the process-wide
+/// descriptor, and retiring that image leaves it), so a parcel carries them
+/// itself, with the observation identity the importer registers.
+pub struct ParcelConstructor {
+    pub descriptor: Arc<ObjectDescriptor>,
+    pub identity: DataConId,
+    pub fields: Vec<RuntimeRep>,
+}
+
 /// A detached copy of one value together with everything a machine that
 /// never saw its sender needs to hold and run it. Root 0 is the value; the
 /// remaining roots are the import-slot values of the images in `images`.
 pub struct Parcel {
     heap: tidepool_heap::gc::evacuate::Parcel,
     images: Vec<ParcelImage>,
+    constructors: Vec<ParcelConstructor>,
 }
 
 impl Parcel {
     pub fn bytes(&self) -> usize {
         self.heap.bytes()
+    }
+
+    pub fn constructors(&self) -> &[ParcelConstructor] {
+        &self.constructors
     }
 
     pub fn root(&self) -> usize {
@@ -98,11 +114,48 @@ impl PreparedMachine<'_> {
         for _ in 0..MANIFEST_ROUNDS {
             let heap = self.export_roots(&roots)?;
             // Owners of every copied object and every static reference.
+            // An interned constructor or an external wrapper has no owner
+            // (see `install_shared`): externals are process-wide and every
+            // machine knows them; constructors travel in the parcel. Any
+            // other unowned header is a defect on this side, refused here
+            // where the object can still be named.
             let mut owners: Vec<ProgramId> = Vec::new();
+            let mut constructors: Vec<ParcelConstructor> = Vec::new();
             for header in heap.headers().map_err(ExecutionError::Evacuation)? {
                 if let Some(id) = self.owner_of_header(header) {
                     if !owners.contains(&id) {
                         owners.push(id);
+                    }
+                    continue;
+                }
+                let Some(entry) = self.descriptor_registry.get(&header) else {
+                    return Err(ExecutionError::Evacuation(
+                        DescriptorTraceError::UnknownDescriptor { address: header },
+                    ));
+                };
+                match &entry.meaning {
+                    super::DescriptorMeaning::External => {}
+                    super::DescriptorMeaning::Constructor(observation) => {
+                        if !constructors
+                            .iter()
+                            .any(|known| known.descriptor.initial_header_word() == header)
+                        {
+                            constructors.push(ParcelConstructor {
+                                descriptor: Arc::clone(&entry.descriptor),
+                                identity: observation.identity,
+                                fields: observation.fields.clone(),
+                            });
+                        }
+                    }
+                    super::DescriptorMeaning::Callable { .. } | super::DescriptorMeaning::Pap => {
+                        tracing::error!(
+                            header = format_args!("{header:#x}"),
+                            kind = ?entry.descriptor.kind(),
+                            "export_parcel: a callable's header belongs to no installed image"
+                        );
+                        return Err(ExecutionError::Invariant(
+                            "export_parcel: a callable's header belongs to no installed image",
+                        ));
                     }
                 }
             }
@@ -151,6 +204,7 @@ impl PreparedMachine<'_> {
                         .into_iter()
                         .map(|(_, image, imports)| ParcelImage { image, imports })
                         .collect(),
+                    constructors,
                 });
             }
         }
@@ -217,17 +271,25 @@ impl PreparedMachine<'_> {
     /// new old-space arena, its payloads become ledger allocations, every
     /// image it names that this machine lacks is installed (bound to the
     /// copies of its import slots), and the returned handle roots the value
-    /// in `realm`.
+    /// in `realm`. The second element is every distinct identity (across
+    /// every newly installed image's `ParcelImports`, deduplicated) paired
+    /// with the handle rooting its copied value — the session layer records
+    /// these in the persistent binding store so a LATER compiled program on
+    /// this machine can resolve the same identity by name and generation,
+    /// exactly as it would on the machine the parcel came from. An identity
+    /// belonging to an image that was already installed here contributes
+    /// nothing (its value already had a live root before this import).
     pub fn import_parcel(
         &mut self,
         parcel: Parcel,
         realm: RealmId,
-    ) -> Result<PreparedHandle, ExecutionError> {
+    ) -> Result<(PreparedHandle, Vec<(SymbolIdentity, PreparedHandle)>), ExecutionError> {
         self.ensure_handle_access()?;
         let _quiescent = self.quiesce()?;
         let Parcel {
             heap: mut parcel,
             images,
+            constructors,
         } = parcel;
         if parcel.root() == 0 {
             return Err(ExecutionError::Evacuation(
@@ -238,14 +300,25 @@ impl PreparedMachine<'_> {
             .iter()
             .filter(|entry| !self.has_image(&entry.image))
             .collect();
-        // Every header the parcel carries must be known here or brought by
-        // an image the parcel names.
+        let new_constructors: Vec<&ParcelConstructor> = constructors
+            .iter()
+            .filter(|entry| {
+                !self
+                    .descriptor_registry
+                    .contains_key(&entry.descriptor.initial_header_word())
+            })
+            .collect();
+        // Every header the parcel carries must be known here, carried as a
+        // constructor, or brought by an image the parcel names.
         for header in parcel.headers().map_err(ExecutionError::Evacuation)? {
             let known = self.descriptor_registry.contains_key(&header)
                 || self
                     .descriptors
                     .iter()
                     .any(|descriptor| descriptor.initial_header_word() == header)
+                || new_constructors
+                    .iter()
+                    .any(|entry| entry.descriptor.initial_header_word() == header)
                 || missing.iter().any(|entry| {
                     entry
                         .image
@@ -263,6 +336,31 @@ impl PreparedMachine<'_> {
         self.handles.try_reserve_handles(roots).map_err(|_| {
             runtime_error(&self.machine, crate::host_fns::RuntimeError::HeapOverflow)
         })?;
+        // Carried constructors join this machine's registry exactly as an
+        // install's interned constructors do: shared, never owned, never
+        // retired. Infallible, so it happens before any heap work.
+        self.descriptors.reserve(new_constructors.len());
+        for entry in &new_constructors {
+            let header = entry.descriptor.initial_header_word();
+            self.descriptors.push(Arc::clone(&entry.descriptor));
+            self.descriptor_registry.insert(
+                header,
+                super::DescriptorMetadata {
+                    descriptor: Arc::clone(&entry.descriptor),
+                    meaning: super::DescriptorMeaning::Constructor(super::ConstructorObservation {
+                        identity: entry.identity,
+                        fields: entry.fields.clone(),
+                    }),
+                },
+            );
+            self.machine
+                .register_prepared_constructors([(header, entry.identity)]);
+        }
+        let carried: Vec<Arc<ObjectDescriptor>> = new_constructors
+            .iter()
+            .map(|entry| Arc::clone(&entry.descriptor))
+            .collect();
+        drop(new_constructors);
 
         // Payloads first: the copier expands them through this machine's
         // ledger, so the parcel must already point at ledger allocations.
@@ -309,6 +407,10 @@ impl PreparedMachine<'_> {
                 // the copy comes first). Descriptors and static regions are
                 // shared, immutable `Arc`s; knowing them early is harmless.
                 let mut arena_descriptors = self.descriptors.clone();
+                prepared
+                    .space
+                    .extend_descriptors(carried.iter().cloned())
+                    .map_err(ExecutionError::Evacuation)?;
                 for entry in &missing {
                     prepared
                         .space
@@ -358,7 +460,9 @@ impl PreparedMachine<'_> {
         };
 
         // Every root gets a handle: the value's for the caller, the imports'
-        // for the installs below (released once the blocks hold them).
+        // for the installs below and the caller after
+        // (`Self::import_parcel`'s own doc comment — kept, not released,
+        // once the blocks hold them too).
         let mut handles = Vec::with_capacity(relocated.len());
         for &pointer in &relocated {
             let slot = self
@@ -370,10 +474,37 @@ impl PreparedMachine<'_> {
                 .insert_handle(slot, realm, RuntimeRep::LiftedRef);
             handles.push(PreparedHandle::new(raw, RuntimeRep::LiftedRef));
         }
+        // The images install in manifest order, and an image's import values
+        // may belong to a sibling that installs later: an install verifies
+        // its imports through this machine's registry, so every missing
+        // image's descriptors join the registry first. Shared `Arc`s; an
+        // install's own extension of the registry skips what is present.
+        for entry in &missing {
+            for (&header, metadata) in &entry.image.descriptor_registry {
+                if self.descriptor_registry.contains_key(&header) {
+                    continue;
+                }
+                self.descriptors.push(Arc::clone(&metadata.descriptor));
+                self.descriptor_registry.insert(header, metadata.clone());
+                if let super::DescriptorMeaning::Constructor(observation) = &metadata.meaning {
+                    self.machine
+                        .register_prepared_constructors([(header, observation.identity)]);
+                }
+            }
+        }
         let missing: Vec<(Arc<CompiledProgram>, ParcelImports)> = missing
             .into_iter()
             .map(|entry| (Arc::clone(&entry.image), entry.imports.clone()))
             .collect();
+        // Kept, not released: the caller (session layer) roots these in the
+        // persistent binding store, so a later compiled program's import
+        // resolves against the SAME live value the images below install
+        // bound to. An index not named by any kept identity (a duplicate
+        // root two images both import) is released with the rest below.
+        let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
+        let mut kept_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut seen_identities: std::collections::BTreeSet<SymbolIdentity> =
+            std::collections::BTreeSet::new();
         for (image, imports) in missing {
             let mut bindings = ImportBindings::new();
             for (identity, index) in imports {
@@ -383,13 +514,19 @@ impl PreparedMachine<'_> {
                     .ok_or(ExecutionError::Invariant(
                         "import_parcel: an image import names a root the parcel lacks",
                     ))?;
-                bindings.insert(identity, handle);
+                bindings.insert(identity.clone(), handle);
+                if seen_identities.insert(identity.clone()) {
+                    imported.push((identity, handle));
+                    kept_indices.insert(index);
+                }
             }
             self.install_shared(image, bindings)?;
         }
-        for handle in handles.iter().skip(1) {
-            self.release(*handle);
+        for (index, handle) in handles.iter().copied().enumerate().skip(1) {
+            if !kept_indices.contains(&index) {
+                self.release(handle);
+            }
         }
-        Ok(handles[0])
+        Ok((handles[0], imported))
     }
 }

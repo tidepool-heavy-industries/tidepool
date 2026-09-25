@@ -178,6 +178,84 @@ async fn composition_root_child_session_factory_runs_a_cell() {
     campaign.hosted.await.unwrap();
 }
 
+/// An eligible `startAgent` launch (`SelectedContext`, no `RepoEvent`)
+/// goes through the real launch path, not the factory called directly: it
+/// gets a machine session distinct from the root's, runs a cell there, and
+/// the dedicated session is released once the actor retires. `TestCampaign`
+/// installs the composition root's factory, bootstrap program and image
+/// registry, so the assertion that the sessions differ is what rules out
+/// the same-session fallback producing a misleading green.
+#[tokio::test]
+#[ignore = "hosts install no child bootstrap program until the cross-session request-site and root-machine thunk defects are fixed (branch p7-fault)"]
+async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirement() {
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let root_session = campaign
+        .forest
+        .actor_session(campaign.actor.identity())
+        .expect("root actor has a session");
+
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        "child <- startAgent (readonlyAgent \"cross-session-child\")",
+    )
+    .await;
+    assert_eq!(setup["status"], "committed", "{setup:?}");
+    let installation = campaign
+        .next_deployment(
+            "cross-session child policy installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    let child_session = campaign
+        .forest
+        .actor_session(installation.actor.identity())
+        .expect("child actor has a session");
+    assert_ne!(
+        child_session, root_session,
+        "an eligible SelectedContext launch must own its own machine, not share the root's"
+    );
+
+    let reply = dispatch_haskell_script(installation.policy.as_ref(), "40 + 2 :: Int").await;
+    assert_eq!(reply["status"], "committed", "{reply:?}");
+    assert_eq!(reply["items"][0]["output"], "42", "{reply:?}");
+
+    installation
+        .actor
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "test teardown".into(),
+        })
+        .await
+        .expect("child shuts down");
+    campaign
+        .next_deployment(
+            "cross-session child retirement",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::Retired { actor, terminal }
+                    if actor == installation.actor.identity() =>
+                {
+                    Ok(terminal)
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    assert_eq!(
+        campaign.forest.session_state_of(child_session),
+        tidepool_runtime::session::ResidentSessionState::Gone,
+        "the dedicated child session must be released once its actor retires"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 // `descendants_observe.hs` composes existing primitives — `actorContext`
 // (self identity), `snapshot`/`listAgentsFull` (the same registry
 // `observeAgent` reads), and `creationTree` (a pure roster filter by

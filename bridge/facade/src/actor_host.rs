@@ -2031,7 +2031,7 @@ pub(crate) async fn run(
         exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
-    let (source, root, program, child_session_factory) = compile_root(
+    let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
         &run_root,
         worktrees.clone(),
@@ -2085,7 +2085,11 @@ pub(crate) async fn run(
             application_owners.clone(),
             backend.clone(),
         ))
-        .with_child_session_factory(child_session_factory);
+        .with_child_session_factory(child_session_factory)
+        .with_image_registry(image_registry);
+    // No child bootstrap program: every launch stays on its launching
+    // session, as before per-actor machines.
+    let _ = &program;
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
@@ -2903,6 +2907,7 @@ type CompiledRoot = (
     ExomonadRoot,
     Arc<tidepool_runtime::session::CompiledTurn>,
     exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
+    Arc<tidepool_runtime::session::ImageRegistry>,
 );
 
 fn compile_root(
@@ -2995,6 +3000,12 @@ fn compile_root(
     let child_journal = journal.clone();
     let child_worktree_handler = worktree_handler.clone();
     let child_run_root = run_root.to_path_buf();
+    // This run's one shared image cache: installed on the forest
+    // (`ResidentForest::with_image_registry`) so it is applied to every
+    // session's engine, root and child alike, including each session's
+    // bootstrap install (`PersistentSession::set_image_registry` holds it
+    // for the first turn).
+    let image_registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
         CapturedOutput,
@@ -3064,6 +3075,10 @@ fn compile_root(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     )?;
+    // The root's own bootstrap install goes through the run's registry, so
+    // every child session bootstraps with this same driver image rather
+    // than a second compile of it.
+    machine.set_image_registry(Arc::clone(&image_registry));
     let outcome = machine.run_with_sites("exomonad_root_driver", compiled.code())?;
     let resource_scope = match &outcome {
         tidepool_runtime::session::ResidentOutcome::Suspended { hole, .. } => machine
@@ -3137,6 +3152,7 @@ fn compile_root(
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),
         child_session_factory,
+        image_registry,
     ))
 }
 
@@ -5604,12 +5620,14 @@ async fn deliver_pending_checked(
     let Some(last) = pending.last() else {
         // The front row is tracked (a native request update/notification).
         // `deliver_tracked_message` below only ever advances that exact
-        // sequence, one at a time; if it is stuck (`Submitted`/`Unconfirmed`
-        // and not resolving), any settlement/watch notice queued behind it
-        // would otherwise never reach the model. Surface those out of band
-        // before attempting the stuck row itself.
-        deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
-            .await?;
+        // sequence, one at a time; if it is stuck in flight (`Submitted` or
+        // `Unconfirmed`), any settlement/watch notice queued behind it would
+        // otherwise never reach the model, so those surface out of band. Any
+        // other phase, a rejection included, stays a hard barrier.
+        if front_tracked_row_is_in_flight(inbox) {
+            deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
+                .await?;
+        }
         return deliver_tracked_message(
             actor,
             inbox,
@@ -5773,6 +5791,24 @@ async fn deliver_pending_checked(
 /// stuck tracked row, pushed to the backend out of order and marked so the
 /// ordinary batch path above does not render them again once the barrier
 /// clears. See `ActorInbox::legacy_notices_beyond_barrier`.
+/// Whether the inbox's front tracked row is in flight: submitted or
+/// unconfirmed, and so expected to resolve. Only then may notices overtake
+/// it; any other phase keeps the barrier.
+fn front_tracked_row_is_in_flight(inbox: &ActorInbox) -> bool {
+    let Some(sequence) = inbox.cursor().checked_add(1) else {
+        return false;
+    };
+    matches!(
+        inbox.observe_receipt(sequence),
+        Ok(exomonad_node::ReceiptLookup::Retained(evidence))
+            if matches!(
+                evidence.phase,
+                exomonad_node::DeliveryPhase::Submitted
+                    | exomonad_node::DeliveryPhase::Unconfirmed
+            )
+    )
+}
+
 async fn deliver_out_of_order_notices(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -5788,6 +5824,20 @@ async fn deliver_out_of_order_notices(
     .await
     .map_err(|error| format!("inbox reader task: {error}"))?
     .map_err(|error| error.to_string())?;
+    // Only notices overtake a stuck row; ordinary messages keep their order.
+    let beyond: Vec<_> = beyond
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message.payload,
+                DurableActorEvent::Typed(
+                    TypedActorEvent::SettlementChanged { .. }
+                        | TypedActorEvent::WatchChanged { .. }
+                        | TypedActorEvent::RequestCancellation { .. }
+                )
+            )
+        })
+        .collect();
     if beyond.is_empty() {
         return Ok(());
     }

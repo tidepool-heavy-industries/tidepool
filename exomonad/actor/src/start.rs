@@ -6,16 +6,13 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::{DataConTable, Generation, SessionModule};
 use tidepool_runtime::session::{
-    assemble_display_expression_module, run_turn, ExpressionLift, MaterializedFacade, OutputSink,
-    ResidentHole, ResidentOutcome, ResidentSession, RootCustody, TemplateSelector, TurnRequest,
-    TurnResult, TurnTemplate,
+    MaterializedFacade, OutputSink, ResidentHole, ResidentSession, RootCustody,
 };
 
 use crate::generated::actor::ActorReq;
@@ -91,8 +88,9 @@ pub(crate) struct ActorStartRequest {
     pub parent_actor: crate::ActorRef,
     /// `Just label` on the wire exactly when this launch is the stdlib's
     /// `agentDefinitionUnbound label` (`startForkedAgent`/`AgentLaunchWith`'s
-    /// bare `startAgent`), the only launch shape whose captured `entry` is
-    /// data-reconstructible. See `child_session_eligibility`.
+    /// bare `startAgent`), the shape a selected-context launch is eligible to
+    /// give its own child session — its entry closure reaches that session by
+    /// evacuation. See `child_session_eligibility`.
     pub unbound_label: Option<String>,
 }
 
@@ -209,9 +207,46 @@ pub struct ActorReplacementDefinition {
 
 pub(crate) struct CapturedChildLaunch {
     pub descriptor: ActorDescriptor,
+    /// Still resident on the LAUNCHING session's machine, whether or not
+    /// the descriptor's own placement names a different, freshly minted
+    /// one (an eligible `SelectedContext` launch — see
+    /// `child_session_eligibility`). Crossing it to the child's own machine
+    /// is the launch path's job, not capture's: `resident_actor.rs`'s
+    /// `try_start_child` (and `replacement.rs`'s matching resolution)
+    /// provisions that session and calls
+    /// `ResidentActorRunner::transfer_custody` once the checkout that
+    /// captured this launch has long since been released — never here,
+    /// while it is still held.
     pub entry: RootCustody,
     pub launch_worktrees: Vec<String>,
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
+    /// `Some` exactly for an eligible launch (see `child_session_eligibility`):
+    /// everything `ResidentActorRunner::provision_child_session` needs to
+    /// give the child's own, freshly built session what its first cell (the
+    /// tool installer) will need to compile against the facade
+    /// `with_source_imports` already names — the facade never physically
+    /// existed under the child's own session root otherwise. `None` for a
+    /// same-session launch: nothing to seed, the facade is already
+    /// reachable from the session that will run it.
+    pub seed: Option<ChildSessionSeed>,
+}
+
+/// Captured in `capture_decoded` while the PARENT checkout is still held —
+/// everything a fresh child session needs physically present on its own
+/// disk before a cell can compile there against the facade the parent
+/// materialized: the facade itself (path + source, already rendered), the
+/// source text of every `Tidepool/Session/Lib/G<n>.hs` module under the
+/// parent's session root at that exact moment (the facade's `import`
+/// line names whichever generations it re-exports from; read every Lib
+/// module present rather than parsing that line, since a re-exported
+/// item's own definition may in turn reference an EARLIER generation), and
+/// the parent's current value-binding generation, so provisioning can raise
+/// the child's own counter past every generation number a copied file uses
+/// before the child ever mints one of its own.
+pub(crate) struct ChildSessionSeed {
+    pub facade: MaterializedFacade,
+    pub lib_sources: Vec<(std::path::PathBuf, String)>,
+    pub val_generation: Generation,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -248,8 +283,6 @@ pub enum ActorStartCaptureError {
     InvalidModel,
     #[error("select actor effects in its profile or launch options, not both")]
     DuplicateEffectSelection,
-    #[error("could not reconstruct an unbound agent launch's entry on its own session: {0}")]
-    UnboundReconstructionFailed(String),
 }
 
 impl ResidentActorStart {
@@ -315,7 +348,10 @@ impl ResidentActorStart {
                 parent_actor,
                 // `Tidepool.Actor`'s own `start`/`fork` (this entry point's
                 // caller) always carries a caller-authored `ActorDefinition`,
-                // never the stdlib's `agentDefinitionUnbound` — never eligible.
+                // never the stdlib's `agentDefinitionUnbound` — but that no
+                // longer decides eligibility (see `child_session_eligibility`):
+                // a `SelectedContext` launch from here is eligible for its
+                // own machine session too, its entry crossing as a parcel.
                 unbound_label: None,
             },
         )
@@ -360,13 +396,6 @@ impl ResidentActorStart {
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let facade = materialize_entry_facade(session, &entry)?;
-        let lexical_scope = if context_fork {
-            session
-                .mint_scope(session.run_context().lexical_scope)
-                .ok_or(ActorStartCaptureError::ParentScopeRetired)?
-        } else {
-            session.mint_isolated_scope()
-        };
         let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
@@ -394,16 +423,57 @@ impl ResidentActorStart {
             reason = eligibility.reason,
             "selected-context child session eligibility decided"
         );
-        // The fresh-machine factory (a shared "spawn child session" primitive
-        // extracted from `bridge/facade`'s root bootstrap) does not exist yet
-        // — see plans/wave3/dives/per-child-sessions-design.md parcel 2.
-        // Every launch, eligible or not, still gets the launching session's
-        // id until that factory lands and its caller wires it in; this call
-        // site is the seam.
+        // Only an eligible launch needs a seed at all — read while this,
+        // the parent's, checkout is still held, since the child session
+        // this seeds does not exist yet (see `ChildSessionSeed`'s doc
+        // comment).
+        let seed = if eligibility.eligible {
+            let lib_sources = capture_lib_sources(session, session.run_context().lexical_scope)
+                .unwrap_or_default();
+            Some(ChildSessionSeed {
+                facade: facade.clone(),
+                lib_sources,
+                val_generation: session.val_gen(),
+            })
+        } else {
+            None
+        };
+        // An eligible launch gets its own fresh session id here, recorded
+        // in the descriptor's placement — but the entry itself stays
+        // resident on THIS, the parent's, session; crossing it to the
+        // child's machine is `try_start_child`'s job, once the checkout
+        // that captured this launch is long since released (never both
+        // sessions checked out at once). An ineligible launch, or any
+        // `InheritedContext` fork, is unchanged: it keeps the launching
+        // session's id, and never crosses at all.
+        //
+        // The lexical scope is minted on THIS, the parent's, session too —
+        // but only when there is no later child session to mint it on
+        // instead: an eligible launch's own scope belongs to the CHILD's
+        // scope forest, minted there once `try_start_child` provisions it
+        // (`ActorDescriptor::with_lexical_scope` replaces this placeholder).
+        // Minting one here anyway, for a scope nothing on the parent will
+        // ever use, would leak an empty scope into the parent's forest on
+        // every eligible launch.
+        let (launch_session, lexical_scope) = if eligibility.eligible {
+            (
+                tidepool_runtime::session::fresh_session_id(),
+                tidepool_codegen::scope::ScopeId::ROOT,
+            )
+        } else if context_fork {
+            (
+                session_id,
+                session
+                    .mint_scope(session.run_context().lexical_scope)
+                    .ok_or(ActorStartCaptureError::ParentScopeRetired)?,
+            )
+        } else {
+            (session_id, session.mint_isolated_scope())
+        };
         let mut descriptor = ActorDescriptor::new(
             label,
             crate::ActorPlacement {
-                session: session_id,
+                session: launch_session,
                 resource_scope: child_realm,
                 lexical_scope,
             },
@@ -432,194 +502,65 @@ impl ResidentActorStart {
                 entry,
                 launch_worktrees,
                 fork_workspace,
+                seed,
             },
         })
     }
 }
 
-/// Whether a launch's `entry` closure is reconstructible on a fresh session,
-/// decided from data the wire request already carries — never by inspecting
-/// the captured `entry` value itself (closures/thunks never cross the bridge;
-/// see `tidepool_bridge::HaskellValue`'s doc comment).
+/// Whether a launch's `entry` closure is eligible to run on its own fresh
+/// child session, decided from data the wire request already carries —
+/// never by inspecting the captured `entry` value itself (closures/thunks
+/// never cross the bridge; see `tidepool_bridge::HaskellValue`'s doc
+/// comment). An eligible entry reaches its child session by evacuation.
 struct ChildSessionEligibility {
     eligible: bool,
     reason: &'static str,
 }
 
-/// A launch is eligible for its own machine session only when BOTH: the
-/// model asked for a selected (not inherited) context, AND the entry is the
-/// stdlib's `agentDefinitionUnbound <label>` — the one shape whose captured
-/// `entry` closes over nothing but that label (see
-/// `bridge/haskell/actors/Tidepool/Actors/Internal/Agent.hs`'s
-/// `agentDefinitionUnbound`/`startForkedAgent`). Every other launch (a
-/// caller-authored `ActorDefinition`, or any `InheritedContext` fork) keeps
-/// running on the launching session, unchanged.
+/// A launch is eligible for its own machine session exactly when the model
+/// asked for a selected (not inherited) context, and the resolved effect row
+/// does not need RepoEvent (a fresh session's `RepoEventHandler` is always
+/// the inert one — see below). Any `InheritedContext` fork keeps running on
+/// the launching session, unchanged: it shares the parent's lexical scope
+/// chain and declaration generations, which only make sense on one machine.
 fn child_session_eligibility(
     context: ForkContext,
-    unbound_label: Option<&str>,
+    // No longer decides eligibility (every `SelectedContext` launch is
+    // eligible, unbound label or not — see this function's doc comment) but
+    // kept as a parameter: every caller already has it in hand from the wire
+    // request, and it stays useful as tracing context for the "selected-context
+    // child session eligibility decided" log line at the one call site.
+    _unbound_label: Option<&str>,
     resolved_effect_keys: &[crate::ActorEffectKey],
 ) -> ChildSessionEligibility {
-    match (context, unbound_label) {
-        (ForkContext::SelectedContext, Some(_)) => {
+    match context {
+        ForkContext::SelectedContext => {
             // The inert `RepoEventHandler` a fresh session installs for this
             // actor never dispatches RepoEvent; if the RESOLVED row somehow
             // grants that key anyway, refuse instead of reaching it. Checked
-            // here, not assumed from `agentDefinitionUnbound`'s fixed
-            // `ReadOnlyEffects AgentProtocol` shape, precisely so a later row
-            // change is caught by this check rather than by a runtime error
-            // inside the inert source.
+            // here, not assumed from any particular launch shape, precisely
+            // so a later row change is caught by this check rather than by a
+            // runtime error inside the inert source.
             if resolved_effect_keys.contains(&crate::ActorEffectKey::RepoEvent) {
                 ChildSessionEligibility {
                     eligible: false,
-                    reason: "selected context, unbound agent launch, but the resolved \
-                             effect row includes RepoEvent — a fresh session's \
-                             RepoEventHandler cannot serve it",
+                    reason: "selected context, but the resolved effect row includes \
+                             RepoEvent — a fresh session's RepoEventHandler cannot \
+                             serve it",
                 }
             } else {
                 ChildSessionEligibility {
                     eligible: true,
-                    reason:
-                        "selected context, unbound agent launch, no RepoEvent in the resolved row",
+                    reason: "selected context, no RepoEvent in the resolved row",
                 }
             }
         }
-        (ForkContext::SelectedContext, None) => ChildSessionEligibility {
-            eligible: false,
-            reason: "selected context, but entry is a caller-authored ActorDefinition \
-                     (may close over live state beyond the label)",
-        },
-        (ForkContext::InheritedContext, _) => ChildSessionEligibility {
+        ForkContext::InheritedContext => ChildSessionEligibility {
             eligible: false,
             reason: "inherited context shares the parent's scope chain and generations",
         },
     }
-}
-
-/// A malformed label would otherwise splice broken Haskell into the
-/// reconstruction turn's source; this mirrors the workbench's own
-/// string-literal escaping (`escape_workbench_haskell_string`) rather than
-/// depending on it, since a wire label is untrusted the same way workbench
-/// key text is.
-#[allow(dead_code, reason = "wired by the child-session launch parcel")]
-fn escape_haskell_string_literal(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Compile and run, as a standalone turn on `session` (already checked out —
-/// the caller owns admission), the exact expression an eligible launch's
-/// entry reconstructs to: `Tidepool.Actors.Internal.Agent.unboundAgentEntry`
-/// applied to `label`. `session_root` is the machine's own session root (the
-/// `ChildSessionFactory` that built it knows this; `ResidentSession` does not
-/// expose it back — see `reap_evicted_stub_sources_in` for the same pattern).
-///
-/// The turn's type is fully closed (`Eff (ActorKernel ': ReadOnlyEffects
-/// AgentProtocol) ()` — see `unboundAgentEntry`'s doc comment for why this
-/// specific shape, alone, can carry a standalone signature at all), so
-/// `effect_stack` below names it exactly; nothing here depends on the
-/// session's own declared workbench effects.
-#[allow(dead_code, reason = "wired by the child-session launch parcel")]
-pub(crate) fn run_unbound_entry_reconstruction<H, O>(
-    session: &mut ResidentSession<H, O>,
-    session_root: &Path,
-    include: &[&Path],
-    // The session's own base preamble (module header, standard prelude) —
-    // `tidepool_mcp::build_preamble`'s result, the same call
-    // `ResidentSession::unbootstrapped`'s caller already made to build this
-    // session's declarations, and NOT something this function builds itself:
-    // `exomonad-actor` does not depend on `tidepool-mcp` (see the crate's own
-    // `H`/`O` genericity), and a hand-rolled `module Main where` won't do —
-    // a bare GHC module here defaults to `Main` and demands a `main`, which
-    // this turn (like any other resident turn) does not have.
-    base_preamble: &str,
-    label: &str,
-) -> Result<ResidentOutcome, ActorStartCaptureError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    // `base_preamble` already aliases `T` (to `Tidepool.Data.Text`, whose
-    // `pack` the workbench scaffold's own hardcoded `T.pack` line relies on)
-    // and already brings `Eff` into scope — this only adds what it doesn't.
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        base_preamble,
-        "qualified Tidepool.Actors.Internal.Agent as TidepoolChildEntry",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Actor.Internal as TidepoolChildEntryActorInternal",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Agent.Ref as TidepoolChildEntryAgentRef",
-    );
-    let preamble = tidepool_runtime::session::insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Effects.Core as TidepoolChildEntryCore",
-    );
-    let preamble = preamble.as_str();
-    let effect_stack = "(TidepoolChildEntryCore.ActorKernel ': \
-                         TidepoolChildEntryActorInternal.ReadOnlyEffects \
-                         TidepoolChildEntryAgentRef.AgentProtocol)";
-    let turn_text = format!(
-        "TidepoolChildEntry.unboundAgentEntry (T.pack \"{}\") 0",
-        escape_haskell_string_literal(label)
-    );
-    // Exactly one candidate, not `resident_workbench_templates`'s usual four
-    // (Effectful/Pure x Display/Opaque): the reconstruction's row is fully
-    // closed and known (see `run_unbound_entry_reconstruction`'s doc
-    // comment), so it is always effectful, never a value to display — the
-    // pure candidates exist for a REPL-style ambiguous user expression,
-    // which this is not, and letting the extract try them first/instead
-    // would hit the workbench's own deliberate "must typecheck in the
-    // current effect row" guard for no reason.
-    let templates = [TurnTemplate {
-        kind: TemplateSelector::Expr,
-        source: assemble_display_expression_module(
-            preamble,
-            "__result",
-            effect_stack,
-            "{{TURN}}",
-            ExpressionLift::Effectful,
-        ),
-    }];
-    let result = run_turn(TurnRequest {
-        turn_text: &turn_text,
-        templates: &templates,
-        include,
-        session_root,
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        // A one-off reconstruction turn: no memo retention across cells.
-        session_id: None,
-        retained_imports: &[],
-    })
-    .map_err(|failure| {
-        ActorStartCaptureError::UnboundReconstructionFailed(format!(
-            "{:?} (attempted source: {})",
-            failure.error,
-            failure.attempted_source.as_deref().unwrap_or("<none>")
-        ))
-    })?;
-    let TurnResult::Expr { compiled, .. } = result else {
-        return Err(ActorStartCaptureError::UnboundReconstructionFailed(
-            "unboundAgentEntry reconstruction did not compile as a bare expression".into(),
-        ));
-    };
-    session
-        .run_with_sites("unbound-agent-entry-reconstruction", compiled.code())
-        .map_err(|error| ActorStartCaptureError::UnboundReconstructionFailed(error.to_string()))
 }
 
 fn materialize_entry_facade<H, O>(
@@ -639,6 +580,43 @@ where
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
     Ok(surface.materialize(&view)?)
+}
+
+/// Every `Tidepool/Session/Lib/G<n>.hs` file under `scope`'s session root
+/// right now, as `(path relative to the session root, source text)` pairs —
+/// the source half of a [`ChildSessionSeed`]. `None` only when this session
+/// has no compile view at `scope` at all (the same condition
+/// `materialize_entry_facade` already turns into
+/// [`ActorStartCaptureError::NoCompileView`] for the facade itself); an
+/// unreadable directory (no declarations committed yet) is an empty list,
+/// not an error, since a launch with no Lib generations to copy is ordinary,
+/// not exceptional.
+fn capture_lib_sources<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+) -> Option<Vec<(std::path::PathBuf, String)>>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let view = session.compile_view_in(scope)?;
+    let root = view.session_root();
+    let lib_dir = root.join("Tidepool/Session/Lib");
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
+        return Some(Vec::new());
+    };
+    let mut sources = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("hs") {
+            continue;
+        }
+        if let Ok(source) = std::fs::read_to_string(&path) {
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            sources.push((relative, source));
+        }
+    }
+    Some(sources)
 }
 
 fn validate_head_incarnations<H, O>(
@@ -775,10 +753,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_context_without_unbound_label_is_ineligible() {
+    fn selected_context_without_unbound_label_is_eligible() {
+        // A caller-authored `ActorDefinition` (no `agentDefinitionUnbound`
+        // label) is now just as eligible as an unbound launch: its entry
+        // crosses to the child session as a parcel instead of being
+        // reconstructed there.
         use super::{child_session_eligibility, ForkContext};
         let decision = child_session_eligibility(ForkContext::SelectedContext, None, &[]);
-        assert!(!decision.eligible);
+        assert!(decision.eligible);
     }
 
     #[test]
@@ -802,6 +784,20 @@ mod tests {
             "a resolved row granting RepoEvent must turn eligibility off, \
              since a fresh session's RepoEventHandler cannot serve it"
         );
+    }
+
+    #[test]
+    fn bound_launch_is_also_ineligible_when_the_resolved_row_grants_repo_event() {
+        // The RepoEvent exclusion is decided from the resolved effect row
+        // alone, independent of whether the entry is an unbound stdlib
+        // launch or a caller-authored `ActorDefinition`.
+        use super::{child_session_eligibility, ForkContext};
+        let decision = child_session_eligibility(
+            ForkContext::SelectedContext,
+            None,
+            &[crate::ActorEffectKey::RepoEvent],
+        );
+        assert!(!decision.eligible);
     }
 
     #[test]
@@ -850,83 +846,6 @@ mod tests {
         assert_eq!(
             super::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
             crate::WorkerLifetime::ParentOwned
-        );
-    }
-
-    /// A minimal, real (extractor-backed) machine with the actors library on
-    /// its include path — everything `run_unbound_entry_reconstruction`
-    /// needs and nothing an interactive workbench session also carries.
-    fn bare_actors_session() -> (
-        tidepool_runtime::session::ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        tempfile::TempDir,
-        Vec<std::path::PathBuf>,
-        String,
-    ) {
-        use tidepool_runtime::session::{ModuleEnv, SessionLib};
-        tidepool_testing::eval_harness::require_extract();
-        let declarations = [tidepool_mcp::notifications_decl()];
-        let base_preamble = tidepool_mcp::build_preamble(&declarations, false);
-        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
-        let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../bridge/haskell/actors"),
-        );
-        let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 9_001);
-        let session_root = tempfile::tempdir().expect("session root");
-        let lib = SessionLib::open(
-            session_id,
-            session_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .expect("declaration plane");
-        (
-            tidepool_runtime::session::ResidentSession::unbootstrapped(
-                frunk::HNil,
-                tidepool_mcp::CapturedOutput::new(),
-                tidepool_runtime::DEFAULT_NURSERY_SIZE,
-                Some(lib),
-            ),
-            session_root,
-            include,
-            base_preamble,
-        )
-    }
-
-    #[test]
-    fn unbound_entry_reconstruction_compiles_and_suspends_at_install_shutdown() {
-        use super::run_unbound_entry_reconstruction;
-        let (mut session, session_root, include, base_preamble) = bare_actors_session();
-        let lexical_scope = session.mint_isolated_scope();
-        let resource_scope = tidepool_codegen::suspension::RealmId::fresh();
-        session
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    lexical_scope,
-                    resource_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            )
-            .expect("actor execution context");
-        let include_refs: Vec<&std::path::Path> = include.iter().map(|p| p.as_path()).collect();
-        let outcome = run_unbound_entry_reconstruction(
-            &mut session,
-            session_root.path(),
-            &include_refs,
-            &base_preamble,
-            "reconstruction-test-label",
-        )
-        .expect("unbound entry reconstructs and runs to its first suspension");
-        assert!(
-            matches!(
-                outcome,
-                tidepool_runtime::session::ResidentOutcome::Suspended { .. }
-            ),
-            "the reconstructed entry's first send is ActorInstallShutdownWith, \
-             which suspends exactly like a captured entry's would: {outcome:?}"
         );
     }
 }

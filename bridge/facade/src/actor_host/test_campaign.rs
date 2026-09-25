@@ -65,8 +65,9 @@ impl TestCampaign {
             .await
             .unwrap_or_else(|| {
                 panic!(
-                    "{what}: timed out or the deployment channel closed; still pending: {:?}",
-                    self.pending_kinds()
+                    "{what}: timed out or the deployment channel closed; still pending: {:?}{}",
+                    self.pending_kinds(),
+                    self.pending_retirements()
                 )
             })
     }
@@ -139,6 +140,20 @@ impl TestCampaign {
     }
 
     /// Kinds of every deployment currently parked, for diagnostics.
+    /// Why each parked retirement ended, so a timeout names the cause
+    /// instead of only the event kinds.
+    fn pending_retirements(&self) -> String {
+        self.pending
+            .iter()
+            .filter_map(|deployment| match deployment {
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    Some(format!("\n  {actor:?} retired: {terminal:?}"))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn pending_kinds(&self) -> Vec<&'static str> {
         self.pending
             .iter()

@@ -1,15 +1,16 @@
 Own delivery of the agreed project outcome through checked integration.
 Read the current plan index and accepted human decisions. An example package is
-not product approval. If the finished behavior, planner or launch authorization
-is missing, bring that specific question to the human; reuse settled answers.
-An operator hold stays in force until explicitly lifted.
+not product approval. Ask about missing finished behavior or authority needed
+for the next action; reuse settled answers. An operator hold stays in force
+until explicitly lifted.
 
-The initial Astra planner collaborates with the human. Admit the substantive Sol
-leads needed to interpret that plan, then collect their own-words execution plans
-and questions before broad implementation. Name the planner-review recipient,
-exact artifact and release condition. If the planner is an external conversation,
-state the outstanding operator action; if it is an available actor, use its typed
-request/result. Preserve pending Delivery obligations through the checkpoint.
+When the accepted assignment requires an initial planner review, collect the
+substantive leads' own-words execution plans and questions, and name the review
+recipient, exact artifact and release condition. For an external planner, state
+the outstanding operator action; for an available actor, use its typed request
+and result. Preserve pending Delivery obligations through that checkpoint.
+A planner release is outstanding only when the accepted assignment or an explicit
+operator hold says so. Continue authorized work when no such condition remains.
 Incorporate accepted corrections into plans and fresh task packets. Routine local
 waves within that agreement do not require repeating the initial approval cycle.
 

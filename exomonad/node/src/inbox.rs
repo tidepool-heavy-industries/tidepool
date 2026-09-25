@@ -336,7 +336,7 @@ where
                     }
                 }
                 None if checkpoint.receipts.contains_key(&row.sequence) => {
-                    return Err(InboxError::Corrupt("receipt names an untracked row".into()))
+                    return Err(InboxError::Corrupt("receipt names an untracked row".into()));
                 }
                 None => {}
             }
@@ -508,7 +508,8 @@ where
             .pending
             .iter()
             .filter(|row| {
-                row.receipt_context.is_none() && !state.surfaced_out_of_order.contains(&row.sequence)
+                row.receipt_context.is_none()
+                    && !state.surfaced_out_of_order.contains(&row.sequence)
             })
             .cloned()
             .collect())
@@ -903,7 +904,7 @@ fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<(InboxCheckpoint<R>, 
     let value = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(corrupt)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((InboxCheckpoint::default(), false))
+            return Ok((InboxCheckpoint::default(), false));
         }
         Err(error) => return Err(error.into()),
     };

@@ -741,11 +741,19 @@ impl PreparedMachine<'static> {
         program: CompiledProgram,
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
+        Self::new_shared(Arc::new(program), options)
+    }
+
+    /// As [`Self::new`], from an image another machine may already have
+    /// installed: the first program on this machine is that same `Arc`, so
+    /// its descriptors, code and static region are the ones every other
+    /// holder of the image shares.
+    pub fn new_shared(
+        program: Arc<CompiledProgram>,
+        options: PreparedMachineOptions,
+    ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(
-            ProgramCustody::Shared(Arc::new(program)),
-            &ImportBindings::new(),
-        )?;
+        let id = machine.install(ProgramCustody::Shared(program), &ImportBindings::new())?;
         Ok((machine, id))
     }
 }
@@ -885,11 +893,20 @@ impl<'code> PreparedMachine<'code> {
     /// static-region folding. Only the code-generation accounting differs:
     /// see [`CompiledProgram::charge_codegen_once`] and the `install` call
     /// site that consults it.
+    ///
+    /// An image installs at most once per machine: its root-table slot and
+    /// owned descriptors belong to that one install. A second install of the
+    /// same `Arc` is refused; the caller compiles a private copy instead.
     pub fn install_shared(
         &mut self,
         image: Arc<CompiledProgram>,
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
+        if self.has_image(&image) {
+            return Err(ExecutionError::Invariant(
+                "install_shared: this machine already installed the image",
+            ));
+        }
         self.install(ProgramCustody::Shared(image), &imports)
     }
 
@@ -2146,12 +2163,12 @@ impl<'code> PreparedMachine<'code> {
                         super::ObservationFailure::Integrity(
                             tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidRange,
                         ),
-                    ))
+                    ));
                 }
                 RuntimeRep::Address => {
                     return Err(
                         super::ObservationFailure::Representation(RuntimeRep::Address).into(),
-                    )
+                    );
                 }
                 RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_) => {
                     output.push(PreparedResult::Scalar(field.word as u64));
@@ -4204,7 +4221,7 @@ mod tests {
             parcel.bytes() > 0,
             "a heap constructor is copied, not shared"
         );
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports the parcel");
         let after = right
@@ -4272,7 +4289,7 @@ mod tests {
         ));
         let parcel = left.export_parcel(handle).expect("export");
         assert_eq!(parcel.bytes(), 0, "a static value is shared, never copied");
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports a static reference");
         assert_eq!(
@@ -4333,7 +4350,7 @@ mod tests {
         )
         .expect("right installs an unrelated base image");
         let before = right.residency().programs;
-        let arrived = right
+        let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both images");
         assert_eq!(right.residency().programs, before + 2);
@@ -4374,22 +4391,421 @@ mod tests {
         assert!(right.release(arrived));
     }
 
+    fn p7_case_producer_identity() -> SymbolIdentity {
+        testing::identity("P7Case", "producer")
+    }
+
+    fn p7_case_family_identity() -> SymbolIdentity {
+        testing::identity("P7Case", "Family")
+    }
+
+    /// A's two declared constructors for the algebraic-case parcel test:
+    /// one family, `First` (nullary) and `Second` (one lifted field).
+    fn p7_case_constructor_decls() -> Vec<ConstructorDecl> {
+        vec![
+            ConstructorDecl {
+                identity: testing::identity("P7Case", "First"),
+                family: p7_case_family_identity(),
+                host_id: tidepool_repr::DataConId(7_801),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 1,
+                family_size: 2,
+                field_reps: vec![],
+                strict_fields: vec![],
+                layout: CheckedLayout {
+                    fields: vec![],
+                    alignment: 1,
+                    payload_size: 0,
+                    root_mask: vec![],
+                },
+            },
+            ConstructorDecl {
+                identity: testing::identity("P7Case", "Second"),
+                family: p7_case_family_identity(),
+                host_id: tidepool_repr::DataConId(7_802),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 2,
+                family_size: 2,
+                field_reps: vec![RuntimeRep::LiftedRef],
+                strict_fields: vec![true],
+                layout: CheckedLayout {
+                    fields: vec![FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    }],
+                    alignment: 8,
+                    payload_size: 8,
+                    root_mask: vec![true],
+                },
+            },
+        ]
+    }
+
+    /// A for the algebraic-case parcel test: a memoized CAF whose forced
+    /// value is `Second(marker)` -- the family's SECOND constructor,
+    /// carrying one lifted field (a nullary `P7Marker.Tag`) -- so the
+    /// value crossing to another machine is an evaluated constructor, not
+    /// a thunk.
+    fn p7_case_producer_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.extend(p7_case_constructor_decls());
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("P7Marker", "Tag"),
+            family: testing::identity("P7Marker", "Tag"),
+            host_id: tidepool_repr::DataConId(7_803),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes = vec![
+            // 0: Second(marker)
+            ExprFrame::Construct {
+                constructor: ConstructorId(1),
+                fields: vec![Atom::Ref(ValueRef::Local(ValueId(50)))],
+            },
+            // 1: let marker = P7Marker.Tag in node 0
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(50),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(2),
+                        fields: vec![],
+                    },
+                }),
+                body: 0,
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = p7_case_producer_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 1,
+        };
+        let prepared = testing::prepare(wire).expect("p7 case producer fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("p7 case producer fixture links");
+        CompiledProgram::compile(&linked).expect("p7 case producer fixture compiles")
+    }
+
+    /// B for the algebraic-case parcel test: a zero-argument entry that
+    /// imports A's top (`required_evaluated: true`) and cases on it,
+    /// declaring its own copies of A's two constructors so its generated
+    /// `Case` dispatch matches A's cell through the shared, interned
+    /// descriptor (the `x1_generated_case_reads_a_foreign_constructor...`
+    /// pattern). Each alternative returns a distinct, freshly built
+    /// constructor so the branch actually taken is observable.
+    fn p7_case_consumer_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        }];
+        wire.constructors.extend(p7_case_constructor_decls());
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("P7CaseResult", "SawFirst"),
+            family: testing::identity("P7CaseResult", "Family"),
+            host_id: tidepool_repr::DataConId(7_811),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 2,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("P7CaseResult", "SawSecond"),
+            family: testing::identity("P7CaseResult", "Family"),
+            host_id: tidepool_repr::DataConId(7_812),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 2,
+            family_size: 2,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes = vec![
+            // 0: the scrutinee: A's imported top.
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]),
+            // 1: First branch -> SawFirst.
+            ExprFrame::Construct {
+                constructor: ConstructorId(2),
+                fields: vec![],
+            },
+            // 2: Second branch -> SawSecond.
+            ExprFrame::Construct {
+                constructor: ConstructorId(3),
+                fields: vec![],
+            },
+            // 3: the algebraic Case itself.
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(49),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                kind: CaseKind::Algebraic(p7_case_family_identity()),
+                alternatives: vec![
+                    Alternative {
+                        pattern: AlternativePattern::Constructor(ConstructorId(0)),
+                        binders: vec![],
+                        body: 1,
+                    },
+                    Alternative {
+                        pattern: AlternativePattern::Constructor(ConstructorId(1)),
+                        binders: vec![ValueId(50)],
+                        body: 2,
+                    },
+                ],
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 3,
+        };
+        let prepared = testing::prepare(wire).expect("p7 case consumer fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: true,
+                generation: 0,
+            },
+        );
+        link_program(prepared, &imports).expect("p7 case consumer fixture links")
+    }
+
+    /// A machine that never installed B's (or A's) image still runs a
+    /// generated algebraic `Case` over an imported EVALUATED constructor
+    /// correctly: the parcel carries A's interned constructor descriptors
+    /// alongside the images, and B's `Case` dispatch, compiled on `left`
+    /// against those same descriptors, recognises the imported cell's
+    /// second-constructor shape on `right` too.
+    #[test]
+    fn an_evaluated_constructor_import_is_cased_on_a_machine_that_never_installed_its_image() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, producer) =
+            PreparedMachine::new(p7_case_producer_program(), options).expect("left installs A");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        left.run_entry(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A's CAF forces to Second(marker)");
+        let producer_handle = left
+            .retain_top(producer, ValueId(0))
+            .expect("A's evaluated top is retained");
+        let mut imports = ImportBindings::new();
+        imports.insert(p7_case_producer_identity(), producer_handle);
+        let consumer = install_linked(
+            &mut left,
+            &p7_case_consumer_program(p7_case_producer_identity()),
+            imports,
+        )
+        .expect("B installs on the left, importing A's evaluated Second and declaring A's constructors identically");
+        let entry = left
+            .retain_top(consumer, ValueId(0))
+            .expect("B's entry is retained");
+
+        let parcel = left.export_parcel(entry).expect("export");
+        // The exported value is B's static entry closing over an already
+        // EVALUATED import: no owned (callable) header from A crosses --
+        // A's whole contribution is its two interned, ownerless constructor
+        // descriptors, carried directly as `ParcelConstructor`s rather than
+        // by naming A's image. Only B, whose static code the receiver must
+        // actually run, is named.
+        assert_eq!(
+            parcel.images().len(),
+            1,
+            "only B's image is named; A contributes no owned header, only interned constructors"
+        );
+        assert!(
+            parcel.images().iter().any(|image| Arc::ptr_eq(
+                &image.image,
+                &left.image_with_imports(consumer).unwrap().0
+            )),
+            "the parcel names B's image"
+        );
+        assert!(
+            parcel
+                .constructors()
+                .iter()
+                .any(|constructor| constructor.identity == tidepool_repr::DataConId(7_802)),
+            "the parcel carries A's Second constructor descriptor: {:?}",
+            parcel
+                .constructors()
+                .iter()
+                .map(|constructor| constructor.identity)
+                .collect::<Vec<_>>()
+        );
+
+        let (mut right, right_base) = PreparedMachine::new(
+            CompiledProgram::compile(&base_program(7_890)).expect("base"),
+            options,
+        )
+        .expect("right installs an unrelated base image, lacking both A and B");
+        let (arrived, _imports) = right
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("right imports, installing both A and B");
+        let call_site =
+            install_linked(&mut right, &closure_caller_program(), ImportBindings::new())
+                .expect("right installs a caller over the imported zero-argument entry");
+        let called = right
+            .run_entry_retained(
+                call_site,
+                ValueId(0),
+                &[PreparedInput::Managed(arrived)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect(
+                "B's generated Case recognises A's imported Second cell through the carried \
+                 descriptor, on a machine that never installed either image",
+            );
+        let [PreparedResult::Managed(result)] = called.values.as_slice() else {
+            panic!("one managed result");
+        };
+        let PreparedOuter::Constructor { identity, .. } = right
+            .inspect_outer(*result, RealmId::ROOT)
+            .expect("the Case's result inspects");
+        assert_eq!(
+            identity,
+            tidepool_repr::DataConId(7_812),
+            "the Second alternative fired, not the First one or a case miss"
+        );
+        let _ = right_base;
+        assert!(right.release(*result));
+        assert!(right.release(arrived));
+    }
+
+    /// An imported evaluated constructor's field survives the parcel, and
+    /// the exporting machine, being dropped entirely: `import_parcel`
+    /// installs a copy of the source image bound by its own `Arc`, so the
+    /// receiver becomes the sole owner once the sender is gone.
+    #[test]
+    fn an_imported_constructor_outlives_its_parcel_and_its_source_machine() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, left_id) =
+            PreparedMachine::new(field_constructor_program(972), options).expect("left installs A");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        left.run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("left evaluates its top");
+        let handle = left
+            .retain_top(left_id, ValueId(0))
+            .expect("left retains the evaluated top");
+        let budget = RunOptions::default().observation_budget;
+        let before = left
+            .observe_handle(left_id, handle, budget)
+            .expect("left observes the value before export");
+        assert!(matches!(
+            before,
+            tidepool_bridge::HaskellValue::Con(id, ref fields)
+                if id == tidepool_repr::DataConId(972) && fields.len() == 1
+        ));
+
+        let parcel = left.export_parcel(handle).expect("export");
+        assert!(
+            parcel.bytes() > 0,
+            "a heap constructor is copied, not shared"
+        );
+
+        let (mut right, right_base) = PreparedMachine::new(
+            CompiledProgram::compile(&base_program(7_891)).expect("base"),
+            options,
+        )
+        .expect("right installs an unrelated base image, lacking A's");
+        let (arrived, _imports) = right
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("right imports, installing A's image it lacked");
+        // The parcel is consumed by `import_parcel`; the source machine is
+        // dropped entirely, leaving `right` the sole owner of the imported
+        // image and value.
+        drop(left);
+
+        let collect = PreparedCallOptions {
+            collect_before_observation: true,
+            ..call
+        };
+        right
+            .run_entry(right_base, ValueId(0), &[], collect, RealmId::ROOT)
+            .expect("a forced collection on the receiver, now the only owner of A's image");
+        let rendered = |value: &tidepool_bridge::HaskellValue| format!("{value:?}");
+        assert_eq!(
+            rendered(
+                &right
+                    .observe_handle(right_base, arrived, budget)
+                    .expect("the imported value's field is intact after its source is gone")
+            ),
+            rendered(&before)
+        );
+        assert!(right.release(arrived));
+    }
+
     #[test]
     fn import_refuses_a_parcel_whose_borrowed_image_this_machine_lacks() {
-        let compiled = field_constructor_program(971);
+        // A constructor's descriptor is no longer the right fixture here:
+        // constructors now travel in the parcel as `ParcelConstructor`
+        // (unowned by design -- an image that declares one shares the
+        // process-wide descriptor), so importing one is legitimately valid
+        // regardless of whether the image itself installs. An unforced
+        // CAF's header, by contrast, is owned by its compiled image alone
+        // and never travels except by that image installing -- and a
+        // BORROWED install (no `Arc<CompiledProgram>` behind it) can never
+        // be named in a parcel's manifest, so this stays a real refusal.
+        let compiled = thunk_to_closure_program();
         let other = CompiledProgram::compile(&base_program(955)).expect("other compiles");
         let options = PreparedMachineOptions {
             nursery_bytes: RunOptions::default().nursery_bytes,
         };
         let (mut left, left_id) = PreparedMachine::from_borrowed(&compiled, options).expect("left");
         let (mut right, _) = PreparedMachine::from_borrowed(&other, options).expect("right");
-        let call = PreparedCallOptions {
-            observation_budget: RunOptions::default().observation_budget,
-            collect_before_observation: false,
-        };
-        left.run_entry(left_id, ValueId(0), &[], call, RealmId::ROOT)
-            .expect("left runs");
-        let handle = left.retain_top(left_id, ValueId(0)).expect("left retains");
+        let handle = left
+            .retain_top(left_id, ValueId(0))
+            .expect("left retains its unforced CAF, never running it");
         let parcel = left.export_parcel(handle).expect("export");
         assert!(matches!(
             right.import_parcel(parcel, RealmId::ROOT),
@@ -6527,7 +6943,9 @@ mod tests {
             "B's import slot must be registered as its own independent persistent root"
         );
         match machine.inspect_outer(*handle_f_via_b_before, RealmId::ROOT) {
-            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(
+                kind,
+            ))) => {
                 assert_eq!(
                     kind,
                     tidepool_heap::execution_descriptor::ObjectKind::Function,
@@ -6578,8 +6996,13 @@ mod tests {
             "B's import slot root registration survives a forced collection on both sides"
         );
         match machine.inspect_outer(*handle_f_via_b_after, RealmId::ROOT) {
-            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
-                assert_eq!(kind, tidepool_heap::execution_descriptor::ObjectKind::Function);
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(
+                kind,
+            ))) => {
+                assert_eq!(
+                    kind,
+                    tidepool_heap::execution_descriptor::ObjectKind::Function
+                );
             }
             other => panic!(
                 "the re-read handle must still classify as Callable after collection, not: {other:?}"

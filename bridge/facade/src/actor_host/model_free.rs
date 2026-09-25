@@ -50,7 +50,7 @@ impl ModelFreeSession {
             Arc::clone(&bindings),
         );
         let source_layers = super::source_service(config, session_root.path(), worktrees.clone());
-        let (source, root, program, child_session_factory) = compile_root(
+        let (source, root, program, child_session_factory, image_registry) = compile_root(
             config,
             session_root.path(),
             worktrees.clone(),
@@ -78,7 +78,11 @@ impl ModelFreeSession {
             .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
                 &config.workspace,
             )?)
-            .with_child_session_factory(child_session_factory);
+            .with_child_session_factory(child_session_factory)
+            .with_image_registry(image_registry);
+        // No child bootstrap program: every launch stays on its launching
+        // session, matching the run host.
+        let _ = &program;
         forest.set_jev_backend(super::jev_backend(config));
         if let Some(layers) = &source_layers {
             forest.set_source_layers(layers.clone());

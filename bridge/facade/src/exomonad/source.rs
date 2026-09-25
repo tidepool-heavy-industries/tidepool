@@ -308,7 +308,7 @@ impl SourceLayer {
         } else {
             std::fs::rename(captured.path(), &directory)?;
             // The temporary name is gone; the retained revision now owns the tree.
-            let _ = captured.keep();
+            let _retained = captured.keep();
             tidepool_atomic_write::sync_parent_directory(&directory)?;
         }
         Ok(PendingRevision {
