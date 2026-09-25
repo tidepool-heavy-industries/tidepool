@@ -768,13 +768,14 @@ sendMessage
 sendMessage recipient message =
   fmap (fmap NotificationReceipt) (send (NotifyWith (agentIdentity recipient) message))
 
--- | The actor that spawned this one, if any. A root actor, which has no
--- parent, answers 'Nothing'. The reference carries bare identity — no bound
--- worktree — sufficient for 'sendMessage' and other identity-addressed calls.
+-- | The supervising actor: it receives this actor's 'sendMessage' and
+-- settles its request. Every child has one, whether its context was
+-- inherited or selected; a root answers 'Nothing'. The reference carries bare
+-- identity, no bound worktree.
 parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)
 parentAgent = do
   context <- Core.actorContext
-  pure $ case (contextParentId context, contextParentIncarnation context) of
+  pure $ case (contextSupervisorId context, contextSupervisorIncarnation context) of
     (Just parent, Just incarnation) -> Just (internalAgentRef parent incarnation)
     _ -> Nothing
 

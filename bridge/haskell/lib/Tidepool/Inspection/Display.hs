@@ -35,8 +35,9 @@ class WorkbenchDisplay a where
   workbenchDisplayWithout :: [Text] -> a -> (Text, Bool)
   workbenchDisplayWithout _ = workbenchDisplay
 
-  -- | Assignments need readable instructions on arrival. Structured inputs
-  -- retain their ordinary compact presentation; the host also caps UTF-8 bytes.
+  -- | Assignments arrive whole: render up to the given character budget
+  -- (the host's activation cap, which also caps UTF-8 bytes) rather than the
+  -- compact 'workbenchDisplay' preview.
   workbenchActivationDisplay :: Int -> a -> (Text, Bool)
   workbenchActivationDisplay _ = workbenchDisplay
 
@@ -166,6 +167,7 @@ instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplay = displayWith 512
   workbenchDisplayWithout keys = displayWithout keys 512
   workbenchReplyDisplay = displayWith
+  workbenchActivationDisplay = displayWith
 
 instance WorkbenchDisplay Text where
   workbenchDisplay = rawText 512

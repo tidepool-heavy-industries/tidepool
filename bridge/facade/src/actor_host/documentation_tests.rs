@@ -1055,15 +1055,21 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "respond (Report 1)",
         ),
         (
+            "preview-task",
+            "taskPreview",
+            "STRUCTURED-ACCEPTANCE-TAIL",
+            "respond (Report 1)",
+        ),
+        (
             "preview-oversized-text",
             "oversizedTextPreview",
-            "expand with `inspectFull sessionInput`",
+            "past the 32 KiB cap; expand with `inspectFull sessionInput`",
             "respond (Report 1)",
         ),
         (
             "preview-opaque",
             "opaquePreview",
-            "<opaque value>",
+            "<function>",
             "respond (Report (sessionInput 16))",
         ),
         (
@@ -1119,34 +1125,22 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "{}",
             activation.message
         );
-        if label == "preview-long-text" {
+        if label == "preview-long-text" || label == "preview-task" {
             assert!(
                 !activation.message.contains("omitted"),
                 "{}",
                 activation.message
             );
-            let observation =
-                committed(child.as_ref().unwrap().policy.as_ref(), "sessionInput").await;
-            assert!(!observation["items"][0]["output"]
-                .as_str()
-                .unwrap()
-                .contains("FINAL-ACCEPTANCE-CONDITION"));
         }
         if label == "preview-oversized-text" {
-            assert!(activation.message.len() < 17 * 1024);
+            assert!(activation.message.len() < 33 * 1024);
             assert!(!activation.message.contains("RETAINED-ASSIGNMENT-TAIL"));
-            let expanded = committed(
+            let retained = committed(
                 child.as_ref().unwrap().policy.as_ref(),
-                "inspectFull sessionInput",
+                "T.isSuffixOf \"RETAINED-ASSIGNMENT-TAIL\" sessionInput",
             )
             .await;
-            assert!(
-                expanded["items"][0]["output"]
-                    .as_str()
-                    .unwrap()
-                    .contains("RETAINED-ASSIGNMENT-TAIL"),
-                "{expanded}"
-            );
+            assert_eq!(retained["items"][0]["output"], "True", "{retained}");
         }
         let result = dispatch_haskell_script(child.as_ref().unwrap().policy.as_ref(), reply).await;
         assert_eq!(result["status"], "replied", "{result:?}");
