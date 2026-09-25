@@ -9,6 +9,8 @@ unconsumed proposals are removed; Git retains their history.
 
 - [RSI iteration 3](rsi-iteration-3.md): wave-10 interview decisions, stale
   reminders, incremental typed review tools and proposed offline restart wave.
+- [Request scoped typed tools](request-scoped-tools.md): design check for
+  current typed request access and a review acceptance tool.
 - [RSI iteration 2](rsi-iteration-2.md): wave-10 preparation and observations,
   launch repairs, review-cell evidence and deferred indentation assistance.
 - [RSI iteration 1](rsi-iteration-1.md): wave-8 reconciliation, typed review
