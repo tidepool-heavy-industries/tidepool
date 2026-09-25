@@ -2163,12 +2163,12 @@ impl<'code> PreparedMachine<'code> {
                         super::ObservationFailure::Integrity(
                             tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidRange,
                         ),
-                    ))
+                    ));
                 }
                 RuntimeRep::Address => {
                     return Err(
                         super::ObservationFailure::Representation(RuntimeRep::Address).into(),
-                    )
+                    );
                 }
                 RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_) => {
                     output.push(PreparedResult::Scalar(field.word as u64));
@@ -4659,10 +4659,10 @@ mod tests {
             "only B's image is named; A contributes no owned header, only interned constructors"
         );
         assert!(
-            parcel
-                .images()
-                .iter()
-                .any(|image| Arc::ptr_eq(&image.image, &left.image_with_imports(consumer).unwrap().0)),
+            parcel.images().iter().any(|image| Arc::ptr_eq(
+                &image.image,
+                &left.image_with_imports(consumer).unwrap().0
+            )),
             "the parcel names B's image"
         );
         assert!(
@@ -4748,7 +4748,10 @@ mod tests {
         ));
 
         let parcel = left.export_parcel(handle).expect("export");
-        assert!(parcel.bytes() > 0, "a heap constructor is copied, not shared");
+        assert!(
+            parcel.bytes() > 0,
+            "a heap constructor is copied, not shared"
+        );
 
         let (mut right, right_base) = PreparedMachine::new(
             CompiledProgram::compile(&base_program(7_891)).expect("base"),
@@ -6940,7 +6943,9 @@ mod tests {
             "B's import slot must be registered as its own independent persistent root"
         );
         match machine.inspect_outer(*handle_f_via_b_before, RealmId::ROOT) {
-            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(
+                kind,
+            ))) => {
                 assert_eq!(
                     kind,
                     tidepool_heap::execution_descriptor::ObjectKind::Function,
@@ -6991,8 +6996,13 @@ mod tests {
             "B's import slot root registration survives a forced collection on both sides"
         );
         match machine.inspect_outer(*handle_f_via_b_after, RealmId::ROOT) {
-            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
-                assert_eq!(kind, tidepool_heap::execution_descriptor::ObjectKind::Function);
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(
+                kind,
+            ))) => {
+                assert_eq!(
+                    kind,
+                    tidepool_heap::execution_descriptor::ObjectKind::Function
+                );
             }
             other => panic!(
                 "the re-read handle must still classify as Callable after collection, not: {other:?}"
