@@ -733,3 +733,10 @@ gates, (c) settings items, (d) Compactor.
   mostly checkout wait, and messages to busy actors waited for turn ends; both
   stretched every cycle (off-checkout fix live in wave 7; mailbox classes are
   a harness amendment).
+- **Compile-check evidence still keys on the session generation:**
+  `ActorCompileView::evidence_key` hashes `next_value_generation`, which moves
+  with every actor's bind, so the check cache still misses on other actors'
+  activity (the split staleness no longer does, 7d4a108b4 / 43d320dbe).
+  Separating the generation from the evidence for non-fold checks would make
+  the cache per-scope; the folded bind result is compiled at a generation, so
+  only that path needs it.
