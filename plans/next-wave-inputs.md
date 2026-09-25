@@ -432,3 +432,15 @@ Deferred, one card each:
   Nix build once while recipe runs loaded the host, with no daemon code
   change since the wave-4 deploy. Wait on the pre-warm's completion event
   instead of a deadline.
+- Delivery fence on a failed steer (wave 5 stall, 2026-09-25): a message
+  submitted while the target is inside a long tool call times out at 35 s,
+  Codex marks the host-input row Unknown and never claims it again, and the
+  Tidepool pump fences every later message behind it forever (1 s silent
+  re-query, deduped WARN, no withdraw, no Unknown branch). Fix on both
+  sides: Codex returns a steer failure as NotSubmitted (or keeps the row
+  claimable) instead of Unknown; the pump re-queries on turn completion and
+  idle, and after the target completes a turn that began after the submit
+  with the row still Unknown, withdraws it and resubmits labeled "possibly
+  already seen" (LateUpdateEvidence::Unconfirmed already fits); the WARN
+  repeats with a count. Also: a /goal-style standing objective the runtime
+  re-asserts on idle, mined from Codex.
