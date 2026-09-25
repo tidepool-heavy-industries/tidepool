@@ -693,3 +693,31 @@ fn snapshot_of_a_staged_rename_drops_the_old_path() {
         "the rename's old path must NOT survive into the snapshot: {names:?}"
     );
 }
+
+#[test]
+fn snapshot_treats_discovered_paths_literally() {
+    let repo = build_messy_repo();
+    for name in [":(exclude)victim", "victim", "[literal].txt"] {
+        std::fs::write(repo.path().join(name), name).unwrap();
+    }
+    let before = capture_source_state(repo.git(), repo.path());
+    let scratch = tempfile::TempDir::new().unwrap();
+    let receipt = snapshot_source(
+        repo.git(),
+        repo.path(),
+        &WorktreeId::from_raw("literal-paths"),
+        scratch.path(),
+    )
+    .unwrap();
+    for name in [":(exclude)victim", "victim", "[literal].txt"] {
+        let object = format!("{}:{name}", receipt.snapshot_commit.as_str());
+        assert_eq!(
+            repo.git()
+                .try_run(repo.path(), &["show", &object])
+                .unwrap()
+                .stdout,
+            name
+        );
+    }
+    assert_source_untouched(&before, &capture_source_state(repo.git(), repo.path()));
+}

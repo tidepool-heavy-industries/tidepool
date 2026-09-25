@@ -119,7 +119,11 @@ pub fn snapshot_source(
 
     temp_git.try_run(source, &["read-tree", "HEAD"])?;
     if !captured_paths.is_empty() {
-        let mut add_args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+        let mut add_args: Vec<String> = vec![
+            "--literal-pathspecs".to_string(),
+            "add".to_string(),
+            "--".to_string(),
+        ];
         add_args.extend(captured_paths.iter().cloned());
         temp_git.try_run(source, &add_args)?;
     }
