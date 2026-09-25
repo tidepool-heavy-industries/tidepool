@@ -64,8 +64,8 @@ explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Use
 `solTaskFrom` when a related Sol child should inherit your completed reasoning. Fresh context is useful after bulky reconciliation or for
 independent review; descendants within a focused subtree can inherit.
 
-Admission costs one cell per `unfold`, not per child, so admit the whole wave
-at once. Keep shared-contract and integration work with the parent. Use
+Admission costs one cell per `unfold`, not per child. Batch the ready, disjoint
+obligations; do not admit dependents before their shared contract is available. Keep shared-contract and integration work with the parent. Use
 `child` when only a final reply is needed; it does not install `reportProgress`.
 Retain returned handles. A record-actor router (`followWork`, see
 exomonad-coordinate) consumes settlement itself; wrap those branches in
@@ -76,20 +76,15 @@ or changed facts it cannot recover. Do not reconstruct the full plan in every Ta
 
 ## Before replying
 
-A child rebases onto the parent's current integration head before replying,
-and the parent merges the child's branch rather than copying files. Every
-managed worktree is a linked worktree of the same repository (`git worktree
-add` off the shared `.git`), so the parent's branch is already an ordinary
-local ref in the child's checkout — no fetch is needed unless the child is
-working from a separate clone. In the child's own checkout, through the `bash`
-tool: `git rebase <parent branch>` (named in the assignment; otherwise derive
-it from the ancestor segments of your own actor path,
-`exomonad/<ancestor path>/branches/<leaf>`), re-run the check command your
-assignment named, and only then `respond`. On the parent side, once
-`unownedPaths` finds no strays, integrate the rebased commit — `git merge
---no-ff <child branch>` in the held integration worktree, or `publish` on a
-`Project.Merge` actor bound to it (`PublishRequest` naming the child's
-commit; it merges, runs the project check, and only advances the branch on a
-green result). A stale candidate — the parent's head moved again after the
-rebase — goes back to the child with `sendMessage` asking it to rebase again
-before resubmitting.
+Return the exact checked candidate and its actual base. Rebase when a required
+source correction is missing, overlapping code advanced, or integration conflicts;
+disjoint parent changes alone do not require another rebase. Managed worktrees
+share local refs, so fetch is needed only for a separate clone. After a rebase,
+report the new base and candidate, check cumulative owned paths against that base,
+and rerun affected checks. Do not reuse an old ownership verdict.
+
+The parent verifies the exact candidate and cumulative ownership, merges the
+child's branch rather than copying files, and checks the resulting integration.
+A candidate that no longer applies returns to its owner with the exact dependency
+commit and required correction. A delivered source update is not proof of its
+incorporation: the owner reports the resulting OID and consumer check.

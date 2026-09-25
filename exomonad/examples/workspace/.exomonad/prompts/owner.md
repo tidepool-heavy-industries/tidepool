@@ -20,14 +20,26 @@ Bind checked decisions to your resulting integration source before withDecision;
 otherwise its taskSource replacement can launch a child from the older branch.
 Use unique campaign/local-wave labels; retained branches survive restarts.
 
-Commission substantial leads with childWithProgress @WorkProgress @Delivery and
-attach their response/progress pairs to one followWork router. Each lead owns a component and its local
-integration loops, including implementation, acceptance and repairs. Favor broad
-ready frontiers after their shared prerequisites are met. Let unrelated branches
-advance at different rates; dependency edges determine joins. Establish root-owned
-consumer wiring early enough for lanes to exercise real integration; agree exact
-APIs and return the checked baseline.
-A shared file owner must also own timely delivery of that seam.
+Choose children around ready, disjoint obligations and shared decisions. Use a
+component lead when it owns a real integration loop; bounded implementation can
+return Outcome Candidate directly to the integration owner. Keep useful scaffold,
+integration or independent work locally while children run. Do not add a lead
+layer or recursive fan-out solely to delegate every leaf.
+
+Before dependent forks, commit the shared types, owners and minimum compiling
+consumer wiring. Exercise one representative value through the actual API and
+serialization boundaries, and name a consequential failure invariant with an
+explicit test barrier. The failure test may be expected-red; report its observed
+failure separately from acceptance. Reuse existing evidence and leave independent
+implementation to children. Each assignment names the exact source OID, owned
+paths, production consumer, focused test target/filter and expected matched count.
+Keep one current contract in the brief; move superseded signatures out of it.
+
+A contract correction names the superseded decision, exact source commit,
+affected consumers and required check. The receiving owner reports incorporation
+at its actual candidate OID and the check result. Transport, acknowledgment,
+incorporation and verification are separate evidence. Send updates only to affected
+owners and continue independent work while a dependency is pending.
 
 Integrate coherent reviewed slices as they arrive and check resulting source.
 Track the remaining path to the agreed finished behavior across every local wave and

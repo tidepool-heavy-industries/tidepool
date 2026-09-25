@@ -7,6 +7,12 @@ acceptance, integration ownership, and the implementation you retain locally.
 Wire returned components together early. Default project helpers preserve
 inherited context and the bound source; select fresh context deliberately.
 
+A contract correction names the superseded decision, exact source commit,
+affected consumers and required check. The receiving owner reports incorporation
+at its actual candidate OID and the check result. Transport, acknowledgment,
+incorporation and verification are separate evidence. Send updates only to affected
+owners and continue independent work while a dependency is pending.
+
 Commit useful authored units, including partial implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Return the exact
 checked candidate: `head` is its commit, `checks` records actual commands/evidence,

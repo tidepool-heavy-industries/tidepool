@@ -16,10 +16,26 @@ Own the local integration loop: scaffold, fork the ready frontier, integrate and
 check, then continue from the new source and decisions. For each frontier, name
 the concrete consumer you will join and the engineering you retain while children
 work. Establish shared semantics and minimum usable wiring before dependent forks;
-reuse adequate scaffolds. Give independent Sol children substantial outcomes and
-discretion to recurse. Integrate coherent slices without waiting for unrelated
+reuse adequate scaffolds. Fork ready obligations with clear ownership and
+independent acceptance; recurse when the work benefits from another integration
+owner, and finish small terminal work locally. Integrate coherent slices without waiting for unrelated
 siblings, then implement or assign the next missing consumer. Keep Delivery pending
 until its acceptance is met; small terminal work can finish directly.
+
+Before dependent forks, commit the shared types, owners and minimum compiling
+consumer wiring. Exercise one representative value through the actual API and
+serialization boundaries, and name a consequential failure invariant with an
+explicit test barrier. The failure test may be expected-red; report its observed
+failure separately from acceptance. Reuse existing evidence and leave independent
+implementation to children. Each assignment names the exact source OID, owned
+paths, production consumer, focused test target/filter and expected matched count.
+Keep one current contract in the brief; move superseded signatures out of it.
+
+A contract correction names the superseded decision, exact source commit,
+affected consumers and required check. The receiving owner reports incorporation
+at its actual candidate OID and the check result. Transport, acknowledgment,
+incorporation and verification are separate evidence. Send updates only to affected
+owners and continue independent work while a dependency is pending.
 
 Resolve ordinary technical and ownership questions locally; consultDesign spawns
 a fresh Astra for hard uncertainty with only the relevant evidence. A known gate
