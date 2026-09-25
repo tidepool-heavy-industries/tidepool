@@ -83,6 +83,8 @@ impl RequestDuration {
 )]
 pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
+    CurrentRequestWith(i64),
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64), bool),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
@@ -107,6 +109,38 @@ pub(crate) enum RepliesReq {
     ObserveProgressWith(i64),
     UpdateRequestWith(i64, String),
     ObserveRequestUpdateWith(i64, i64),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RequestScopeRefusal {
+    NoCurrentRequest,
+    RequestTypeMismatch,
+    RequestInputShadowed,
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for RequestScopeRefusal {}
+impl ToHaskell for RequestScopeRefusal {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let reason = match self {
+            Self::NoCurrentRequest => "NoCurrentRequest",
+            Self::RequestTypeMismatch => "RequestTypeMismatch",
+            Self::RequestInputShadowed => "RequestInputShadowed",
+        };
+        let reason = table
+            .get_by_qualified_name(&format!("Tidepool.Agent.Reply.Internal.{reason}"))
+            .ok_or_else(|| BridgeError::UnknownDataConName(reason.into()))?;
+        let unavailable = table
+            .get_by_qualified_name("Tidepool.Agent.Reply.Internal.RequestUnavailable")
+            .ok_or_else(|| BridgeError::UnknownDataConName("RequestUnavailable".into()))?;
+        visitor.begin_constructor(unavailable, 1)?;
+        visitor.begin_constructor(reason, 0)?;
+        visitor.end_constructor()?;
+        visitor.end_constructor()
+    }
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]

@@ -2543,6 +2543,20 @@ where
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
     }
 
+    /// Compare compiler-authenticated type components from two installed
+    /// sites; a missing site or component is never equivalent.
+    pub fn site_types_equivalent(
+        &mut self,
+        first_site: u64,
+        first_component: super::prepared::SiteTypeComponent,
+        second_site: u64,
+        second_component: super::prepared::SiteTypeComponent,
+    ) -> bool {
+        self.state.prepared_mut().is_some_and(|engine| {
+            engine.site_types_equivalent(first_site, first_component, second_site, second_component)
+        })
+    }
+
     /// Install a rooted live value under a binder GHC has already compiled,
     /// without evaluating a throwaway placeholder of that type.
     ///
@@ -4940,12 +4954,32 @@ where
     /// this at all. Returns `None` for an unknown binding.
     pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
         let entry = self.state.bindings().resolve(name)?;
+        Some(self.borrow_prepared_binding(entry))
+    }
+
+    /// Borrow the binding still visible at `scope` only when it is the exact
+    /// binding mounted for the caller's request. A later same-name bind may
+    /// shadow it without changing the request's recorded identity.
+    pub fn prepared_binding_handle_in(
+        &self,
+        scope: ScopeId,
+        name: &str,
+        expected: SessionVarId,
+    ) -> Option<RootCustody> {
+        let entry = self.state.resolve_in(scope, name)?;
+        (entry.id == expected).then(|| self.borrow_prepared_binding(entry))
+    }
+
+    fn borrow_prepared_binding(
+        &self,
+        entry: &tidepool_codegen::binding_table::BindingEntry,
+    ) -> RootCustody {
         let BoundValue { handle, .. } = &entry.value;
-        Some(RootCustody::shared(
+        RootCustody::shared(
             handle.raw(),
             Arc::clone(&self.custody_cleanup),
             Arc::new(ProgramProvenance::default()),
-        ))
+        )
     }
 
     fn retire_resumed(&mut self, resumed: Option<&str>) {

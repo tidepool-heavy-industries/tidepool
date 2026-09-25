@@ -238,22 +238,30 @@ elaboratePreparedSites authority siblings bindings = do
                   (renderSiteFailure (T.unpack originName) spec failure) : esRejections current})
               pure (mkApps headExpr rewrittenArguments)
             Right plan -> do
-              case siteWireType authority spec (spAnswer plan) of
+              case do
+                wire <- siteWireType authority spec (spAnswer plan)
+                derived <- case vsDerivedInput spec of
+                  Nothing -> Right []
+                  Just (index, source) -> case drop index (spTypeArgs plan) of
+                    inputType : _ -> (:[]) <$> siteWireType authority
+                      (spec { vsWireSource = source }) inputType
+                    [] -> Left "derived site input names a missing type argument"
+                Right (wire, spInputs plan ++ derived) of
                 Left detail -> do
                   modify' (\current -> current
                     { esRejections = SiteRejection topBinder
                         (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
                         : esRejections current })
                   pure (mkApps headExpr rewrittenArguments)
-                Right wireType -> do
+                Right (wireType, siteInputs) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
-                  let site = buildYieldSite spec originName ordinal (spAnswer plan) (spInputs plan)
+                  let site = buildYieldSite spec originName ordinal (spAnswer plan) siteInputs
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
                   current <- get
                   let (wireNode, graph1) = runState (internType wireType) (esTypeGraph current)
-                      (inputNodes, graph2) = runState (traverse internType (spInputs plan)) graph1
+                      (inputNodes, graph2) = runState (traverse internType siteInputs) graph1
                       preparedSite = PreparedSite topBinder site (vsDelivery spec)
                         wireNode inputNodes
                   put current

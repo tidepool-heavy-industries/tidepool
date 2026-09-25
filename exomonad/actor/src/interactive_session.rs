@@ -125,6 +125,7 @@ impl ActivationContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveSessionRequest {
+    pub(crate) site: u64,
     pub request: crate::RequestId,
     pub initial_user_message: Option<String>,
     pub input_type: String,
@@ -219,6 +220,7 @@ impl ResidentInteractiveSession {
             .ok_or(InteractiveSessionCaptureError::MissingInput)?;
         Ok(Self {
             request: InteractiveSessionRequest {
+                site: site as u64,
                 request,
                 initial_user_message,
                 input_type: signature.input_type,

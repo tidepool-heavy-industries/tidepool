@@ -350,6 +350,13 @@ struct SiteWitness {
     row: usize,
 }
 
+/// A closed type component of a compiler-authenticated typed site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SiteTypeComponent {
+    Answer,
+    Input(usize),
+}
+
 /// The two constructors a turn's settled layer is read by, as this program's
 /// own declarations name them (`host_id` is the bridge `DataConId`).
 #[derive(Clone, Copy, Debug)]
@@ -1681,6 +1688,33 @@ fn resolve_prepared_import<'a>(
 }
 
 impl PreparedEngine {
+    /// Compare two closed site types through their canonical installed type
+    /// graphs. Missing sites or components never establish equivalence.
+    pub fn site_types_equivalent(
+        &self,
+        first_site: u64,
+        first_component: SiteTypeComponent,
+        second_site: u64,
+        second_component: SiteTypeComponent,
+    ) -> bool {
+        let resolve = |site, component| {
+            let witness = self.sites.get(&site)?;
+            let facts = self.programs.get(&witness.owner)?;
+            let row = facts.sites.get(witness.row)?;
+            let node = match component {
+                SiteTypeComponent::Answer => row.wire,
+                SiteTypeComponent::Input(index) => *row.inputs.get(index)?,
+            };
+            Some((facts, node))
+        };
+        let Some((first, first_node)) = resolve(first_site, first_component) else {
+            return false;
+        };
+        let Some((second, second_node)) = resolve(second_site, second_component) else {
+            return false;
+        };
+        type_nodes_equivalent(first, first_node, second, second_node, &mut BTreeSet::new())
+    }
     /// Stream a structurally encoded host value into the resident heap. The
     /// caller supplies the compiler-authenticated constructor table for the
     /// typed binding it will mount; no source-text representation is involved.
@@ -4950,6 +4984,99 @@ mod tests {
         }];
         wire.verb_sites = vec![(ConstructorId(0), site)];
         testing::prepare(wire).expect("verb fixture validates")
+    }
+
+    fn typed_site_program(
+        site: u64,
+        types: Vec<TypeNode>,
+        wire: u32,
+        inputs: &[u32],
+    ) -> PreparedProgram {
+        let mut program = testing::wire_program();
+        program.types = types;
+        program.sites = vec![SiteRow {
+            site,
+            origin: "Fixture.Request".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(wire),
+            inputs: inputs.iter().copied().map(TypeNodeId).collect(),
+        }];
+        testing::prepare(program).expect("typed site fixture validates")
+    }
+
+    #[test]
+    fn installed_sites_compare_request_input_and_reply_across_programs() {
+        let mut response_family =
+            testing::identity("Tidepool.Agent.Reply.Internal", "ResponseResult");
+        response_family.namespace = "type".into();
+        let (mut engine, _) = PreparedEngine::bootstrap(typed_site_program(
+            41,
+            vec![
+                TypeNode::Text,
+                TypeNode::Integer,
+                TypeNode::Data {
+                    family: response_family.clone(),
+                    arguments: vec![TypeNodeId(1)],
+                    rows: vec![],
+                },
+            ],
+            2,
+            &[0],
+        ))
+        .expect("install request site");
+        engine
+            .install(
+                typed_site_program(
+                    42,
+                    vec![
+                        TypeNode::Integer,
+                        TypeNode::Natural,
+                        TypeNode::Text,
+                        TypeNode::Data {
+                            family: response_family,
+                            arguments: vec![TypeNodeId(0)],
+                            rows: vec![],
+                        },
+                    ],
+                    1,
+                    &[2, 0, 3],
+                ),
+                &BindingTable::new(),
+                &BindingIndex::new(),
+            )
+            .expect("install accessor site");
+
+        assert!(engine.site_types_equivalent(
+            41,
+            SiteTypeComponent::Input(0),
+            42,
+            SiteTypeComponent::Input(0)
+        ));
+        assert!(engine.site_types_equivalent(
+            41,
+            SiteTypeComponent::Answer,
+            42,
+            SiteTypeComponent::Input(2)
+        ));
+        assert!(!engine.site_types_equivalent(
+            41,
+            SiteTypeComponent::Answer,
+            42,
+            SiteTypeComponent::Input(0)
+        ));
+        assert!(!engine.site_types_equivalent(
+            41,
+            SiteTypeComponent::Answer,
+            42,
+            SiteTypeComponent::Input(1)
+        ));
+        assert!(!engine.site_types_equivalent(
+            41,
+            SiteTypeComponent::Answer,
+            43,
+            SiteTypeComponent::Answer
+        ));
     }
 
     #[test]

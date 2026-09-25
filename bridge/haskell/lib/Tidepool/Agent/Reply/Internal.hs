@@ -2,12 +2,18 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
   ( RequestId (..)
   , Response (..)
   , Reply (..)
+  , RequestScope (..)
+  , RequestScopeError (..)
+  , currentRequest
+  , currentRequestSited
+  , requestReplyOf
   , Replies (..)
   , Progress (..)
   , ProgressSink (..)
@@ -102,6 +108,20 @@ instance Display (Response result) where
 
 newtype Reply result = Reply RequestId
   deriving (Show, Eq)
+
+data RequestScopeError
+  = NoCurrentRequest
+  | RequestTypeMismatch
+  | RequestInputShadowed
+  deriving (Show, Eq)
+
+data RequestScope input result
+  = RequestUnavailable RequestScopeError
+  | RequestActive RequestId input
+
+requestReplyOf :: RequestScope input result -> Maybe (Reply result)
+requestReplyOf (RequestUnavailable _) = Nothing
+requestReplyOf (RequestActive request _) = Just (Reply request)
 
 instance Display (Reply result) where
   displayTree (Reply (RequestId request)) = opaqueHandle ("reply for request " <> tshow request)
@@ -281,6 +301,7 @@ data RawReplyObservation
   | RawReplyRejected ReplyError
 
 data Replies a where
+  CurrentRequestWith :: Int -> Replies (RequestScope input result)
   ReserveRequestWith :: Text -> (Int, Int) -> Bool -> Replies Int
   SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies ()
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
@@ -304,6 +325,18 @@ data Replies a where
   ObserveProgressWith :: Int -> Replies (ProgressState progress)
   UpdateRequestWith :: Int -> Text -> Replies (Either ReplyError Int)
   ObserveRequestUpdateWith :: Int -> Int -> Replies (Either ReplyError RequestUpdateState)
+
+{-# OPAQUE currentRequest #-}
+currentRequest
+  :: forall input result effs. Member Replies effs
+  => Eff effs (RequestScope input result)
+currentRequest = currentRequestSited (-1)
+
+{-# OPAQUE currentRequestSited #-}
+currentRequestSited
+  :: forall input result effs. Member Replies effs
+  => Int -> Eff effs (RequestScope input result)
+currentRequestSited site = send (CurrentRequestWith site)
 
 reportRequestProgress
   :: Member Replies effs

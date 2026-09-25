@@ -597,14 +597,24 @@ enum ResidentBoot {
 struct OutstandingInteractive {
     response: crate::ResponseExpectation,
     request: crate::RequestId,
+    site: u64,
+    input_binding: tidepool_repr::SessionVarId,
+    input_scope: tidepool_codegen::scope::ScopeId,
     type_modules: Vec<String>,
 }
 
 impl OutstandingInteractive {
-    fn new(request: &crate::interactive_session::InteractiveSessionRequest) -> Self {
+    fn new(
+        request: &crate::interactive_session::InteractiveSessionRequest,
+        input_binding: tidepool_repr::SessionVarId,
+        input_scope: tidepool_codegen::scope::ScopeId,
+    ) -> Self {
         Self {
             response: request.response.clone(),
             request: request.request,
+            site: request.site,
+            input_binding,
+            input_scope,
             type_modules: request.type_modules(),
         }
     }
@@ -3833,6 +3843,22 @@ where
                     .resume_value(context.clone(), continuation, outcome)
                     .await
             }),
+            ResidentActorBoundary::CurrentRequest { continuation, site } => {
+                let current = self.outstanding_interactive.as_ref().map(|active| {
+                    (
+                        active.request,
+                        active.site,
+                        active.input_scope,
+                        active.input_binding,
+                    )
+                });
+                Box::pin(async move {
+                    self.environment
+                        .runner
+                        .resume_current_request(context.clone(), continuation, site, current)
+                        .await
+                })
+            }
             ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
                 crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -4414,7 +4440,7 @@ where
             request.request,
             request.type_modules(),
         );
-        let (input_preview, reply_preview) = workbench
+        let (input_preview, reply_preview, input_binding) = workbench
             .mount_activation_input(
                 context.clone(),
                 request.input_type.clone(),
@@ -4436,7 +4462,11 @@ where
             contract.message(request.request, request.initial_user_message.as_deref());
         self.install_interactive_policy(kernel, context, Some(request_message.clone()))
             .await?;
-        self.outstanding_interactive = Some(OutstandingInteractive::new(&request));
+        self.outstanding_interactive = Some(OutstandingInteractive::new(
+            &request,
+            input_binding,
+            context.placement.lexical_scope,
+        ));
         self.set_standing(
             context.actor,
             ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {

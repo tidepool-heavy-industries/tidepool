@@ -5,6 +5,10 @@ module Tidepool.Agent.Reply
   ( RequestId
   , Response
   , Reply
+  , RequestScope (..)
+  , RequestScopeError (..)
+  , currentRequest
+  , requestReplyOf
   , Replies
   , Progress
   , ProgressCursor (..)
@@ -41,6 +45,10 @@ module Tidepool.Agent.Reply
 
 import Tidepool.Agent.Reply.Internal
   ( Reply
+  , RequestScope (..)
+  , RequestScopeError (..)
+  , currentRequest
+  , requestReplyOf
   , Progress
   , ProgressCursor (..)
   , ProgressState (..)

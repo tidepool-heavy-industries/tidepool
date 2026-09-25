@@ -1286,6 +1286,10 @@ pub(crate) enum ResidentActorBoundary {
         inspected: Vec<(crate::ActorRef, u64)>,
     },
     RequestReservation(RequestReservation),
+    CurrentRequest {
+        continuation: ResidentHole,
+        site: Option<u64>,
+    },
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
@@ -1423,6 +1427,7 @@ impl ResidentActorBoundary {
             Self::CleanupPlan { .. } => "planCleanup",
             Self::CleanupExecute { .. } => "executeCleanup",
             Self::RequestReservation(_) => "request",
+            Self::CurrentRequest { .. } => "currentRequest",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
@@ -1760,6 +1765,7 @@ impl ResidentRequest {
                 crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..),
             ) => "agent attachment",
             Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
+            Self::Replies(RepliesReq::CurrentRequestWith(..)) => "currentRequest",
             Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
             Self::Replies(RepliesReq::PublishProgressWith(..)) => "reportProgress",
@@ -3067,7 +3073,7 @@ where
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
-    ) -> Result<(String, String), ResidentActorWorkbenchError> {
+    ) -> Result<(String, String, tidepool_repr::SessionVarId), ResidentActorWorkbenchError> {
         let reply_declaration = reply_declaration.filter(|_| {
             reply_declaration_modules.iter().any(|module| {
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
@@ -3161,9 +3167,10 @@ where
                     Ok(outcome) => decode_activation_observation(outcome),
                     Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
                 };
-                Ok(preview)
+                Ok((preview, tidepool_repr::SessionVarId::from_extract(binder.var_id)))
             })
             .await?;
+        let (preview, input_binding) = preview;
         let input = match preview {
             Ok((text, omitted)) => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
@@ -3183,6 +3190,7 @@ where
         Ok((
             input,
             bounded_activation_text(reply, 4 * 1024, false, &format!("lookup {reply_type}")),
+            input_binding,
         ))
     }
 
@@ -6594,6 +6602,12 @@ where
                             notify_owner,
                         }),
                     ),
+                    ResidentRequest::Replies(RepliesReq::CurrentRequestWith(site)) => Ok(
+                        ResidentActorBoundary::CurrentRequest {
+                            continuation: hole,
+                            site: u64::try_from(site).ok(),
+                        }
+                    ),
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
                         request_id,
                         _,
@@ -7566,6 +7580,80 @@ where
                 let answer = crate::request_effect::ReplyResult::<()>(Err(error));
                 session
                     .resume_classified(hole, answer)
+                    .map_err(classify_resumption)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_current_request(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        access_site: Option<u64>,
+        current: Option<(
+            crate::RequestId,
+            u64,
+            tidepool_codegen::scope::ScopeId,
+            tidepool_repr::SessionVarId,
+        )>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        use tidepool_runtime::session::SiteTypeComponent;
+
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let refusal = match (access_site, current) {
+                    (Some(access_site), Some((request, request_site, scope, input_binding))) => {
+                        let input_matches = session.site_types_equivalent(
+                            request_site,
+                            SiteTypeComponent::Input(0),
+                            access_site,
+                            SiteTypeComponent::Input(0),
+                        );
+                        let reply_matches = session.site_types_equivalent(
+                            request_site,
+                            SiteTypeComponent::Answer,
+                            access_site,
+                            SiteTypeComponent::Input(2),
+                        );
+                        if !input_matches || !reply_matches {
+                            crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
+                        } else if let Some(input) =
+                            session.prepared_binding_handle_in(scope, "sessionInput", input_binding)
+                        {
+                            let constructor = tidepool_bridge::get_qualified(
+                                session.data_con_table(),
+                                "Tidepool.Agent.Reply.Internal.RequestActive",
+                                2,
+                            )
+                            .ok_or_else(|| {
+                                BridgeError::UnknownDataConName(
+                                    "Tidepool.Agent.Reply.Internal.RequestActive".into(),
+                                )
+                            })?;
+                            let request = i64::try_from(request.0).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "current request identity exceeds Haskell Int".into(),
+                                )
+                            })?;
+                            return session
+                                .resume_framed_custody_sources_classified(
+                                    hole,
+                                    &input,
+                                    constructor,
+                                    vec![request],
+                                )
+                                .map_err(classify_resumption);
+                        } else {
+                            crate::request_effect::RequestScopeRefusal::RequestInputShadowed
+                        }
+                    }
+                    (None, Some(_)) => {
+                        crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
+                    }
+                    (_, None) => crate::request_effect::RequestScopeRefusal::NoCurrentRequest,
+                };
+                session
+                    .resume_classified(hole, refusal)
                     .map_err(classify_resumption)
             })
             .await
@@ -13294,6 +13382,164 @@ mod request_tests {
                 .all(|item| matches!(item.ready, PreparedCellStep::Executable(_))),
             "both items compile through the split's item loop, not the declaration plane"
         );
+    }
+
+    #[tokio::test]
+    async fn current_request_cell_compiles_closed_site_evidence() {
+        let (machines, mut context, mut source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Replies]".into();
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let cell = "scope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
+
+        let (checked, prepared) = workbench
+            .prepare_cell(context, cell)
+            .await
+            .expect("a closed request scope compiles with site evidence");
+        assert_eq!(checked.items.len(), 1);
+        let PreparedCell::Ready { items, .. } = prepared else {
+            panic!("the request scope is one executable binding")
+        };
+        let PreparedCellStep::Executable(ready) = &items[0].ready else {
+            panic!("the request scope binding must compile")
+        };
+        let TurnResult::Bind { compiled, .. } = &ready.result else {
+            panic!("the request scope binding must carry compiled sites")
+        };
+        assert!(
+            compiled.asks.iter().any(|site| site.inputs.len() == 3),
+            "currentRequest carries input, result, and ResponseResult result evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_input_borrow_refuses_a_shadowed_mount() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source,
+                vec![],
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "sourceValue <- pure ()".into(),
+                },
+                None,
+            )
+            .await
+            .expect("source value compiles");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
+            workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("source value binds");
+        }
+        let scope = context.placement.lexical_scope;
+        let borrow_source = || async {
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let (id, ..) = session
+                        .current_binding_in(scope, "sourceValue")
+                        .expect("source value remains visible");
+                    Ok(session
+                        .prepared_binding_handle_in(scope, "sourceValue", id)
+                        .expect("borrow source value"))
+                })
+                .await
+        };
+        let (_, _, first) = workbench
+            .mount_activation_input(
+                context.clone(),
+                "()".into(),
+                borrow_source().await.expect("source borrow"),
+                "()".into(),
+                None,
+                vec![],
+            )
+            .await
+            .expect("first activation mount");
+        let (_, _, second) = workbench
+            .mount_activation_input(
+                context.clone(),
+                "()".into(),
+                borrow_source().await.expect("source borrow"),
+                "()".into(),
+                None,
+                vec![],
+            )
+            .await
+            .expect("second activation shadows the first");
+        assert_ne!(first, second);
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert!(session
+                    .prepared_binding_handle_in(scope, "sessionInput", first)
+                    .is_none());
+                assert!(session
+                    .prepared_binding_handle_in(scope, "sessionInput", second)
+                    .is_some());
+                Ok(())
+            })
+            .await
+            .expect("shadowed input is refused by identity");
+    }
+
+    #[tokio::test]
+    async fn current_request_without_an_activation_returns_typed_refusal() {
+        let (machines, mut context, mut source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Replies]".into();
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source);
+        let cell = "scope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
+        let (_, prepared) = workbench
+            .prepare_cell(context.clone(), cell.clone())
+            .await
+            .expect("request access compiles");
+        let PreparedCell::Ready { mut items, .. } = prepared else {
+            panic!("request access is an executable cell")
+        };
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: cell,
+                },
+                items.remove(0),
+                4096,
+            )
+            .await
+            .expect("request access suspends");
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("request access must produce a suspended effect")
+        };
+        let boundary = runner
+            .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+            .await
+            .expect("capture request access");
+        let ResidentActorBoundary::CurrentRequest { continuation, site } = boundary else {
+            panic!("request access is decoded as its typed effect")
+        };
+        assert!(site.is_some(), "extractor assigns a closed site");
+        let outcome = runner
+            .resume_current_request(context.clone(), continuation, site, None)
+            .await
+            .expect("no activation returns a typed refusal");
+        workbench
+            .settle_item(context, *fragment, outcome)
+            .await
+            .expect("refusal is a valid RequestScope result");
     }
 
     /// A single bind item (`x <- e`, no declaration) is the fold's target

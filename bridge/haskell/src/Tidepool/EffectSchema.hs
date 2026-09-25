@@ -61,6 +61,7 @@ data VerbSpec = VerbSpec
   , vsSitedModule :: String
   , vsListAnswer :: Bool
   , vsInputTypeArgs :: [Int]
+  , vsDerivedInput :: Maybe (Int, SiteWireSource)
   , vsAnswerSource :: SiteAnswerSource
   , vsDelivery :: SiteDelivery
   , vsWireSource :: SiteWireSource
@@ -73,6 +74,7 @@ data VerbSpec = VerbSpec
 data SiteAnswerSource
   = FirstTypeArgument
   | TypeArgument Int
+  | EffectResult
   deriving (Eq, Show)
 
 data SiteDelivery
@@ -140,6 +142,7 @@ sitedVerbs =
       , vsSitedModule = "Tidepool.Actors.Unfold"
       , vsListAnswer = False
       , vsInputTypeArgs = [2]
+      , vsDerivedInput = Nothing
       , vsAnswerSource = TypeArgument 0
       , vsDelivery = DeliverExitCellFill
       , vsWireSource = ResponseResultEvidence
@@ -148,6 +151,12 @@ sitedVerbs =
       "childWithProgressSited" "Tidepool.Actors.Unfold" False [3, 0]
       DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
+  , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
+      "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [0, 1]
+      DeliverHostAnswer SelectedAnswer)
+      { vsAnswerSource = EffectResult
+      , vsDerivedInput = Just (1, ResponseResultEvidence)
+      }
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
@@ -155,5 +164,5 @@ sitedVerbs =
   ]
   where
     verb name source sibling siblingSource listAnswer inputs delivery wireSource =
-      VerbSpec name source sibling siblingSource listAnswer inputs FirstTypeArgument
+      VerbSpec name source sibling siblingSource listAnswer inputs Nothing FirstTypeArgument
         delivery wireSource

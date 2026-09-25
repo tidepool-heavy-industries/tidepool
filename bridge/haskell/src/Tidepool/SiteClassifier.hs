@@ -13,7 +13,7 @@ import GHC.Core.TyCo.FVs (tyCoVarsOfType)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.Type
   ( Type, mkTyVarTy, splitForAllTyCoVars, piResultTys, splitFunTys
-  , mkPiTys, mkVisFunTyMany, splitInvisPiTys )
+  , mkPiTys, mkVisFunTyMany, splitInvisPiTys, splitTyConApp_maybe )
 import GHC.Types.Id (Id, idName, idType)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -44,6 +44,7 @@ data SiteFailure
   | OpenSiteType SiteTypePosition Type
   | MissingSibling
   | IncompatibleSibling
+  | MissingEffectResult
 
 classifySiteOccurrence :: Map String Id -> VerbSpec -> Id -> [CoreExpr]
   -> Either SiteFailure SitePlan
@@ -62,10 +63,14 @@ classifySiteOccurrence siblings spec surface args = do
   mapM_ checkEvidence (zip [0..] evidence)
   let missingEvidence = take (nEvidence - length evidence)
         (drop (length evidence) (fst (splitFunTys (piResultTys (idType surface) types))))
-  answer <- typeAt types (case vsAnswerSource spec of
-    FirstTypeArgument -> 0
-    TypeArgument i -> i)
-    >>= closed SiteResult
+  answer <- case vsAnswerSource spec of
+    FirstTypeArgument -> typeAt types 0 >>= closed SiteResult
+    TypeArgument i -> typeAt types i >>= closed SiteResult
+    EffectResult -> do
+      let (_, effectType) = splitFunTys (piResultTys (idType surface) types)
+      case splitTyConApp_maybe effectType of
+        Just (_, [_effects, value]) -> closed SiteResult value
+        _ -> Left MissingEffectResult
   inputs <- traverse (\i -> typeAt types i >>= closed SiteInput) (vsInputTypeArgs spec)
   if eqType (idType sibling) (mkPiTys binders (mkVisFunTyMany intTy result))
     then Right (SitePlan sibling types missingTypes evidence missingEvidence rest answer inputs)
@@ -93,6 +98,7 @@ renderSiteFailure origin spec failure = case failure of
     MissingEvidence i -> "missing constraint evidence " ++ show i
     MissingSibling -> "missing generated site-aware sibling"
     IncompatibleSibling -> "generated site-aware sibling has an incompatible type"
+    MissingEffectResult -> "expected an Eff result type"
 
 -- | Preserve every argument, including type applications following nospec.
 -- Casts are deliberately retained: erasing a cast changes typed Core.

@@ -51,7 +51,7 @@ pub use persistent::{
 
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
-    RealmId,
+    RealmId, SiteTypeComponent,
 };
 // Re-exported for callers that pass a value across two resident sessions'
 // machines ([`resident::ResidentSession::export_custody`]/`import_parcel`)
