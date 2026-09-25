@@ -415,3 +415,14 @@ Deferred, one card each:
   diagnostic, so it is teachable, but the natural form fails. Decide:
   default the unconstrained case to `Label` (a defaulting rule the workbench
   owns), or make the quasiquote monomorphic and give watch labels their own.
+- Gate failures carried into wave 5 (2026-09-25), all failing identically on
+  main; none is a parcel 7/8 regression:
+  - five `actor_host::jev_tests` and `command_skill_examples_execute...`:
+    test backends see a `noul` request (the destructive-command check) they
+    do not script, and a skill example's memory limit (256 MiB) differs from
+    the test's constant (1 GiB);
+  - `accepted_stdin_is_acknowledged...`: "Variable not in scope: job1" in a
+    cell's second statement; already failing at the wave-4 deploy ad856115c;
+  - `exomonad_control_contract::fork_options_are_optional...`: ForksStartWith
+    has 16 arguments, the test expects 15; predates today's work.
+  The notification-barrier regression (473a76215) is fixed in 8dfa4f6ba.
