@@ -408,3 +408,10 @@ Deferred, one card each:
   unstamped version 0; and KV `flush` logs write failures (including the
   refused flush after a failed load) while its callers still report success,
   though the effect contract says I/O faults abort.
+- Label quasiquote ambiguity (2026-09-24): since c1be8bfce `[label|x|]` is
+  polymorphic over `IsWatchLabel`, so `let l = [label|x|]` in a cell that
+  does not itself use `l` is rejected as ambiguous; a binding meant for a
+  later turn needs `:: Label`. Models see GHC's "use a type annotation"
+  diagnostic, so it is teachable, but the natural form fails. Decide:
+  default the unconstrained case to `Label` (a defaulting rule the workbench
+  owns), or make the quasiquote monomorphic and give watch labels their own.
