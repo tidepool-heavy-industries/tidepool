@@ -72,8 +72,8 @@ is enough to be useful; no requirement for universal automation.
 
 | Priority | Finding | Next action and proof |
 |---|---|---|
-| High | Watcher summary could not read evidence, while root later could | Trace exact file/access failure before choosing retry. Browser-helper investigation found unbound actors accessing a managed checkout without its owned handle. Reproduce check collection under correct worktree authority; prove success and refusal, without rerunning original tests. |
-| High | Raw-output recovery returned HTTP 409 | Trace owner/retention lifecycle. Retention expiry is the run's interpretation, not an independently established cause. Preserve terminal facts and durable artifact recovery. |
+| High | Watcher summary could not read evidence, while root later could | Retain JSON in the original job before exit; collect it without a second actor opening the originating checkout. Root was WritableBound, not a managed checkout, so binding the watcher to an unrelated worktree would not fix this case. Prove both root and managed-child collection without rerunning tests. |
+| High | Raw-output recovery returned HTTP 409 | Exact 10:29:38 trace reports retained command output expired. Preserve terminal facts and capture evidence before expiry; unavailable retained output remains explicit and must not cause an automatic test rerun. |
 | High | Review source omitted required sibling Engine change | Declare required source dependencies and validate composition before product review. Keep partial component review legitimate. Prove stale composition is identified without mislabeling a provider defect. |
 | Medium | Typed Repair contradicted no-defect prose | Prefer a verdict shape requiring an actual finding; inspect existing API before adding checks. Semantic prose contradictions may need a bounded judgment. Measure root clarification rounds rather than hiding reviewer work. |
 | Medium | Initial contract named ask although provider advertised sleep | Include a small executable consumer example with advertised names, decision/evidence shape and capture seam before delegation. Keep production acceptance independent. |
