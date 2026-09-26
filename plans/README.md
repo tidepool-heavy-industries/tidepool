@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Post-wave17 improvements](post-wave17-improvements.md): planned worktree batch
+  for helper/mount integrity, recoverable checks, coordinator cleanup, executable
+  release evidence and measured coordination/launch costs.
+
 - [Post-wave15 improvements](post-wave15-improvements.md): completion-oriented
   Bash with bounded contextual follow-ups, evidence access, source composition
   and review friction; next RSI experiment and measurements.
