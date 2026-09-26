@@ -278,6 +278,8 @@ pub struct SpawnError {
 #[derive(Debug)]
 enum Settlement {
     NotSubmitted,
+    /// Capacity timed out on the bound daemon; no execution, no rebinding.
+    Capacity,
     Submitted,
 }
 
@@ -297,6 +299,17 @@ impl SpawnError {
             bin: bin.as_ref().to_owned(),
             source,
             settlement: Settlement::NotSubmitted,
+        }
+    }
+
+    fn capacity(bin: impl AsRef<OsStr>) -> Self {
+        Self {
+            bin: bin.as_ref().to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "compiler daemon remained busy until admission deadline",
+            ),
+            settlement: Settlement::Capacity,
         }
     }
 
@@ -699,6 +712,17 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn daemon_capacity_never_permits_direct_rebind() {
+        let capacity = SpawnError::capacity("daemon.sock");
+        assert_eq!(capacity.source.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!capacity.permits_rebind());
+        let stale_epoch = SpawnError::not_submitted(
+            "daemon.sock",
+            std::io::Error::other("daemon boot epoch changed"),
+        );
+        assert!(stale_epoch.permits_rebind());
+    }
     /// Serializes tests that mutate process-global environment or counters.
     /// The crate must also pass ordinary multi-threaded `cargo test`; process
     /// isolation by a particular test runner is not part of its contract.

@@ -375,6 +375,9 @@ fn available_memory_mb() -> Option<u64> {
 const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
+/// Capacity is transient and never permits rebinding to a direct worker.
+const BUSY: u8 = 2;
+const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
 
 fn pane_filter() -> tracing_subscriber::EnvFilter {
@@ -500,13 +503,22 @@ pub(crate) enum DaemonError {
     /// The daemon rejected the bound epoch or deployment before acknowledging
     /// acceptance. It guarantees this request will not execute.
     NotAccepted(String),
+    /// No work was admitted before the caller's admission deadline.
+    Busy,
+    /// The caller stopped waiting; acceptance may have raced cancellation.
+    Cancelled,
     /// The daemon acknowledged acceptance before the enclosed response error.
     AfterAcceptance(Box<DaemonError>),
     Protocol(String),
 }
 
 impl DaemonError {
+    #[cfg(test)]
     pub(crate) fn is_not_accepted(&self) -> bool {
+        matches!(self, Self::Connect(_) | Self::NotAccepted(_) | Self::Busy)
+    }
+
+    pub(crate) fn permits_rebind(&self) -> bool {
         matches!(self, Self::Connect(_) | Self::NotAccepted(_))
     }
 
@@ -524,6 +536,10 @@ impl std::fmt::Display for DaemonError {
             DaemonError::NotAccepted(message) => {
                 write!(f, "daemon did not accept request: {message}")
             }
+            DaemonError::Busy => {
+                write!(f, "compiler daemon remained busy until admission deadline")
+            }
+            DaemonError::Cancelled => write!(f, "compiler daemon admission was cancelled"),
             DaemonError::AfterAcceptance(error) => {
                 write!(f, "daemon response failed after acceptance: {error}")
             }
@@ -544,13 +560,41 @@ pub(crate) fn execute(
     cwd: &Path,
     argv: &[OsString],
 ) -> Result<Output, DaemonError> {
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let mut busy_retries = 0u64;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                busy_retries,
+                "compiler daemon admission timed out while busy"
+            );
+            return Err(DaemonError::Busy);
+        }
+        match execute_once(socket_path, epoch, cwd, argv, remaining) {
+            Err(DaemonError::Busy) => {
+                busy_retries = busy_retries.saturating_add(1);
+                wait_for_busy(deadline, None)?;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn execute_once(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+    cwd: &Path,
+    argv: &[OsString],
+    admission_timeout: Duration,
+) -> Result<Output, DaemonError> {
     let admission_started = Instant::now();
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
+        .set_read_timeout(Some(admission_timeout))
         .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
     stream
-        .set_write_timeout(Some(IO_TIMEOUT))
+        .set_write_timeout(Some(admission_timeout))
         .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
 
     let mut req = Vec::new();
@@ -561,22 +605,27 @@ pub(crate) fn execute(
         // The daemon may reject and close before reading every byte. Only a
         // rejection it already sent proves nonacceptance; any other loss after
         // bytes may have reached it stays indeterminate.
-        return Err(match explicit_rejection(&mut stream) {
-            Some(message) => DaemonError::NotAccepted(message),
+        return Err(match explicit_refusal(&mut stream) {
+            Some(refusal) => refusal,
             None => DaemonError::Io(error),
         });
     }
     // A missing marker (including orderly EOF) does not prove the peer did
     // not accept. Only an explicit rejection permits rebinding after submission.
     let state = read_exact_or_crash(&mut stream, 1)?[0];
-    tracing::info!(
-        phase = "compiler_request_admission",
-        elapsed_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        accepted = state == ACCEPTED,
-        "compiler phase finished"
-    );
+    if state != BUSY {
+        tracing::info!(
+            phase = "compiler_request_admission",
+            elapsed_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            accepted = state == ACCEPTED,
+            "compiler phase finished"
+        );
+    }
     match state {
         ACCEPTED => {
+            stream
+                .set_read_timeout(Some(IO_TIMEOUT))
+                .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
             let response_started = Instant::now();
             let response = decode_output(&mut stream)
                 .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)));
@@ -593,33 +642,125 @@ pub(crate) fn execute(
             let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
             Err(DaemonError::NotAccepted(message))
         }
+        BUSY => Err(DaemonError::Busy),
         other => Err(DaemonError::Protocol(format!(
             "unknown acceptance marker {other}"
         ))),
     }
 }
 
+fn wait_for_busy(
+    deadline: Instant,
+    cancellation: Option<&crate::CompilerTransactionCancellation>,
+) -> Result<(), DaemonError> {
+    if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
+        return Err(DaemonError::Cancelled);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(DaemonError::Busy);
+    }
+    // Synchronous compiler callers have no async runtime to yield through.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "bounded synchronous daemon admission retry"
+    )]
+    std::thread::sleep(BUSY_RETRY_DELAY.min(remaining));
+    if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
+        return Err(DaemonError::Cancelled);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn begin_transaction(
     socket_path: &Path,
     epoch: &[u8; 32],
 ) -> Result<UnixStream, DaemonError> {
+    begin_transaction_with_cancellation(socket_path, epoch, None)
+}
+
+pub(crate) fn begin_transaction_with_cancellation(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+    cancellation: Option<&crate::CompilerTransactionCancellation>,
+) -> Result<UnixStream, DaemonError> {
+    let deadline = Instant::now() + IO_TIMEOUT;
+    loop {
+        if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
+            return Err(DaemonError::Cancelled);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(DaemonError::Busy);
+        }
+        let result = begin_transaction_once(socket_path, epoch, remaining, cancellation);
+        match result {
+            Err(DaemonError::Busy) => {
+                if let Some(cancellation) = cancellation {
+                    cancellation.disarm();
+                }
+                wait_for_busy(deadline, cancellation)?;
+            }
+            Err(error) => {
+                if let Some(cancellation) = cancellation {
+                    cancellation.disarm();
+                }
+                return Err(error);
+            }
+            Ok(stream) => return Ok(stream),
+        }
+    }
+}
+
+fn begin_transaction_once(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+    admission_timeout: Duration,
+    cancellation: Option<&crate::CompilerTransactionCancellation>,
+) -> Result<UnixStream, DaemonError> {
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
+    if let Some(cancellation) = cancellation {
+        cancellation.arm_daemon(&stream).map_err(DaemonError::Io)?;
+    }
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
+        .set_read_timeout(Some(admission_timeout))
         .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
     stream
-        .set_write_timeout(Some(IO_TIMEOUT))
+        .set_write_timeout(Some(admission_timeout))
         .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
-    stream.write_all(TRANSACTION).map_err(DaemonError::Io)?;
-    stream.write_all(epoch).map_err(DaemonError::Io)?;
-    stream.flush().map_err(DaemonError::Io)?;
-    let state = read_exact_or_crash(&mut stream, 1)?[0];
+    if let Err(error) = stream
+        .write_all(TRANSACTION)
+        .and_then(|()| stream.write_all(epoch))
+        .and_then(|()| stream.flush())
+    {
+        return Err(explicit_refusal(&mut stream).unwrap_or_else(|| {
+            if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
+                DaemonError::Cancelled
+            } else {
+                DaemonError::Io(error)
+            }
+        }));
+    }
+    let state = read_exact_or_crash(&mut stream, 1).map_err(|error| {
+        if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
+            DaemonError::Cancelled
+        } else {
+            error
+        }
+    })?[0];
     match state {
-        ACCEPTED => Ok(stream),
+        ACCEPTED => {
+            stream
+                .set_read_timeout(Some(IO_TIMEOUT))
+                .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+            Ok(stream)
+        }
         REJECTED => {
             let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
             Err(DaemonError::NotAccepted(message))
         }
+        BUSY => Err(DaemonError::Busy),
         other => Err(DaemonError::Protocol(format!(
             "unknown transaction acceptance marker {other}"
         ))),
@@ -670,14 +811,15 @@ pub(crate) fn end_transaction(stream: &mut UnixStream) -> Result<(), DaemonError
     }
 }
 
-fn explicit_rejection(stream: &mut UnixStream) -> Option<String> {
+fn explicit_refusal(stream: &mut UnixStream) -> Option<DaemonError> {
     let marker = read_exact_or_crash(stream, 1).ok()?;
-    if marker[0] != REJECTED {
-        return None;
+    match marker[0] {
+        BUSY => Some(DaemonError::Busy),
+        REJECTED => read_frame(stream)
+            .ok()
+            .map(|frame| DaemonError::NotAccepted(String::from_utf8_lossy(&frame).into_owned())),
+        _ => None,
     }
-    read_frame(stream)
-        .ok()
-        .map(|frame| String::from_utf8_lossy(&frame).into_owned())
 }
 
 pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError> {
@@ -1145,7 +1287,7 @@ fn admit_job(
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            write_rejected(connection, "compiler daemon busy").ok();
+            write_busy(connection).ok();
             return Admission::Continue;
         }
         Some(AdmissionPermit(std::sync::Arc::clone(busy)))
@@ -1160,7 +1302,7 @@ fn admit_job(
     }) {
         Ok(()) => {}
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
-            write_rejected(connection, "compiler daemon busy").ok();
+            write_busy(connection).ok();
             return Admission::Continue;
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
@@ -1938,6 +2080,11 @@ fn write_rejected(stream: &mut impl Write, message: &str) -> Result<(), Frontend
     let mut response = vec![REJECTED];
     push_frame(&mut response, message.as_bytes());
     stream.write_all(&response).map_err(FrontendError::Io)?;
+    stream.flush().map_err(FrontendError::Io)
+}
+
+fn write_busy(stream: &mut impl Write) -> Result<(), FrontendError> {
+    stream.write_all(&[BUSY]).map_err(FrontendError::Io)?;
     stream.flush().map_err(FrontendError::Io)
 }
 
@@ -3357,9 +3504,16 @@ fn main() {{
         excess.write_all(&binding.epoch).unwrap();
         excess.write_all(&encode_request(&dir, &argv)).unwrap();
         excess.read_exact(&mut decision).unwrap();
-        assert_eq!(decision, [REJECTED]);
-        assert_eq!(read_frame(&mut excess).unwrap(), b"compiler daemon busy");
+        assert_eq!(decision, [BUSY]);
         drop(queued);
+
+        let retrying = std::thread::spawn({
+            let socket = socket.clone();
+            let dir = dir.clone();
+            let argv = argv.clone();
+            let epoch = binding.epoch;
+            move || execute(&socket, &epoch, &dir, &argv)
+        });
 
         let control_started = Instant::now();
         assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);
@@ -3375,6 +3529,8 @@ fn main() {{
         std::fs::write(&release, b"").unwrap();
         assert_eq!(first.join().unwrap().unwrap().status.code(), Some(0));
         assert_eq!(server.join().unwrap().unwrap(), 0);
+        let refusal = retrying.join().unwrap().unwrap_err();
+        assert!(refusal.is_not_accepted(), "{refusal}");
         assert!(!second_started.exists(), "disconnected queued job ran");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3541,8 +3697,8 @@ fn main() {{
     }
 
     /// Compile a fake worker (rustc, matching the style of the fixtures
-    /// above) that acks `begin_transaction`, reads exactly one request,
-    /// sleeps `sleep_ms`, and answers successfully — once. A `--workers 2`
+    /// above) that acks `begin_transaction`, sleeps `sleep_ms` per request,
+    /// and answers successfully. A `--workers 2`
     /// daemon spawns one of these per slot; two connections dispatched to
     /// two distinct slots therefore run this sleep concurrently in two
     /// separate OS processes.
@@ -3553,6 +3709,7 @@ fn main() {{
     ) -> std::path::PathBuf {
         let worker_argv = normalize_worker_argv(argv.to_vec()).unwrap();
         let payload_len = encode_request(dir, &worker_argv).len();
+        let started = dir.join("started");
         let source = dir.join("fake_worker.rs");
         std::fs::write(
             &source,
@@ -3565,26 +3722,29 @@ fn main() {{
     let mut stdout = std::io::stdout();
     let mut one = [0u8; 1];
 
-    stdin.read_exact(&mut one).unwrap(); // begin_transaction
-    stdout.write_all(&[1]).unwrap();
-    stdout.flush().unwrap();
+    while stdin.read_exact(&mut one).is_ok() {{ // begin_transaction
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
 
-    stdin.read_exact(&mut one).unwrap(); // request prefix
-    let mut payload = vec![0u8; {payload_len}];
-    stdin.read_exact(&mut payload).unwrap();
+        stdin.read_exact(&mut one).unwrap(); // request prefix
+        let mut payload = vec![0u8; {payload_len}];
+        stdin.read_exact(&mut payload).unwrap();
+        std::fs::write(r"{started}", b"").unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis({sleep_ms}));
+        std::thread::sleep(std::time::Duration::from_millis({sleep_ms}));
 
-    stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
-    stdout.flush().unwrap();
+        stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
+        stdout.flush().unwrap();
 
-    stdin.read_exact(&mut one).unwrap(); // end_transaction
-    stdout.write_all(&[1]).unwrap();
-    stdout.flush().unwrap();
+        stdin.read_exact(&mut one).unwrap(); // end_transaction
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
+    }}
 }}
 "#,
                 payload_len = payload_len,
                 sleep_ms = sleep_ms,
+                started = started.display(),
             ),
         )
         .unwrap();
@@ -3648,11 +3808,146 @@ fn main() {{
         excess.write_all(&binding.epoch).unwrap();
         excess.write_all(&encode_request(&dir, &argv)).unwrap();
         excess.read_exact(&mut decision).unwrap();
-        assert_eq!(decision, [REJECTED]);
-        assert_eq!(read_frame(&mut excess).unwrap(), b"compiler daemon busy");
+        assert_eq!(decision, [BUSY]);
         assert_eq!(decode_output(&mut first).unwrap().status.code(), Some(0));
         assert_eq!(server.join().unwrap().unwrap(), 0);
         assert!(!socket.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn saturated_daemon_serves_callers_beyond_its_pending_slot() {
+        let dir = std::env::temp_dir().join(format!("tp-busy-retry-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(&dir, &argv, 250);
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: Some(10),
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+        };
+        let server = std::thread::spawn(move || serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(clippy::disallowed_methods, reason = "test polls fake daemon startup")]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let clients: Vec<_> = (0..4)
+            .map(|index| {
+                let socket = socket.clone();
+                let dir = dir.clone();
+                let argv = argv.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                let epoch = binding.epoch;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if index == 0 {
+                        let mut stream = begin_transaction(&socket, &epoch)?;
+                        let output = execute_transaction_request(&mut stream, &dir, &argv)?;
+                        end_transaction(&mut stream)?;
+                        Ok(output)
+                    } else {
+                        execute(&socket, &epoch, &dir, &argv)
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+        let control_started = Instant::now();
+        assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);
+        assert!(control_started.elapsed() < Duration::from_secs(1));
+        for client in clients {
+            assert_eq!(client.join().unwrap().unwrap().status.code(), Some(0));
+        }
+        request_stop(&socket).unwrap();
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelling_a_busy_transaction_stops_waiting_without_admission() {
+        let dir = std::env::temp_dir().join(format!("tp-busy-cancel-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(&dir, &argv, 800);
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: Some(10),
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+        };
+        let server = std::thread::spawn(move || serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = preflight(&socket) {
+                break binding;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(clippy::disallowed_methods, reason = "test polls fake daemon startup")]
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let first = std::thread::spawn({
+            let socket = socket.clone();
+            let dir = dir.clone();
+            let argv = argv.clone();
+            let epoch = binding.epoch;
+            move || execute(&socket, &epoch, &dir, &argv)
+        });
+        while !dir.join("started").exists() {
+            assert!(Instant::now() < deadline, "worker did not start");
+            #[allow(clippy::disallowed_methods, reason = "test polls fake worker sentinel")]
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut queued = UnixStream::connect(&socket).unwrap();
+        queued.write_all(REQUEST).unwrap();
+        queued.write_all(&binding.epoch).unwrap();
+        queued.write_all(&encode_request(&dir, &argv)).unwrap();
+        let mut decision = [0];
+        queued.read_exact(&mut decision).unwrap();
+        assert_eq!(decision, [ACCEPTED]);
+
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let waiting = std::thread::spawn({
+            let socket = socket.clone();
+            let cancellation = cancellation.clone();
+            let epoch = binding.epoch;
+            move || begin_transaction_with_cancellation(&socket, &epoch, Some(&cancellation))
+        });
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test lets the waiting client receive Busy"
+        )]
+        std::thread::sleep(Duration::from_millis(50));
+        cancellation.cancel();
+        let result = waiting.join().unwrap();
+        assert!(matches!(result, Err(DaemonError::Cancelled)), "{result:?}");
+        drop(queued);
+        assert_eq!(first.join().unwrap().unwrap().status.code(), Some(0));
+        assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);
+        request_stop(&socket).unwrap();
+        assert_eq!(server.join().unwrap().unwrap(), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

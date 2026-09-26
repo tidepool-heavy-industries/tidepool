@@ -42,18 +42,25 @@ A `--persistent` daemon serves `--workers N` concurrent GHC workers
 (`daemon::DEFAULT_WORKER_COUNT`, 3 by default) rather than one: a single
 accept thread owns every fence check (epoch, watched-stamp) and PREFLIGHT/STOP
 handling. It admits at most one pending job beyond occupied worker slots;
-excess requests get a known-unsubmitted busy rejection. A worker waits for
+excess requests receive a distinct busy marker. A worker waits for
 the acceptance acknowledgement before executing its job. Each slot is a full
 pinned worker with its own transaction pinning, request deadline,
 peer-disconnect kill, and served/RSS rotation. Rotation replaces a persistent
-slot's worker in place.
+slot's worker in place. Capacity saturation returns a distinct busy marker,
+which a bound caller retries against the same socket and epoch through one
+admission deadline. Busy never rebinds to a direct worker; a timed-out busy
+caller reports known-unsubmitted capacity without permitting rebind. A
+cancellable transaction arms its pending socket before waiting for acceptance,
+so cancellation stops the waiter even while the worker and pending slot are
+occupied.
+
 `STOP` and a watched-stamp change stop accepting, let every slot finish its
 accepted jobs (bounded by each job's own request deadline), and only then
 drain and reject the unaccepted listener backlog. Ordinary (non-`--persistent`)
 daemon mode always runs one worker and ignores `--workers`: it retires the
 whole endpoint, not just a slot, the first time any request's rotation bound
-is reached. It has no pending queue, so a busy worker yields an immediate
-known-unsubmitted rejection.
+is reached. It has no pending queue; busy callers wait through same-endpoint
+retries until that worker becomes available or the daemon retires.
 
 `--workers` and `--rss-ceiling-mb` keep their historical meanings (worker
 count and a per-worker RSS ceiling) when given explicitly. Their *defaults*

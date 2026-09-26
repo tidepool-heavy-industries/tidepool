@@ -236,6 +236,18 @@ impl CompilerTransactionCancellation {
         cancel_target(target);
     }
 
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancelled
+    }
+
+    pub(crate) fn arm_daemon(&self, stream: &UnixStream) -> io::Result<()> {
+        self.arm(CancellationTarget::Daemon(stream.try_clone()?));
+        Ok(())
+    }
+
     fn arm(&self, target: CancellationTarget) {
         let target = {
             let mut state = self
@@ -252,7 +264,7 @@ impl CompilerTransactionCancellation {
         cancel_target(target);
     }
 
-    fn disarm(&self) {
+    pub(crate) fn disarm(&self) {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -427,6 +439,13 @@ impl CompilerEndpoint {
     }
 
     pub fn transaction(self) -> Result<CompilerTransaction, SpawnError> {
+        self.transaction_with_cancellation(None)
+    }
+
+    fn transaction_with_cancellation(
+        self,
+        cancellation: Option<CompilerTransactionCancellation>,
+    ) -> Result<CompilerTransaction, SpawnError> {
         let identity = self.identity.clone();
         let transport_name = self.transport.name();
         let admission_started = Instant::now();
@@ -457,12 +476,23 @@ impl CompilerEndpoint {
                         io::Error::new(io::ErrorKind::InvalidData, "compiler rejected transaction"),
                     ));
                 }
+                if let Some(cancellation) = &cancellation {
+                    cancellation.arm(CancellationTarget::Direct(Arc::clone(&endpoint.child)));
+                }
                 TransactionTransport::Direct(endpoint)
             }
             Transport::Daemon { socket, epoch } => {
-                let stream = daemon::begin_transaction(&socket, &epoch).map_err(|error| {
+                let stream = daemon::begin_transaction_with_cancellation(
+                    &socket,
+                    &epoch,
+                    cancellation.as_ref(),
+                )
+                .map_err(|error| {
+                    if matches!(error, daemon::DaemonError::Busy) {
+                        return SpawnError::capacity(socket.as_os_str());
+                    }
                     let source = io::Error::other(error.to_string());
-                    if error.is_not_accepted() {
+                    if error.permits_rebind() {
                         SpawnError::not_submitted(socket.as_os_str(), source)
                     } else {
                         SpawnError::indeterminate(socket.as_os_str(), source)
@@ -488,7 +518,7 @@ impl CompilerEndpoint {
             identity,
             transport: Some(transport),
             failed: false,
-            cancellation: None,
+            cancellation,
         })
     }
 
@@ -540,8 +570,11 @@ impl CompilerEndpoint {
                         if error.was_accepted() {
                             crate::EXTRACT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
+                        if matches!(error, daemon::DaemonError::Busy) {
+                            return Err(SpawnError::capacity(socket.as_os_str()));
+                        }
                         let source = io::Error::other(error.to_string());
-                        if error.is_not_accepted() {
+                        if error.permits_rebind() {
                             return Err(SpawnError::not_submitted(socket.as_os_str(), source));
                         } else {
                             return Err(SpawnError::indeterminate(socket.as_os_str(), source));
@@ -600,33 +633,26 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
         }
         return Ok(identity);
     }
-    let mut transaction = CompilerEndpoint::bind_unscoped(cmd)?.transaction()?;
     let cancellation = TRANSACTION_SCOPE.with(|scope| {
         scope
             .borrow()
             .as_ref()
             .and_then(|state| state.cancellation.clone())
     });
-    if let Some(cancellation) = cancellation {
-        let transport = transaction.transport.as_ref().ok_or_else(|| {
-            SpawnError::indeterminate(
-                "compiler transaction",
-                io::Error::other("new compiler transaction has no transport"),
-            )
-        })?;
-        let target = match transport {
-            TransactionTransport::Direct(endpoint) => {
-                CancellationTarget::Direct(Arc::clone(&endpoint.child))
-            }
-            TransactionTransport::Daemon { stream, .. } => CancellationTarget::Daemon(
-                stream
-                    .try_clone()
-                    .map_err(|source| SpawnError::indeterminate("compiler transaction", source))?,
+    if cancellation
+        .as_ref()
+        .is_some_and(CompilerTransactionCancellation::is_cancelled)
+    {
+        return Err(SpawnError::indeterminate(
+            "compiler transaction",
+            io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler transaction was cancelled",
             ),
-        };
-        cancellation.arm(target);
-        transaction.cancellation = Some(cancellation);
+        ));
     }
+    let transaction =
+        CompilerEndpoint::bind_unscoped(cmd)?.transaction_with_cancellation(cancellation)?;
     let identity = transaction.identity.clone();
     TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
