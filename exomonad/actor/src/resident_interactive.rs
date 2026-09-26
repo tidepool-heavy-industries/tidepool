@@ -44,12 +44,14 @@ impl ResidentInteractivePolicy {
                 HASKELL_TOOL
                     | crate::status_tool::STATUS_TOOL
                     | crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
             )
         });
         Self {
             tools: std::iter::once(haskell_tool_declaration())
                 .chain(std::iter::once(crate::status_tool::declaration()))
                 .chain(std::iter::once(crate::reload_spec_tool::declaration()))
+                .chain(std::iter::once(crate::reload_helpers_tool::declaration()))
                 .chain(custom)
                 .collect::<Vec<_>>()
                 .into(),
@@ -63,6 +65,7 @@ impl ResidentInteractivePolicy {
                 haskell_tool_declaration(),
                 crate::status_tool::declaration(),
                 crate::reload_spec_tool::declaration(),
+                crate::reload_helpers_tool::declaration(),
             ]
             .into(),
             client,
@@ -78,6 +81,7 @@ pub(crate) fn project_tools(
         HASKELL_TOOL.to_string(),
         crate::status_tool::STATUS_TOOL.to_string(),
         crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
+        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL.to_string(),
     ]);
     declarations
         .into_iter()
@@ -251,7 +255,16 @@ mod tests {
 
     #[test]
     fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in ["", "haskell", "status", "bad.name", "λ", &"a".repeat(65)] {
+        for name in [
+            "",
+            "haskell",
+            "status",
+            "reload_agent_spec",
+            "reload_helpers",
+            "bad.name",
+            "λ",
+            &"a".repeat(65),
+        ] {
             assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
         }
         assert!(project_tools(vec![raw("lookup")]).is_ok());

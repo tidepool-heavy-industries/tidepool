@@ -1,5 +1,7 @@
 //! Captured typed boundary for one supervised external-agent session.
 
+use std::sync::Arc;
+
 use tidepool_bridge::FromHaskell;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -125,7 +127,7 @@ impl ActivationContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveSessionRequest {
-    pub(crate) site: u64,
+    pub(crate) type_evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     pub request: crate::RequestId,
     pub initial_user_message: Option<String>,
     pub input_type: String,
@@ -174,6 +176,8 @@ pub enum InteractiveSessionCaptureError {
     MissingInput,
     #[error("interactive agent session carried invalid request id {0}")]
     InvalidRequestId(i64),
+    #[error("interactive agent session site {0} has no canonical type evidence")]
+    MissingTypeEvidence(u64),
 }
 
 impl ResidentInteractiveSession {
@@ -212,6 +216,9 @@ impl ResidentInteractiveSession {
             };
         let sites = session.parked_program_provenance(&hole).unwrap_or_default();
         let signature = decode_typed_request_site(site, &sites.sites())?;
+        let type_evidence = session.request_site_type_evidence(site as u64).ok_or(
+            InteractiveSessionCaptureError::MissingTypeEvidence(site as u64),
+        )?;
         let request = u64::try_from(request_id)
             .map(crate::RequestId)
             .map_err(|_| InteractiveSessionCaptureError::InvalidRequestId(request_id))?;
@@ -220,7 +227,7 @@ impl ResidentInteractiveSession {
             .ok_or(InteractiveSessionCaptureError::MissingInput)?;
         Ok(Self {
             request: InteractiveSessionRequest {
-                site: site as u64,
+                type_evidence: Arc::new(type_evidence),
                 request,
                 initial_user_message,
                 input_type: signature.input_type,

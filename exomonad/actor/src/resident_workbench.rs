@@ -7592,30 +7592,16 @@ where
         access_site: Option<u64>,
         current: Option<(
             crate::RequestId,
-            u64,
+            Arc<tidepool_runtime::session::SiteTypeEvidence>,
             tidepool_codegen::scope::ScopeId,
             tidepool_repr::SessionVarId,
         )>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        use tidepool_runtime::session::SiteTypeComponent;
-
         self.access
             .with_machine(context, move |session, _, _| {
                 let refusal = match (access_site, current) {
-                    (Some(access_site), Some((request, request_site, scope, input_binding))) => {
-                        let input_matches = session.site_types_equivalent(
-                            request_site,
-                            SiteTypeComponent::Input(0),
-                            access_site,
-                            SiteTypeComponent::Input(0),
-                        );
-                        let reply_matches = session.site_types_equivalent(
-                            request_site,
-                            SiteTypeComponent::Answer,
-                            access_site,
-                            SiteTypeComponent::Input(2),
-                        );
-                        if !input_matches || !reply_matches {
+                    (Some(access_site), Some((request, request_types, scope, input_binding))) => {
+                        if !session.request_scope_types_match(&request_types, access_site) {
                             crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
                         } else if let Some(input) =
                             session.prepared_binding_handle_in(scope, "sessionInput", input_binding)

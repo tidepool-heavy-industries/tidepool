@@ -597,7 +597,7 @@ enum ResidentBoot {
 struct OutstandingInteractive {
     response: crate::ResponseExpectation,
     request: crate::RequestId,
-    site: u64,
+    type_evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     input_binding: tidepool_repr::SessionVarId,
     input_scope: tidepool_codegen::scope::ScopeId,
     type_modules: Vec<String>,
@@ -612,7 +612,7 @@ impl OutstandingInteractive {
         Self {
             response: request.response.clone(),
             request: request.request,
-            site: request.site,
+            type_evidence: request.type_evidence.clone(),
             input_binding,
             input_scope,
             type_modules: request.type_modules(),
@@ -3847,7 +3847,7 @@ where
                 let current = self.outstanding_interactive.as_ref().map(|active| {
                     (
                         active.request,
-                        active.site,
+                        active.type_evidence.clone(),
                         active.input_scope,
                         active.input_binding,
                     )
@@ -4510,6 +4510,52 @@ where
                 .ok();
         }
         Ok(InteractivePark::Parked)
+    }
+
+    async fn reload_helpers(&self, context: &ActorSessionContext, also_check: &[String]) -> String {
+        let started = std::time::Instant::now();
+        let Some(layers) = self.environment.source_layers.as_ref() else {
+            return reload_receipt(
+                "unavailable",
+                started,
+                vec!["helpers: this host installs no source layers.".into()],
+            );
+        };
+        let (outcome, detail) = match layers.reload_helpers(
+            tidepool_repr::PrincipalId::from(context.actor),
+            also_check,
+        ) {
+            crate::SourceLayerReload::Unavailable(detail) => ("unavailable", detail),
+            crate::SourceLayerReload::Rejected {
+                active,
+                rejected,
+                diagnostics,
+            } => (
+                "rejected",
+                format!(
+                    "helpers: rejected {rejected}; {active} remains active. Edited files remain on disk.\n{diagnostics}"
+                ),
+            ),
+            crate::SourceLayerReload::Unchanged { revision } => {
+                ("unchanged", format!("helpers: unchanged at {revision}."))
+            }
+            crate::SourceLayerReload::Published {
+                previous,
+                revision,
+                changed,
+            } => (
+                "published",
+                format!(
+                    "helpers: published {revision} over {previous}; changed {}.",
+                    if changed.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        changed.join(", ")
+                    }
+                ),
+            ),
+        };
+        reload_receipt(outcome, started, vec![detail])
     }
 
     /// Rebuild this actor's spec and swap the retained record between calls.
@@ -6055,9 +6101,14 @@ where
             .tool_call()
             .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
             .cloned();
+        let reload_helpers_call = request
+            .tool_call()
+            .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
+            .cloned();
         let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
             call.name != crate::status_tool::STATUS_TOOL
                 && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
         }) {
             let tools = self
                 .compiled_tools
@@ -6098,6 +6149,37 @@ where
         } else {
             None
         };
+        if let Some(call) = reload_helpers_call {
+            let arguments = crate::reload_helpers_tool::parse(call.arguments).map_err(|error| {
+                workbench_failure(
+                    &[],
+                    0,
+                    1,
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                )
+            })?;
+            let output = self.reload_helpers(context, &arguments.also_check).await;
+            return Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output,
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
+                    failure_layer: None,
+                }],
+                1,
+                1,
+                None,
+            )));
+        }
         if let Some(call) = reload_spec_call {
             let arguments = crate::reload_spec_tool::parse(call.arguments).map_err(|error| {
                 workbench_failure(
@@ -6481,7 +6563,7 @@ where
                     // own dispatcher; an authored Haskell cell reaches here
                     // too, under the `haskell` tool name and the same
                     // installed spec's dispatcher — `status` and
-                    // `reload_agent_spec` are the only committed outcomes
+                    // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
                     // that never acquire one, so a broken slot can never
                     // block its own repair.
                     let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());

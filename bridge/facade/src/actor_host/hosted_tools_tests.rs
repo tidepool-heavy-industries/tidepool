@@ -31,8 +31,11 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert!(
         matches!(&policy.tools()[2], HostedTool::Function(tool) if tool.name == "reload_agent_spec")
     );
-    assert!(matches!(&policy.tools()[3], HostedTool::Custom(tool) if tool.name == "raw_echo"));
-    assert!(matches!(&policy.tools()[4], HostedTool::Function(tool) if tool.name == "repeat_text"));
+    assert!(
+        matches!(&policy.tools()[3], HostedTool::Function(tool) if tool.name == "reload_helpers")
+    );
+    assert!(matches!(&policy.tools()[4], HostedTool::Custom(tool) if tool.name == "raw_echo"));
+    assert!(matches!(&policy.tools()[5], HostedTool::Function(tool) if tool.name == "repeat_text"));
     let call = |name: &str, arguments| {
         policy.dispatch_boxed(ToolInvocation {
             context: None,

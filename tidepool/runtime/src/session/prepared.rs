@@ -350,11 +350,36 @@ struct SiteWitness {
     row: usize,
 }
 
-/// A closed type component of a compiler-authenticated typed site.
+/// Canonical compiler type graph for one request's input and complete reply.
+/// This travels with the activation because its originating site belongs to
+/// the requesting machine session, not the recipient's machine session.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SiteTypeComponent {
-    Answer,
-    Input(usize),
+pub struct SiteTypeEvidence {
+    types: Vec<TypeNode>,
+    constructors: Vec<SymbolIdentity>,
+    input: TypeNodeId,
+    answer: TypeNodeId,
+}
+
+trait TypeGraph {
+    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode>;
+    fn constructor_identity(
+        &self,
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<&SymbolIdentity>;
+}
+
+impl TypeGraph for SiteTypeEvidence {
+    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
+        self.types.get(id.0 as usize)
+    }
+
+    fn constructor_identity(
+        &self,
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<&SymbolIdentity> {
+        self.constructors.get(id.0 as usize)
+    }
 }
 
 /// The two constructors a turn's settled layer is read by, as this program's
@@ -542,6 +567,19 @@ impl ProgramFacts {
             }),
             _ => None,
         }
+    }
+}
+
+impl TypeGraph for ProgramFacts {
+    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
+        ProgramFacts::type_node(self, id)
+    }
+
+    fn constructor_identity(
+        &self,
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<&SymbolIdentity> {
+        ProgramFacts::constructor_identity(self, id)
     }
 }
 
@@ -1309,10 +1347,10 @@ fn sites_equivalent(a: &ProgramFacts, a_row: &SiteRow, b: &ProgramFacts, b_row: 
             .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, &mut visited))
 }
 
-fn type_nodes_equivalent(
-    a: &ProgramFacts,
+fn type_nodes_equivalent<A: TypeGraph, B: TypeGraph>(
+    a: &A,
     a_id: TypeNodeId,
-    b: &ProgramFacts,
+    b: &B,
     b_id: TypeNodeId,
     visited: &mut BTreeSet<(u32, u32)>,
 ) -> bool {
@@ -1688,32 +1726,41 @@ fn resolve_prepared_import<'a>(
 }
 
 impl PreparedEngine {
-    /// Compare two closed site types through their canonical installed type
-    /// graphs. Missing sites or components never establish equivalence.
-    pub fn site_types_equivalent(
-        &self,
-        first_site: u64,
-        first_component: SiteTypeComponent,
-        second_site: u64,
-        second_component: SiteTypeComponent,
-    ) -> bool {
-        let resolve = |site, component| {
-            let witness = self.sites.get(&site)?;
-            let facts = self.programs.get(&witness.owner)?;
-            let row = facts.sites.get(witness.row)?;
-            let node = match component {
-                SiteTypeComponent::Answer => row.wire,
-                SiteTypeComponent::Input(index) => *row.inputs.get(index)?,
-            };
-            Some((facts, node))
-        };
-        let Some((first, first_node)) = resolve(first_site, first_component) else {
+    /// Capture the request site's compiler-authenticated graph before its
+    /// input travels to another actor's machine session.
+    pub fn request_site_type_evidence(&self, site: u64) -> Option<SiteTypeEvidence> {
+        let witness = self.sites.get(&site)?;
+        let facts = self.programs.get(&witness.owner)?;
+        let row = facts.sites.get(witness.row)?;
+        Some(SiteTypeEvidence {
+            types: facts.types.clone(),
+            constructors: facts
+                .constructors
+                .iter()
+                .map(|(identity, _)| identity.clone())
+                .collect(),
+            input: *row.inputs.first()?,
+            answer: row.wire,
+        })
+    }
+
+    /// Compare the original request graph with the access site installed in
+    /// this machine. The third accessor input is its complete reply evidence.
+    pub fn request_scope_types_match(&self, request: &SiteTypeEvidence, access_site: u64) -> bool {
+        let Some(witness) = self.sites.get(&access_site) else {
             return false;
         };
-        let Some((second, second_node)) = resolve(second_site, second_component) else {
+        let Some(facts) = self.programs.get(&witness.owner) else {
             return false;
         };
-        type_nodes_equivalent(first, first_node, second, second_node, &mut BTreeSet::new())
+        let Some(row) = facts.sites.get(witness.row) else {
+            return false;
+        };
+        let (Some(input), Some(reply)) = (row.inputs.first(), row.inputs.get(2)) else {
+            return false;
+        };
+        type_nodes_equivalent(request, request.input, facts, *input, &mut BTreeSet::new())
+            && type_nodes_equivalent(request, request.answer, facts, *reply, &mut BTreeSet::new())
     }
     /// Stream a structurally encoded host value into the resident heap. The
     /// caller supplies the compiler-authenticated constructor table for the
@@ -5010,7 +5057,7 @@ mod tests {
         let mut response_family =
             testing::identity("Tidepool.Agent.Reply.Internal", "ResponseResult");
         response_family.namespace = "type".into();
-        let (mut engine, _) = PreparedEngine::bootstrap(typed_site_program(
+        let (source, _) = PreparedEngine::bootstrap(typed_site_program(
             41,
             vec![
                 TypeNode::Text,
@@ -5025,58 +5072,52 @@ mod tests {
             &[0],
         ))
         .expect("install request site");
-        engine
-            .install(
-                typed_site_program(
-                    42,
-                    vec![
-                        TypeNode::Integer,
-                        TypeNode::Natural,
-                        TypeNode::Text,
-                        TypeNode::Data {
-                            family: response_family,
-                            arguments: vec![TypeNodeId(0)],
-                            rows: vec![],
-                        },
-                    ],
-                    1,
-                    &[2, 0, 3],
-                ),
-                &BindingTable::new(),
-                &BindingIndex::new(),
-            )
-            .expect("install accessor site");
+        let evidence = source
+            .request_site_type_evidence(41)
+            .expect("capture source site before crossing sessions");
+        let (recipient, _) = PreparedEngine::bootstrap(typed_site_program(
+            42,
+            vec![
+                TypeNode::Integer,
+                TypeNode::Natural,
+                TypeNode::Text,
+                TypeNode::Data {
+                    family: response_family.clone(),
+                    arguments: vec![TypeNodeId(0)],
+                    rows: vec![],
+                },
+            ],
+            1,
+            &[2, 0, 3],
+        ))
+        .expect("install accessor in a different machine");
 
-        assert!(engine.site_types_equivalent(
-            41,
-            SiteTypeComponent::Input(0),
-            42,
-            SiteTypeComponent::Input(0)
-        ));
-        assert!(engine.site_types_equivalent(
-            41,
-            SiteTypeComponent::Answer,
-            42,
-            SiteTypeComponent::Input(2)
-        ));
-        assert!(!engine.site_types_equivalent(
-            41,
-            SiteTypeComponent::Answer,
-            42,
-            SiteTypeComponent::Input(0)
-        ));
-        assert!(!engine.site_types_equivalent(
-            41,
-            SiteTypeComponent::Answer,
-            42,
-            SiteTypeComponent::Input(1)
-        ));
-        assert!(!engine.site_types_equivalent(
-            41,
-            SiteTypeComponent::Answer,
+        assert!(recipient.request_scope_types_match(&evidence, 42));
+        assert!(!recipient.request_scope_types_match(&evidence, 41));
+        let (wrong_input, _) = PreparedEngine::bootstrap(typed_site_program(
+            44,
+            vec![
+                TypeNode::Integer,
+                TypeNode::Text,
+                TypeNode::Data {
+                    family: response_family,
+                    arguments: vec![TypeNodeId(0)],
+                    rows: vec![],
+                },
+            ],
+            0,
+            &[0, 0, 2],
+        ))
+        .expect("install wrong-input accessor");
+        assert!(!wrong_input.request_scope_types_match(&evidence, 44));
+        let (wrong, _) = PreparedEngine::bootstrap(typed_site_program(
             43,
-            SiteTypeComponent::Answer
-        ));
+            vec![TypeNode::Text, TypeNode::Integer],
+            1,
+            &[0, 0, 1],
+        ))
+        .expect("install wrong accessor");
+        assert!(!wrong.request_scope_types_match(&evidence, 43));
     }
 
     #[test]

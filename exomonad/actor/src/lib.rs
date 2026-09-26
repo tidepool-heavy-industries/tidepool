@@ -43,6 +43,7 @@ mod mount;
 mod notification;
 mod profile;
 mod prompt_catalog;
+pub(crate) mod reload_helpers_tool;
 pub(crate) mod reload_spec_tool;
 mod request;
 pub use request::sources::SourceDelivery;

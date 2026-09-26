@@ -2543,18 +2543,24 @@ where
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
     }
 
-    /// Compare compiler-authenticated type components from two installed
-    /// sites; a missing site or component is never equivalent.
-    pub fn site_types_equivalent(
+    /// Capture the originating request's canonical type graph before its
+    /// input leaves this machine session.
+    pub fn request_site_type_evidence(
         &mut self,
-        first_site: u64,
-        first_component: super::prepared::SiteTypeComponent,
-        second_site: u64,
-        second_component: super::prepared::SiteTypeComponent,
+        site: u64,
+    ) -> Option<super::prepared::SiteTypeEvidence> {
+        self.state.prepared_mut()?.request_site_type_evidence(site)
+    }
+
+    /// Match the captured request graph to this machine's access site.
+    pub fn request_scope_types_match(
+        &mut self,
+        request: &super::prepared::SiteTypeEvidence,
+        access_site: u64,
     ) -> bool {
-        self.state.prepared_mut().is_some_and(|engine| {
-            engine.site_types_equivalent(first_site, first_component, second_site, second_component)
-        })
+        self.state
+            .prepared_mut()
+            .is_some_and(|engine| engine.request_scope_types_match(request, access_site))
     }
 
     /// Install a rooted live value under a binder GHC has already compiled,
