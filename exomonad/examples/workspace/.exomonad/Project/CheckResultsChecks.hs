@@ -7,7 +7,7 @@
 
 module Project.CheckResultsChecks
   ( completionRouting, managedEvidence, runningCommandCleanup
-  , EvidenceProbe (probeStart, probeRead), evidenceProbe
+  , EvidenceProbe (probeStart, probeRead, probeMove), evidenceProbe
   ) where
 
 import Control.Monad (void)
