@@ -161,10 +161,7 @@ An actor with no process of its own also has no terminal: run its commands
 with piped or closed input, never `TerminalInput`.
 
 Ordinary commands use 1024 MiB. Choose realistic explicit memory for builds/tests,
-e.g. `job <- Cmd.start (withMemory (GiB 4) [bash|cargo build|])`.
-This reserves 4 GiB of the default shared 8 GiB general command pool until the job's
-process tree and cleanup finish; a command asking for the full 8 GiB waits
-while any general allocation remains, even if that process uses little RSS.
+e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
 `start` returns immediately; admission queues automatically. Retain the job,
 do other work, and observe it later. Memory is a hard limit and admission weight.
 `traverse Cmd.run commands` works sequentially until completion or a foreground

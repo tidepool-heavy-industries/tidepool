@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
-    CommandPosition, CommandQueueWait, CommandReport, CommandResult, CommandSpec, CommandStatus,
-    CommandStream,
+    CommandPosition, CommandReport, CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -90,13 +89,6 @@ impl BoundedBackend {
                 ))
             })
     }
-
-    async fn queue_wait(&self, id: &str) -> Option<CommandQueueWait> {
-        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.queue_wait(id))
-            .await
-            .ok()
-            .flatten()
-    }
 }
 
 /// Native execution remains in the owning TUI; these operations carry no shell launcher.
@@ -135,11 +127,6 @@ pub trait CommandBackend: Send + Sync + 'static {
         position: CommandPosition,
     ) -> BoxFuture<'a, Result<CommandPage, CommandError>>;
     fn cleanup<'a>(&'a self, id: &'a str) -> BoxFuture<'a, CommandCleanup>;
-    /// Current owner-derived resource wait detail, if this backend has
-    /// submitted the job to the shared resource authority.
-    fn queue_wait<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Option<CommandQueueWait>> {
-        Box::pin(async { None })
-    }
 }
 #[derive(Clone, Debug)]
 pub enum CommandControl {
@@ -280,20 +267,7 @@ impl Shared {
         if caller == self.owner() {
             let _ = self.cleanup(id).await;
         }
-        let phase = self.phase.borrow().clone();
-        if !matches!(phase, CommandStatus::CommandQueued) {
-            return phase;
-        }
-        let backend = self.backend.lock().clone();
-        let wait = match backend {
-            Some(backend) => backend.queue_wait(id).await,
-            None => None,
-        };
-        let latest = self.phase.borrow().clone();
-        if !matches!(latest, CommandStatus::CommandQueued) {
-            return latest;
-        }
-        wait.map_or(latest, CommandStatus::CommandResourceQueued)
+        self.phase.borrow().clone()
     }
 
     fn complete(&self, result: CommandResult) {
@@ -657,7 +631,7 @@ impl CommandJobs {
 
     pub async fn wait(
         &self,
-        caller: ActorRef,
+        _caller: ActorRef,
         id: &str,
         milliseconds: i64,
     ) -> Result<CommandStatus, CommandError> {
@@ -682,10 +656,11 @@ impl CommandJobs {
         if milliseconds == -1 {
             Ok(wait.await)
         } else {
-            match tokio::time::timeout(Duration::from_millis(milliseconds as u64), wait).await {
-                Ok(status) => Ok(status),
-                Err(_) => Ok(shared.status(caller, id).await),
-            }
+            Ok(
+                tokio::time::timeout(Duration::from_millis(milliseconds as u64), wait)
+                    .await
+                    .unwrap_or_else(|_| shared.phase.borrow().clone()),
+            )
         }
     }
 

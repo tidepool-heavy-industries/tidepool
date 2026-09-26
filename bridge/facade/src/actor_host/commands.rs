@@ -4,9 +4,7 @@ use exomonad_agent::{
     InteractiveAgentBackend, NativeCommandOperation as Op, NativeCommandReply as Reply,
     QueueReadyThread,
 };
-use exomonad_node::command_resources::{
-    CommandResourceClient, CommandResourceQueueWait, CommandResourceStatus as Resource,
-};
+use exomonad_node::command_resources::{CommandResourceClient, CommandResourceStatus as Resource};
 use exomonad_node::host_command::{
     HostCommand, HostCommandSpec, HostExit, HostPage, HostStdin, HostStream,
 };
@@ -14,43 +12,9 @@ use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
-    CommandPosition, CommandQueueWait, CommandResult, CommandSpec, CommandStatus, CommandStream,
+    CommandPosition, CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tokio::sync::watch;
-
-fn queue_wait_wire(wait: CommandResourceQueueWait) -> Option<CommandQueueWait> {
-    Some(CommandQueueWait {
-        requested_bytes: wait.requested_bytes.try_into().ok()?,
-        general_total_bytes: wait.general_total_bytes.try_into().ok()?,
-        general_used_bytes: wait.general_used_bytes.try_into().ok()?,
-        head_requested_bytes: wait.head_requested_bytes.try_into().ok()?,
-        head_of_line: wait.head_of_line,
-        protected_total_bytes: wait
-            .protected_total_bytes
-            .map(i64::try_from)
-            .transpose()
-            .ok()?,
-        protected_used_bytes: wait
-            .protected_used_bytes
-            .map(i64::try_from)
-            .transpose()
-            .ok()?,
-    })
-}
-
-async fn resource_queue_wait(
-    resources: &CommandResourceClient,
-    actor: &str,
-    id: &str,
-) -> Option<CommandQueueWait> {
-    match resources.queue_wait(actor, id).await {
-        Ok(wait) => wait.and_then(queue_wait_wire),
-        Err(error) => {
-            tracing::debug!(%error, "command resource queue observation unavailable");
-            None
-        }
-    }
-}
 
 pub(super) struct NativeCommandBackend {
     native: Arc<dyn InteractiveAgentBackend>,
@@ -257,10 +221,6 @@ async fn wait_until_set(cancelled: &mut watch::Receiver<bool>) {
 }
 
 impl CommandBackend for NativeCommandBackend {
-    fn queue_wait<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Option<CommandQueueWait>> {
-        Box::pin(resource_queue_wait(&self.resources, &self.actor, id))
-    }
-
     fn execute<'a>(
         &'a self,
         id: &'a str,
@@ -625,10 +585,6 @@ fn window(position: CommandPosition, available: u64) -> (u64, u64) {
 }
 
 impl CommandBackend for HostCommandBackend {
-    fn queue_wait<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Option<CommandQueueWait>> {
-        Box::pin(resource_queue_wait(&self.resources, &self.actor, id))
-    }
-
     fn execute<'a>(
         &'a self,
         id: &'a str,

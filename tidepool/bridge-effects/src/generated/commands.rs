@@ -68,25 +68,9 @@ pub struct CommandResult {
 #[derive(
     ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
-#[haskell(module = "Tidepool.Effects.Core")]
-pub struct CommandQueueWait {
-    pub requested_bytes: i64,
-    pub general_total_bytes: i64,
-    pub general_used_bytes: i64,
-    pub head_requested_bytes: i64,
-    pub head_of_line: bool,
-    pub protected_total_bytes: Option<i64>,
-    pub protected_used_bytes: Option<i64>,
-}
-
-#[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
 pub enum CommandStatus {
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandQueued,
-    #[haskell(module = "Tidepool.Effects.Core")]
-    CommandResourceQueued(CommandQueueWait),
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandStarting,
     #[haskell(module = "Tidepool.Effects.Core")]

@@ -213,7 +213,6 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "CommandOutcome",
             "CommandCleanup",
             "CommandResult",
-            "CommandQueueWait",
             "CommandStatus",
             "CommandStream",
             "CommandPosition",

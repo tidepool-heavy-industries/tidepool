@@ -135,20 +135,6 @@ pub enum CommandResourceStatus {
     Retired,
 }
 
-/// Current reservation pressure for one queued command. Derived from the
-/// resource owner's FIFO under its lock; it is never an admission grant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandResourceQueueWait {
-    pub requested_bytes: u64,
-    pub general_total_bytes: u64,
-    pub general_used_bytes: u64,
-    pub head_requested_bytes: u64,
-    pub head_of_line: bool,
-    /// Present only when this command is small enough for the protected lane.
-    pub protected_total_bytes: Option<u64>,
-    pub protected_used_bytes: Option<u64>,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandResourceObservation {
     pub active: usize,
@@ -1043,20 +1029,6 @@ impl CommandResources {
             .ok_or_else(|| io_error("unknown command"))
     }
 
-    pub fn queue_wait(
-        &self,
-        actor: &str,
-        id: &str,
-    ) -> std::io::Result<Option<CommandResourceQueueWait>> {
-        self.observe();
-        let key = validate_key(actor, id)?;
-        let state = self.state.lock();
-        if !state.entries.contains_key(&key) {
-            return Err(io_error("unknown command"));
-        }
-        Ok(state.queue.waiting_reason(&key))
-    }
-
     pub fn cancel(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
@@ -1299,73 +1271,6 @@ mod tests {
             actor_start_bytes: GIB,
             ..CommandResourcePolicy::default()
         }
-    }
-
-    #[tokio::test]
-    async fn remote_queue_observation_tracks_the_owner_fifo_without_other_job_ids() {
-        let root = tempfile::tempdir().unwrap();
-        let owner = Arc::new(owner(root.path()));
-        let running = ("run-b-actor".into(), "running".into());
-        let head = ("run-a-actor".into(), "head".into());
-        let follower = ("run-a-actor".into(), "follower".into());
-        {
-            let mut state = owner.state.lock();
-            state.queue.recover_active(running.clone(), GIB).unwrap();
-            state.queue.push(head.clone(), 8 * GIB);
-            state.queue.push(follower.clone(), 4 * GIB);
-            for (key, status, bytes) in [
-                (running.clone(), CommandResourceStatus::Running, GIB),
-                (head.clone(), CommandResourceStatus::Queued, 8 * GIB),
-                (follower.clone(), CommandResourceStatus::Queued, 4 * GIB),
-            ] {
-                state
-                    .entries
-                    .insert(key.clone(), Entry::new(status, Some(bytes)));
-                state.active.insert(key);
-            }
-        }
-        let socket = root.path().join("resources.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let server = tokio::spawn(service::serve(listener, Arc::clone(&owner)));
-        let client = CommandResourceClient::connect(socket, "run-a".into(), owner.policy())
-            .await
-            .unwrap();
-        let first = client.queue_wait("actor", "head").await.unwrap().unwrap();
-        assert_eq!(
-            (
-                first.requested_bytes,
-                first.general_used_bytes,
-                first.head_requested_bytes
-            ),
-            (8 * GIB, GIB, 8 * GIB)
-        );
-        assert!(first.head_of_line);
-        let second = client
-            .queue_wait("actor", "follower")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(second.requested_bytes, 4 * GIB);
-        assert!(!second.head_of_line);
-        assert_eq!(second.head_requested_bytes, 8 * GIB);
-        {
-            let mut state = owner.state.lock();
-            state.queue.release(&running);
-            state.active.remove(&running);
-            state.entries[&running]
-                .status
-                .send_replace(CommandResourceStatus::Completed);
-        }
-        assert!(client.queue_wait("actor", "head").await.unwrap().is_none());
-        let promoted = client
-            .queue_wait("actor", "follower")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(promoted.head_of_line);
-        assert_eq!(promoted.head_requested_bytes, 4 * GIB);
-        assert_eq!(promoted.general_used_bytes, 8 * GIB);
-        server.abort();
     }
 
     /// Writes a synthetic `<proc_root>/<pid>/{cmdline,status}` pair with the

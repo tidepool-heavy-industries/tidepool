@@ -1,7 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 
-use super::CommandResourceQueueWait;
-
 pub(super) type Key = (String, String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,25 +85,6 @@ impl Queue {
                 Pool::Protected => self.protected_used -= bytes,
             }
         }
-    }
-
-    pub(super) fn waiting_reason(&self, key: &Key) -> Option<CommandResourceQueueWait> {
-        let position = self
-            .waiting
-            .iter()
-            .position(|(waiting, _)| waiting == key)?;
-        let requested_bytes = self.waiting[position].1;
-        let protected =
-            (requested_bytes <= self.small).then_some((self.protected, self.protected_used));
-        Some(CommandResourceQueueWait {
-            requested_bytes,
-            general_total_bytes: self.general,
-            general_used_bytes: self.general_used,
-            head_requested_bytes: self.waiting.front()?.1,
-            head_of_line: position == 0,
-            protected_total_bytes: protected.map(|(total, _)| total),
-            protected_used_bytes: protected.map(|(_, used)| used),
-        })
     }
 }
 
