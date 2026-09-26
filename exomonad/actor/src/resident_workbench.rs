@@ -8903,11 +8903,15 @@ where
     }
     let declaration = declaration_receipt
         .map(|receipt| {
-            session.render_declaration_candidate_in(
-                context.placement.lexical_scope,
-                receipt,
-                &fresh_view.workbench_imports(),
-            )
+            session
+                .render_declaration_candidate_in(
+                    context.placement.lexical_scope,
+                    receipt,
+                    &fresh_view.workbench_imports(),
+                )
+                .map(|(candidate, values)| {
+                    (candidate.with_source_layer(&context.source_layer), values)
+                })
         })
         .transpose()
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
@@ -9213,6 +9217,7 @@ where
             context.placement.lexical_scope,
             &receipt,
             &declaration_imports,
+            &context.source_layer,
         ) {
             Ok(staged) => Some(staged),
             Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {

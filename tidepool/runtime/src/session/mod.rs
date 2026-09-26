@@ -449,6 +449,16 @@ pub struct DeclarationCandidateRender {
 }
 
 impl DeclarationCandidateRender {
+    /// Use the actor's source layer when validating a declaration import.
+    /// The layer precedes shared roots, as it does for whole-cell checks.
+    #[must_use]
+    pub fn with_source_layer(mut self, roots: &[PathBuf]) -> Self {
+        let mut include = roots.to_vec();
+        include.extend(self.extra_include);
+        self.extra_include = include;
+        self
+    }
+
     #[must_use]
     pub fn generation(&self) -> Generation {
         self.generation
@@ -1121,23 +1131,6 @@ impl SessionLib {
         }
     }
 
-    pub(crate) fn stage_batch_with_receipt_and_vals_in(
-        &self,
-        scope: ScopeId,
-        external: &SourceImports,
-        receipt: &DeclarationReceipt,
-        import_modules: &[String],
-        inject_modules: &[String],
-    ) -> Result<StagedDeclaration, SessionError> {
-        let candidate =
-            self.render_candidate_in(scope, external, receipt, import_modules, inject_modules);
-        // Writing and validating directly into `self.root` (rather than a
-        // private candidate directory) is exactly today's single-checkout
-        // behavior: the whole call happens under one exclusive checkout, so
-        // there is no concurrent reader to shield from a half-written module.
-        validate_declaration_candidate(candidate, &self.root)
-    }
-
     pub(crate) fn adopt_staged_batch_with_receipt_and_vals_in(
         &mut self,
         staged: StagedDeclaration,
@@ -1673,14 +1666,38 @@ mod tests {
             .declaration_receipt(&[source])
             .expect("extract declaration receipt")
             .expect("non-empty declaration receipt");
-        lib.stage_batch_with_receipt_and_vals_in(
-            ScopeId::ROOT,
-            &SourceImports::new(),
-            &receipt,
-            &[],
-            &[],
+        let candidate =
+            lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
+        validate_declaration_candidate(candidate, lib.include_dir())
+            .expect("stage and validate declaration")
+    }
+
+    #[test]
+    fn declaration_validation_uses_the_actor_source_layer() {
+        let root = tempfile::tempdir().unwrap();
+        let helper = tempfile::tempdir().unwrap();
+        std::fs::write(
+            helper.path().join("SessionHelpers.hs"),
+            "module SessionHelpers where\nhelper :: Int\nhelper = 42\n",
         )
-        .expect("stage and validate declaration")
+        .unwrap();
+        let lib = staged_test_lib(&root);
+        let receipt = lib
+            .declaration_receipt(&["import SessionHelpers\nanswer :: Int\nanswer = helper"])
+            .unwrap()
+            .unwrap();
+        let candidate =
+            lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
+        assert!(validate_declaration_candidate(candidate.clone(), lib.include_dir()).is_err());
+        let staged = validate_declaration_candidate(
+            candidate.with_source_layer(&[helper.path().to_path_buf()]),
+            lib.include_dir(),
+        )
+        .expect("actor helper import must resolve while staging the declaration");
+        assert!(staged
+            .items()
+            .iter()
+            .any(|item| item.head_name() == "answer"));
     }
 
     fn validated_staged_answer(lib: &SessionLib) -> StagedDeclaration {
@@ -1744,14 +1761,9 @@ mod tests {
             .declaration_receipt(&["bad :: Int\nbad = True"])
             .expect("extract declaration receipt")
             .expect("non-empty declaration receipt");
-        let error = lib
-            .stage_batch_with_receipt_and_vals_in(
-                ScopeId::ROOT,
-                &SourceImports::new(),
-                &receipt,
-                &[],
-                &[],
-            )
+        let candidate =
+            lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
+        let error = validate_declaration_candidate(candidate, lib.include_dir())
             .expect_err("ill-typed declaration must fail staging");
         let SessionError::ValidationFailed(failure) = error else {
             panic!("expected structured validation failure, got {error:?}");
@@ -1822,14 +1834,15 @@ mod tests {
             .declaration_receipt(&["data Version = NewVersion Bool deriving Show"])
             .expect("extract replacement declaration")
             .expect("non-empty replacement declaration");
-        lib.stage_batch_with_receipt_and_vals_in(
+        let candidate = lib.render_candidate_in(
             ScopeId::ROOT,
             &SourceImports::new(),
             &receipt,
             &injected,
             &injected,
-        )
-        .expect("a replacement type may shadow the type of a live value");
+        );
+        validate_declaration_candidate(candidate, lib.include_dir())
+            .expect("a replacement type may shadow the type of a live value");
     }
 
     #[test]

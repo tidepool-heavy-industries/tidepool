@@ -870,26 +870,31 @@ impl PersistentSession {
         Ok((persistent_imports, import_modules, visible_values))
     }
 
-    /// Render and validate the exact next declaration module without changing
-    /// the live log, scope tip, recovery manifest, or binding store.
+    /// Render and validate the exact next declaration module against the
+    /// actor's source layer without changing the live log, scope tip,
+    /// recovery manifest, or binding store.
     pub fn stage_declarations_in(
         &self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
+        source_layer: &[PathBuf],
     ) -> Result<super::StagedDeclaration, SessionError> {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let lib = self.lib.as_ref().expect("decl plane present");
-        lib.stage_batch_with_receipt_and_vals_in(
-            scope,
-            &persistent_imports,
-            receipt,
-            &import_modules,
-            &self.live_val_modules(),
-        )
-        .map(|staged| staged.with_visible_values(visible_values))
+        let candidate = lib
+            .render_candidate_in(
+                scope,
+                &persistent_imports,
+                receipt,
+                &import_modules,
+                &self.live_val_modules(),
+            )
+            .with_source_layer(source_layer);
+        super::validate_declaration_candidate(candidate, &lib.root)
+            .map(|staged| staged.with_visible_values(visible_values))
     }
 
     /// The pure half of a split cell preparation's declaration staging:

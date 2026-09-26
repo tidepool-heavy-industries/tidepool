@@ -1817,8 +1817,10 @@ where
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
+        source_layer: &[PathBuf],
     ) -> Result<super::StagedDeclaration, SessionError> {
-        self.state.stage_declarations_in(scope, receipt, imports)
+        self.state
+            .stage_declarations_in(scope, receipt, imports, source_layer)
     }
 
     /// The checkout-only half of staging a declaration off-checkout: see
