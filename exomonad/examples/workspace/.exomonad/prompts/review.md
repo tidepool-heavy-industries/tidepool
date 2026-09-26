@@ -67,3 +67,13 @@ The reviewed candidate is the single source of its reviewed revision. Keep sourc
 check limits accurate; do not launder earlier checks into a later head. Return
 Blocked with evidence if review cannot continue. Remain available for repairs
 without requiring a fresh reviewer for every attempt.
+
+
+For recurring checks, begin with the project's compiled Haskell composition and
+specialize its inputs for this component. Retain one job and carry its terminal
+receipt, source and test counts into the candidate or review. Prefer completion
+routing to repeated observations. Pass the working helper name and its source to
+children; a menu seen by the parent does not establish discovery by a child.
+Before product review, name required sibling commits and check that the candidate
+contains them. A partial component review must say which integration gates remain.
+Preparation, executed checks, review and integration are distinct evidence.

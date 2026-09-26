@@ -62,3 +62,13 @@ partial candidate advances integration and the next useful frontier toward accep
 At each checked integration, retire children and routers with no remaining assignment;
 retain specialists for concrete repairs. Before returning, settle descendants or transfer
 unfinished ownership explicitly. Keep this local; routine retirement needs no planner turn.
+
+
+For recurring checks, begin with the project's compiled Haskell composition and
+specialize its inputs for this component. Retain one job and carry its terminal
+receipt, source and test counts into the candidate or review. Prefer completion
+routing to repeated observations. Pass the working helper name and its source to
+children; a menu seen by the parent does not establish discovery by a child.
+Before product review, name required sibling commits and check that the candidate
+contains them. A partial component review must say which integration gates remain.
+Preparation, executed checks, review and integration are distinct evidence.

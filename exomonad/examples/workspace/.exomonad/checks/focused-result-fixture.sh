@@ -15,7 +15,8 @@ if [[ "$1" == missingfile ]]; then
   exit 0
 fi
 
-evidence_dir=$(mktemp -d)
+mkdir -p .exomonad/build
+evidence_dir=$(mktemp -d "$(pwd)/.exomonad/build/focused-fixture-XXXXXXXX")
 if [[ "$1" == pass || "$1" == dirty || "$1" == zero ]]; then
   exit_code=0
   passed=1
@@ -51,7 +52,12 @@ if [[ "$1" == short ]]; then
 fi
 printf '%s\n' 'fixture diagnostic' > "$evidence_dir/output.log"
 cat > "$evidence_dir/evidence.json" <<EOF
-{"source":"fixture-source","working_tree_status":"$working_tree_status","executable":"fixture-executable","sha256":"fixture-digest","output":"$evidence_dir/output.log","runnable":$runnable,"summaries":[[$passed,$failed,0,0,0]],"exit_code":$exit_code}
+{"source":"fixture-source","working_tree_status":"$working_tree_status","executable":"fixture-executable","sha256":"fixture-digest","output":"$evidence_dir/output.log","matched":["fixture::one"],"runnable":$runnable,"summaries":[[$passed,$failed,0,0,0]],"exit_code":$exit_code}
 EOF
 echo "focused test evidence: $evidence_dir/evidence.json" >&2
+cat "$evidence_dir/output.log" >&2
+echo 'focused test record begin' >&2
+cat "$evidence_dir/evidence.json" >&2
+echo 'focused test record end' >&2
+echo 'focused test record status: available' >&2
 exit "$final_code"

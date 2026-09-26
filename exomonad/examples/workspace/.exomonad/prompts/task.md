@@ -32,3 +32,13 @@ the assigned work needs no code change, report the finding through its actual
 result type, or ask the requester to correct a Candidate-only contract. A custom
 task may specify another result type; follow that contract. Remain available
 for named repairs.
+
+
+For recurring checks, begin with the project's compiled Haskell composition and
+specialize its inputs for this component. Retain one job and carry its terminal
+receipt, source and test counts into the candidate or review. Prefer completion
+routing to repeated observations. Pass the working helper name and its source to
+children; a menu seen by the parent does not establish discovery by a child.
+Before product review, name required sibling commits and check that the candidate
+contains them. A partial component review must say which integration gates remain.
+Preparation, executed checks, review and integration are distinct evidence.

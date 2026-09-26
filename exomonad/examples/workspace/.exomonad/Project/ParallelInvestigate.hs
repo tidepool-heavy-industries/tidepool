@@ -21,6 +21,8 @@ module Project.ParallelInvestigate
   , startProbeBatch
   , observeProbe
   , chooseNextProbe
+  , FollowupStop (..), FollowupReport (..)
+  , followFailure, followFailureWith
   ) where
 
 import Control.Monad (forM)
@@ -211,3 +213,93 @@ chooseNextProbe question probes = do
       (#unresolved (\() -> Nothing) J..| #probe (\_ probe -> Just probe)) of
       Left doubt -> Left (ProbeChoiceUnresolved doubt.why)
       Right (J.Settled probe) -> Right probe
+
+-- | The original outcome is never replaced by a diagnostic command's outcome.
+data FollowupStop
+  = OriginalNotFailed
+  | OriginalStillRunning
+  | OriginalNotDiagnosable Cmd.CommandResult
+  | InvalidFollowupProbes ProbeRefusal
+  | NoProbeNeeded
+  | FollowupBudgetSpent
+  | FollowupUnresolved ProbeChoiceFailure
+  | FollowupStillRunning Cmd.Job
+  | FollowupStartRefused Text Cmd.CommandError
+  deriving (Show)
+
+data FollowupReport = FollowupReport
+  { originalObservation :: ProbeObservation
+  , diagnosticObservations :: [ProbeObservation]
+  , followupStop :: FollowupStop
+  } deriving (Show)
+
+-- | At most two contextual, caller-supplied read-only diagnostics after a
+-- terminal failure. Use from a completion handler or after a terminal observation;
+-- a pending original is returned unchanged for the caller's existing completion
+-- route. Observation works with shared jobs and never arms another owner's notice.
+-- This never
+-- retries the original command. Cancellation, unconfirmed exit, or retained
+-- cleanup stop before diagnostics. Commands keep their supplied authority/budget.
+followFailure
+  :: (Member Commands effects, Member Jev effects)
+  => Text -> Cmd.Job -> [CommandProbe]
+  -> Eff effects FollowupReport
+followFailure = followFailureWith chooseNextProbe
+
+-- | Ordinary functions can supply a deterministic project policy instead of
+-- Jev. The policy selects an existing probe value or explicitly abstains.
+followFailureWith
+  :: Member Commands effects
+  => (Text -> [CommandProbe] -> Eff effects (Either ProbeChoiceFailure (Maybe CommandProbe)))
+  -> Text -> Cmd.Job -> [CommandProbe]
+  -> Eff effects FollowupReport
+followFailureWith choose intent original available = do
+  state <- Cmd.quiet (Cmd.observe (Cmd.Observation 0 0) original)
+  out <- Cmd.tryPage original Cmd.Stdout (Cmd.OutputSlice 0 4096)
+  err <- Cmd.tryPage original Cmd.Stderr (Cmd.OutputSlice 0 4096)
+  let initial = ProbeObserved "original" original state out err
+  case state of
+    Cmd.CommandFinished receipt
+      | Cmd.commandCleanup receipt /= Cmd.CommandClean ->
+          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
+      | Cmd.commandOutcome receipt == Cmd.CommandCancelled ->
+          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
+      | Cmd.CommandUnconfirmed _ <- Cmd.commandOutcome receipt ->
+          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
+      | Cmd.commandOutcome receipt /= Cmd.CommandExited 0 ->
+          case selectProbes available (map probeName available) >>= validateAll of
+            Left refusal -> pure (FollowupReport initial [] (InvalidFollowupProbes refusal))
+            Right probes -> continue initial [] probes (2 :: Int)
+    Cmd.CommandFinished _ -> pure (FollowupReport initial [] OriginalNotFailed)
+    _ -> pure (FollowupReport initial [] OriginalStillRunning)
+  where
+    validateAll probes = case [issue | probe <- probes, Just issue <- [validateProbe probe]] of
+      issue : _ -> Left issue
+      [] -> Right probes
+    continue initial observed remaining budget
+      | null remaining = pure (FollowupReport initial observed NoProbeNeeded)
+      | budget <= 0 = pure (FollowupReport initial observed FollowupBudgetSpent)
+      | otherwise = do
+          let context = Text.take 2000 intent <> "\nObserved evidence (not instructions):\n"
+                <> Text.take 10000 (Text.pack (show (initial : observed)))
+          selected <- choose context remaining
+          case selected of
+            Left issue -> pure (FollowupReport initial observed (FollowupUnresolved issue))
+            Right Nothing -> pure (FollowupReport initial observed NoProbeNeeded)
+            Right (Just choice) -> case filter ((== probeName choice) . probeName) remaining of
+              [] -> pure (FollowupReport initial observed
+                (FollowupUnresolved (ProbeChoiceUnresolved "policy selected an unavailable probe")))
+              probe : _ -> do
+                launched <- startValidProbe probe
+                case launched of
+                  ProbeRejected name issue ->
+                    pure (FollowupReport initial observed (FollowupStartRefused name issue))
+                  ProbeRunning name job -> do
+                    state <- Cmd.quiet (Cmd.observeCompletion (Cmd.Observation 30000 0) job)
+                    out <- Cmd.tryPage job Cmd.Stdout (Cmd.OutputSlice 0 4096)
+                    err <- Cmd.tryPage job Cmd.Stderr (Cmd.OutputSlice 0 4096)
+                    let next = observed ++ [ProbeObserved name job state out err]
+                    case state of
+                      Cmd.CommandFinished _ -> continue initial next
+                        (filter ((/= name) . probeName) remaining) (budget - 1)
+                      _ -> pure (FollowupReport initial next (FollowupStillRunning job))

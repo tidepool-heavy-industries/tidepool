@@ -50,6 +50,7 @@ data FocusedRecord = FocusedRecord
   , recordExecutable :: Text
   , recordDigest :: Text
   , recordOutput :: Text
+  , recordMatched :: Maybe [Text]
   , recordRunnable :: Maybe [Text]
   , recordSummaries :: Maybe [[Int]]
   , recordExitCode :: Maybe Int
@@ -62,6 +63,7 @@ instance FromJSON FocusedRecord where
       <*> fields .: "executable"
       <*> fields .: "sha256"
       <*> fields .: "output"
+      <*> fields .:? "matched"
       <*> fields .:? "runnable"
       <*> fields .:? "summaries"
       <*> fields .:? "exit_code"
@@ -127,8 +129,33 @@ focusedCommandFor memory spec = Cmd.withMemory memory $
       Cmd.withArguments
         [ focusedPackage spec, focusedTarget spec, focusedFilter spec
         , Text.pack (show (focusedExpected spec)) ]
-        [bash|set -euo pipefail
-scripts/cargo-focused-test --package "$1" --target "$2" --filter "$3" --expect "$4"|]
+        [bash|set -uo pipefail
+runner_output=$(mktemp) || { printf 'focused runner cannot allocate output capture\n' >&2; exit 125; }
+trap 'rm -f -- "$runner_output"' EXIT
+scripts/cargo-focused-test --package "$1" --target "$2" --filter "$3" --expect "$4" > "$runner_output" 2>&1
+runner_exit=$?
+tail -c 8192 "$runner_output" >&2
+evidence_file=
+while IFS= read -r line; do
+  case "$line" in
+    "focused test evidence: "*) evidence_file=${line#"focused test evidence: "} ;;
+  esac
+done < "$runner_output"
+if [[ -n "$evidence_file" ]]; then
+  printf 'focused test evidence: %s\n' "$evidence_file" >&2
+fi
+if [[ -n "$evidence_file" && -f "$evidence_file" && $(wc -c < "$evidence_file") -le 65536 ]]; then
+  printf '\nfocused test record begin\n' >&2
+  cat "$evidence_file" >&2
+  printf '\nfocused test record end\n' >&2
+  printf 'focused test record status: available\n' >&2
+elif [[ -n "$evidence_file" && -f "$evidence_file" ]]; then
+  printf 'focused test record exceeds 65536 bytes; artifact remains at %s\n' "$evidence_file" >&2
+  printf 'focused test record status: unavailable\n' >&2
+else
+  printf 'focused test record status: unavailable\n' >&2
+fi
+exit "$runner_exit"|]
 
 focusedExecution :: FocusedResult -> CheckExecution
 focusedExecution result
@@ -154,23 +181,32 @@ focusedSourceAssurance result = case focusedEvidence result of
     | otherwise -> SourceUnrecorded
   where spec = focusedSpec result
 
--- Read retained evidence after completion, without a model judgment.
+-- The originating command reads its own artifact before exit. A completion
+-- actor may observe the job without being able to open the originating
+-- actor's checkout. The terminal output must be complete to prove the JSON.
 collectFocused :: Member Commands effects => FocusedRun -> Eff effects FocusedResult
 collectFocused (FocusedRun spec job) = do
   completed <- Cmd.await job
-  let path = evidencePath (Cmd.stderr completed)
-  evidence <- case path of
-    Nothing -> pure (Left "focused runner did not report an absolute evidence.json path")
-    Just file -> do
-      loaded <- Cmd.run (Cmd.argv ["cat", file])
-      pure $ if Cmd.failure loaded /= Nothing
-          || Cmd.commandCleanup (Cmd.commandResult loaded) /= Cmd.CommandClean
-        then Left ("cannot read focused evidence; cat receipt: " <>
-          Text.pack (show (Cmd.commandResult loaded)))
-        else case Cmd.decodeWith (Cmd.asJSON @FocusedRecord) (Cmd.stdout loaded) of
-          Left issue -> Left ("cannot decode focused evidence: " <> Text.pack (show issue))
-          Right record -> Right record
+  let stderr = Cmd.stderr completed
+      path = evidencePath stderr
+  let evidence = case path of
+        Nothing -> Left "focused runner did not report an absolute evidence.json path"
+        Just _ | not (completeStderr completed) -> Left "focused command output is incomplete; evidence record is unproved"
+        Just _ -> case evidenceRecord stderr of
+          Nothing -> Left "focused command did not retain its evidence record"
+          Just encoded -> case Cmd.asJSON @FocusedRecord encoded of
+            Left issue -> Left ("cannot decode focused evidence: " <> issue)
+            Right record -> Right record
   pure (FocusedResult spec completed path evidence Nothing)
+
+completeStderr :: Cmd.RunResult -> Bool
+completeStderr completed =
+  let page = Cmd.commandStderr (Cmd.capturedOutput completed)
+  in Cmd.outputStart page == 0
+    && Cmd.outputEnd page == Cmd.outputAvailableEnd page
+    && Cmd.outputLostBytes page == 0
+    && Cmd.outputFinished page
+    && not (Cmd.outputLossy page)
 
 failureEvidence :: FocusedResult -> FailureEvidence
 failureEvidence result = case focusedEvidence result of
@@ -186,21 +222,15 @@ failureEvidence result = case focusedEvidence result of
     | focusedSourceAssurance result /= SourceVerified -> SourceUnverified
     | otherwise -> NoFailureEvidence
 
--- | Read at most 8192 bytes from the retained log, then apply the existing
--- code-only reflex table. The original receipt and JSON remain in the packet.
-diagnoseFocused :: Member Commands effects => FocusedResult -> Eff effects FocusedDiagnosis
+-- | The originating job already emitted a bounded diagnostic tail before its
+-- evidence record. Reading that terminal output does not require authority to
+-- the originating checkout. The original receipt and JSON remain in packet.
+diagnoseFocused :: FocusedResult -> Eff effects FocusedDiagnosis
 diagnoseFocused result = do
   let branch = failureEvidence result
-  excerpt <- case (branch, focusedEvidence result) of
-    (NoFailureEvidence, _) -> pure (Right "")
-    (_, Left issue) -> pure (Left issue)
-    (_, Right record) -> do
-      readLog <- Cmd.run (Cmd.argv ["tail", "-c", "8192", recordOutput record])
-      pure $ if Cmd.failure readLog /= Nothing
-          || Cmd.commandCleanup (Cmd.commandResult readLog) /= Cmd.CommandClean
-        then Left ("cannot read retained output log; command receipt: " <>
-          Text.pack (show (Cmd.commandResult readLog)))
-        else either (Left . Text.pack . show) Right (Cmd.stdout readLog)
+      excerpt = if branch == NoFailureEvidence
+        then Right ""
+        else diagnosticExcerpt (focusedCommand result)
   let reflex = case (branch, focusedEvidence result, excerpt) of
         (NoFailureEvidence, _, _) -> Nothing
         (_, Right record, Right output) ->
@@ -209,6 +239,17 @@ diagnoseFocused result = do
             _ -> Nothing
         _ -> Nothing
   pure (FocusedDiagnosis result branch excerpt reflex)
+
+diagnosticExcerpt :: Cmd.RunResult -> Either Text Text
+diagnosticExcerpt completed
+  | not (completeStderr completed) = Left "focused command diagnostic output is incomplete"
+  | otherwise = Right (Text.takeEnd 8192 beforeRecord)
+  where
+    stderr = Cmd.stderr completed
+    beforeRecord = case Text.breakOnEnd "focused test record begin\n" stderr of
+      (prefix, rest) | not (Text.null rest) ->
+        Text.dropEnd (Text.length "focused test record begin\n") prefix
+      _ -> stderr
 
 -- An optional diagnosis of a failed check never changes its pass rule.
 finishFocused
@@ -254,6 +295,19 @@ evidencePath :: Text -> Maybe Text
 evidencePath stderr = case
   [ Text.strip (Text.drop (Text.length marker) line)
   | line <- Text.lines stderr, marker `Text.isPrefixOf` line ] of
-    path : _ | "/" `Text.isPrefixOf` path -> Just path
+    paths | path : _ <- reverse paths, "/" `Text.isPrefixOf` path -> Just path
     _ -> Nothing
   where marker = "focused test evidence: "
+
+evidenceRecord :: Text -> Maybe Text
+evidenceRecord stderr = case reverse (Text.lines stderr) of
+  "focused test record status: available" : _ ->
+    case Text.breakOnEnd begin stderr of
+      (_, rest) | Text.null rest -> Nothing
+      (_, rest) -> case Text.breakOn end rest of
+        (_, remaining) | Text.null remaining -> Nothing
+        (encoded, _) -> Just (Text.strip encoded)
+  _ -> Nothing
+  where
+    begin = "focused test record begin\n"
+    end = "\nfocused test record end"

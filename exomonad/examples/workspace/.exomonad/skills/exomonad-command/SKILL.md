@@ -22,11 +22,12 @@ what it omitted, so there is no need to rerun with `sed` ranges:
 {"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"focus":"the failing test, its assertion and panic message"}
 ```
 
-For an expected long check, start once with an explicit memory limit and a short
-initial observation (choose the limit for the actual check):
+For an expected long check, prefer the project's compiled Haskell focused-check
+composition: start once, route completion and retain source/count evidence. For
+a direct command, give an explicit memory limit and let it manage completion:
 
 ```json
-{"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"yield_time_ms":1000}
+{"cmd":"cargo test -p my_crate --lib","memory_mib":4096}
 ```
 
 Use the returned `session_id` verbatim. `write_stdin` with omitted `chars` polls;
@@ -60,10 +61,14 @@ value for `watch`; see the routing example linked below.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Execution defaults: 1024 MiB and a 30-second observation; `yield_time_ms` accepts
-0..300000, so a long-running command can be observed in one call instead of
-polling with `write_stdin` every 30 seconds. Expiry leaves the
-command alive.
+Direct execution defaults: 1024 MiB and up to 60 seconds awaiting completion.
+If still running, the same job receives one completion notice (or its existing
+watch owns that wake). Continue useful work; no polling is needed. Explicit
+`yield_time_ms` (0..300000) requests a deliberate snapshot without automatic
+notification. `background: true` returns immediately with completion delivery.
+In Haskell, `Cmd.observeCompletion` and `Cmd.observeWithCompletion` provide the
+same bounded waiting and notification behavior for an existing job. Use completion
+events for authored continuations; waiting alone does not collect test evidence.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
 use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
 whole. Without `focus`, output over budget is shown as a head and a tail with a

@@ -1,13 +1,30 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
 
-module Project.CheckResultsChecks (completionRouting, runningCommandCleanup) where
+module Project.CheckResultsChecks
+  ( completionRouting, managedEvidence, runningCommandCleanup
+  , EvidenceProbe (probeStart, probeRead), evidenceProbe
+  ) where
 
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Exomonad.Workspace (workspaceRoot)
+import GHC.Generics (Generic)
+import qualified Tidepool.Actor as Actor
+import qualified Tidepool.Actor.Record as R
+import Tidepool.Actors.Exomonad
+import qualified Tidepool.Command as Cmd
 import Tidepool.Check
+import Tidepool.Effects.Core (Actor, Commands)
+import Tidepool.Effects.Row (knownEffects)
+import Tidepool.Worktree (createWorktree, fromCurrentRepository, worktreeId)
+import Project.CheckResults
 
 -- A completed job is attached late; two other jobs settle through the same
 -- record actor. The fixture uses the focused runner's retained JSON shape.
@@ -63,9 +80,9 @@ completionRouting = do
     "Right summarizer <- watchChecks me NotifySummary [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed)]"
   summary <- awaitOutput owner
     "view <- readChecks summarizer\nif length (checkNotices view) == 1 then checksSummary view else \"pending\""
-    (Text.isInfixOf "late passed")
+    (Text.isInfixOf "late: passed")
   check "aggregate policy records one named summary attempt after late completions"
-    (all (`Text.isInfixOf` summary) ["late passed", "failed failed"])
+    (all (`Text.isInfixOf` summary) ["late: passed", "failed: failed", "matched 1", "runnable 1", "CommandExited 0", "CommandClean", "; artifact /"])
   void $ turn owner "finishChecks summarizer"
 
   void $ turn owner
@@ -81,9 +98,9 @@ completionRouting = do
     "missing <- Cmd.start (fixture \"missingfile\")\nRight missingWatcher <- watchChecks me NotifyProblems [(\"missing\", FocusedRun spec missing)]"
   missing <- awaitOutput owner
     "missingView <- readChecks missingWatcher\n[(checkVerdict e outcome, focusedEvidence (checkFocused outcome)) | e <- checkEntries missingView, Just outcome <- [checkOutcome e]]"
-    (Text.isInfixOf "cat receipt")
-  check "failed evidence read remains unknown with its command receipt"
-    (all (`Text.isInfixOf` missing) ["CheckUnknown", "cat receipt"])
+    (Text.isInfixOf "did not retain its evidence record")
+  check "missing embedded evidence stays unknown without a second file read"
+    (all (`Text.isInfixOf` missing) ["CheckUnknown", "did not retain its evidence record"])
   void $ turn owner "finishChecks missingWatcher"
 
   setup <- turn owner
@@ -91,6 +108,67 @@ completionRouting = do
   check "zero selection, incomplete setup, and short execution stay distinct"
     ("(ZeroSelection,SetupIncomplete,ExecutionUnknown,SetupIncomplete)"
       `Text.isInfixOf` Text.filter (/= ' ') (lastOutput setup))
+
+data EvidenceProbe mode = EvidenceProbe
+  { probeState :: mode :- State ()
+  , probeStart :: mode :- Call () (R.Reply FocusedRun)
+  , probeRead :: mode :- Call Text (R.Reply Text)
+  } deriving Generic
+
+type EvidenceProbeEffects = LocalEffects EvidenceProbe '[Replies, Commands]
+
+evidenceProbe :: FocusedSpec -> ActorSpec EvidenceProbe EvidenceProbeEffects
+evidenceProbe spec =
+  R.definition "focused-evidence-probe" (Actor.Selected knownEffects) EvidenceProbe
+    { probeState = ()
+    , probeStart = \() -> FocusedRun spec <$> Cmd.start
+        (Cmd.withMemory (Cmd.MiB 64)
+          (Cmd.argv ["bash", "checks/focused-result-fixture.sh", "pass"]))
+    , probeRead = \path -> do
+        started <- Cmd.tryStart (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv ["cat", path]))
+        case started of
+          Left issue -> pure ("start refused: " <> Text.pack (show issue))
+          Right job -> do
+            observed <- Cmd.await job
+            pure (Text.pack (show (Cmd.commandResult observed)))
+    }
+
+-- The bound actor runs a check in an actual managed writable checkout. Its
+-- virtual path does not grant an unbound actor access to the artifact; the
+-- completion watcher uses the record emitted by the original job instead.
+managedEvidence :: Member RecipeCheck effects => Eff effects ()
+managedEvidence = do
+  owner <- root
+  void $ turn owner "import Project.CheckResultsChecks"
+  created <- turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
+  check "a managed checkout is allocated for focused evidence" ("WorktreeId" `Text.isInfixOf` lastOutput created)
+  void $ turn owner $ Text.unlines
+    [ "let managedSpec = FocusedSpec \"managed fixture\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
+    , "boundProbe <- R.start (R.withWorktree (worktreeId focusedTree) (evidenceProbe managedSpec))"
+    , "managedRun <- R.call (probeStart (R.client boundProbe)) ()"
+    , "Right managedWatcher <- watchChecks me NotifyAllTerminal [(\"managed\", managedRun)]"
+    ]
+  verified <- awaitOutput owner
+    "checksSummary <$> readChecks managedWatcher"
+    (Text.isInfixOf "managed: passed")
+  check "watcher reports selected and executed facts from the original managed job"
+    (all (`Text.isInfixOf` verified)
+      ["managed: passed", "matched 1", "runnable 1", "executed 1 passed", "fixture-source", "CommandExited 0", "CommandClean", "; artifact /"])
+  accessible <- turn owner $ Text.unlines
+    [ "managedResult <- collectFocused managedRun"
+    , "let Just managedPath = focusedEvidencePath managedResult"
+    , "R.call (probeRead (R.client boundProbe)) managedPath"
+    ]
+  check "the artifact exists in the managed owner's writable checkout"
+    ("CommandExited 0" `Text.isInfixOf` lastOutput accessible)
+  refused <- turn owner $ Text.unlines
+    [ "let Just managedPath = focusedEvidencePath managedResult"
+    , "unboundProbe <- R.start (evidenceProbe managedSpec)"
+    , "R.call (probeRead (R.client unboundProbe)) managedPath"
+    ]
+  check "an unbound actor cannot open the managed checkout artifact"
+    (any (`Text.isInfixOf` lastOutput refused) ["CommandExited 1", "CommandUnauthorized"])
+  void $ turn owner "finishChecks managedWatcher\nR.finish boundProbe\nR.finish unboundProbe"
 
 -- The driver must service a live command's cleanup receipt while its resident
 -- forest stops. A successful restart proves the old producer was sealed.

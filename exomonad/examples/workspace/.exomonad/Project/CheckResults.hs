@@ -151,22 +151,28 @@ checkLine entry = checkName entry <> ": " <> case checkOutcome entry of
   Nothing -> "running"
   Just outcome ->
     verdictText (checkVerdict entry outcome)
+      <> "; " <> selectionText (checkFocused outcome)
       <> "; executed " <> executionText (checkExecution entry outcome)
       <> "; source " <> sourceText (checkSourceAssurance entry outcome)
+      <> maybe "" (" @" <>) (recordSource =<< either (const Nothing) Just (focusedEvidence (checkFocused outcome)))
       <> "; " <> Text.pack (show (Cmd.commandOutcome (checkCompletion outcome)))
       <> "; cleanup " <> Text.pack (show (Cmd.commandCleanup (checkCompletion outcome)))
-      <> maybe "" ("; evidence " <>) (focusedEvidencePath (checkFocused outcome))
-      <> either ("; " <>) (\record -> "; log " <> recordOutput record)
+      <> "; artifact " <> maybe "unknown" id (focusedEvidencePath (checkFocused outcome))
+      <> either ("; evidence unknown: " <>) (const "; evidence recorded")
            (focusedEvidence (checkFocused outcome))
 
 checksSummary :: CheckState -> Text
 checksSummary state = "focused checks: " <> Text.intercalate "; "
-  [checkName entry <> " " <> maybe "running" (\outcome ->
-      verdictText (checkVerdict entry outcome)
-        <> " (executed " <> executionText (checkExecution entry outcome)
-        <> ", source " <> sourceText (checkSourceAssurance entry outcome) <> ")")
-      (checkOutcome entry)
-    | entry <- checkEntries state]
+  [checkLine entry | entry <- checkEntries state]
+
+selectionText :: FocusedResult -> Text
+selectionText result = case focusedEvidence result of
+  Left _ -> "matched unknown, runnable unknown"
+  Right record ->
+    "matched " <> count (recordMatched record)
+      <> ", runnable " <> count (recordRunnable record)
+  where
+    count = maybe "unknown" (Text.pack . show . length)
 
 executionText :: CheckExecution -> Text
 executionText (ExecutionPassed count) = Text.pack (show count) <> " passed"
