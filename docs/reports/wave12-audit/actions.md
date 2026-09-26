@@ -8,16 +8,16 @@ a recommendation into a standing rule.
 
 | Work | Owner / status | Acceptance evidence |
 |---|---|---|
-| Responsive compiler control under one busy worker | cf6a5fa8f, integration review | Focused tests passed; review whether busy rejection can trigger fallback workers before merge |
-| Reuse recovered reachability in projection | f4252f72d, awaiting integration review and corpus gate | Focused equivalence test and extractor build passed; full fixtures gate outstanding; speedup unmeasured |
+| Responsive compiler control under one busy worker | main 132784eeb + bc908ecfe | Typed BUSY retries same endpoint without rebind; six focused tests and Clippy passed |
+| Reuse recovered reachability in projection | main 6f4ea972f | Independent review, full fixtures gate (Suite 692/0 plus ancillary cohorts), focused recovery and matched host build passed; live speedup unmeasured |
 | Cancel fork imports without fallback launch | cancellation branch through 5e61feecc, awaiting review | Build, pre-cancel, in-flight copy kill/reap and captured-source cleanup tests passed |
 | Failed admission releases provisional resources | 5e61feecc, awaiting review | Concurrent tmux insertion tested; provisional Git receipts deliberately retained by owner contract |
-| Managed root baseline, private overlays and explicit integration | queued for next implementation slot | Approved managed-root plan; policy/importer exist, production composition and acceptance remain |
-| Clear producer contracts and completion evidence | harness a6a39c3, isolated prompt branch | Clarification, expected-red prerequisites, retained checkout and pending-update guidance corrected; diff checked |
+| Managed root baseline, private overlays and explicit integration | managed_root_integration, branch through 15a8e1edd plus WIP | Source/authority tests passed; artifact mounts, cancellation, frozen-source parity and descendant acceptance pending; excluded from wave13 |
+| Clear producer contracts and completion evidence | harness master 6119ae5 | Clarification, expected-red prerequisites, retained checkout and pending-update guidance corrected; diff checked |
 | Reconcile audit evidence and action ownership | root, active | Correct actor identities and resolve conflicting helper-import claims before treating reports as settled |
 | Jev shared-service breaker | main 136790a14 | 14 focused tests passed; facade compiled; no running host changed |
-| Stale notice filtering and accurate queue logs | compiler_control, active | Same watch-observation checks for both delivery paths; presentation remains separate |
-| Overlap independent resource-release waits | review_finish, active | Preserve descendant retirement order; separate within-group fix from multi-group experiment |
+| Stale notice filtering and accurate queue logs | main a2298a42e | Five focused tests passed; shared observation checks; presentation remains separate |
+| Overlap independent resource-release waits | main 2e51dcf51 | Focused ordering/failure tests passed; three delayed releases measured123ms serial vs42ms batched; separate groups remain serial |
 
 ## Investigation and experiments
 
@@ -37,8 +37,8 @@ a recommendation into a standing rule.
   probe; callers receive explicit failures, never invented judgments.
 - **Command handle failure:** traced to a mistyped ID, not registry loss. Audit
   handle reuse/transcription ergonomics before proposing lifecycle changes.
-- **Broader Luna audits:** repeated compilation dispatched; context cost and
-  artifact amplification queued for worker slots. See [experiments](experiments.md)
+- **Broader Luna audits:** compilation, context cost and artifact amplification
+  completed. Counts of native turns must not be presented as model rounds. See [experiments](experiments.md)
   for bounded trials and their acceptance evidence.
 
 ## Dispatch policy
@@ -66,3 +66,23 @@ before stopping anything. Launch the next Sol-root wave only after its brief and
 required checks are ready, with bounded parallel work and one experiment. Timer
 expiration alone is not a launch gate. Current wave12 product is delivered;
 its root retrospective has been requested, and implementation work continues.
+
+
+## First scheduled check — 2026-09-26 04:26 UTC
+
+Wave12 root interview committed in harness `cce811a`; 55 completed root cells,
+23 over10s are recorded in completed-root-latency.md. All seven worker resources
+released. Host retained deliberately: demo hostPID3202992 is under the root
+command namespace/cgroup, so stopping the host risks the protected demo.
+
+New verification recipe is harness `c6a5916`: pinned Node24, npm ci/check/test/build,
+then existing focused browser runner. Clean-source run passed14web tests and
+1browser API journey. Real-browser UI verification remains a distinct boundary.
+
+Wave13 brief `7445af3` and assignment `b6e5a14` target portable standalone browser
+operation with isolated startup/reopen evidence and a focused-gate helper trial.
+Initial launch against the old harness path correctly refused its live-owner
+lock. Retry uses `/home/inanna/dev/exomonad-harness-runs/wave13`, branch
+`rsi/wave13`, leaving the protected demo and original checkout untouched.
+Launch log `/tmp/rsi-wave13-launch-isolated.log`. No root task is considered
+started until the launch and initial-message receipt are recorded.
