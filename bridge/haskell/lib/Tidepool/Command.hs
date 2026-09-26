@@ -69,6 +69,7 @@ module Tidepool.Command
     cancel,
     completion,
     CommandStatus (..),
+    CommandQueueWait (..),
     CommandResult (..),
     CommandOutcome (..),
     CommandCleanup (..),
@@ -83,6 +84,7 @@ where
 import Control.Monad.Freer (Eff, Member, interpose, send)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Numeric (showFFloat)
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
 import Tidepool.Agent.Watch.Internal (Await (..), AwaitDependency (..), Watches (..))
@@ -102,6 +104,7 @@ import Tidepool.Effects.Core
     CommandSource (..),
     CommandSpec (..),
     CommandStatus (..),
+    CommandQueueWait (..),
     CommandStream (..),
     Commands (..),
   )
@@ -270,6 +273,7 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
   let heading = case current of
         CommandFinished result -> resultHeading result
         CommandQueued -> "terminal: no · queued (process not started)"
+        CommandResourceQueued wait -> "terminal: no · queued for resources · " <> queueWaitHeading wait
         CommandStarting -> "terminal: no · starting"
         CommandRunning -> "terminal: no · running"
         CommandStopping -> "terminal: no · stopping; cancellation not yet confirmed"
@@ -278,6 +282,21 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
         _ -> "\nnext: observe the same job with write_stdin; read_output for retained output"
   send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> heading <> next) bytes))
   pure current
+
+queueWaitHeading :: CommandQueueWait -> Text
+queueWaitHeading wait =
+  "requested " <> gib (queueRequestedBytes wait)
+    <> " GiB · general " <> gib (queueGeneralUsedBytes wait)
+    <> "/" <> gib (queueGeneralTotalBytes wait)
+    <> " GiB used (" <> gib (queueGeneralTotalBytes wait - queueGeneralUsedBytes wait)
+    <> " GiB free) · head requests " <> gib (queueHeadRequestedBytes wait)
+    <> " GiB · "
+    <> (if queueHeadOfLine wait then "head of FIFO" else "behind FIFO head")
+    <> case (queueProtectedUsedBytes wait, queueProtectedTotalBytes wait) of
+      (Just used, Just total) -> " · protected " <> gib used <> "/" <> gib total <> " GiB used"
+      _ -> ""
+  where
+    gib bytes = T.pack (showFFloat (Just 1) (fromIntegral bytes / 1073741824 :: Double) "")
 
 -- | Observe once, then let ordinary Haskell prepare what the tool returns
 -- before command output is presented.  The callback receives stream endpoints

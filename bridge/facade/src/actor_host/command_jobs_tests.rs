@@ -28,6 +28,7 @@ pub(super) struct TestCommands {
     slice_reads: std::sync::atomic::AtomicUsize,
     short_slice_read: std::sync::atomic::AtomicUsize,
     hang_cancel: std::sync::atomic::AtomicBool,
+    queue_wait: Mutex<Option<CommandQueueWait>>,
 }
 impl TestCommands {
     pub(super) fn completed(stdout: &str) -> Arc<Self> {
@@ -96,6 +97,7 @@ impl TestCommands {
             slice_reads: 0.into(),
             short_slice_read: 0.into(),
             hang_cancel: false.into(),
+            queue_wait: Mutex::new(None),
         })
     }
 
@@ -126,6 +128,13 @@ impl TestCommands {
     }
 }
 impl CommandBackend for TestCommands {
+    fn queue_wait<'a>(
+        &'a self,
+        _id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Option<CommandQueueWait>> {
+        Box::pin(async move { self.queue_wait.lock().clone() })
+    }
+
     fn cleanup<'a>(&'a self, _id: &'a str) -> futures_util::future::BoxFuture<'a, CommandCleanup> {
         Box::pin(async { CommandCleanup::CommandClean })
     }
@@ -428,12 +437,24 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         }),
     ));
     let backend = TestCommands::new();
+    *backend.queue_wait.lock() = Some(CommandQueueWait {
+        requested_bytes: 64 * 1024 * 1024,
+        general_total_bytes: 8 * 1024 * 1024 * 1024,
+        general_used_bytes: 8 * 1024 * 1024 * 1024,
+        head_requested_bytes: 8 * 1024 * 1024 * 1024,
+        head_of_line: false,
+        protected_total_bytes: Some(512 * 1024 * 1024),
+        protected_used_bytes: Some(512 * 1024 * 1024),
+    });
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
     let receipt = running.await.unwrap().unwrap();
     assert_eq!(receipt["status"], "committed", "{receipt}");
     let text = receipt["items"][0]["output"].as_str().unwrap();
+    assert!(text.contains("queued for resources"), "{receipt}");
+    assert!(text.contains("behind FIFO head"), "{receipt}");
+    assert!(text.contains("0.0 GiB free"), "{receipt}");
     let session = text
         .split("session_id: ")
         .nth(1)
@@ -781,6 +802,59 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
 }
 
 #[tokio::test]
+async fn queued_resource_reason_reaches_model_observation_and_updates() {
+    let mut campaign = TestCampaign::start().await;
+    let initial = committed(
+        &campaign,
+        "job <- Cmd.start (withMemory (GiB 8) [bash|sleep 30|])\nCmd.status job",
+    )
+    .await;
+    assert!(initial.to_string().contains("CommandQueued"), "{initial}");
+    let backend = TestCommands::new();
+    *backend.queue_wait.lock() = Some(CommandQueueWait {
+        requested_bytes: 8 * 1024 * 1024 * 1024,
+        general_total_bytes: 8 * 1024 * 1024 * 1024,
+        general_used_bytes: 1024 * 1024 * 1024,
+        head_requested_bytes: 8 * 1024 * 1024 * 1024,
+        head_of_line: true,
+        protected_total_bytes: None,
+        protected_used_bytes: None,
+    });
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let head = committed(&campaign, "Cmd.observe (Cmd.Observation 0 1024) job").await;
+    assert!(head.to_string().contains("requested 8.0 GiB"), "{head}");
+    assert!(
+        head.to_string().contains("general 1.0/8.0 GiB used"),
+        "{head}"
+    );
+    assert!(head.to_string().contains("head of FIFO"), "{head}");
+    *backend.queue_wait.lock() = Some(CommandQueueWait {
+        requested_bytes: 8 * 1024 * 1024 * 1024,
+        general_total_bytes: 8 * 1024 * 1024 * 1024,
+        general_used_bytes: 8 * 1024 * 1024 * 1024,
+        head_requested_bytes: 8 * 1024 * 1024 * 1024,
+        head_of_line: false,
+        protected_total_bytes: None,
+        protected_used_bytes: None,
+    });
+    let follower = committed(&campaign, "Cmd.observe (Cmd.Observation 0 1024) job").await;
+    assert!(
+        follower.to_string().contains("behind FIFO head"),
+        "{follower}"
+    );
+    backend.finish();
+    let finished = committed(&campaign, "Cmd.await job").await;
+    assert!(
+        finished.to_string().contains("CommandExited 0"),
+        "{finished}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_jobs_retain_completion_and_route_to_record_actors() {
     let mut campaign = TestCampaign::start().await;
     let initial = committed(&campaign, include_str!("command_jobs.hs")).await;
@@ -808,7 +882,7 @@ async fn command_jobs_retain_completion_and_route_to_record_actors() {
             "a b;$HOME\n'quoted'"
         ]
     );
-    assert_eq!(backend.specs.lock()[0].memory, 8 * 1024 * 1024 * 1024);
+    assert_eq!(backend.specs.lock()[0].memory, 4 * 1024 * 1024 * 1024);
     assert_eq!(
         backend.specs.lock()[0].environment,
         [("A".into(), "new".into()), ("B".into(), "kept".into())]

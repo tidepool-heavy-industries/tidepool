@@ -32,6 +32,10 @@ enum Request {
         actor: String,
         id: String,
     },
+    QueueWait {
+        actor: String,
+        id: String,
+    },
     Started {
         actor: String,
         id: String,
@@ -56,6 +60,7 @@ enum Response {
     Observation(CommandResourceObservation),
     Directory(PathBuf),
     Status(CommandResourceStatus),
+    QueueWait(Option<CommandResourceQueueWait>),
     ActorAdmitted,
     Acknowledged,
     Error(String),
@@ -124,6 +129,9 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                     }
                 }
                 Request::Status { actor, id } => owner.status(&actor, &id).map(Response::Status),
+                Request::QueueWait { actor, id } => {
+                    owner.queue_wait(&actor, &id).map(Response::QueueWait)
+                }
                 Request::Started { actor, id } => owner.started(&actor, &id).map(Response::Status),
                 Request::Cancel { actor, id } => owner.cancel(&actor, &id).map(Response::Status),
                 Request::SealProducer { producer } => owner
@@ -311,6 +319,26 @@ impl CommandResourceClient {
             id: id.into(),
         })
         .await
+    }
+
+    pub async fn queue_wait(
+        &self,
+        actor: &str,
+        id: &str,
+    ) -> std::io::Result<Option<CommandResourceQueueWait>> {
+        if let Self::Local(owner) = self {
+            return owner.queue_wait(actor, id);
+        }
+        match self
+            .rpc(Request::QueueWait {
+                actor: self.actor(actor),
+                id: id.into(),
+            })
+            .await?
+        {
+            Response::QueueWait(wait) => Ok(wait),
+            _ => Err(io_error("invalid command resource queue response")),
+        }
     }
 
     pub async fn cancel(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {

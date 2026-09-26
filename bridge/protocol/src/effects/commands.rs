@@ -151,10 +151,35 @@ pub fn commands() -> Effect {
                     ("commandCleanup", "cleanup", named("CommandCleanup")),
                 ],
             ),
+            record(
+                "CommandQueueWait",
+                vec![
+                    ("queueRequestedBytes", "requested_bytes", HsType::Int),
+                    ("queueGeneralTotalBytes", "general_total_bytes", HsType::Int),
+                    ("queueGeneralUsedBytes", "general_used_bytes", HsType::Int),
+                    (
+                        "queueHeadRequestedBytes",
+                        "head_requested_bytes",
+                        HsType::Int,
+                    ),
+                    ("queueHeadOfLine", "head_of_line", HsType::Bool),
+                    (
+                        "queueProtectedTotalBytes",
+                        "protected_total_bytes",
+                        HsType::maybe(HsType::Int),
+                    ),
+                    (
+                        "queueProtectedUsedBytes",
+                        "protected_used_bytes",
+                        HsType::maybe(HsType::Int),
+                    ),
+                ],
+            ),
             sum(
                 "CommandStatus",
                 vec![
                     ("CommandQueued", vec![]),
+                    ("CommandResourceQueued", vec![named("CommandQueueWait")]),
                     ("CommandStarting", vec![]),
                     ("CommandRunning", vec![]),
                     ("CommandStopping", vec![]),
