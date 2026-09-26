@@ -40,20 +40,20 @@ which only `--persistent` survives.
 
 A `--persistent` daemon serves `--workers N` concurrent GHC workers
 (`daemon::DEFAULT_WORKER_COUNT`, 3 by default) rather than one: a single
-accept thread still owns every fence check (epoch, watched-stamp) and
-PREFLIGHT/STOP handling, but hands each accepted, fenced connection to a free
-worker slot over a bounded (rendezvous) queue — an over-subscribed daemon
-backs up in the kernel's own listen backlog, never in an unbounded set of
-spawned threads. Each slot is a full pinned worker with its own transaction
-pinning, request deadline, peer-disconnect kill, and served/RSS rotation;
-rotation replaces a slot's worker in place, same as the single-worker case.
+accept thread owns every fence check (epoch, watched-stamp) and PREFLIGHT/STOP
+handling. It admits at most one pending job beyond occupied worker slots;
+excess requests get a known-unsubmitted busy rejection. A worker waits for
+the acceptance acknowledgement before executing its job. Each slot is a full
+pinned worker with its own transaction pinning, request deadline,
+peer-disconnect kill, and served/RSS rotation. Rotation replaces a persistent
+slot's worker in place.
 `STOP` and a watched-stamp change stop accepting, let every slot finish its
-current job (bounded by that job's own request deadline), and only then
-drain and reject whatever is left queued. Ordinary (non-`--persistent`)
+accepted jobs (bounded by each job's own request deadline), and only then
+drain and reject the unaccepted listener backlog. Ordinary (non-`--persistent`)
 daemon mode always runs one worker and ignores `--workers`: it retires the
 whole endpoint, not just a slot, the first time any request's rotation bound
-is reached, which only suits the single short-lived worker that mode was
-designed around.
+is reached. It has no pending queue, so a busy worker yields an immediate
+known-unsubmitted rejection.
 
 `--workers` and `--rss-ceiling-mb` keep their historical meanings (worker
 count and a per-worker RSS ceiling) when given explicitly. Their *defaults*
