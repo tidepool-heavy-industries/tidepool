@@ -130,3 +130,22 @@ Direct native `codex queue` to the root failed with a session-metadata error;
 operator delivery is being investigated before claiming the root received the
 reservation diagnosis. No running host or daemon was restarted. Next scheduled
 check remains22:56PDT through `tidepool-rsi-supervisor.timer`.
+
+
+Follow-up at05:23Z: tmux insertion fix integrated as `fece13978`, reviewed from
+isolated `fbdeaedff`. Exact main check
+`just test-lib exomonad-node 'test(=tmux::tests::dedicated_socket_session_has_exact_create_and_kill_lifecycle)'`
+passed1/1 (96skipped), including eight concurrent actor windows. No live host
+was rebuilt/restarted. Reversible live mitigation installed on **wave13 only**:
+session-local `after-new-window` selects `wave13:{end}`, and current selection
+was moved to the last window. No prior hook existed; pane IDs/processes stay
+unchanged. This changes visible focus and is a temporary mitigation, not the
+atomic production fix.
+
+Operator notification25 to root carries the memory-reservation diagnosis:
+admitted and retained, not yet presented. Reviewer actor8 received the separate
+preparation-path review question (notification2, Presented). Root again queued
+an8GiB job, so active-turn delivery is under investigation. The queue-observation
+implementation is assigned to `audit_abstractions` in isolated branch
+`perf/command-queue-observation`; use the existing owner and per-job observation,
+preserve FIFO and protected bypass, and expose no other-run identities.
