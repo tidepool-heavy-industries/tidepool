@@ -17,7 +17,7 @@ dirty-source reporting; shutdown also completed. Other actor recipes are pending
 | AssumptionWatch | Typed fingerprints are retained, but the relevance callback receives only rendered descriptions. | Let relevance inspect typed before/after observations, so code need not parse its own display text. |
 | BrowserScenario | Existing `web/dist/index.html` proves presence, not freshness. | Default preparation must build/check, or require an input-matched successful preparation witness. Keep the browser assertion separate to avoid running it twice. |
 | Routing | Exact terminal candidate evidence and checkpoint progress are properly distinct; terminal readiness test is still failing. Duplicate input names currently throw `error`. | Resolve the failing terminal test before advertising. Prefer typed setup refusal consistent with CheckResults. |
-| Review / Work | Existing automatic review and ordinary task review use different report/decision vocabularies. Retained reviewer reuse does not itself move its checkout. | Reuse one coordinator, share exact candidate/evidence boundaries, retain attempts before effects, and require exact checkout preparation or a fresh reviewer. |
+| Review / Work | Existing automatic review and ordinary task review use different report/decision vocabularies. A consumer search found no executable `reviewOf` caller; the exercised continuation uses `Outcome Candidate`. Retained reviewer reuse does not itself move its checkout. | Extract the actual continuation's narrow composition; do not promote unused Project.Review as the default. Share exact candidate/evidence boundaries, retain attempts before effects, and require exact checkout preparation or a fresh reviewer. |
 | Diagnostics | Investigate, Reflex and TestEvidence already own investigation, classification and focused evidence. | Compose those owners; do not introduce another classifier, parser or test runner. |
 | Interview / handoff | These need bounded collection and supplied facts, not independent actor registries or authority. | Reuse typed responses and existing evidence. Retirement remains a separate operation. |
 
@@ -34,6 +34,27 @@ dirty-source reporting; shutdown also completed. Other actor recipes are pending
 - Default displays should be compact; full histories and output remain explicit
   reads. Account for helper compile/effect cost as well as saved model turns.
 - The twelve user-facing operations need not become twelve modules or actors.
+
+## Expressiveness and elegance
+
+Correctness is necessary but insufficient. The notebook interface should express
+useful orchestration directly and compose without reconstructing context. A record
+around ambiguous arguments does not by itself achieve that.
+
+- Carry selected operations as typed values through Jev decisions; do not select
+  strings and redispatch by name. Let callers supply policy as ordinary functions.
+- Let preparation produce the value/evidence its continuation consumes, so callers
+  cannot accidentally substitute an unrelated readiness flag or repeat setup facts.
+- Watch typed projections and compare domain values. Render text at notification
+  boundaries, not between internal decisions.
+- Compose independent observations using existing event-source operations; retain
+  one stateful actor where the coordination actually needs state.
+- Separate pure evidence interpretation from optional semantic judgment and
+  execution where this gives callers useful compositions. Avoid abstraction layers
+  with no concrete consumer.
+- Judge interfaces by compiled, realistic notebook examples: what context must the
+  model repeat, which states must it manually reconcile, and how naturally does the
+  result feed the next operation? Prefer deleting that work over adding wrappers.
 
 ## Remaining review scope
 
