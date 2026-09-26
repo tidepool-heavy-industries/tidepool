@@ -84,3 +84,23 @@ root cell's source before proposing compiler changes.
 
 No production code changed during this audit; no resources retired or shared
 daemons restarted. Preserve the failed-reviewer evidence until diagnosis.
+
+## Follow-up: cleanup compilation and retained resources
+
+The 63,095 ms cell bound two cleanup receipts and displayed their tuple.
+Request `4175a1bfbab08989` alone took 57,219 ms at the client (57,119 ms
+compiler total). The compiler had just rotated at 12:30:24.831 after 329
+requests: RSS 7,194 MiB exceeded the configured 7,168 MiB ceiling. The next
+request was marked `followed_rotation=true`, `served=0`. Its principal phases
+were GHC load 12,152 ms, lowering 23,845 ms and module interfaces 16,540 ms.
+These are cold reconstruction costs after rotation, not evidence of seven
+identical compilations. No cache or rotation-policy change follows from this
+single incident. No shared daemon was restarted for this investigation.
+
+The cancelled reviewer's supervisor checkpoint still says `process_stopped`,
+no pending operation and no error. Its host-tools/input socket paths remain.
+This confirms process stop only; it does not supersede the host's retained
+ToolService/BuildResource/WorktreeBinding receipt. Resources were preserved
+for the lifecycle follow-up rather than manually deleting them.
+
+The full follow-up root interview is retained in `wave16-helper-interview.md`.
