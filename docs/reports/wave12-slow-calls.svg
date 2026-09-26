@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="555" viewBox="0 0 1100 555">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="sans-serif" font-size="13">
+<text x="20" y="24" font-size="18">Wave 12 — root Haskell calls over 10 seconds</text>
+<text x="20" y="46">Measured wall-time components; compiler service is split by reported worker phases.</text>
+<rect x="20" y="61" width="12" height="12" fill="#7389b5"/>
+<text x="36" y="72">Preflight wait</text>
+<rect x="232" y="61" width="12" height="12" fill="#d66b55"/>
+<text x="248" y="72">Prepared projection</text>
+<rect x="444" y="61" width="12" height="12" fill="#d9ac4c"/>
+<text x="460" y="72">GHC load</text>
+<rect x="656" y="61" width="12" height="12" fill="#70a18b"/>
+<text x="672" y="72">Other compile response</text>
+<rect x="868" y="61" width="12" height="12" fill="#b9bec9"/>
+<text x="884" y="72">Other call time</text>
+<text x="20" y="117">1. Admit initial three children</text>
+<rect x="310.00" y="100" width="0.00" height="24" fill="#7389b5"/>
+<rect x="310.00" y="100" width="4.76" height="24" fill="#d66b55"/>
+<rect x="314.76" y="100" width="2.61" height="24" fill="#d9ac4c"/>
+<rect x="317.38" y="100" width="7.54" height="24" fill="#70a18b"/>
+<rect x="324.91" y="100" width="37.88" height="24" fill="#b9bec9"/>
+<text x="370.80" y="117">24.1s</text>
+<text x="20" y="161">2. Admit acceptance replacement</text>
+<rect x="310.00" y="144" width="0.00" height="24" fill="#7389b5"/>
+<rect x="310.00" y="144" width="2.36" height="24" fill="#d66b55"/>
+<rect x="312.36" y="144" width="1.37" height="24" fill="#d9ac4c"/>
+<rect x="313.73" y="144" width="2.43" height="24" fill="#70a18b"/>
+<rect x="316.16" y="144" width="20.22" height="24" fill="#b9bec9"/>
+<text x="344.38" y="161">12.0s</text>
+<text x="20" y="205">3. Commission UI review</text>
+<rect x="310.00" y="188" width="0.90" height="24" fill="#7389b5"/>
+<rect x="310.90" y="188" width="5.10" height="24" fill="#d66b55"/>
+<rect x="316.00" y="188" width="1.38" height="24" fill="#d9ac4c"/>
+<rect x="317.38" y="188" width="2.61" height="24" fill="#70a18b"/>
+<rect x="319.99" y="188" width="15.37" height="24" fill="#b9bec9"/>
+<text x="343.36" y="205">11.6s</text>
+<text x="20" y="249">4. Send corrected acceptance assignment</text>
+<rect x="310.00" y="232" width="214.85" height="24" fill="#7389b5"/>
+<rect x="524.85" y="232" width="179.91" height="24" fill="#d66b55"/>
+<rect x="704.75" y="232" width="9.21" height="24" fill="#d9ac4c"/>
+<rect x="713.97" y="232" width="32.64" height="24" fill="#70a18b"/>
+<rect x="746.60" y="232" width="80.80" height="24" fill="#b9bec9"/>
+<text x="835.40" y="249">236.1s</text>
+<text x="20" y="293">5. Read server and review replies</text>
+<rect x="310.00" y="276" width="218.77" height="24" fill="#7389b5"/>
+<rect x="528.77" y="276" width="320.97" height="24" fill="#d66b55"/>
+<rect x="849.74" y="276" width="5.41" height="24" fill="#d9ac4c"/>
+<rect x="855.15" y="276" width="45.52" height="24" fill="#70a18b"/>
+<rect x="900.67" y="276" width="49.33" height="24" fill="#b9bec9"/>
+<text x="958.00" y="293">292.0s</text>
+<text x="20" y="337">6. Assign server repair</text>
+<rect x="310.00" y="320" width="0.00" height="24" fill="#7389b5"/>
+<rect x="310.00" y="320" width="223.30" height="24" fill="#d66b55"/>
+<rect x="533.30" y="320" width="5.47" height="24" fill="#d9ac4c"/>
+<rect x="538.77" y="320" width="101.06" height="24" fill="#70a18b"/>
+<rect x="639.83" y="320" width="90.66" height="24" fill="#b9bec9"/>
+<text x="738.49" y="337">191.9s</text>
+<text x="20" y="381">7. Assign UI repair</text>
+<rect x="310.00" y="364" width="0.00" height="24" fill="#7389b5"/>
+<rect x="310.00" y="364" width="26.98" height="24" fill="#d66b55"/>
+<rect x="336.98" y="364" width="10.64" height="24" fill="#d9ac4c"/>
+<rect x="347.62" y="364" width="21.33" height="24" fill="#70a18b"/>
+<rect x="368.95" y="364" width="34.80" height="24" fill="#b9bec9"/>
+<text x="411.75" y="381">42.8s</text>
+<text x="20" y="425">8. Commission design consultation</text>
+<rect x="310.00" y="408" width="41.80" height="24" fill="#7389b5"/>
+<rect x="351.80" y="408" width="9.93" height="24" fill="#d66b55"/>
+<rect x="361.74" y="408" width="126.99" height="24" fill="#d9ac4c"/>
+<rect x="488.73" y="408" width="16.10" height="24" fill="#70a18b"/>
+<rect x="504.83" y="408" width="29.27" height="24" fill="#b9bec9"/>
+<text x="542.10" y="425">102.3s</text>
+<text x="20" y="469">9. Read UI repair result</text>
+<rect x="310.00" y="452" width="0.00" height="24" fill="#7389b5"/>
+<rect x="310.00" y="452" width="5.29" height="24" fill="#d66b55"/>
+<rect x="315.29" y="452" width="1.97" height="24" fill="#d9ac4c"/>
+<rect x="317.26" y="452" width="20.29" height="24" fill="#70a18b"/>
+<rect x="337.55" y="452" width="10.10" height="24" fill="#b9bec9"/>
+<text x="355.65" y="469">17.2s</text>
+<text x="20" y="513">10. Read server repair result</text>
+<rect x="310.00" y="496" width="6.75" height="24" fill="#7389b5"/>
+<rect x="316.75" y="496" width="3.41" height="24" fill="#d66b55"/>
+<rect x="320.16" y="496" width="1.97" height="24" fill="#d9ac4c"/>
+<rect x="322.12" y="496" width="3.64" height="24" fill="#70a18b"/>
+<rect x="325.77" y="496" width="19.90" height="24" fill="#b9bec9"/>
+<text x="353.67" y="513">16.3s</text>
+</g></svg>
