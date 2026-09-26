@@ -28,6 +28,7 @@ mod lookup_availability_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 mod overlay_resource;
+pub(crate) use overlay_resource::valid_artifact_path;
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
@@ -109,7 +110,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 pub(crate) use self::host_incarnation::HostIncarnationLease;
-use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot, SharedOverlayResource};
+use self::overlay_resource::{
+    ArtifactInspection, OverlayResourceLease, OverlaySnapshot, SharedOverlayResource,
+};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
 
@@ -2347,6 +2350,8 @@ pub(crate) async fn run(
         std::fs::remove_file(&operator_socket)?;
     }
     let inspection_forest = forest.clone();
+    let artifact_owners = application_owners.clone();
+    let artifact_run_id = runtime_namespace(&run_root);
     let operator = crate::operator::OperatorService::bind(
         operator_socket.clone(),
         Arc::new(move || {
@@ -2372,6 +2377,73 @@ pub(crate) async fn run(
             })
         }),
         Arc::new(move |requester| inspection_forest.inspect_graph(requester)),
+        Arc::new(move |actor: ActorRef, relative_path: PathBuf| {
+            let owners = artifact_owners.clone();
+            let run_id = artifact_run_id.clone();
+            Box::pin(async move {
+                let logical_path = Path::new(ACTOR_PROJECT_ROOT)
+                    .join(ACTOR_BUILD_TARGET)
+                    .join(&relative_path)
+                    .display()
+                    .to_string();
+                // Clone the exact resource while holding the owner map briefly;
+                // its publication lock may wait for a rotation.
+                let (build, retired) = {
+                    let owners = owners.lock();
+                    match owners.get(&actor) {
+                        Some(owner) => (
+                            owner
+                                .creator_workspace
+                                .as_ref()
+                                .and_then(|bound| bound.workspace.build.clone()),
+                            owner.terminal.is_some(),
+                        ),
+                        None => (None, false),
+                    }
+                };
+                let availability = match build {
+                    Some(build) => match build.inspect_artifact(&relative_path).await {
+                        ArtifactInspection::Present(layers) => {
+                            crate::run_map::ArtifactAvailability::RetainedLayers {
+                                layers: layers
+                                    .into_iter()
+                                    .map(|layer| crate::run_map::ArtifactLayer {
+                                        order: layer.order,
+                                        host_path: layer.path.display().to_string(),
+                                        current_upper: layer.current_upper,
+                                    })
+                                    .collect(),
+                                visible_source: crate::run_map::Evidence::Unknown {
+                                    reason: "physical backing paths do not prove merged overlay visibility".into(),
+                                },
+                            }
+                        }
+                        ArtifactInspection::Missing => {
+                            crate::run_map::ArtifactAvailability::Missing
+                        }
+                        ArtifactInspection::Retired => {
+                            crate::run_map::ArtifactAvailability::Retired
+                        }
+                        ArtifactInspection::RefusedPath => {
+                            crate::run_map::ArtifactAvailability::RefusedPath
+                        }
+                        ArtifactInspection::Unknown(reason) => {
+                            crate::run_map::ArtifactAvailability::Unknown { reason }
+                        }
+                    },
+                    None if retired => crate::run_map::ArtifactAvailability::Retired,
+                    None => crate::run_map::ArtifactAvailability::Unknown {
+                        reason: "No active build overlay owner for this exact actor".into(),
+                    },
+                };
+                crate::run_map::ArtifactProvenance {
+                    run_id,
+                    actor,
+                    logical_path,
+                    availability,
+                }
+            })
+        }),
     )
     .await;
     let operator = match operator {

@@ -24,7 +24,10 @@ mod metadata;
 mod review;
 mod trace;
 use metadata::{binding_thread, read_root, recorded_link};
-pub use metadata::{RecordedLink, RootBinding, TimeWindow, WatchState};
+pub use metadata::{
+    ArtifactAvailability, ArtifactLayer, ArtifactProvenance, RecordedLink, RootBinding, TimeWindow,
+    WatchState,
+};
 pub use review::{
     ActorDeliveries, CancellationRow, Deliveries, DeliveryRow, Fence, HostInput, MessagePhase,
     Notification, Observation, Percentiles, Provenance, Receipt, RepeatGroup, Review, Section,

@@ -177,7 +177,16 @@ enum Command {
 enum OperatorCommand {
     New,
     List,
-    Stop { session: String },
+    Stop {
+        session: String,
+    },
+    /// Inspect retained build backing paths for one exact actor.
+    Artifact {
+        actor: u64,
+        incarnation: u64,
+        /// Path relative to the actor's .exomonad/build/cargo mount.
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -314,6 +323,17 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 OperatorCommand::Stop { session } => {
                     tidepool::operator::OperatorAction::Stop { session }
                 }
+                OperatorCommand::Artifact {
+                    actor,
+                    incarnation,
+                    path,
+                } => tidepool::operator::OperatorAction::Artifact {
+                    actor: exomonad_actor::ActorRef {
+                        id: exomonad_actor::ActorId(actor),
+                        incarnation: exomonad_actor::Incarnation(incarnation),
+                    },
+                    relative_path: path,
+                },
             };
             tidepool::operator::command(&socket, action).await
         }
@@ -415,6 +435,21 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_artifact_query_selects_exact_actor_and_build_relative_path() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "exomonad", "operator", "--socket", "/private/operator.sock",
+                "artifact", "7", "2", "debug/deps/evidence.json"
+            ]).unwrap().command,
+            Command::Operator {
+                socket,
+                action: OperatorCommand::Artifact { actor: 7, incarnation: 2, path }
+            } if socket == std::path::Path::new("/private/operator.sock")
+                && path == std::path::Path::new("debug/deps/evidence.json")
+        ));
+    }
 
     #[test]
     fn run_map_cli_preserves_explicit_directory_and_window() {

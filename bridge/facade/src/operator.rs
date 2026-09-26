@@ -26,6 +26,9 @@ use wire::*;
 
 type InspectGraph =
     dyn Fn(exomonad_actor::ActorRef) -> Option<Vec<exomonad_actor::ActorGraphNode>> + Send + Sync;
+type InspectArtifact = dyn Fn(exomonad_actor::ActorRef, PathBuf) -> BoxFuture<'static, crate::run_map::ArtifactProvenance>
+    + Send
+    + Sync;
 
 type Provision = dyn Fn() -> BoxFuture<'static, Result<LocalActorRef, String>> + Send + Sync;
 #[derive(Clone)]
@@ -34,6 +37,7 @@ struct AttachmentState {
     open: Arc<std::sync::atomic::AtomicBool>,
     provision: Arc<Provision>,
     inspect_graph: Arc<InspectGraph>,
+    inspect_artifact: Arc<InspectArtifact>,
     socket: PathBuf,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +55,7 @@ impl OperatorService {
         socket: PathBuf,
         provision: Arc<Provision>,
         inspect_graph: Arc<InspectGraph>,
+        inspect_artifact: Arc<InspectArtifact>,
     ) -> std::io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         let parent = socket
@@ -65,11 +70,13 @@ impl OperatorService {
             open: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provision,
             inspect_graph,
+            inspect_artifact,
             socket,
         };
         let app = Router::new()
             .route("/host/operators", get(list).post(new))
             .route("/host/operators/{session}/stop", post(stop))
+            .route("/host/artifacts", post(artifact))
             .route("/v1/sessions/{session}", get(inspect))
             .route("/v1/sessions/{session}/submit", post(submit))
             .route("/v1/sessions/{session}/actors", get(graph))
@@ -107,6 +114,37 @@ impl OperatorService {
         // does not affect a later run, which binds its own fresh socket.
         std::fs::remove_file(&self.state.socket).ok();
     }
+}
+
+async fn artifact(State(state): State<AttachmentState>, body: Body) -> Response {
+    let bytes = match to_bytes(body, 8 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "Artifact query exceeds 8 KiB",
+            )
+        }
+    };
+    let request: ArtifactRequest = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(error_value) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                error_value.to_string(),
+            );
+        }
+    };
+    if !crate::actor_host::valid_artifact_path(&request.relative_path) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_artifact_path",
+            "Use a relative build artifact path without traversal",
+        );
+    }
+    Json((state.inspect_artifact)(request.actor, request.relative_path).await).into_response()
 }
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
@@ -431,7 +469,13 @@ fn bounded_response(mut result: SubmitResponse) -> Response {
 pub enum OperatorAction {
     New,
     List,
-    Stop { session: String },
+    Stop {
+        session: String,
+    },
+    Artifact {
+        actor: exomonad_actor::ActorRef,
+        relative_path: PathBuf,
+    },
 }
 
 pub async fn command(
@@ -445,6 +489,7 @@ pub async fn command(
         .build()?;
     let url = match &action {
         OperatorAction::New | OperatorAction::List => "http://localhost/host/operators".to_owned(),
+        OperatorAction::Artifact { .. } => "http://localhost/host/artifacts".to_owned(),
         OperatorAction::Stop { session } => {
             let mut url = reqwest::Url::parse("http://localhost/host/operators/")?;
             url.path_segments_mut()
@@ -455,10 +500,16 @@ pub async fn command(
             url.to_string()
         }
     };
-    let response = if matches!(action, OperatorAction::List) {
-        client.get(url)
-    } else {
-        client.post(url)
+    let response = match action {
+        OperatorAction::List => client.get(url),
+        OperatorAction::Artifact {
+            actor,
+            relative_path,
+        } => client.post(url).json(&ArtifactRequest {
+            actor,
+            relative_path,
+        }),
+        OperatorAction::New | OperatorAction::Stop { .. } => client.post(url),
     }
     .send()
     .await?;
@@ -469,4 +520,68 @@ pub async fn command(
     }
     println!("{body}");
     Ok(())
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+    use exomonad_actor::{ActorId, ActorRef};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn artifact_query_is_read_only_and_rejects_traversal_before_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator.sock");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let service = OperatorService::bind(
+            socket.clone(),
+            Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
+            Arc::new(|_| None),
+            Arc::new(move |actor, relative_path| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    crate::run_map::ArtifactProvenance {
+                        run_id: "test-run".into(),
+                        actor,
+                        logical_path: relative_path.display().to_string(),
+                        availability: crate::run_map::ArtifactAvailability::Unknown {
+                            reason: "no active owner".into(),
+                        },
+                    }
+                })
+            }),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .unix_socket(socket.as_path())
+            .build()
+            .unwrap();
+        let actor = ActorRef::first(ActorId(7));
+        let query = |path: &str| ArtifactRequest {
+            actor,
+            relative_path: PathBuf::from(path),
+        };
+        let refused = client
+            .post("http://localhost/host/artifacts")
+            .json(&query("../outside"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let accepted = client
+            .post("http://localhost/host/artifacts")
+            .json(&query("debug/evidence.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let body: serde_json::Value = accepted.json().await.unwrap();
+        assert_eq!(body["actor"], serde_json::json!({"id":7,"incarnation":1}));
+        assert_eq!(body["availability"]["state"], "unknown");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        service.shutdown().await;
+    }
 }

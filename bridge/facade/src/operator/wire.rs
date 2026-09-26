@@ -1,5 +1,12 @@
 //! Portable proposed operator HTTP v1 schema. Copy with serde + serde_json only.
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArtifactRequest {
+    pub actor: exomonad_actor::ActorRef,
+    pub relative_path: PathBuf,
+}
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;

@@ -1,7 +1,7 @@
 //! Shared overlay publication and storage custody for source and build views.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use exomonad_node::{
@@ -58,6 +58,20 @@ impl SharedOverlayResource {
 
     pub(super) fn latest_snapshot(&self) -> Option<OverlaySnapshot> {
         self.latest.lock().clone()
+    }
+
+    /// Inspect only the backing paths owned by this live publication. The
+    /// result identifies physical retained copies, not which overlay entry is
+    /// visible after whiteouts, opaque directories, or nested mounts.
+    pub(super) async fn inspect_artifact(&self, relative: &Path) -> ArtifactInspection {
+        if !valid_artifact_path(relative) {
+            return ArtifactInspection::RefusedPath;
+        }
+        let publication = self.publication.lock().await;
+        match publication.as_ref() {
+            Some(resource) => resource.inspect_artifact(relative),
+            None => ArtifactInspection::Retired,
+        }
     }
 
     #[cfg(test)]
@@ -128,6 +142,57 @@ struct OverlayLayer {
     storage: Arc<OverlayStorage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedArtifactLayer {
+    /// Ordered bottom to top; the current writable upper is last.
+    pub order: usize,
+    pub path: PathBuf,
+    pub current_upper: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArtifactInspection {
+    Present(Vec<RetainedArtifactLayer>),
+    Missing,
+    Retired,
+    RefusedPath,
+    Unknown(String),
+}
+
+pub(crate) fn valid_artifact_path(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 4096
+        && !bytes.contains(&0)
+        && path.components().count() <= 64
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn inspect_backing_path(root: &Path, relative: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = root.to_path_buf();
+    let mut final_metadata = None;
+    for part in relative.components() {
+        current.push(part.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::other("symlink in artifact backing path"));
+        }
+        final_metadata = Some(metadata);
+    }
+    if !final_metadata.is_some_and(|metadata| metadata.is_file()) {
+        return Err(io::Error::other(
+            "artifact backing entry is not a regular file",
+        ));
+    }
+    Ok(Some(current))
+}
+
 #[derive(Debug)]
 struct OverlayStorage {
     path: PathBuf,
@@ -196,6 +261,35 @@ impl OverlayResourceLease {
     // Compaction copies one merged tree per 32 published layers. Older layers
     // remain leased while descendants use them, so peak storage can rise.
     const COMPACT_AT_LAYERS: usize = 32;
+
+    fn inspect_artifact(&self, relative: &Path) -> ArtifactInspection {
+        if !matches!(self.publication, PublicationState::Writable) {
+            return ArtifactInspection::Unknown("build publication is unsettled".into());
+        }
+        let mut retained = Vec::new();
+        for (order, root) in self
+            .layers
+            .iter()
+            .map(|layer| layer.path.as_path())
+            .chain(std::iter::once(self.upper.as_path()))
+            .enumerate()
+        {
+            match inspect_backing_path(root, relative) {
+                Ok(Some(path)) => retained.push(RetainedArtifactLayer {
+                    order,
+                    path,
+                    current_upper: order == self.layers.len(),
+                }),
+                Ok(None) => {}
+                Err(error) => return ArtifactInspection::Unknown(error.to_string()),
+            }
+        }
+        if retained.is_empty() {
+            ArtifactInspection::Missing
+        } else {
+            ArtifactInspection::Present(retained)
+        }
+    }
 
     pub(super) fn allocate_path(
         path: PathBuf,
@@ -913,6 +1007,72 @@ mod tests {
     /// `source_publication_preserves_the_independent_build_mount`; short
     /// because the test view has nothing to wait on but its own mount.
     const CHILD_VIEW_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn artifact_inspection_reports_owned_upper_and_inherited_lower() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent =
+            OverlayResourceLease::allocate_path(directory.path().join("parent"), None).unwrap();
+        std::fs::create_dir_all(parent.layers[0].path.join("cargo")).unwrap();
+        std::fs::write(parent.layers[0].path.join("cargo/result.json"), b"lower").unwrap();
+        let inherited = OverlaySnapshot {
+            layers: parent.layers.clone().into(),
+        };
+        let child =
+            OverlayResourceLease::allocate_path(directory.path().join("child"), Some(inherited))
+                .unwrap();
+        let shared = SharedOverlayResource::new(child);
+        let relative = Path::new("cargo/result.json");
+        let lower = shared.inspect_artifact(relative).await;
+        assert!(matches!(
+            lower,
+            ArtifactInspection::Present(ref layers)
+                if layers.len() == 1
+                    && layers[0].path == parent.layers[0].path.join(relative)
+                    && !layers[0].current_upper
+        ));
+
+        let upper = shared.publication.lock().await;
+        let own_upper = upper.as_ref().unwrap().upper.clone();
+        drop(upper);
+        std::fs::create_dir_all(own_upper.join("cargo")).unwrap();
+        std::fs::write(own_upper.join(relative), b"upper").unwrap();
+        let both = shared.inspect_artifact(relative).await;
+        assert!(matches!(
+            both,
+            ArtifactInspection::Present(ref layers)
+                if layers.len() == 2
+                    && layers[0].path == parent.layers[0].path.join(relative)
+                    && layers[1].path == own_upper.join(relative)
+                    && layers[1].current_upper
+        ));
+        assert_eq!(
+            shared.inspect_artifact(Path::new("cargo/missing")).await,
+            ArtifactInspection::Missing
+        );
+        assert_eq!(
+            shared.inspect_artifact(Path::new("../result.json")).await,
+            ArtifactInspection::RefusedPath
+        );
+        shared.retire().await.unwrap();
+        assert_eq!(
+            shared.inspect_artifact(relative).await,
+            ArtifactInspection::Retired
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_inspection_does_not_follow_backing_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let resource =
+            OverlayResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
+        std::os::unix::fs::symlink(directory.path(), resource.upper.join("outside")).unwrap();
+        let shared = SharedOverlayResource::new(resource);
+        assert!(matches!(
+            shared.inspect_artifact(Path::new("outside/secret")).await,
+            ArtifactInspection::Unknown(_)
+        ));
+    }
 
     #[tokio::test]
     async fn retired_parent_layers_survive_children_then_are_reclaimed() {
