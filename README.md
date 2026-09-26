@@ -54,6 +54,14 @@ building `exomonad-harness` incrementally. Each wave feeds two connected cycles:
   semantic judgments to discover useful orchestration patterns and expand what
   we want the system to accomplish.
 
+One core target is the graph of model rounds: tool calls, forks, replies, review
+and parent integration. Move small recurring workflows into authored Haskell,
+using Jev for contextual decisions and focused stronger-model judgment where it
+helps cheaper nodes. Save rounds, improve results and enable useful work that
+would otherwise cost too much. Modest wins on a fraction of opportunities count;
+measure their costs and compound the successful ones. Evaluate the Haskell
+helpers and eDSLs themselves as agents discover, compose and reuse them.
+
 The target evolves alongside the system. Keep observations, interpretations and
 proposals distinct. Measure product progress and orchestration improvements
 separately, carry unresolved questions forward, and judge changes by subsequent

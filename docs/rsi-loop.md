@@ -42,6 +42,57 @@ several layers. Separate that work from unresolved design questions and experime
 For the current harness workload, prove extension points through standalone stubs
 and production consumers before attempting Exomonad integration.
 
+## Core target: improve the graph of model rounds
+
+Audit the graph of work across model rounds, tool calls, forks, replies, review
+and integration. The worker tree alone is insufficient: children return evidence
+and decisions to parents, and repairs and follow-ups create further dependencies.
+Find small recurring sequences where authored Haskell can save frontier model
+rounds, improve results, or supply a bounded stronger judgment to a cheaper node.
+
+Move exact operations into deterministic code and contextual decisions into
+bounded Jev judgments. Use a focused Astra consultation when consequential
+uncertainty needs frontier reasoning; retain its useful policy or procedure in
+Haskell where possible. This can give Luna nodes access to stronger judgment at
+the needed boundary without upgrading every round. A compiled procedure does not
+itself establish Astra-level judgment quality: evaluate the resulting decisions.
+
+Start with modest, composable wins. A follow-up that saves a few frontier rounds
+in roughly 30% of opportunities can justify a cheap judgment even if that judgment
+runs on every opportunity. That fraction is an illustrative payoff, not a quota
+or measured rate. Preserve a useful fallback for the remaining cases. Accumulate
+several proven improvements instead of requiring the first workflow to cover all
+cases. Include useful vigilance and coordination that agents previously omitted
+because performing it through model rounds cost too much.
+
+For each intervention record:
+
+- The triggering opportunity and actual sequence of calls, including information
+  returned from children and any subsequent parent work.
+- The replacement Haskell workflow, exact operations, semantic judgments and
+  point where an unresolved decision returns to a model.
+- Observed use, rounds avoided, output/context reduction, result quality and
+  newly feasible work; keep estimated savings separate from measured outcomes.
+- Added judgment, setup, latency and maintenance costs, failed follow-ups and
+  fallback behavior. Evaluate combined improvements without double-counting the
+  same avoided round or hiding costs shifted to children or the supervisor.
+
+Evaluate the Haskell surface alongside the workflow. Can an agent discover,
+compose, customize and inherit it without reconstructing bookkeeping? Do its
+types and combinators express the useful logic, retain evidence and make failure
+handling clear? Does the eDSL operate concrete machinery with a small, stable
+interface? Improve the offered helpers and frameworks when observed use exposes
+leaky boundaries, awkward composition or needless ceremony. Interface elegance
+must help real consumers express richer behavior, not merely add wrappers.
+
+Give validated, advertised automations at least three waves of actual prompt
+exposure before judging non-use. Distinguish absent opportunities, discovery
+problems, setup failures and poor utility; fix confirmed defects immediately.
+
+The first post-wave15 experiment applies this target to Bash followed by waiting
+and diagnostic reads: make the tool own routine continuation, with bounded
+Jev-assisted follow-ups where useful, then evaluate against the recorded sequences.
+
 ## 1. Orient and choose
 
 The supervisor reads the previous run's artifacts and interviews, verifies
