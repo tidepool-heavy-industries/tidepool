@@ -194,3 +194,29 @@ cancellations, which hid wave13's tmux diagnosis from its parent.
 
 Protected demo still listens on4600 as hostPID3202992. Timer remains active;
 next tick23:41PDT. Existing run/log/source/pin identities remain unchanged.
+
+
+### Integration rollback — 06:06 UTC
+
+Queue diagnostics are **deferred**, not deployed. Integrated tests passed2/2,
+but at06:04 the running wave13 compiler rejected `Tidepool.Command` because
+its old generated `Tidepool.Effects.Core` lacks `CommandQueueWait`. The live
+worker reads the mutable Tidepool Haskell library; changing the schema/library
+under it broke compatibility despite focused checks passing with a matched new
+worker. Reverted integration39bd8b1a3 as `f8483da2c`; the reviewed implementation
+remains `f53900607` on its isolated branch. No shared daemon was restarted.
+Root notification and actual next-cell recovery verification are pending.
+Future schema/library integration must wait for active runs or use an immutable
+matched runtime-library snapshot; treat this as an owning-source isolation gap.
+
+`just fixtures-check` stopped at stale Suite oracle fingerprint; it did NOT
+pass. Native GHC regeneration changed only the fingerprint, no expectation or
+payload digest. That generated edit was removed with the schema rollback.
+The original fingerprint still fails current input validation after rollback;
+retain run evidence `target/prepared-corpus/run.tF5pv5` and investigate the
+fingerprint input set before a later release gate. No oracle values were edited.
+
+Managed-root scoped follow-ups committed7b16899bb (reject authored FIFO/nonregular
+entries) and a8f61b41a (reject changed parent symlink before artifact import),
+with focused tests. Cancellation-aware authored copying still underway; a
+fully adversarial concurrent path-swap race is not claimed solved.
