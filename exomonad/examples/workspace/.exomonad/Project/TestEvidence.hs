@@ -247,7 +247,7 @@ diagnosticExcerpt completed
   where
     stderr = Cmd.stderr completed
     beforeRecord = case Text.breakOnEnd "focused test record begin\n" stderr of
-      (prefix, rest) | not (Text.null rest) ->
+      (prefix, _) | not (Text.null prefix) ->
         Text.dropEnd (Text.length "focused test record begin\n") prefix
       _ -> stderr
 
@@ -303,7 +303,7 @@ evidenceRecord :: Text -> Maybe Text
 evidenceRecord stderr = case reverse (Text.lines stderr) of
   "focused test record status: available" : _ ->
     case Text.breakOnEnd begin stderr of
-      (_, rest) | Text.null rest -> Nothing
+      (prefix, _) | Text.null prefix -> Nothing
       (_, rest) -> case Text.breakOn end rest of
         (_, remaining) | Text.null remaining -> Nothing
         (encoded, _) -> Just (Text.strip encoded)
