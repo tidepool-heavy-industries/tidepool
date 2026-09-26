@@ -70,6 +70,7 @@ reason. Cells as a freeform custom tool are the safe form of the same idea.
 |---|---|
 | `unfold`, `errand`, `withContext inherited/selected`, two-pass activate | one effect `spawnAgent :: From -> Contract -> Eff es AgentRef`, `From = Prompt \| Here \| Checkpoint name`. N spawns in one cell are N siblings from one point; the child inherits the parent's claim on the pending cell call and starts from the cell's committed snapshot. |
 | `watch` + end the turn + wake + `pollWatch` | the model calls `wait_agent`; the child's final answer arrives as a FINAL_ANSWER envelope, a settled job on its own `call_id`. No notification-and-wake protocol. |
+| the `Await` applicative, `Watches` (register, groups, routes, observe, forget), the three-valued watch state, `ProgressCursor` revisions, the 30-second foreground handoff in `Command.hs`, `ToolRounds` | a cell blocks; the call settles late and the model resumes through `wait_agent`. The shape of the blocking surface is not decided; see "Blocking in cells" below. |
 | `sendMessage`, `parentAgent` | `send_message` (no turn) and `followup_task` (starts a turn) on agent paths; parent path is a field of the actor context. |
 | `afterTool` annotation | the `tool-result` hook, one of eleven. |
 | labels validated as kebab segments | labels are path segments; model-facing form uses the trained grammar (lowercase, digits, underscore); both accepted, canonicalized. |
@@ -135,14 +136,165 @@ crate changed until the last step. The harness ships the primitives that make
 each promotion small; the model does the promoting. Record the first real
 instance with its query.
 
+## What the dogfood runs are showing (our notes, not the builders' task)
+
+The harness waves run inside today's Exomonad on purpose: each run pays the
+costs the harness is meant to remove, and the root's friction notes in the
+harness repo's `docs/questions.md` are the primary evidence. Wave 0
+(2026-09-23/24) showed: a registered watch gave no progress unless the child
+published a stream, so the root polled and then read git instead; native
+`spawn_agent` children could not use Bash, Haskell or status; a batched
+`lookup` over agent lists failed in the compiler worker; the `afterTool`
+watchdog was not installed for the root actor, so no nudge ledger could
+exist; leaves got isolated worktrees and the parent merged by hand with no
+veto before the edit; effort was fixed at spawn. Each maps to a mechanism in
+the surface table above. Keep adding here per wave; this is the case for the
+adoption, written from what the runs cost.
+
+## One process
+
+Today every actor is a Codex subprocess with its own conversation on disk,
+so the swarm side has to manage a process tree: launch arguments per actor,
+a relay socket per process for host tools, memory ceilings for N concurrent
+Codex instances, rollout files as the only view of usage, wake-and-poll
+protocols because a parked child is a parked process, and cleanup of the
+tree when a parent dies. After adoption there are a few processes total: the
+harness (all agent threads, the store, the web view), the GHC worker, and the
+cells' machines. An agent is a row and a set of futures, not a process. A
+parked node costs a row. Fork is a store operation, not a second process with
+a copied rollout. Child shutdown is dropping futures under a subtree root.
+Memory is the model window per live request plus the store, so the swarm's
+own memory management collapses to the compaction policy in the hooks table.
+
+The harness library ships no supervisor and no actor abstraction; it returns
+one future per agent over a shared store, and its standalone binary has a
+small driver that spawns them. Adoption replaces that driver with the actor
+host here, which already owns supervision. `exomonad-actor`'s identity,
+lifecycle and mailbox become views over harness rows or are deleted; the
+merge is an Exomonad actor becoming a harness agent path plus a resident
+environment, not a shared interface between two actor systems. Standalone
+pieces built in wave 1 are built to be hosted this way, not rewritten.
+
+## Blocking in cells (suggestions, not decisions)
+
+Everything under `Tidepool/Agent/Watch/` and the foreground handoff in
+`Command.hs` exists because a cell could not outlive the Codex turn. With
+async tool calls the cell's job blocks and the call settles late, so the
+question becomes what the blocking surface should look like. The following
+are one model's answers to "what would you expect, sitting at the cell
+prompt as a parent with children, jobs, and an operator", written
+2026-09-23 before any of it is built. Each is a suggestion to test in
+dogfooding, not a rule.
+
+- **Events underneath, handles as sugar.** `awaitAgent h` is what a model
+  types without reading docs, so keep it. But with two children the next
+  thing wanted is "whichever finishes first", and with handles alone that
+  is a special function to look up. If handles expose events (`settled h`,
+  `progress h`, `envelopeFrom path`, the operator's reply) and there is one
+  blocking primitive over events with `race` and `both`, then
+  `awaitAgent h` is `await (settled h)` and a peek is
+  `race (settled h) (after 30s)`, a value to pattern-match. `Tidepool/Event.hs`
+  already has `awaitFirst` over `Event a`. No `awaitFor`: one composable
+  primitive beats a second one to remember. This shape also leaves room for
+  an applicative layer over events later, which is out of scope now.
+- **Claims hold the duplicate.** A child's reply both settles the awaiting
+  cell and is a FINAL_ANSWER envelope to the parent path. If a cell holds a
+  claim on the child, the envelope is delivered as Hold and released when
+  the claim ends (the cell returns, fails, or is cancelled), never dropped.
+  The parent decided how to consume the reply when it wrote the cell;
+  seeing it twice reads as the harness not trusting that. The claims rule
+  already does this for calls.
+- **Report only.** No interval notices that a cell is still waiting; they
+  cost a turn boundary and carry nothing actionable. The cell calls `report`
+  (the harness `JobVerbs::envelope`) where its author knows something
+  happened. A child's `report` reaches the parent as an envelope from the
+  child's path, so the parent's mailbox hook can Steer or leave it. The
+  operator looks at the web view.
+- **The child calls a tool; the parent picks the route.** A child given
+  `askParent :: Question -> Decision` calls it and gets a typed answer,
+  never knowing whether code, a cell, or the parent's model answered. Per
+  tool the parent chooses a handler in its own environment (the existing
+  `spawnAgentWithTools` idea, minus the round bound, because the handler
+  runs as a job) or "ask my model", which is a `followup_task` to the
+  parent's own path delivered as an ordinary envelope. Nothing new in the
+  harness.
+- **Ownership by origin.** A child spawned from a cell belongs to that
+  cell; cancelling the cell cancels the child. A child spawned by the
+  model's verb belongs to the conversation and is untouched by any cell's
+  cancellation. Same split the claims rule makes between the two spawn
+  origins. Retain-first: a cancelled child's last state stays queryable.
+
+The harness-side implications (Hold released on claim end; cancellation
+scoped by spawn origin) are recorded in the harness repo's
+`docs/ideas-later.md` so wave 1 does not preclude them.
+
 ## What is deleted on this side
 
-`exomonad/agent/src/backend/codex/` and the relay socket for host tools;
+Per-actor process supervision and the resource accounting around it
+(concurrent Codex instance limits, subprocess memory ceilings, orphan
+cleanup). `exomonad/agent/src/backend/codex/` and the relay socket for host tools;
 rollout parsing for usage; the `--disable multi_agent code_mode` launch
 arguments; `Unfold.hs`'s free applicative and two-pass activation; the
-watch-and-wake reactivation path for children; `ForkContext`; the
+watch-and-wake reactivation path for children; `Tidepool/Agent/Watch/` with
+the `Watches` effect and its handler; the foreground-handoff and
+observation-deadline paths in `Command.hs`; `ToolRounds`; `ForkContext`; the
 notification presentation states. The retired `exomonad/harness/` and
 `exomonad/web/` trees go with them, since the harness ships its own web view.
+
+## Parity with Codex: what Exomonad takes from it today, and where each goes
+
+Measured from `exomonad/agent/src/backend/codex/` (about 9.5k lines) on
+2026-09-24. Exomonad drives Codex through `thread/start` with dynamic tools,
+`turn/start` with a cwd and a workspace-write sandbox policy, `turn/interrupt`,
+and `item/tool/call` relayed back over the commands socket; it reads
+`config.toml` for model, effort and its own `model_instructions_file`; it
+reads `auth.json` for the subscription credential that Codex refreshes; and
+it reads rollouts for usage and for `reflect`. No MCP servers are handed to
+Codex.
+
+| Taken from Codex today | Covered by | Gap |
+|---|---|---|
+| model loop, streaming, retries | harness waves 0 to 1 | none |
+| threads, fork, dynamic tools relayed to Exomonad | harness agent tree + `Provider` adapter (steps 2 and 3) | none |
+| rollouts for usage and `reflect` | harness store queries | none |
+| effort per thread from config | `configuration_update` (correction wave c) | none |
+| compaction | `Compactor` (correction wave d, wave 1) | none |
+| model instructions file | Exomonad already supplies its own; becomes the root developer item | none |
+| subscription credential and refresh | harness reads Codex's `auth.json` read-only; **Codex stays installed only to refresh tokens** | login and refresh in the harness `Auth` trait. The retired `exomonad/harness/src/provider/oauth.rs` has a complete device-code and browser login with refresh (1.4k lines); port, do not redesign. Reference only, own code, per the Codex rule |
+| `commandExecution` and `apply_patch` under a workspace-write, network-off sandbox | harness wave 2 gives the demo provider `run`, `read`, `edit` unsandboxed (operator's machine, trusted models) | sandboxing itself, deferred. Owner when it comes: the provider, since tool meaning is provider-owned; the harness supplies only the owned/mustNot veto |
+| `turn/interrupt` | `interrupt_agent` declared, refused `not_available` | cancel in flight; needed for parity, not only for the operator |
+
+The first three rows are the hard part and they are planned. The last three
+are ordinary engineering that no wave owns yet.
+
+## Follow-on waves toward replacing Codex
+
+Harness-side first, Tidepool last. The harness stays pluggable and the demo
+provider grows just enough that the operator can drive it alone for a few
+runs before any adapter is written.
+
+1. **Correction wave** and **wave 1** in the harness repo (its `docs/tree.md`).
+2. **Wave 2, standalone and operator-drivable** (harness repo). Auth: port
+   the device-code login and refresh from the retired
+   `exomonad/harness/src/provider/oauth.rs` behind the `Auth` trait, so the
+   run stops reading Codex's file. Coding tools in the demo provider,
+   unsandboxed for now: `run` with cwd at the subtree worktree and a wall
+   timeout, a `read` tool, `edit` owned-confined. The operator's machine,
+   trusted models; sandboxing is deferred to a later wave and belongs to
+   the provider when it comes. Tree mode by default, the operator
+   drives root from the page. Gate: one real multi-file task in a scratch
+   repo with Codex not installed and Tidepool untouched. Note for that later wave: Tidepool's own code has no subprocess
+   resource limits today (checked 2026-09-24; the only `setrlimit` is in
+   vendored Codex).
+3. **Operator runs** of wave 2, several, before anything below. Friction
+   notes from these go in the section above.
+4. **Adapter wave** (Tidepool, steps 2 and 3 in Order): `Provider` for the
+   cell tool and shell, `spawnAgent` and the contract record. Sandboxing, when
+   it comes, covers cells and shell alike.
+5. **Interrupt** (harness): `interrupt_agent` with the typed previous
+   status, cancellation scoped by spawn origin. Later; nothing above needs
+   it.
+6. **Deletion**: steps 6 and 7 in Order. Codex is no longer on the machine.
 
 ## Order
 
