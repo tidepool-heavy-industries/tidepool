@@ -461,6 +461,7 @@ impl TmuxSession {
         command
             .arg("new-window")
             .arg("-d")
+            .arg("-a")
             .arg("-t")
             .arg(self.name.as_str())
             .arg("-n")
@@ -753,6 +754,23 @@ mod tests {
         let mut actor_launch = launch.clone();
         actor_launch.window_name = "RootActor".into();
         let actor_pane = session.spawn_window(&actor_launch).await.unwrap();
+        let concurrent = (0..8)
+            .map(|index| {
+                let session = session.clone();
+                let mut launch = launch.clone();
+                launch.window_name = format!("ConcurrentActor{index}");
+                tokio::spawn(async move { session.spawn_window(&launch).await })
+            })
+            .collect::<Vec<_>>();
+        let mut concurrent_panes = HashSet::new();
+        for task in concurrent {
+            assert!(concurrent_panes.insert(task.await.unwrap().unwrap()));
+        }
+        assert!(session
+            .list_panes()
+            .await
+            .unwrap()
+            .is_superset(&concurrent_panes));
         session.select_window_for_pane(&actor_pane).await.unwrap();
         let selected = session
             .command()
