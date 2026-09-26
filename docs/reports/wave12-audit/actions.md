@@ -132,7 +132,7 @@ reservation diagnosis. No running host or daemon was restarted. Next scheduled
 check remains22:56PDT through `tidepool-rsi-supervisor.timer`.
 
 
-Follow-up at05:23Z: tmux insertion fix integrated as `fece13978`, reviewed from
+Follow-up at05:21Z: tmux insertion fix integrated as `fece13978`, reviewed from
 isolated `fbdeaedff`. Exact main check
 `just test-lib exomonad-node 'test(=tmux::tests::dedicated_socket_session_has_exact_create_and_kill_lifecycle)'`
 passed1/1 (96skipped), including eight concurrent actor windows. No live host
