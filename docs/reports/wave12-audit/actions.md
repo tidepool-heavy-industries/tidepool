@@ -312,3 +312,48 @@ an incomplete DesignQuestion constructor, leaving required fields unapplied;
 retain as model-facing API ergonomics evidence. Actor2 had16 captured Jev
 effects:2 actual HTTP403 RBAC denials and14 circuit-open responses without a
 backend request. These counts are actor-specific, not a whole-run total.
+
+
+### Scheduled supervision — 2026-09-26 06:41 UTC
+
+Wave14 remains active; no new wave or teardown. Root checkpoint names Provider/
+Store2a9852cc (focused checks reported1/1 each), independent reviewer actor5,
+Engine7b5693a6 (compiled only, retained owner asked for cancellation/failure
+repairs), and independent browser acceptance actor4. Review correctly declined
+provider-only forwarding tests as proof of Engine persistence/correlation.
+Root is incorporating review and expected-red work; no product acceptance yet.
+
+Read-only Jev investigation counted10 actual provider RBAC403 responses and120
+local circuit-open refusals through recovery06:40:26, followed by58 successful
+responses at the audit snapshot. Source confirms one shared client admission
+before send and one recovery probe per30s. Logs establish neither credit nor
+credential cause. Existing breaker worked; future telemetry should distinguish
+local circuit-open observations from provider HTTP responses without a new
+service owner. No credential inspection, network probes or restart performed.
+
+Helper experiment: actor3 reported publication after reload_helpers, then one
+composed cell issued3 command effects but selected/executed0 tests (expected1);
+this is a failed selection, not a passing test. Its Jev judgment failed during
+403 interval. Actor2 reported the root's 4-to-3GiB dirty helper snapshot stayed
+in its own checkout despite the root reverting locally. Reviewer reported an
+import rejection with no command effect, followed by direct-script fallback.
+These distinguish file inheritance, publication, invocation and actual reuse.
+Supervisor notification18 admitted to root: experiment does not require exactly
+4GiB; realistic3GiB plus exact helper/source evidence is valid. No instruction
+to rerun completed product tests merely to satisfy the experiment. Admission
+is not evidence that the root has read this notification.
+
+One-line task-prompt repair8e4f7720cc47aab5972b173a2d57487870f4538d is isolated
+in harness branchrsi/question-prompt, worktree rsi-question-prompt. It supplies
+the six DesignQuestion fields previously available only in specialist prompt;
+compared with pinned Project.Types, diff check passed. No executable snippet
+or runtime schema added. Awaiting independent review; leave live wave unchanged.
+
+Sol investigates runtime stdlib isolation in a separate worktree: dev facade
+embeds an empty bundle and falls back to mutable checkout library; frozen
+workspace hashes but does not copy it. Require protection against mid-run edits
+and distinguish admission of an already-mismatched old binary. No live library
+changes or shared daemon restart authorized by this investigation.
+
+Protected demo HTTP200 at this tick. Timer next00:26:19 PDT (07:26:19 UTC).
+Dirty NEXT/helper files and retained cleanup resources remain untouched.
