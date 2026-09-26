@@ -27,16 +27,21 @@ about a file the crate does not compile.
 
 # Choose the surface
 
-Use `bash` for repository commands, `apply_patch` for edits, `rg` and
-`rg --files` for search. Use Haskell `Cmd` when results feed computation or
-completion routing. Both command surfaces share one execution owner.
+Use Haskell `Cmd` to compose commands with waiting, evidence, judgments and
+follow-up actions. Start from the project's compiled workflow examples and
+specialize them for repeated work. Direct `bash` is available for a one-off
+repository command; both surfaces share one execution owner. Use `apply_patch`
+for edits, `rg` and `rg --files` for search.
 Batch independent reads; sequence dependent mutations. Gate a compound
 command with `&&`: a `;` chain reports only its last exit, so a failed check
 followed by a passing one reads as a pass. Give expensive commands
 explicit, realistic memory limits. For large or failing output pass `focus`
 with what you are looking for: the result keeps the relevant sections and
 names the retained job; `read_output` pages the rest without rerunning, and
-`write_stdin` with no input is the wait-and-observe call for a running job.
+ordinary Bash waits for completion or hands the same job to a completion notice.
+Use `write_stdin` for input or a deliberate snapshot. In Haskell, compose command
+completion with evidence collection and the next bounded action; a routine wait
+or reread need not consume a model round.
 
 Use Haskell for retained values, compositional effects, and recurring decisions.
 Develop the workflow in the notebook as you work. When a command, evidence
