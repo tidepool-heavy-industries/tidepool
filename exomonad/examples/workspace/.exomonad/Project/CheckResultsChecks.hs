@@ -6,8 +6,8 @@
 {-# LANGUAGE TypeOperators #-}
 
 module Project.CheckResultsChecks
-  ( completionRouting, managedEvidence, runningCommandCleanup
-  , EvidenceProbe (probeStart, probeRead, probeMove), evidenceProbe
+  ( preparedCompletion, completionRouting, managedEvidence, runningCommandCleanup
+  , EvidenceProbe (probeStart, probePrepared, probeRead, probeMove), evidenceProbe
   ) where
 
 import Control.Monad (void)
@@ -25,6 +25,28 @@ import Tidepool.Effects.Core (Actor, Commands)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Worktree (createWorktree, fromCurrentRepository, worktreeId)
 import Project.CheckResults
+
+-- Preparation and test execution share the original command. These checks
+-- exercise failure classification without making Jev infer a prerequisite.
+preparedCompletion :: Member RecipeCheck effects => Eff effects ()
+preparedCompletion = do
+  owner <- root
+  concrete <- turn owner "import SessionHelpers\nlet candidateOid = \"0123456789abcdef0123456789abcdef01234567\" :: GitOid\nconcreteGate <- runCheck me candidateOid (Cmd.MiB 64) (CheckDefinition \"concrete invocation\" \"fixture\" \"lib\" \"one\" 0)\nconcreteGate"
+  check "session entrypoint infers effects without a cell annotation" ("NonPositiveExpected 0" `Text.isInfixOf` lastOutput concrete)
+  void $ turn owner "let spec = FocusedSpec \"prepared fixture\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
+  void $ turn owner "Right failedPreparation <- startFocusedAfter (Cmd.MiB 256) spec [\"sh\", \"-c\", \"echo missing-assets >&2; exit 9\"]"
+  void $ awaitOutput owner "Cmd.status (runJob failedPreparation)" (Text.isInfixOf "CommandFinished")
+  failure <- turn owner "preparedFailure <- collectFocused failedPreparation\npreparedDiagnosis <- diagnoseFocused preparedFailure\n(focusedPreparation preparedFailure, focusedEvidencePath preparedFailure, diagnosisBranch preparedDiagnosis, focusedExecution preparedFailure)"
+  check "failed preparation prevents test execution and retains its own classification"
+    (all (`Text.isInfixOf` lastOutput failure) ["PreparationFailed 9", "Nothing", "SetupIncomplete", "ExecutionUnknown"])
+  void $ turn owner "Right successfulPreparation <- startFocusedAfter (Cmd.MiB 256) spec [\"sh\", \"-c\", \"printf prepared\"]"
+  void $ awaitOutput owner "Cmd.status (runJob successfulPreparation)" (Text.isInfixOf "CommandFinished")
+  success <- turn owner "preparedSuccess <- collectFocused successfulPreparation\nfocusedPreparation preparedSuccess"
+  check "successful preparation is retained separately from the check result" (lastOutput success == "PreparationPassed")
+  void $ turn owner "interrupted <- Cmd.start (Cmd.withStdin (Cmd.argv [\"sh\", \"-c\", \"read line\"]))\nCmd.cancel interrupted"
+  void $ awaitOutput owner "Cmd.status interrupted" (Text.isInfixOf "CommandFinished")
+  cancelled <- turn owner "cancelledResult <- collectFocused (PreparedFocusedRun spec interrupted)\n(focusedPreparation cancelledResult, focusedPassed cancelledResult)"
+  check "interrupted preparation never claims success" (all (`Text.isInfixOf` lastOutput cancelled) ["PreparationUnknown", "False"])
 
 -- A completed job is attached late; two other jobs settle through the same
 -- record actor. The fixture uses the focused runner's retained JSON shape.
@@ -112,6 +134,7 @@ completionRouting = do
 data EvidenceProbe mode = EvidenceProbe
   { probeState :: mode :- State ()
   , probeStart :: mode :- Call () (R.Reply FocusedRun)
+  , probePrepared :: mode :- Call () (R.Reply (Either FocusedSetupIssue FocusedRun))
   , probeRead :: mode :- Call Text (R.Reply Text)
   , probeMove :: mode :- Call (Text, Text) (R.Reply Text)
   } deriving Generic
@@ -122,6 +145,13 @@ evidenceProbe :: FocusedSpec -> ActorSpec EvidenceProbe EvidenceProbeEffects
 evidenceProbe spec =
   R.definition "focused-evidence-probe" (Actor.Selected knownEffects) EvidenceProbe
     { probeState = ()
+    , probePrepared = \() -> do
+        let checks = Text.pack workspaceRoot <> "/checks/"
+        setup <- Cmd.run (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv
+          ["bash", checks <> "prepared-focused-setup.sh", checks <> "focused-result-fixture.sh"]))
+        case Cmd.failure setup of
+          Just detail -> pure (Left (FocusedStartRefused (Cmd.CommandInvalid detail)))
+          Nothing -> startFocusedAfter (Cmd.MiB 64) spec ["sh", "-c", "printf ready > .prepared-here"]
     , probeStart = \() -> FocusedRun spec <$> Cmd.start
         (Cmd.withMemory (Cmd.MiB 64)
           (Cmd.argv ["bash", Text.pack workspaceRoot <> "/checks/focused-result-fixture.sh", "pass", "managed"]))
@@ -190,6 +220,13 @@ managedEvidence = do
     "afterMove <- collectFocused managedRun\n(focusedExecution afterMove, focusedEvidence afterMove, focusedEvidencePath afterMove)"
   check "the original retained job still proves execution after its artifact moves"
     (all (`Text.isInfixOf` lastOutput retained) ["ExecutionPassed 1", "fixture-digest", "Just"])
+  void $ turn owner "Right preparedRun <- R.call (probePrepared (R.client boundProbe)) ()\nRight preparedWatcher <- watchChecks me NotifyAllTerminal [(\"prepared\", preparedRun)]"
+  prepared <- awaitOutput owner "checksSummary <$> readChecks preparedWatcher" (Text.isInfixOf "prepared: passed")
+  check "preparation writes and test reads in the same managed checkout"
+    (all (`Text.isInfixOf` prepared) ["prepared: passed", "PreparationPassed", "executed 1 passed", "CommandClean"])
+  unknown <- turn owner "preparedResult <- collectFocused preparedRun\nfocusedPassed (preparedResult { focusedPreparation = PreparationUnknown })"
+  check "unconfirmed preparation cannot be accepted even with passing test evidence" (lastOutput unknown == "False")
+  void $ turn owner "finishChecks preparedWatcher"
   void $ turn owner "finishChecks managedWatcher\nR.finish boundProbe\nR.finish unboundProbe"
 
 -- The driver must service a live command's cleanup receipt while its resident

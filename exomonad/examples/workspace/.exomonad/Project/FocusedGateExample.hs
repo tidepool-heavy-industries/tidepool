@@ -5,7 +5,7 @@
 -- terminal facts; call 'readChecks' and 'foldGate' only when a decision needs
 -- the retained typed result.
 module Project.FocusedGateExample
-  ( GateStart (..), startGate, readGate, foldGate
+  ( GateStart (..), startGate, startPreparedGate, readGate, foldGate
   ) where
 
 import Control.Monad (forM_)
@@ -30,7 +30,17 @@ startGate
   :: (Member Actor effects, Member Commands effects)
   => AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> Eff effects GateStart
 startGate owner name memory spec = do
-  started <- startFocused memory spec
+  startFocused memory spec >>= attachGate owner name
+
+-- One original job retains prerequisite and test evidence in the owner checkout.
+startPreparedGate
+  :: (Member Actor effects, Member Commands effects)
+  => AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> [Text] -> Eff effects GateStart
+startPreparedGate owner name memory spec preparation =
+  startFocusedAfter memory spec preparation >>= attachGate owner name
+
+attachGate :: Member Actor effects => AgentRef -> Text -> Either FocusedSetupIssue FocusedRun -> Eff effects GateStart
+attachGate owner name started =
   case started of
     Left issue -> pure (GateSetupRefused issue)
     Right run -> do

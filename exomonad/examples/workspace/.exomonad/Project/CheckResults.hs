@@ -97,7 +97,7 @@ checkDefinition owner policy runs =
       , checkSnapshot = \() -> R.get
       , checkCompletions = R.on (mconcat
           [fmap (\receipt -> (name, run, receipt)) (Cmd.completion job)
-          | (name, run@(FocusedRun _ job)) <- runs]) completed
+          | (name, run) <- runs, let job = runJob run]) completed
       }
   where
     completed (name, run, receipt) = do
@@ -140,7 +140,8 @@ checkSourceAssurance _ outcome = focusedSourceAssurance (checkFocused outcome)
 
 matchingReceipt :: CheckEntry -> CheckOutcome -> Bool
 matchingReceipt entry outcome =
-  let FocusedRun spec job = checkRun entry
+  let spec = runSpec (checkRun entry)
+      job = runJob (checkRun entry)
       result = checkFocused outcome
   in focusedSpec result == spec
     && Cmd.completedJob (focusedCommand result) == job
@@ -157,6 +158,7 @@ checkLine entry = checkName entry <> ": " <> case checkOutcome entry of
       <> maybe "" (" @" <>) (recordSource =<< either (const Nothing) Just (focusedEvidence (checkFocused outcome)))
       <> "; " <> Text.pack (show (Cmd.commandOutcome (checkCompletion outcome)))
       <> "; cleanup " <> Text.pack (show (Cmd.commandCleanup (checkCompletion outcome)))
+      <> "; preparation " <> Text.pack (show (focusedPreparation (checkFocused outcome)))
       <> "; artifact " <> maybe "unknown" id (focusedEvidencePath (checkFocused outcome))
       <> either ("; evidence unknown: " <>) (const "; evidence recorded")
            (focusedEvidence (checkFocused outcome))

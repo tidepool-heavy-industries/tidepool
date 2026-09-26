@@ -10,6 +10,7 @@ module Project.TestEvidence
   ( FocusedSpec (..), FocusedSetupIssue (..), FocusedRun (..), FocusedRecord (..), FailureKind (..)
   , FocusedResult (..), CheckExecution (..), SourceAssurance (..)
   , FailureEvidence (..), FocusedDiagnosis (..)
+  , PreparationEvidence (..), startFocusedAfter
   , startFocused, startFocusedIn, collectFocused, diagnoseFocused, finishFocused
   , focusedPassed, focusedExecution, focusedSourceAssurance
   ) where
@@ -34,10 +35,14 @@ data FocusedSpec = FocusedSpec
   , focusedExpected :: Int
   } deriving (Show, Eq)
 
-data FocusedRun = FocusedRun FocusedSpec Cmd.Job deriving (Show)
+data FocusedRun
+  = FocusedRun { runSpec :: FocusedSpec, runJob :: Cmd.Job }
+  | PreparedFocusedRun { runSpec :: FocusedSpec, runJob :: Cmd.Job }
+  deriving (Show)
 
 data FocusedSetupIssue
-  = NonPositiveExpected Int
+  = EmptyPreparation
+  | NonPositiveExpected Int
   | NonAbsoluteCheckout Text
   | FocusedStartRefused Cmd.CommandError
   deriving (Show, Eq)
@@ -75,11 +80,15 @@ data FailureKind
   | InsufficientEvidence
   deriving (Show, Eq)
 
+data PreparationEvidence = NoPreparation | PreparationPassed | PreparationFailed Int | PreparationUnknown
+  deriving (Show, Eq)
+
 data FocusedResult = FocusedResult
   { focusedSpec :: FocusedSpec
   , focusedCommand :: Cmd.RunResult
   , focusedEvidencePath :: Maybe Text
   , focusedEvidence :: Either Text FocusedRecord
+  , focusedPreparation :: PreparationEvidence
   , focusedFailure :: Maybe (Either Text FailureKind)
   } deriving (Show)
 
@@ -125,13 +134,32 @@ startFocusedIn checkout memory spec
       Cmd.tryBackground (Cmd.inDirectory checkout (focusedCommandFor memory spec))
 
 focusedCommandFor :: Cmd.Memory -> FocusedSpec -> Cmd.Command
-focusedCommandFor memory spec = Cmd.withMemory memory $
+focusedCommandFor memory spec = focusedCommandAfter memory spec []
+
+-- Preparation and the check execute under one job's checkout authority. The
+-- argv is executed literally; a failed prerequisite never starts the runner.
+startFocusedAfter :: Member Commands effects => Cmd.Memory -> FocusedSpec -> [Text] -> Eff effects (Either FocusedSetupIssue FocusedRun)
+startFocusedAfter memory spec preparation
+  | null preparation = pure (Left EmptyPreparation)
+  | focusedExpected spec <= 0 = pure (Left (NonPositiveExpected (focusedExpected spec)))
+  | otherwise = fmap (either (Left . FocusedStartRefused) (Right . PreparedFocusedRun spec)) $
+      Cmd.tryBackground (focusedCommandAfter memory spec preparation)
+
+focusedCommandAfter :: Cmd.Memory -> FocusedSpec -> [Text] -> Cmd.Command
+focusedCommandAfter memory spec preparation = Cmd.withMemory memory $
       Cmd.withArguments
-        [ focusedPackage spec, focusedTarget spec, focusedFilter spec
-        , Text.pack (show (focusedExpected spec)) ]
+        ([ focusedPackage spec, focusedTarget spec, focusedFilter spec
+        , Text.pack (show (focusedExpected spec)) ] ++ preparation)
         [bash|set -uo pipefail
 runner_output=$(mktemp) || { printf 'focused runner cannot allocate output capture\n' >&2; exit 125; }
 trap 'rm -f -- "$runner_output"' EXIT
+if (( $# > 4 )); then
+  "${@:5}" > "$runner_output" 2>&1
+  preparation_exit=$?
+  tail -c 8192 "$runner_output" >&2
+  printf '\nfocused preparation exit: %s\n' "$preparation_exit" >&2
+  if (( preparation_exit != 0 )); then exit "$preparation_exit"; fi
+fi
 scripts/cargo-focused-test --package "$1" --target "$2" --filter "$3" --expect "$4" > "$runner_output" 2>&1
 runner_exit=$?
 tail -c 8192 "$runner_output" >&2
@@ -185,7 +213,9 @@ focusedSourceAssurance result = case focusedEvidence result of
 -- actor may observe the job without being able to open the originating
 -- actor's checkout. The terminal output must be complete to prove the JSON.
 collectFocused :: Member Commands effects => FocusedRun -> Eff effects FocusedResult
-collectFocused (FocusedRun spec job) = do
+collectFocused run = do
+  let spec = runSpec run
+      job = runJob run
   completed <- Cmd.await job
   let stderr = Cmd.stderr completed
       path = evidencePath stderr
@@ -197,7 +227,17 @@ collectFocused (FocusedRun spec job) = do
           Just encoded -> case Cmd.asJSON @FocusedRecord encoded of
             Left issue -> Left ("cannot decode focused evidence: " <> issue)
             Right record -> Right record
-  pure (FocusedResult spec completed path evidence Nothing)
+  let preparation = if not (completeStderr completed) then PreparationUnknown else
+        case [Text.strip suffix | line <- Text.lines stderr, Just suffix <- [Text.stripPrefix "focused preparation exit: " line]] of
+          [] -> case run of
+            FocusedRun {} -> NoPreparation
+            PreparedFocusedRun {} -> PreparationUnknown
+          ["0"] -> PreparationPassed
+          [code] -> case reads (Text.unpack code) of
+            [(value, "")] | value > 0 -> PreparationFailed value
+            _ -> PreparationUnknown
+          _ -> PreparationUnknown
+  pure (FocusedResult spec completed path evidence preparation Nothing)
 
 completeStderr :: Cmd.RunResult -> Bool
 completeStderr completed =
@@ -209,18 +249,20 @@ completeStderr completed =
     && not (Cmd.outputLossy page)
 
 failureEvidence :: FocusedResult -> FailureEvidence
-failureEvidence result = case focusedEvidence result of
-  Left _ -> EvidenceUnavailable
-  Right record
-    | recordRunnable record == Just [] -> ZeroSelection
-    | ExecutionFailed passed failed <- focusedExecution result ->
-        AssertionsFailed passed failed
-    | ExecutionUnknown <- focusedExecution result -> SetupIncomplete
-    | Cmd.failure (focusedCommand result) /= Nothing
-        || Cmd.commandCleanup (Cmd.commandResult (focusedCommand result)) /= Cmd.CommandClean
-        || recordExitCode record /= Just 0 -> RunnerFailed
-    | focusedSourceAssurance result /= SourceVerified -> SourceUnverified
-    | otherwise -> NoFailureEvidence
+failureEvidence result
+  | PreparationFailed _ <- focusedPreparation result = SetupIncomplete
+  | otherwise = case focusedEvidence result of
+    Left _ -> EvidenceUnavailable
+    Right record
+      | recordRunnable record == Just [] -> ZeroSelection
+      | ExecutionFailed passed failed <- focusedExecution result ->
+          AssertionsFailed passed failed
+      | ExecutionUnknown <- focusedExecution result -> SetupIncomplete
+      | Cmd.failure (focusedCommand result) /= Nothing
+          || Cmd.commandCleanup (Cmd.commandResult (focusedCommand result)) /= Cmd.CommandClean
+          || recordExitCode record /= Just 0 -> RunnerFailed
+      | focusedSourceAssurance result /= SourceVerified -> SourceUnverified
+      | otherwise -> NoFailureEvidence
 
 -- | The originating job already emitted a bounded diagnostic tail before its
 -- evidence record. Reading that terminal output does not require authority to
@@ -284,6 +326,7 @@ finishFocused run = do
 focusedPassed :: FocusedResult -> Bool
 focusedPassed result =
   focusedExecution result == ExecutionPassed (focusedExpected (focusedSpec result))
+    && focusedPreparation result `elem` [NoPreparation, PreparationPassed]
     && focusedSourceAssurance result == SourceVerified
     && Cmd.failure (focusedCommand result) == Nothing
     && Cmd.commandCleanup (Cmd.commandResult (focusedCommand result)) == Cmd.CommandClean
