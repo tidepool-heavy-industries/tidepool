@@ -68,3 +68,27 @@ while retaining broad parallel Luna execution and independent review. This is
 a future experiment, not a model change or new launch for the current batch.
 Compare design quality, useful delegation, convergence and end-to-end cost;
 do not assume a stronger root removes the need to fix orchestration defects.
+
+## Launch preparation and reduced critical path
+
+User approved parallel completion and a fallback to ordinary event-driven review
+if automatic convergence remains unresolved. Helper isolation and live
+request-aware review acceptance remain gates. Reuse passed checks and run focused
+integration checks; do not repeat broad batteries. Ship one small remixable
+test/evidence helper before generalizing it. Convergence retries are bounded;
+retain its failure evidence and card any deferred behavior.
+
+After integration and verification, launch two independent Exomonad roots:
+
+- Sol in exomonad-harness drives the next product wave, using the improved
+  prompts and review surface. Its product scope is standalone extension-point
+  proof through stubs, with no real Exomonad adapter or credentialed inference.
+  Resolve concrete acceptance from current harness source before launch.
+- Astra in Tidepool is entirely user-driven from turn zero. Send no initial
+  task, orientation, NEXT.md instruction or autonomous assignment. Leave the
+  initial composer empty for the user.
+
+Use distinct tmux sessions, the same verified matched build, and one-worker
+compiler settings. Record actual source revisions, workspace pins, prompt
+catalog identity, run/log paths and configured models at launch. Preparation
+is not evidence that either root has started.
