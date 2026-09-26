@@ -44,6 +44,37 @@ and production consumers before attempting Exomonad integration.
 
 ## Core target: improve the graph of model rounds
 
+### Distill small decision flows into actors
+
+A core RSI goal is to distill recurring decision trees into Haskell effects and
+small flowchart-style actors, using Jev for semantic branching. Start with the
+mind-numbing bookkeeping: one repeated five-tool-call sequence, a routine relay,
+or the first diagnostic reads after a failure. Choose a narrow episode with a
+clear input, useful output and stopping point. Replacing that episode is enough;
+do not expand it into replacing the agent's whole engineering assignment.
+
+Draw the observed flow before implementing it. Code handles exact conditions,
+identities and transitions; Jev interprets bounded evidence where choosing the
+next branch needs semantic understanding. The actor retains the original handles,
+intermediate evidence and continuation across events. Its Haskell interface lets
+the frontier model supply context, permitted actions and decision criteria once,
+then receive the result or the specific question the flow could not settle.
+
+For example: a command fails, the agent reads stderr, chooses a diagnostic read,
+reads its output and summarizes what to do next. A small actor can retain the
+failure, let Jev select among supplied read-only probes, execute a bounded probe,
+and return the original outcome with useful diagnostic evidence. The agent still
+owns the repair. Similarly, a flow can deliver a baseline update and collect
+incorporation evidence while leaving semantic conflicts with the component owner.
+
+Prefer a small complete flow over a collection of wrappers that still requires
+the model to perform every transition. Reuse existing effects, routing callbacks
+and resource owners. Give semantic branches an unresolved outcome and preserve
+evidence for escalation. Validate representative successful, failed and ambiguous
+episodes, then measure setup, judgments, recovery and actual frontier work saved.
+Keep useful partial coverage: automating a modest fraction of opportunities can
+pay off without generalizing the flow to every case.
+
 Audit the graph of work across model rounds, tool calls, forks, replies, review
 and integration. The worker tree alone is insufficient: children return evidence
 and decisions to parents, and repairs and follow-ups create further dependencies.
