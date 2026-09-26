@@ -276,3 +276,30 @@ contract. Host Git status is clean; actual actor-namespace check is pending.
 Runtime build is42db232c0, catalog39. Workspace check/launch still pending at
 this entry. No second working wave overlaps wave13; old retained resources and
 wave12 demo remain untouched.
+
+
+### Wave14 active — 2026-09-26 06:36 UTC
+
+Matched incremental build and workspace check passed. Launched Sol Medium
+root in `wave14`, run `08a7d4c5-4821-4887-8a07-42470a08029b`, thread
+`01a0dc67-2aed-7eb0-95d5-15dedc7ef92f`. Runtime launch checkout15306f7c4
+(production42db232c0), harness admission5c398bc, workspace98aef850d7be.
+Worktree `/home/inanna/dev/exomonad-harness-runs/wave14`; current NEXT.md
+is there, not the completed-wave13 NEXT on harness master. Log is that
+worktree's `.exomonad/logs/<run>.log` and adjacent JSONL. Full launch facts
+are in its `docs/wave14-launch.md`.
+
+Initial task visibly started06:31:05 after a second Enter; no duplicate task.
+Root established compiling contract81ef34ce and admitted three children
+06:34:40–55. Actor-view Git status succeeded and reported dirty helpers;
+unknown cleanliness is not silently accepted. Helper publication/import and
+root's focused1/1 test are observed, but two-actor reuse remains pending.
+Luna audited the initial five minutes. Jev403 RBAC failures appear across
+actors; the shared breaker returns circuit-open abstentions and tools still
+commit. Investigate authorization separately from credit exhaustion; do not
+print credentials or treat hook abstention as successful semantic judgment.
+
+Preserved wave12 demo still HTTP200 on4600. Wave13 has no live host/compiler,
+but uncertain old custody is retained. Timer remains scheduled23:41:18 PDT
+(06:41:18 UTC). No overlapping wave. Keep runtime Haskell/schema edits isolated
+while these hosts run; no shared daemon restart.
