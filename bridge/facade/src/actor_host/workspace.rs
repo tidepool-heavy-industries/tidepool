@@ -180,13 +180,16 @@ impl PreparedWorkspace {
 }
 
 impl WorkspaceLayout {
-    fn helper_draft(&self, branch: &str) -> PathBuf {
+    fn helper_root(&self) -> PathBuf {
         self.worktrees
             .managed_root()
             .join(".resources")
             .join(&self.run_namespace)
-            .join("helpers/drafts")
-            .join(branch)
+            .join("helpers")
+    }
+
+    fn helper_draft(&self, branch: &str) -> PathBuf {
+        self.helper_root().join("drafts").join(branch)
     }
 
     fn inherit_helper_branch(&self, parent_draft: &Path, child_branch: &str) -> io::Result<()> {
@@ -194,11 +197,7 @@ impl WorkspaceLayout {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| io::Error::other("parent helper branch has no name"))?;
-        let helper_root = self
-            .worktrees
-            .managed_root()
-            .join(".resources")
-            .join(&self.run_namespace);
+        let helper_root = self.helper_root();
         let parent_layer =
             crate::exomonad::source::SourceLayer::helpers(&helper_root, parent_branch);
         let _helper_revision = parent_layer

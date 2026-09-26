@@ -82,6 +82,63 @@ fn helper_fork_keeps_invalid_draft_separate_from_last_active_revision() {
 }
 
 #[test]
+fn prepared_fork_inherits_the_published_helper_revision() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "published-helper-fork".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let parent_draft = layout.helper_draft("run");
+    std::fs::create_dir_all(parent_draft.join("SessionHelpers")).unwrap();
+    std::fs::write(
+        parent_draft.join("SessionHelpers/TestEvidence.hs"),
+        "module SessionHelpers.TestEvidence where\nvalue = 1\n",
+    )
+    .unwrap();
+    let parent_layer = crate::exomonad::source::SourceLayer::helpers(&layout.helper_root(), "run");
+    let published = parent_layer
+        .ensure_active_from("published-helper-fork", std::slice::from_ref(&parent_draft))
+        .unwrap();
+
+    std::fs::write(
+        parent_draft.join("SessionHelpers/TestEvidence.hs"),
+        "module SessionHelpers.TestEvidence where\nvalue = (\n",
+    )
+    .unwrap();
+    layout
+        .inherit_helper_branch(&parent_draft, "reviewer")
+        .unwrap();
+
+    let child_layer =
+        crate::exomonad::source::SourceLayer::helpers(&layout.helper_root(), "reviewer");
+    assert_eq!(
+        std::fs::read_link(layout.helper_root().join("layers/reviewer/active")).unwrap(),
+        PathBuf::from("revisions").join(&published.identity)
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            child_layer.active_include_paths().unwrap()[0].join("SessionHelpers/TestEvidence.hs")
+        )
+        .unwrap(),
+        "module SessionHelpers.TestEvidence where\nvalue = 1\n"
+    );
+    assert!(std::fs::read_to_string(
+        layout
+            .helper_draft("reviewer")
+            .join("SessionHelpers/TestEvidence.hs")
+    )
+    .unwrap()
+    .contains("value = ("));
+}
+
+#[test]
 fn helper_draft_fork_rejects_symlink_entries() {
     use std::os::unix::fs::symlink;
 
