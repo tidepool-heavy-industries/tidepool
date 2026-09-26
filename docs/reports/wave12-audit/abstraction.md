@@ -1,0 +1,39 @@
+# Abstraction audit — wave 12
+
+Cutoff: **2026-09-26 02:52:47 UTC**. Covered the root and six bound child Codex histories (actors 2, 3, 5, 6, 7, 8), plus harness JSONL events through the cutoff. This is an ongoing run. The histories show tool inputs and results, not every internal decision. Source references below use history call IDs and UTC timestamps; source traces remain local.
+
+## Findings
+
+### A1 — A test-evidence helper was published but had no usable consumer (opportunity; high confidence)
+
+Root copied `SessionHelpers.TestEvidence`, added `demoSpec`, and `reload_helpers` reported publication at 02:09:39 (`call_A6ri2inKIT4KCHyYiZGAS0F9`, `call_GS4CrDzKfszBSaf7rXXgbcH7`, `call_uPVQIPPULjJYziZIi00fmgCv`). Root then attempted `demoSpec` and `import SessionHelpers.TestEvidence`; both failed with out-of-scope/module-not-found errors at 02:10:59–02:11:07 (`call_qvQlI5DGRWaZvBot6WUaIMXR`, `call_JO44PYL9STuxxaHybwC7gVBf`). `import SessionHelpers` failed again at 02:14:12 (`call_42oZItPiJJPBcMCqgVnVALlQ`). Publication was therefore **not execution or reuse**. Children had forked before publication and used `scripts/cargo-focused-test` directly; acceptance used it repeatedly for `test:browser_journey`, server for `bin:harness-demo` (`call_maEK8B67LKcYk4GjgcqTh1jQ`, `call_2mucLyxm0ddmBLWI4fBRIdgU`).
+
+The helper's intended consumers were root/server/acceptance focused checks, but this run supplies no evidence that its extra Haskell/Jev wrapper would repay construction cost over the existing script. First fix helper source import resolution and verify one call with retained evidence; only then compare adoption and action count in a later wave. Do not mandate this abstraction based on its definition alone. Route: **runtime, environment, experiment**.
+
+### A2 — Repeated manual settlement projection and root relay may warrant a small typed collector (opportunity; medium confidence)
+
+Root repeatedly issued `pollResponse`, projected `ResponseReady` to `Maybe`, and displayed replies for server, web, acceptance, and reviews (02:11:16–02:12:37 `call_6ChlMGY7jG6tsPrWAXsIDt8f`, `call_bxZtc8cHQWio3hpDWEF75xSN`, `call_feeXfNQonE8C8LAR5WtzlbRb`, `call_7ZHhOWmfDOy7QAFH9RRnFlxw`; 02:36:52 `call_1vKnhdkjakWTykE3NLG8y2RJ`; 02:42:15 `call_mNGFjYzbomR7juHeTU502Ee6`; 02:46:15 `call_qOBx6cd9SctIwmYeBllIUSTf`). It also relayed versioned contract and environment corrections with `sendMessage`/`updateRequest` (02:13:33 `call_Na196C5l4pBT9CaUVKXt8te4`, 02:35:37 `call_O0kcNRQMPX0ZYM8e7Vn9NLwy`, 02:44:33 `call_feKC8fZspa4ZH8ElXAKEYqcK`).
+
+The same root is the actual consumer for at least three workstream settlements and two review streams; future waves may reuse a typed collector that waits on those handles and returns compact `{actor, exact source, outcome, evidence, pending}` records. It should only automate observation and routing of already decided updates. Contract corrections and integration judgment visibly required source inspection and must stay with the owner. Implementing an actor adds registration, type, and failure-path costs, so first prototype an in-notebook function around the existing handles and compare model rounds, missed notices, and display bytes against this trace. Route: **api, experiment**.
+
+### A3 — The shared contract surfaced a cross-component need, but several revisions arrived after forks (opportunity; medium confidence)
+
+Root produced a source-pinned shared contract before `unfold` (`call_ztNyFMXxHP82FiXr1wBBrhMf`, `call_9ggyfqOu6bPHqI5JZG3vbOY5`), which let server, web, and acceptance work from one baseline. Real consumers then exposed missing details: root added dependencies at 02:15 (`call_9DuzXFQwYovI2FGY9sWFgFPE`), outcome/order fields at 02:35 (`call_HkMeZOQDo9gHSohagYr0jxzG`), and cancelled-wait semantics at 02:44 (`call_WFxqkfz7GpBinZr7SynpTXP9`). Web's later `3bfa370` candidate and acceptance's later repair both incorporated these changes (`call_ICJbcDDN7LCjIa7jbbGgbN9P`, `call_edaescPT4zlInt6MpmNrk49P`).
+
+The successful abstraction was the source-pinned contract, not the first draft's completeness. A compact pre-fork wire example spanning command accepted, request outcome, envelope ordinal, wait/cancel, and reconnect would have had three immediate consumers (server, web, acceptance). Construction cost is a small shared fixture plus validation against the existing wire types; likelihood of future reuse is plausible for browser-facing waves, unproved here. Validate by checking whether a subsequent wave needs fewer contract corrections without hiding legitimate discoveries. Route: **prompt, api, experiment**.
+
+### A4 — Existing typed fork/review composition was useful (success; high confidence)
+
+Root used `task` and `unfold` with typed `WorkProgress`/`Outcome Candidate` to admit server/web/acceptance work from an exact Git source (`call_9ggyfqOu6bPHqI5JZG3vbOY5`, `call_MRqj6k8gHPjWw4dLexuovOd5`), then `reviewCommit`/`reviewAgain` on exact candidates (`call_gNwaGzoM1fp7jplYE3pXbReM`, `call_TbXYwbAUdW0r0dWG27dVuAUD`, `call_njAqshowod2GJnsKFXLp1WDs`). Independent review caught the initial web TypeScript build failure despite 11/11 tests (`call_PHW4Bdg0DULQoq9eEGHQlZwI`, reviewer at 02:15:35) and distinguished a later fixture-only display from production wiring (`call_1Dhvnefd7hFbtJNf3lnEmGqd`, 02:44:14). The web owner then reported 14/14 tests and typecheck/build after wiring changes (`call_ICJbcDDN7LCjIa7jbbGgbN9P`). This is defined, compiled, executed, and reused typed composition; it should remain the baseline for any collector experiment. Route: **prompt, experiment**.
+
+### A5 — The focused test script supplied reusable evidence without the Haskell wrapper (success; high confidence)
+
+The acceptance owner repeatedly ran the same `scripts/cargo-focused-test --package harness-demo --target test:browser_journey --filter browser --expect 1` after test repairs (`call_maEK8B67LKcYk4GjgcqTh1jQ`, `call_oWMAILGR7cPYMgdXGwKbyCPY`, `call_EZxpgGj7zyuW6gFGS6H0Pzgt`). The server owner used the same script with `bin:harness-demo` and `server` filter (`call_WIdhuJvpCJlAbQG6DSdrG72k`, `call_2mucLyxm0ddmBLWI4fBRIdgU`). Acceptance reported selected/runnable/executed counts and expected-red behavior in a typed Candidate (`call_VfnDH0LcERngUh4x8V7jgZHM`, 02:33:00). This is a successful existing abstraction across two actual consumers. Repeated invocations followed edits and changed source; they are not evidence of needless reruns. Route: **api, experiment**.
+
+### A6 — Jev failure volume is environmental, not evidence of an actor-level judgment abstraction gap (counterexample; high confidence)
+
+The harness logged 459 `jev call failed` events through 02:52:47, across all seven observed actors; sampled failures are HTTP 402 stating no available TypeSafe credits (JSONL 02:07:27.916, 02:07:32.253, 02:07:36.039). The root's custom helper would call Jev only on a failed focused check, but never imported, so these events cannot establish helper use or excessive semantic branching by that helper. Investigate which after-tool/runtime path issued the calls and whether a per-run unavailable-credit state should suppress identical retries; validate error classification and count avoided calls without suppressing recoverable failures. Route: **environment, runtime**.
+
+## Scope and limits
+
+No changes to live actors or product were made. I did not measure model-token or wall-time savings from any proposed abstraction. Log event counts include runtime generated calls; history action counts refer to the seven bound threads only. Two very short consultation/review threads were sampled with their full tool histories; later work after cutoff remains unknown. A shorter display (for example root's `T.takeEnd 5500` on a consultation at `call_PEfoaYZKj4XcbvE2e3IASaqy`) is a useful local choice, not by itself a reusable API need.
