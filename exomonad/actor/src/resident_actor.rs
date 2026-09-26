@@ -2398,6 +2398,29 @@ where
         } else {
             None
         };
+        // The child may carry declarations that import a helper published by
+        // its parent. Fix its own snapshot and include roots before a fresh
+        // machine bootstraps those declarations.
+        let source_layers = self.environment.source_layers.clone();
+        let helper_branch = if let Some(layers) = &source_layers {
+            Some(
+                layers
+                    .prepare_helpers(
+                        context.actor.into(),
+                        &launch_worktrees,
+                        prepared_workspace.is_some(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+            )
+        } else {
+            None
+        };
+        if let Some(layers) = &source_layers {
+            descriptor = descriptor.with_source_layer(layers.layer_include_for(
+                helper_branch.as_deref().unwrap_or_default(),
+                &launch_worktrees,
+            ));
+        }
         // A launch whose descriptor still names the launching session (the
         // common case: ineligible, or `InheritedContext`) needs nothing
         // further — the entry is already resident there. An eligible
@@ -2442,6 +2465,7 @@ where
                     child_session,
                     descriptor.placement().resource_scope,
                     seed.as_ref(),
+                    descriptor.source_layer(),
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
@@ -2456,32 +2480,8 @@ where
                 )
                 .await?
         };
-        // The checkout this child is launched with is settled here — a
-        // context-fork workspace has already been admitted above — so this is
-        // the last moment before the child exists, and the only honest place
-        // to fix its search path. `base_include` is deployment-wide and shared
-        // by every actor in the forest; an actor's OWN layer travels on its
-        // descriptor instead, and neither ever moves afterwards.
-        let source_layers = self.environment.source_layers.clone();
-        let helper_branch = if let Some(layers) = &source_layers {
-            Some(
-                layers
-                    .prepare_helpers(
-                        context.actor.into(),
-                        &launch_worktrees,
-                        prepared_workspace.is_some(),
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-            )
-        } else {
-            None
-        };
-        if let Some(layers) = &source_layers {
-            descriptor = descriptor.with_source_layer(layers.layer_include_for(
-                helper_branch.as_deref().unwrap_or_default(),
-                &launch_worktrees,
-            ));
-        }
+        // The checkout-derived include roots were fixed before any fresh
+        // child machine bootstrapped inherited declarations.
         let allocated_label = descriptor.label().to_string();
         let admitted_worktree = prepared_workspace
             .as_ref()

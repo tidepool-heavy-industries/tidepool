@@ -230,7 +230,7 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
 async fn composition_root_child_session_factory_runs_a_cell() {
     let campaign = test_campaign::TestCampaign::start().await;
     let child_session_id = tidepool_runtime::session::fresh_session_id();
-    let mut child_machine = (campaign.child_session_factory)(child_session_id)
+    let mut child_machine = (campaign.child_session_factory)(child_session_id, &[])
         .expect("the composition root's factory builds a fresh session");
 
     child_machine.set_effect_execution(

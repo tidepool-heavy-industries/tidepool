@@ -738,11 +738,8 @@ impl ExomonadSourceReload {
         let seed = self.helper_root.join("empty");
         std::fs::create_dir_all(&seed)?;
         let draft = self.helper_draft(branch);
-        if branch == "run" && !draft.exists() {
-            let workspace_seed = self.workspace.join(".exomonad/workspace/seeds/helpers");
-            if workspace_seed.is_dir() {
-                crate::actor_host::copy_helper_draft(&workspace_seed, &draft)?;
-            }
+        if branch == "run" {
+            crate::actor_host::initialize_helper_draft(&self.workspace, &draft)?;
         }
         std::fs::create_dir_all(&draft)?;
         self.helper_layer(branch)
@@ -883,21 +880,15 @@ impl ExomonadSourceReload {
                 ));
             }
         };
+        let active = match self.ensure_helper_active(branch) {
+            Ok(active) => active,
+            Err(error) => {
+                return SourceLayerReload::Unavailable(format!(
+                    "session helper revision is unavailable: {error}"
+                ));
+            }
+        };
         let draft = self.helper_draft(branch);
-        if let Err(error) = std::fs::create_dir_all(&draft) {
-            return SourceLayerReload::Unavailable(format!(
-                "session helper draft is unavailable: {error}"
-            ));
-        }
-        let active =
-            match layer.ensure_active_from(self.frozen.identity(), std::slice::from_ref(&draft)) {
-                Ok(active) => active,
-                Err(error) => {
-                    return SourceLayerReload::Unavailable(format!(
-                        "session helper revision is unavailable: {error}"
-                    ));
-                }
-            };
         let pending =
             match layer.capture_from_roots(self.frozen.identity(), std::slice::from_ref(&draft)) {
                 Ok(pending) => pending,
@@ -1635,6 +1626,18 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             let [branch] = worktrees else {
                 return Err("prepared fork must have exactly one helper branch".into());
             };
+            let draft = self.helper_draft(branch);
+            let active = self
+                .helper_layer(branch)
+                .read_active()
+                .map_err(|error| format!("prepared helper revision is unavailable: {error}"))?;
+            match (draft.exists(), active.is_some()) {
+                (true, true) => {}
+                (false, false) => self.fork_helper_branch(creator, branch).map_err(|error| {
+                    format!("could not snapshot creator's session helpers: {error}")
+                })?,
+                _ => return Err("prepared helper draft and active revision disagree".into()),
+            }
             return Ok(branch.clone());
         }
         let branch = format!("actor-{}", uuid::Uuid::new_v4());
@@ -1889,6 +1892,109 @@ mod tests {
             .unwrap()
             .modules
             .is_empty());
+    }
+
+    #[test]
+    fn authored_helpers_initialize_the_run_draft_without_resurrecting_seed_modules() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let seed = project.path().join(".exomonad/workspace/seeds/helpers");
+        std::fs::create_dir_all(seed.join("SessionHelpers")).unwrap();
+        std::fs::write(
+            seed.join("SessionHelpers/BrowserChecks.hs"),
+            "module SessionHelpers.BrowserChecks where\n",
+        )
+        .unwrap();
+        let authored = project.path().join(".exomonad/helpers");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(
+            authored.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nanswer :: Int\nanswer = 41\n",
+        )
+        .unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+
+        let active = reload.ensure_helper_active("run").unwrap();
+        let draft = reload.helper_draft("run");
+        assert!(
+            active.modules.is_empty(),
+            "draft edits require explicit publication"
+        );
+        assert_eq!(
+            std::fs::read_to_string(draft.join("SessionHelpers.hs")).unwrap(),
+            "module SessionHelpers where\nanswer :: Int\nanswer = 41\n"
+        );
+        assert!(!draft.join("SessionHelpers/BrowserChecks.hs").exists());
+        assert_eq!(
+            reload.helper_layer("run").read_active().unwrap().unwrap(),
+            active
+        );
+    }
+
+    #[test]
+    fn first_reload_rejects_an_invalid_authored_draft_without_publishing_it() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let authored = project.path().join(".exomonad/helpers");
+        std::fs::create_dir_all(&authored).unwrap();
+        let invalid = "module SessionHelpers where\nanswer = (\n";
+        std::fs::write(authored.join("SessionHelpers.hs"), invalid).unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+
+        let outcome = reload.reload_helper_branch("run", &[]);
+        assert!(matches!(
+            outcome,
+            exomonad_actor::SourceLayerReload::Rejected { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
+            invalid
+        );
+        assert!(reload
+            .helper_layer("run")
+            .read_active()
+            .unwrap()
+            .unwrap()
+            .modules
+            .is_empty());
+    }
+
+    #[test]
+    fn prepared_helper_branch_refuses_a_partial_snapshot() {
+        use exomonad_actor::ActorSourceLayers;
+
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+        let draft = reload.helper_draft("prepared");
+        std::fs::create_dir_all(&draft).unwrap();
+        let result = ActorSourceLayers::prepare_helpers(
+            &reload,
+            PrincipalId::SYSTEM,
+            &["prepared".to_owned()],
+            true,
+        );
+        assert!(result.unwrap_err().contains("disagree"));
+        assert!(reload
+            .helper_layer("prepared")
+            .read_active()
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2240,6 +2346,26 @@ mod tests {
         assert_ne!(
             ActorSourceLayers::layer_include_for(&reload, parent_branch, &worktrees)[0],
             ActorSourceLayers::layer_include_for(&reload, &child_branch, &worktrees)[0]
+        );
+        std::fs::write(
+            parent_draft.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nvalue :: Int\nvalue = 3\n",
+        )
+        .unwrap();
+        let later_parent = match ActorSourceLayers::reload_helpers(&reload, parent, &[]) {
+            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
+            result => panic!("later parent helper publish failed: {result:?}"),
+        };
+        assert_ne!(later_parent, parent_revision);
+        assert_eq!(
+            reload
+                .helper_layer(&child_branch)
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .identity,
+            child_revision,
+            "a later parent publication cannot change an existing child"
         );
     }
 

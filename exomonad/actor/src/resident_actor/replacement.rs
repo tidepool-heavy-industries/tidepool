@@ -333,6 +333,7 @@ where
                         child_session,
                         descriptor.placement().resource_scope,
                         seed.as_ref(),
+                        descriptor.source_layer(),
                     )
                     .await
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;

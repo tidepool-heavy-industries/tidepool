@@ -731,10 +731,13 @@ impl<H, O> ResidentMachineAccess<H, O> {
 
 /// Builds a fresh, idle [`ResidentSession`] for a session id the caller has
 /// already minted — the composition root's one factory, installed once and
-/// called by [`ResidentActorRunner::spawn_child_session`]. `Fn`, not
-/// `FnOnce`: called once per eligible child for the life of the host.
+/// called by [`ResidentActorRunner::provision_child_session`] with the child's
+/// fixed source layer. `Fn`, not `FnOnce`: called once per eligible child for
+/// the life of the host.
 pub type ChildSessionFactory<H, O> = Arc<
-    dyn Fn(tidepool_repr::SessionId) -> Result<Box<ResidentSession<H, O>>, String> + Send + Sync,
+    dyn Fn(tidepool_repr::SessionId, &[PathBuf]) -> Result<Box<ResidentSession<H, O>>, String>
+        + Send
+        + Sync,
 >;
 
 /// Keeps `prepare_cell`'s split-mounted request-input host binding alive
@@ -1895,7 +1898,7 @@ impl<H, O> ResidentActorRunner<H, O> {
             .child_session_factory
             .clone()
             .ok_or_else(|| "no child-session factory installed".to_string())?;
-        let machine = factory(session_id)?;
+        let machine = factory(session_id, &[])?;
         self.access
             .machines
             .try_insert_idle(session_id, machine)
@@ -1921,6 +1924,10 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// publish into the shared registry. A failure at any step drops the
     /// private machine and the reserved session id without ever publishing
     /// it — the shared registry is unchanged.
+    ///
+    /// `source_layer` is the descriptor's fixed helper snapshot. The factory
+    /// puts it on the validation path before bootstrap compiles inherited
+    /// declarations.
     ///
     /// `resource_scope` is the descriptor's own resource scope, minted at
     /// capture time (`crate::start::capture_decoded`'s `child_realm`) — the
@@ -1951,6 +1958,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         session_id: tidepool_repr::SessionId,
         resource_scope: RealmId,
         seed: Option<&crate::start::ChildSessionSeed>,
+        source_layer: &[PathBuf],
     ) -> Result<tidepool_codegen::scope::ScopeId, String>
     where
         H: DispatchEffect<O> + Send + 'static,
@@ -1966,7 +1974,7 @@ impl<H, O> ResidentActorRunner<H, O> {
             .child_bootstrap_program
             .clone()
             .ok_or_else(|| "no child bootstrap program installed".to_string())?;
-        let mut machine = factory(session_id)?;
+        let mut machine = factory(session_id, source_layer)?;
         let lexical_scope = machine.mint_isolated_scope();
         machine
             .set_actor_execution(
@@ -12496,7 +12504,7 @@ mod request_tests {
         // production factory instead captures the run's real session root.
         let held_root = std::sync::Mutex::new(None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
-            .with_child_session_factory(Arc::new(move |session_id| {
+            .with_child_session_factory(Arc::new(move |session_id, _source_layer| {
                 let (session, root) = bare_session_at(session_id);
                 *held_root.lock().unwrap() = Some(root);
                 Ok(Box::new(session))

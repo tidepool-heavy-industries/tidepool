@@ -39,7 +39,7 @@ mod tui_sleep_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
-pub(crate) use workspace::copy_helper_draft;
+pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
 use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
 mod model_free;
 mod prompt_catalog;
@@ -3178,7 +3178,7 @@ fn compile_root(
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
         CapturedOutput,
-    > = Arc::new(move |child_session_id| {
+    > = Arc::new(move |child_session_id, source_layer| {
         let child_declarations = exomonad_effect_declarations();
         let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
             &child_declarations,
@@ -3192,9 +3192,11 @@ fn compile_root(
         let session_root = child_run_root
             .join("haskell-session-children")
             .join(child_session_id.0.to_string());
+        let mut validation_include = source_layer.to_vec();
+        validation_include.extend(child_include.iter().cloned());
         let library = SessionLib::open(child_session_id, &session_root, module_env)
             .map_err(|error| format!("child session declaration plane: {error}"))?
-            .with_validation_include(child_include.clone());
+            .with_validation_include(validation_include);
         let child_event_handler =
             RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
         let child_worktree_handler = child_worktree_handler.clone();

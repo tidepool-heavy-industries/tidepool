@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use super::test_campaign::TestCampaign;
-use super::tests::dispatch_haskell_script;
+use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
 
 async fn committed(
@@ -70,6 +70,125 @@ fn commit(workspace: &Path, message: &str) {
 /// carries it and can have a source layer of its own.
 fn commit_workspace(workspace: &Path) {
     commit(workspace, "authored package");
+}
+
+#[tokio::test]
+async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_revision() {
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            write_workspace(&config.workspace, 1);
+            let helpers = config.workspace.join(".exomonad/helpers");
+            std::fs::create_dir_all(&helpers).unwrap();
+            std::fs::write(
+                helpers.join("SessionHelpers.hs"),
+                "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 41\n",
+            )
+            .unwrap();
+            commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    let helper_root = campaign
+        .worktrees
+        .managed_root()
+        .join(".resources")
+        .join(runtime_namespace(campaign.session_root.path()))
+        .join("helpers");
+    let draft = helper_root.join("drafts/run/SessionHelpers.hs");
+    let active = helper_root.join("layers/run/active");
+    let root = campaign.root_installation.policy.clone();
+    assert!(std::fs::read_to_string(&draft)
+        .unwrap()
+        .contains("helperAnswer = 41"));
+    let initial = std::fs::read_link(&active).unwrap();
+
+    let published =
+        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
+    assert!(
+        published.to_string().contains("outcome: published"),
+        "{published}"
+    );
+    let first = std::fs::read_link(&active).unwrap();
+    assert_ne!(first, initial);
+    assert!(published
+        .to_string()
+        .contains(first.file_name().unwrap().to_str().unwrap()));
+    committed(root.as_ref(), "import SessionHelpers").await;
+    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+
+    let invalid = "module SessionHelpers where\nhelperAnswer = (\n";
+    std::fs::write(&draft, invalid).unwrap();
+    let rejected =
+        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
+    assert!(
+        rejected.to_string().contains("outcome: rejected"),
+        "{rejected}"
+    );
+    assert!(rejected
+        .to_string()
+        .contains(first.file_name().unwrap().to_str().unwrap()));
+    assert_eq!(std::fs::read_link(&active).unwrap(), first);
+    assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
+    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+
+    std::fs::write(
+        &draft,
+        "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 42\n",
+    )
+    .unwrap();
+    let published =
+        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
+    assert!(
+        published.to_string().contains("outcome: published"),
+        "{published}"
+    );
+    let second = std::fs::read_link(&active).unwrap();
+    assert_ne!(second, first);
+    assert!(published
+        .to_string()
+        .contains(second.file_name().unwrap().to_str().unwrap()));
+    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(answer["items"][0]["output"], "42", "{answer}");
+
+    let launch = {
+        let root = root.clone();
+        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
+    };
+    let child = next_child(&mut campaign).await;
+    assert_eq!(launch.await.unwrap()["status"], "committed");
+    committed(child.policy.as_ref(), "import SessionHelpers").await;
+    let child_answer = committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+
+    std::fs::write(
+        &draft,
+        "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 43\n",
+    )
+    .unwrap();
+    let published =
+        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
+    assert!(
+        published.to_string().contains("outcome: published"),
+        "{published}"
+    );
+    let parent_answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(parent_answer["items"][0]["output"], "43", "{parent_answer}");
+    let child_answer = committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
+    assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// Keep the authored package out of the repository entirely, so a checkout cut
