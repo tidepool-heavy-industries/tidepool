@@ -42,6 +42,17 @@ when a decision needs them. Yield when only waiting remains. Bind decisions and
 child packets to actual incorporated source. Use the assigned reply type for final checked delivery;
 coordination failure alone does not prove the product work or native TUI is lost.
 
+When a dependency change could invalidate pending work, consider a background
+`Project.AssumptionWatch.watchAssumption`. Supply an existing event source, a
+projection onto the domain value you care about, and a policy over its typed
+before/after change. Equal values skip the policy. A policy can use deterministic
+logic or Jev; ignored and unresolved decisions remain inspectable. Specialize a
+policy once and reuse it across children instead of polling or relaying every
+publication through a model. `Project.AssumptionExamples` has compiled policies
+for measured regressions and semantic task impact; adapt them in session helpers.
+Keep the returned actor handle and finish the watcher when the dependency no
+longer matters. It observes work; it does not retire the observed workers.
+
 Messages carry only the recipient's missing assignment or changed source, constraints,
 evidence and next action; shared instructions already supply the workflow.
 Incorporation evidence identifies resulting source and changed behavior without an

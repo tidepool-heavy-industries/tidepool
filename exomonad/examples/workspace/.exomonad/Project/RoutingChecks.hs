@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, declaredRepair, forwardingFailure) where
+module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, reviewReadiness, declaredRepair, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -258,6 +258,45 @@ candidateHistory = do
     (lastOutput after == "True")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
   void $ turn owner "finishWork collection"
+
+reviewReadiness :: Member RecipeCheck effects => Eff effects ()
+reviewReadiness = do
+  owner <- root
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
+  script owner "review-readiness"
+  worker <- activation
+  let actor = checkActor worker
+  void $ turn actor ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral baseline
+    <> " [] [\"review pending\"]] [])")
+  premature <- turn owner "state <- readWork readiness\n(0,Nothing) == (length (workNotices state), reviewReadyMessage (last (workHistory state)))"
+  check "a reported progress candidate cannot signal review readiness" (lastOutput premature == "True")
+  submitted <- checkpoint actor "review-ready.txt" "submitted source\n" "commit review source"
+  void $ turn actor ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral submitted
+    <> " [] [\"integration remains\"]] [])")
+  checkpointOnly <- turn owner "null . workNotices <$> readWork readiness"
+  check "a committed progress checkpoint still has no terminal source receipt" (lastOutput checkpointOnly == "True")
+  void $ turn actor ("respond (Produced (Candidate " <> gitOidLiteral submitted
+    <> " [\"child-reported check\"] [\"integration remains\"]))")
+  notice <- turn owner "state <- readWork readiness\nlet terminal = last (workHistory state)\ninspectFull (length (workNotices state), reviewReadyMessage terminal)"
+  let messageSent = and
+        [ "(1," `Text.isInfixOf` output notice
+        , "Just \"" `Text.isInfixOf` output notice
+        , submitted `Text.isInfixOf` output notice
+        , "matching submitted HEAD" `Text.isInfixOf` output notice
+        , "integration remains" `Text.isInfixOf` output notice
+        , not ("child-reported check" `Text.isInfixOf` output notice)
+        ]
+  check (if messageSent then "matching terminal HEAD sends one exact source notice without claiming review or checks"
+         else "unexpected terminal notice: " <> output notice) messageSent
+  casesSource <- readFile owner (checkSource "review-readiness-cases")
+  cases <- turn owner casesSource
+  check "mismatched and unbound sources refuse readiness; blocked results remain quiet"
+    (baseline `Text.isInfixOf` output cases
+      && submitted `Text.isInfixOf` output cases
+      && "no bound-source evidence" `Text.isInfixOf` output cases
+      && ",Nothing)" `Text.isInfixOf` output cases)
+  void $ turn owner "finishWork readiness"
 
 notificationRetention :: Member RecipeCheck effects => Eff effects ()
 notificationRetention = do

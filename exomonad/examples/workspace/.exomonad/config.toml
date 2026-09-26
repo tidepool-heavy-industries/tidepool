@@ -18,10 +18,15 @@ modules = [
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
   "Project.FieldNotesChecks", "Project.RebaseRouterChecks",
-  "Project.Service", "Project.Repository",
+  "Project.Service", "Project.Repository", "Project.CheckResults",
+  "Project.PrepareContinue", "Project.RetainedEvidence",
+  "Project.AssumptionWatch", "Project.ParallelInvestigate", "Project.SlowCommandWatch",
+  "Project.Interview",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
+  "Project.AutomationChecks.integration",
+  "Project.CheckResultsChecks.completionRouting",
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",
   "Project.RoutingChecks.notificationRetention",

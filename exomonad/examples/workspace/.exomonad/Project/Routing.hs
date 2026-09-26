@@ -15,6 +15,7 @@ module Project.Routing
   , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink
   , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence
   , notifyWork, workMessage, withCheckpoints
+  , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -29,7 +30,7 @@ import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
 import Project.Types
 import Project.Actors (CoordinationEffects, coordinationActor)
-import Project.Work (sameQuestion)
+import Project.Work (candidateAtSubmission, sameQuestion)
 
 -- Closure keeps unanswered questions. The terminal response is independent of
 -- progress closure and retains its execution/worktree evidence, including failure.
@@ -195,6 +196,36 @@ notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value
 notifyWork owner render event = case render event of
   Nothing -> pure Nothing
   Just message -> Just <$> sendMessage owner message
+
+-- A progress candidate is a checkpoint. Only a terminal result carries the
+-- submitted worktree observation needed to identify the exact review source.
+data ReviewReadiness
+  = ReviewReady Text Candidate
+  | ReviewSourceRejected Text Text
+  deriving (Show, Eq)
+
+reviewReadiness :: WorkEvent (Outcome Candidate) -> Maybe ReviewReadiness
+reviewReadiness (WorkFinished name (Right receipt)) = case responseValue receipt of
+  Produced candidate -> Just $ either
+    (ReviewSourceRejected name) (ReviewReady name)
+    (candidateAtSubmission candidate (responseWorktree receipt))
+  Blocked _ _ -> Nothing
+reviewReadiness _ = Nothing
+
+reviewReadyMessage :: WorkEvent (Outcome Candidate) -> Maybe Text
+reviewReadyMessage event = case reviewReadiness event of
+  Just (ReviewReady name candidate) -> Just
+    (name <> ": candidate " <> renderGitOid (candidateCommit candidate)
+      <> " has a matching submitted HEAD; ready for independent review. Child-reported remaining gates: "
+      <> case remainingGates candidate of
+        [] -> "none reported"
+        gates -> Text.intercalate "; " gates)
+  Just (ReviewSourceRejected name reason) -> Just
+    (name <> ": candidate source could not be admitted for review: " <> reason)
+  Nothing -> Nothing
+
+notifyReviewReady :: AgentRef -> WorkSink (Outcome Candidate)
+notifyReviewReady owner = notifyWork owner reviewReadyMessage
 
 workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text
 workMessage render event = case event of
