@@ -220,3 +220,13 @@ Managed-root scoped follow-ups committed7b16899bb (reject authored FIFO/nonregul
 entries) and a8f61b41a (reject changed parent symlink before artifact import),
 with focused tests. Cancellation-aware authored copying still underway; a
 fully adversarial concurrent path-swap race is not claimed solved.
+
+
+At06:08 recovery is verified: operator explicitly imported Tidepool.Command
+and evaluated Cmd.GiB4; root Haskell cells committed06:07:30 and06:07:51.
+Notification33 was Presented. No command or restart was needed for that proof.
+Harnesshandoff ee5a0da reports completed local product checks and leaves the
+ordinary-host lifetime gate open. Verification agent is executing only that
+isolated host gate; no port4600 migration or run teardown has begun. Root and
+reviewer interviews are retained in the run checkout. Cleanup skill loaded;
+terminal and released remain separate facts. New wave remains gated.

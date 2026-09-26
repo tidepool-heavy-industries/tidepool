@@ -47,3 +47,32 @@ commit, dirty status, executable hash, selection and executed summaries. Extend
 that owner only for demonstrated gaps; do not add a second evidence subsystem.
 In particular, test source mutation during build and missing preparation inputs
 before deciding whether its provenance needs stronger semantics.
+
+
+## Wave13 observations — 2026-09-26
+
+- **Helper consumption: partial.** Publication and notebook import worked. An
+  impossible8GiB reservation prevented the first executions while the preserved
+  demo held1GiB of the8GiB general pool. After explicit4GiB requests, root used
+  the helper for server8/8 and standalone1/1 at harnesscf19ed4. Two targets by
+  one actor do not meet the intended two-actor reuse trial. Each use still took
+  start/finish calls; no tool-call saving was measured. Typed evidence/counts
+  and uncertainty retention were useful. Next trial should compare one composed
+  procedure with direct runner use, and record inherited child consumption.
+- **Test evidence provenance: useful refusal.** `working_tree_status: null`
+  kept the strict helper predicate false instead of claiming clean-source proof.
+  Root namespace contains a relocated relative submodule gitdir; host Git works,
+  but exact namespace Git stderr was not retained. Confirm the failure through
+  the owner before changing Git metadata; preserve stderr rather than converting
+  unknown provenance to clean. Passing assertions remain passing assertions.
+- **Independent review: concrete value.** Root found runtime `cargo run` violated
+  standalone launch. Later exact review found configured-target preparation
+  could leave an older default binary launchable after failure. Candidate2e7e6f9
+  fixed that and integrated asd2de055. Final external-host acceptance remains
+  distinct from namespace-local launch/reopen and release checks.
+- **Runtime source isolation: new prerequisite.** A reviewed/tested command
+  schema extension on the mutable Tidepool checkout broke a still-running
+  host's library imports. Rollback restored execution; the feature is retained
+  for a matched deployment. Freeze the runtime Haskell library with the binary
+  and generated effects, or build from an isolated immutable checkout while old
+  runs remain. Project-source freezing alone does not prove runtime matching.
