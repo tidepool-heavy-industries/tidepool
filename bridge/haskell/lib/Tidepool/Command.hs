@@ -36,7 +36,9 @@ module Tidepool.Command
     Observation (..),
     PresentedObservation (..),
     observe,
+    observeCompletion,
     observeWith,
+    observeWithCompletion,
     quiet,
     job,
     status,
@@ -267,6 +269,17 @@ await retained@(Job key) = do
 observe :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
   current <- checked <$> send (CommandAwaitWith key milliseconds)
+  presentStatus key bytes False current
+
+-- | Observe with a bounded foreground wait and a completion notice for a
+-- still-running job. The command is not relaunched or cancelled at handoff.
+observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
+observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
+  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
+  presentStatus key bytes True current
+
+presentStatus :: (Member Commands effects) => Text -> Int -> Bool -> CommandStatus -> Eff effects CommandStatus
+presentStatus key bytes completionNotice current = do
   let heading = case current of
         CommandFinished result -> resultHeading result
         CommandQueued -> "terminal: no · queued (process not started)"
@@ -275,7 +288,9 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
         CommandStopping -> "terminal: no · stopping; cancellation not yet confirmed"
   let next = case current of
         CommandFinished _ -> ""
-        _ -> "\nnext: observe the same job with write_stdin; read_output for retained output"
+        _
+          | completionNotice -> "\nA completion notice or an existing watch will wake you; keep working. read_output can inspect retained output."
+          | otherwise -> "\nnext: observe the same job with write_stdin; read_output for retained output"
   send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> heading <> next) bytes))
   pure current
 
@@ -296,6 +311,29 @@ observeWith ::
   Eff effects (CommandStatus, Text)
 observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
   current <- checked <$> send (CommandAwaitWith key milliseconds)
+  presentObserved options retained prepare current
+
+-- | Wait for a useful foreground interval. If the job is still live, the
+-- command owner arms its single completion settlement before this returns.
+-- A finish racing that handoff is reported by the notice for the same job.
+observeWithCompletion ::
+  (Member Commands effects) =>
+  Observation ->
+  Job ->
+  (PresentedObservation -> Eff effects Text) ->
+  Eff effects (CommandStatus, Text)
+observeWithCompletion options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
+  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
+  presentObserved options retained prepare current
+
+presentObserved ::
+  (Member Commands effects) =>
+  Observation ->
+  Job ->
+  (PresentedObservation -> Eff effects Text) ->
+  CommandStatus ->
+  Eff effects (CommandStatus, Text)
+presentObserved options retained@(Job key) prepare current = do
   -- Bound the first materialized pages by the caller's display budget.  Each
   -- page still carries the frozen stream endpoints, so a presenter can make
   -- an explicit, independently bounded page request when it needs more.

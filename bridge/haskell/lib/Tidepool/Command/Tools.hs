@@ -13,6 +13,7 @@ module Tidepool.Command.Tools
     ReadOutput (..),
     CancelCommand (..),
     Stream (..),
+    WaitMode (..),
     ObservationPresenter,
     tools,
     toolsWith,
@@ -73,6 +74,10 @@ data CancelCommand = CancelCommand
 data Stream = Stdout | Stderr
   deriving (Generic, FromJSON, JsonSchema)
 
+-- | Ordinary Bash owns a bounded foreground wait and a completion notice.
+-- Explicit yield and input-control observations remain deliberate snapshots.
+data WaitMode = CompletionOrNotify | ObserveOnce
+
 data ReadOutput = ReadOutput
   { session_id :: Text,
     stream :: Maybe Stream,
@@ -94,7 +99,7 @@ data ShellTools mode = ShellTools
 -- | A composable policy for one command observation.  The shared shell owns
 -- validation, process/input handling and retained jobs; a workspace may only
 -- replace how a successful observation is prepared for display.
-type ObservationPresenter effects = Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
+type ObservationPresenter effects = WaitMode -> Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
 
 tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
 tools = toolsWith defaultPresenter
@@ -104,11 +109,11 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. Observe 0..300000ms (default 30000); max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. Observation expiry leaves execution alive: write_stdin with no input keeps observing. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes, so keep working instead of polling. intent gives the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. By default await completion for up to 60000ms, then retain the same running job and send one completion notice; keep working instead of polling. Explicit yield_time_ms (0..300000) requests a deliberate observation without automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
-          "Wait on and observe an existing session_id (the way to wait for a running job); optional chars sends input first, empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..300000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes; focus filters as for bash."
+          "Send input to an existing session_id or deliberately observe it. Optional chars sends input first; empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..300000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes; focus filters as for bash."
           (writeInputWith presenter),
       readOutput =
         tool
@@ -154,7 +159,7 @@ executeWith presenter
       focus = focus,
       background = detached
     } =
-    case observation 30000 wait limit of
+    case observation 60000 wait limit of
       Left rejection -> pure rejection
       Right options -> do
         let command =
@@ -178,7 +183,7 @@ executeWith presenter
                 -- names the retained binding beside this line.
                 send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\nrunning in background; its completion notice will wake you. Keep working; do not poll. read_output reads its output so far; cancel_command stops it. focus, yield_time_ms and max_output_bytes do not apply here. A host restart loses a running job.") 512))
                 pure ""
-            | otherwise -> presenter (Just script) purpose focus options retained
+            | otherwise -> presenter (maybe CompletionOrNotify (const ObserveOnce) wait) (Just script) purpose focus options retained
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
 writeInput = writeInputWith defaultPresenter
@@ -216,7 +221,7 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
                 then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
                 -- Empty input is an observation poll and keeps the configured
                 -- presenter behavior.
-                else presenter Nothing Nothing Nothing options (Job key)
+                else presenter ObserveOnce Nothing Nothing Nothing options (Job key)
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
@@ -271,4 +276,8 @@ utf8Bytes = T.foldl' (\n c -> n + width c) 0
       | otherwise = 4
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
-defaultPresenter _ _ _ options retained = Cmd.observe options retained >> pure ""
+defaultPresenter mode _ _ _ options retained = do
+  _ <- case mode of
+    CompletionOrNotify -> Cmd.observeCompletion options retained
+    ObserveOnce -> Cmd.observe options retained
+  pure ""

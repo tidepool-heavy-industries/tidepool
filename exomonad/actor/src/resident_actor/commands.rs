@@ -96,6 +96,11 @@ where
                 CommandsReq::CommandAwaitWith(id, milliseconds) => {
                     answer!(jobs.wait(owner, &id, milliseconds).await)
                 }
+                CommandsReq::CommandAwaitAndNotifyWith(id, milliseconds) => answer!({
+                    super::command_settlement::CommandSettlements::new(&self.environment)
+                        .await_and_notify(owner, &id, milliseconds)
+                        .await
+                }),
                 CommandsReq::CommandForegroundWith(id) => {
                     let observed = if permitted {
                         jobs.wait(owner, &id, 30_000).await

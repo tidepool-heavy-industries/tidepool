@@ -149,6 +149,28 @@ impl CommandSettlements {
         Ok(job)
     }
 
+    /// Give a foreground command a bounded chance to finish. If it is still
+    /// live at the observation boundary, its existing settlement becomes the
+    /// single owner notice. A finish racing this handoff settles that same
+    /// record; the returned observation remains the live snapshot so the
+    /// completion is delivered only through the notice.
+    pub(super) async fn await_and_notify(
+        &self,
+        owner: crate::ActorRef,
+        job: &str,
+        milliseconds: i64,
+    ) -> Result<tidepool_bridge_effects::CommandStatus, CommandError> {
+        let observed = self.jobs.wait(owner, job, milliseconds).await?;
+        if matches!(
+            observed,
+            tidepool_bridge_effects::CommandStatus::CommandFinished(_)
+        ) {
+            return self.jobs.status(owner, job).await;
+        }
+        self.arm(job, true, None)?;
+        Ok(observed)
+    }
+
     /// The request that settles when `job` finishes, arming it on first use.
     /// Only the call that arms it releases a background start's command.
     fn arm(
@@ -170,10 +192,33 @@ impl CommandSettlements {
                 return Err(error);
             }
         };
-        if !armed && !notify_owner && !self.requests.hold_command(request) {
-            // The settled record was released once its notice existed and
-            // nothing watched it. A later watch gets a fresh, settled record.
-            return self.rearm(job, start);
+        if notify_owner && !self.jobs.claim_owner_notice(job)? {
+            if let Some(start) = start {
+                dispatch_backend(&self.deployments, start.command);
+            }
+            return Ok(request);
+        }
+        if !armed {
+            if notify_owner {
+                match self.requests.notify_command_owner(request) {
+                    Some(notifications) => {
+                        let settlements = self.clone();
+                        tokio::spawn(async move {
+                            publish_request_notifications(
+                                &settlements.requests,
+                                &settlements.deployments,
+                                notifications,
+                            )
+                            .await;
+                        });
+                    }
+                    None => return self.rearm(job, start, true),
+                }
+            } else if !self.requests.hold_command(request) {
+                // A released record is rearmed from the retained report for
+                // a later watch on that same completed job.
+                return self.rearm(job, start, false);
+            }
         }
         if armed {
             let settlements = self.clone();
@@ -185,7 +230,12 @@ impl CommandSettlements {
         Ok(request)
     }
 
-    fn rearm(&self, job: &str, start: Option<BackgroundStart>) -> Result<RequestId, CommandError> {
+    fn rearm(
+        &self,
+        job: &str,
+        start: Option<BackgroundStart>,
+        notify_owner: bool,
+    ) -> Result<RequestId, CommandError> {
         if let Some(start) = start {
             dispatch_backend(&self.deployments, start.command);
         }
@@ -198,12 +248,22 @@ impl CommandSettlements {
             .and_then(|source| source.commit.clone());
         let requests = Arc::clone(&self.requests);
         let request = self.jobs.replace_settlement(job, |owner| {
-            requests.reserve_command_settlement(owner, job.to_owned(), false)
+            requests.reserve_command_settlement(owner, job.to_owned(), notify_owner)
         })?;
-        drop(
+        let notifications =
             self.requests
-                .settle_command(request, render_report(job, &report), revision),
-        );
+                .settle_command(request, render_report(job, &report), revision);
+        if notify_owner {
+            let settlements = self.clone();
+            tokio::spawn(async move {
+                publish_request_notifications(
+                    &settlements.requests,
+                    &settlements.deployments,
+                    notifications,
+                )
+                .await;
+            });
+        }
         Ok(request)
     }
 

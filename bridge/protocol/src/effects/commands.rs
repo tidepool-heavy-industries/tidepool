@@ -283,6 +283,15 @@ pub fn commands() -> Effect {
                 HsType::either(named("CommandError"), named("CommandStatus")),
             ),
             verb(
+                "CommandAwaitAndNotifyWith",
+                "command_await_and_notify_with",
+                vec![
+                    ("job", HsType::Text, "String"),
+                    ("milliseconds", HsType::Int, "i64"),
+                ],
+                HsType::either(named("CommandError"), named("CommandStatus")),
+            ),
+            verb(
                 "CommandForegroundWith",
                 "command_foreground_with",
                 vec![("job", HsType::Text, "String")],

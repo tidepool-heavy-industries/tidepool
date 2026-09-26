@@ -167,6 +167,10 @@ struct Shared {
     command: Vec<String>,
     /// The request that settles when this job finishes, once one is armed.
     settlement: Mutex<Option<crate::RequestId>>,
+    /// Once true, this job has already arranged its owner's completion wake.
+    /// A later observation must not create another notice from a released
+    /// settlement record.
+    owner_notice_armed: std::sync::atomic::AtomicBool,
     /// The completion report, recorded once when that settlement is made.
     report: Mutex<Option<CommandReport>>,
     /// True once the deployment owner has supplied this job's backend.
@@ -416,6 +420,7 @@ impl CommandJobs {
             displayed: Mutex::new(Default::default()),
             command,
             settlement: Mutex::new(None),
+            owner_notice_armed: std::sync::atomic::AtomicBool::new(false),
             report: Mutex::new(None),
             supplied: watch::channel(false).0,
         });
@@ -518,6 +523,13 @@ impl CommandJobs {
         let request = reserve(shared.owner());
         *settlement = Some(request);
         Ok((request, true))
+    }
+
+    pub(crate) fn claim_owner_notice(&self, id: &str) -> Result<bool, CommandError> {
+        Ok(!self
+            .shared(id)?
+            .owner_notice_armed
+            .swap(true, std::sync::atomic::Ordering::AcqRel))
     }
 
     /// A replaced actor's jobs belong to its successor: control, cleanup
@@ -1302,6 +1314,7 @@ mod bounded_backend_tests {
             displayed: Mutex::new(Default::default()),
             command: vec!["true".into()],
             settlement: Mutex::new(None),
+            owner_notice_armed: std::sync::atomic::AtomicBool::new(false),
             report: Mutex::new(None),
             supplied: watch::channel(false).0,
         }

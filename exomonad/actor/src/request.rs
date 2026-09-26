@@ -1956,6 +1956,36 @@ impl RequestRegistry {
         }
     }
 
+    /// Arm the owner's completion notice for an existing command settlement.
+    /// An owner response watch keeps its wake instead. `None` means the record
+    /// was already released and the job must rearm from its retained report.
+    pub(crate) fn notify_command_owner(
+        &self,
+        request: RequestId,
+    ) -> Option<Vec<WatchNotification>> {
+        let mut state = self.state.lock();
+        let record = state.requests.get(&request)?;
+        if record.command_job.is_none() {
+            return None;
+        }
+        let owner = record.owner;
+        let owner_watches = state.watches.values().any(|watch| {
+            watch.owner == owner
+                && watch.dependencies.iter().any(|dependency| {
+                    dependency.request == request
+                        && matches!(dependency.requirement, WatchRequirement::Response { .. })
+                })
+        });
+        if !owner_watches {
+            if let Some(record) = state.requests.get_mut(&request) {
+                record.notify_owner = true;
+            }
+        }
+        let notifications = reevaluate_watches(&mut state);
+        release_settled_commands(&mut state);
+        Some(notifications)
+    }
+
     /// A watch registration that armed these command records was refused:
     /// drop their holds so they are released once settled and unwatched.
     pub(crate) fn release_command_holds(&self, requests: &[RequestId]) {
@@ -2651,6 +2681,31 @@ mod tests {
         assert_eq!(
             registry.observe_response(owner, stopped),
             Err(ReplyError::Stale)
+        );
+    }
+
+    #[test]
+    fn command_handoff_upgrades_an_unwatched_settlement_without_duplicating_notice() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let request = registry.reserve_command_settlement(owner, "job".into(), false);
+        registry.release_command_holds(&[request]);
+        assert!(registry.notify_command_owner(request).is_some());
+        registry.settle_command(request, "finished".into(), None);
+        assert_eq!(registry.take_settlement_notifications().len(), 1);
+        // A later handoff can rearm from the retained job report; it cannot
+        // emit a second notice from this released request.
+        assert!(registry.notify_command_owner(request).is_none());
+
+        let raced = registry.reserve_command_settlement(owner, "raced".into(), false);
+        registry.settle_command(raced, "already finished".into(), None);
+        assert!(registry.notify_command_owner(raced).is_some());
+        assert!(registry.notify_command_owner(raced).is_some());
+        let notices = registry.take_settlement_notifications();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].reply_preview.as_deref(),
+            Some("already finished")
         );
     }
 

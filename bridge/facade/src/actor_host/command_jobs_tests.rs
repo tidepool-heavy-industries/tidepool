@@ -2294,6 +2294,92 @@ async fn command_settlement(campaign: &mut TestCampaign) -> exomonad_actor::Sett
 }
 
 #[tokio::test]
+async fn foreground_completion_budget_hands_off_the_same_job_once() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|long-running|]").await;
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+
+    let observed = committed(
+        &campaign,
+        "Cmd.observeCompletion (Cmd.Observation 10 1024) job",
+    )
+    .await;
+    assert!(
+        observed
+            .to_string()
+            .contains("A completion notice or an existing watch will wake you"),
+        "{observed}"
+    );
+    committed(
+        &campaign,
+        "Cmd.observeCompletion (Cmd.Observation 10 1024) job",
+    )
+    .await;
+    assert_eq!(backend.executions(), 1);
+
+    // Cancellation remains available after the handoff. Its terminal result
+    // settles the already-armed request instead of starting a replacement.
+    committed(&campaign, "Cmd.cancel job").await;
+    let notice = command_settlement(&mut campaign).await;
+    assert!(
+        notice
+            .reply_preview
+            .as_deref()
+            .is_some_and(|text| text.contains("cancelled")),
+        "{notice:?}"
+    );
+    assert_eq!(backend.executions(), 1);
+    assert!(campaign
+        .next_deployment_opt(Duration::from_millis(100), |event| match event {
+            LocalResidentDeployment::SettlementChanged { notification }
+                if notification.command_job.is_some() =>
+                Ok(notification),
+            other => Err(other),
+        })
+        .await
+        .is_none());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn foreground_completion_before_budget_returns_inline_without_notice() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|quick|]").await;
+    let backend = TestCommands::completed("done\n");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let observed = committed(
+        &campaign,
+        "Cmd.observeCompletion (Cmd.Observation 1000 1024) job",
+    )
+    .await;
+    assert!(observed.to_string().contains("done"), "{observed}");
+    assert!(
+        !observed
+            .to_string()
+            .contains("A completion notice or an existing watch will wake you"),
+        "{observed}"
+    );
+    assert_eq!(backend.executions(), 1);
+    assert!(campaign
+        .next_deployment_opt(Duration::from_millis(100), |event| match event {
+            LocalResidentDeployment::SettlementChanged { notification }
+                if notification.command_job.is_some() =>
+                Ok(notification),
+            other => Err(other),
+        })
+        .await
+        .is_none());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
