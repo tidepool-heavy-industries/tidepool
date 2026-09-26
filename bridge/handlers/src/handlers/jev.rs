@@ -9,8 +9,9 @@
 // since this is the handler Exomonad actually dispatches against.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 
 /// Response bytes are streamed and capped here — same limit as the research
@@ -19,11 +20,15 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 
 /// Bytes of a non-2xx body kept for `JevFailure::Http`.
 const MAX_ERROR_BODY: usize = 2000;
+const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
+const TRANSIENT_PROBE_DELAY: Duration = Duration::from_secs(5);
 
 pub struct JevConfig {
     pub base_url: String,
     pub timeout: Duration,
     pub max_calls: u64,
+    /// Time between probes after an account-level Jev failure.
+    pub circuit_cooldown: Duration,
 }
 
 impl Default for JevConfig {
@@ -32,6 +37,7 @@ impl Default for JevConfig {
             base_url: "https://api.typesafe.ai".to_string(),
             timeout: Duration::from_secs(15),
             max_calls: 100_000,
+            circuit_cooldown: DEFAULT_CIRCUIT_COOLDOWN,
         }
     }
 }
@@ -48,6 +54,8 @@ pub enum JevFailure {
     Timeout,
     #[error("Jev returned HTTP {status}: {body}")]
     Http { status: u16, body: String },
+    #[error("Jev circuit open after HTTP {status}; retry after {retry_after_ms} ms")]
+    CircuitOpen { status: u16, retry_after_ms: u64 },
     #[error("Jev response exceeded the {MAX_BODY}-byte cap")]
     BodyLimit,
     #[error("Jev response was not valid JSON: {0}")]
@@ -103,6 +111,215 @@ pub struct JevClient {
     key: Option<String>,
     config: JevConfig,
     calls: AtomicU64,
+    circuit: Mutex<CircuitState>,
+}
+
+// One client is shared by every actor in a forest. The gate only pauses
+// requests for that client's credential; it never couples separate runs or
+// accounts. The epoch prevents an older in-flight request from reopening a
+// circuit after a successful recovery probe.
+enum CircuitState {
+    Closed {
+        epoch: u64,
+    },
+    Open {
+        epoch: u64,
+        status: u16,
+        until: Instant,
+        suppressed: u64,
+    },
+    Probing {
+        epoch: u64,
+        status: u16,
+        suppressed: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum Permit {
+    Regular(u64),
+    Probe(u64),
+}
+
+// A cancelled ask must release its probe slot. The request future can be
+// dropped while awaiting HTTP, before `finish` has a result to inspect.
+struct ProbeGuard<'a> {
+    circuit: &'a Mutex<CircuitState>,
+    permit: Permit,
+    finished: bool,
+}
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Permit::Probe(epoch) = self.permit {
+            self.circuit.lock().cancel_probe(epoch);
+        }
+    }
+}
+
+impl CircuitState {
+    fn admit(&mut self) -> Result<Permit, JevFailure> {
+        match self {
+            Self::Closed { epoch } => Ok(Permit::Regular(*epoch)),
+            Self::Open {
+                epoch,
+                status,
+                until,
+                suppressed,
+            } if Instant::now() >= *until => {
+                let permit = Permit::Probe(*epoch);
+                *self = Self::Probing {
+                    epoch: *epoch,
+                    status: *status,
+                    suppressed: *suppressed,
+                };
+                Ok(permit)
+            }
+            Self::Open {
+                status,
+                until,
+                suppressed,
+                ..
+            } => {
+                *suppressed += 1;
+                Err(JevFailure::CircuitOpen {
+                    status: *status,
+                    retry_after_ms: until.saturating_duration_since(Instant::now()).as_millis()
+                        as u64,
+                })
+            }
+            Self::Probing {
+                status, suppressed, ..
+            } => {
+                *suppressed += 1;
+                Err(JevFailure::CircuitOpen {
+                    status: *status,
+                    retry_after_ms: 0,
+                })
+            }
+        }
+    }
+
+    fn finish(
+        &mut self,
+        permit: Permit,
+        result: &Result<serde_json::Value, JevFailure>,
+        cooldown: Duration,
+    ) {
+        let (epoch, was_probe) = match permit {
+            Permit::Regular(epoch) => (epoch, false),
+            Permit::Probe(epoch) => (epoch, true),
+        };
+        let current_epoch = match self {
+            Self::Closed { epoch } | Self::Open { epoch, .. } | Self::Probing { epoch, .. } => {
+                *epoch
+            }
+        };
+        if epoch != current_epoch {
+            return;
+        }
+        let account_status = result.as_ref().err().and_then(account_failure_status);
+        match (was_probe, account_status) {
+            (false, Some(status)) if matches!(self, Self::Closed { .. }) => {
+                tracing::warn!(status, "jev circuit opened after account failure");
+                *self = Self::Open {
+                    epoch: epoch + 1,
+                    status,
+                    until: Instant::now() + cooldown,
+                    suppressed: 0,
+                };
+            }
+            (true, Some(status)) if matches!(self, Self::Probing { .. }) => {
+                let suppressed = self.suppressed();
+                tracing::warn!(
+                    status,
+                    suppressed,
+                    "jev circuit probe found account failure"
+                );
+                *self = Self::Open {
+                    epoch: epoch + 1,
+                    status,
+                    until: Instant::now() + cooldown,
+                    suppressed: 0,
+                };
+            }
+            (true, None) if matches!(self, Self::Probing { .. }) => {
+                if result.is_ok() || result.as_ref().err().is_some_and(is_caller_error) {
+                    tracing::info!(suppressed = self.suppressed(), "jev circuit recovered");
+                    *self = Self::Closed { epoch: epoch + 1 };
+                } else {
+                    let status = self.status();
+                    tracing::warn!(status, "jev circuit probe failed transiently");
+                    *self = Self::Open {
+                        epoch: epoch + 1,
+                        status,
+                        until: Instant::now() + TRANSIENT_PROBE_DELAY,
+                        suppressed: 0,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn cancel_probe(&mut self, epoch: u64) {
+        if let Self::Probing {
+            epoch: current,
+            status,
+            suppressed,
+        } = self
+        {
+            if *current == epoch {
+                tracing::warn!(status, suppressed, "jev circuit probe cancelled");
+                *self = Self::Open {
+                    epoch: epoch + 1,
+                    status: *status,
+                    until: Instant::now() + TRANSIENT_PROBE_DELAY,
+                    suppressed: 0,
+                };
+            }
+        }
+    }
+
+    fn status(&self) -> u16 {
+        match self {
+            Self::Open { status, .. } | Self::Probing { status, .. } => *status,
+            Self::Closed { .. } => unreachable!("closed circuit has no status"),
+        }
+    }
+
+    fn suppressed(&self) -> u64 {
+        match self {
+            Self::Open { suppressed, .. } | Self::Probing { suppressed, .. } => *suppressed,
+            Self::Closed { .. } => 0,
+        }
+    }
+}
+
+fn account_failure_status(failure: &JevFailure) -> Option<u16> {
+    match failure {
+        JevFailure::Http { status, .. } if matches!(*status, 401 | 403) => Some(*status),
+        JevFailure::Http { status: 402, body } => {
+            let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+            let detail = parsed.get("detail").unwrap_or(&parsed);
+            (detail.get("error_type").and_then(serde_json::Value::as_str) == Some("billing_error"))
+                .then_some(402)
+        }
+        _ => None,
+    }
+}
+
+fn is_caller_error(failure: &JevFailure) -> bool {
+    matches!(
+        failure,
+        JevFailure::Http {
+            status: 400 | 422,
+            ..
+        }
+    )
 }
 
 impl JevClient {
@@ -126,6 +343,7 @@ impl JevClient {
             key,
             config,
             calls: AtomicU64::new(0),
+            circuit: Mutex::new(CircuitState::Closed { epoch: 0 }),
         })
     }
 
@@ -137,11 +355,40 @@ impl JevClient {
         let Some(key) = self.key.as_deref() else {
             return Err(JevFailure::Unconfigured);
         };
-        let count = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if count > self.config.max_calls {
+        if self.calls.load(Ordering::Relaxed) >= self.config.max_calls {
+            return Err(JevFailure::CallCap);
+        }
+        let permit = self.circuit.lock().admit()?;
+        let mut probe_guard = ProbeGuard {
+            circuit: &self.circuit,
+            permit,
+            finished: false,
+        };
+        if self
+            .calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < self.config.max_calls).then(|| count + 1)
+            })
+            .is_err()
+        {
+            // A concurrent caller claimed the last budget slot. No provider
+            // response exists to establish whether an open circuit recovered.
             return Err(JevFailure::CallCap);
         }
 
+        let result = self.send(key, body).await;
+        self.circuit
+            .lock()
+            .finish(permit, &result, self.config.circuit_cooldown);
+        probe_guard.finished = true;
+        result
+    }
+
+    async fn send(
+        &self,
+        key: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, JevFailure> {
         let start = std::time::Instant::now();
         let url = format!("{}/v1/systemone", self.config.base_url);
         let send = self
@@ -239,6 +486,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
@@ -295,6 +543,7 @@ mod tests {
             base_url,
             timeout: Duration::from_secs(2),
             max_calls: 100_000,
+            circuit_cooldown: Duration::from_millis(200),
         }
     }
 
@@ -327,6 +576,217 @@ mod tests {
             }
         );
         task.join().unwrap();
+    }
+
+    fn scripted_server(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = thread::spawn(move || {
+            for (status, body) in &replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0; 4096];
+                while !received.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&buffer[..count]);
+                }
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+            replies.len()
+        });
+        (url, task)
+    }
+
+    const CREDIT_ERROR: &str =
+        r#"{"detail":{"error_type":"billing_error","message":"no available credits"}}"#;
+
+    #[tokio::test]
+    async fn billing_failure_opens_then_one_probe_recovers_after_replenishment() {
+        let (url, task) = scripted_server(vec![
+            ("402 Payment Required", CREDIT_ERROR),
+            ("200 OK", r#"{"model":"jev-latest","usage":{}}"#),
+            ("200 OK", r#"{"model":"jev-latest","usage":{}}"#),
+        ]);
+        let client = JevClient::with_key(config(url), Some("test-key".into())).unwrap();
+        assert!(matches!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::Http { status: 402, .. })
+        ));
+        assert!(matches!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::CircuitOpen { status: 402, .. })
+        ));
+        assert_eq!(client.calls.load(Ordering::Relaxed), 1);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert_eq!(
+            client.ask(serde_json::json!({})).await.unwrap()["model"],
+            "jev-latest"
+        );
+        assert_eq!(
+            client.ask(serde_json::json!({})).await.unwrap()["model"],
+            "jev-latest"
+        );
+        assert_eq!(client.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(task.join().unwrap(), 3);
+    }
+
+    #[test]
+    fn concurrent_old_failures_cannot_reopen_after_recovery_and_only_one_probe_enters() {
+        let mut gate = CircuitState::Closed { epoch: 0 };
+        let first = gate.admit().unwrap();
+        let second = gate.admit().unwrap();
+        let failure = Err(JevFailure::Http {
+            status: 402,
+            body: CREDIT_ERROR.into(),
+        });
+        gate.finish(first, &failure, Duration::ZERO);
+        let probe = gate.admit().unwrap();
+        assert!(matches!(probe, Permit::Probe(_)));
+        assert!(matches!(
+            gate.admit(),
+            Err(JevFailure::CircuitOpen { status: 402, .. })
+        ));
+        gate.finish(
+            probe,
+            &Ok(serde_json::json!({"model":"jev-latest"})),
+            Duration::ZERO,
+        );
+        gate.finish(second, &failure, Duration::ZERO);
+        assert!(matches!(gate.admit(), Ok(Permit::Regular(_))));
+    }
+
+    #[tokio::test]
+    async fn cancelled_probe_releases_slot_for_later_recovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = config(format!("http://{}", listener.local_addr().unwrap()));
+        cfg.timeout = Duration::from_secs(2);
+        let client = Arc::new(JevClient::with_key(cfg, Some("test-key".into())).unwrap());
+        *client.circuit.lock() = CircuitState::Open {
+            epoch: 1,
+            status: 402,
+            until: Instant::now(),
+            suppressed: 0,
+        };
+        let probe_client = Arc::clone(&client);
+        let probe = tokio::spawn(async move { probe_client.ask(serde_json::json!({})).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(*client.circuit.lock(), CircuitState::Probing { .. }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        probe.abort();
+        assert!(probe.await.unwrap_err().is_cancelled());
+        let mut gate = client.circuit.lock();
+        assert!(matches!(*gate, CircuitState::Open { .. }));
+        if let CircuitState::Open { until, .. } = &mut *gate {
+            *until = Instant::now();
+        }
+        assert!(matches!(gate.admit(), Ok(Permit::Probe(_))));
+    }
+
+    #[tokio::test]
+    async fn exhausted_call_budget_does_not_establish_probe_recovery() {
+        let (url, task) = scripted_server(vec![("402 Payment Required", CREDIT_ERROR)]);
+        let mut cfg = config(url);
+        cfg.max_calls = 1;
+        let client = JevClient::with_key(cfg, Some("test-key".into())).unwrap();
+        assert!(matches!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::Http { status: 402, .. })
+        ));
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert_eq!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::CallCap)
+        );
+        assert!(matches!(*client.circuit.lock(), CircuitState::Open { .. }));
+        assert_eq!(client.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(task.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_and_caller_local_http_failures_do_not_open_circuit() {
+        let (url, task) = scripted_server(vec![
+            ("429 Too Many Requests", "rate limited"),
+            ("422 Unprocessable Entity", "bad question"),
+            ("200 OK", r#"{"model":"jev-latest","usage":{}}"#),
+        ]);
+        let client = JevClient::with_key(config(url), Some("test-key".into())).unwrap();
+        assert!(matches!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::Http { status: 429, .. })
+        ));
+        assert!(matches!(
+            client.ask(serde_json::json!({})).await,
+            Err(JevFailure::Http { status: 422, .. })
+        ));
+        assert_eq!(
+            client.ask(serde_json::json!({})).await.unwrap()["model"],
+            "jev-latest"
+        );
+        assert_eq!(task.join().unwrap(), 3);
+    }
+
+    #[test]
+    fn transient_probe_failure_keeps_circuit_open_and_caller_error_recovers_it() {
+        let mut gate = CircuitState::Closed { epoch: 0 };
+        let first = gate.admit().unwrap();
+        gate.finish(
+            first,
+            &Err(JevFailure::Http {
+                status: 401,
+                body: "invalid key".into(),
+            }),
+            Duration::ZERO,
+        );
+        let probe = gate.admit().unwrap();
+        gate.finish(probe, &Err(JevFailure::Timeout), Duration::ZERO);
+        assert!(matches!(
+            gate.admit(),
+            Err(JevFailure::CircuitOpen { status: 401, .. })
+        ));
+        if let CircuitState::Open { until, .. } = &mut gate {
+            *until = Instant::now();
+        }
+        let probe = gate.admit().unwrap();
+        gate.finish(
+            probe,
+            &Err(JevFailure::Http {
+                status: 422,
+                body: "bad question".into(),
+            }),
+            Duration::ZERO,
+        );
+        assert!(matches!(gate.admit(), Ok(Permit::Regular(_))));
+    }
+
+    #[test]
+    fn unrelated_payment_error_does_not_open_account_circuit() {
+        let mut gate = CircuitState::Closed { epoch: 0 };
+        let first = gate.admit().unwrap();
+        gate.finish(
+            first,
+            &Err(JevFailure::Http {
+                status: 402,
+                body: "payment required".into(),
+            }),
+            Duration::ZERO,
+        );
+        assert!(matches!(gate.admit(), Ok(Permit::Regular(_))));
     }
 
     #[tokio::test]

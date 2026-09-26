@@ -1015,6 +1015,15 @@ impl exomonad_actor::JevBackend for HostJev {
                     JevFailure::Transport(detail) => Failure::Transport(detail),
                     JevFailure::Timeout => Failure::Timeout,
                     JevFailure::Http { status, body } => Failure::Http(i64::from(status), body),
+                    // The actor's Haskell error surface treats provider
+                    // refusal as HTTP; preserve that contract for fast fails.
+                    JevFailure::CircuitOpen {
+                        status,
+                        retry_after_ms,
+                    } => Failure::Http(
+                        i64::from(status),
+                        format!("Jev circuit open; retry after {retry_after_ms} ms"),
+                    ),
                     JevFailure::BodyLimit => Failure::BodyLimit,
                     JevFailure::Malformed(detail) => Failure::Malformed(detail),
                 }),
