@@ -41,7 +41,10 @@ counts. Wave18 is a standalone browser harness milestone, not an adapter launch.
   notification receipts, duplicate suppression and changed-question episodes.
 - Harness release preparation stages a real release executable and exercises the
   production launcher through the browser journey. Twelve Python script checks
-  passed; the actual release-binary journey is pending.
+  passed; frontend typecheck, 14 web tests, production asset build and the
+  actual staged release-binary browser journey (1/1) also passed. Release source
+  was harness `6ae6521531439f6bad168a3d55f7f086be5b7623`; subsequent launch
+  revision changes only pins, trials and launch records.
 
 See `wave17-audit/jev-synthetic-trials.md` for root-run live semantic trials,
 including a weak wrong reminder preference that the conservative policy refuses.
@@ -57,7 +60,18 @@ or unmeasured latency improvement is claimed.
 
 ## Integration and launch
 
-Final revisions, combined gates and run identity will be appended after completion.
+Wave18 launched with Tidepool `d707d18ed`, shared workspace
+`8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84` and harness
+`5484b2a85f1db21f5f56a259226e64a42ba72615`. Matched incremental build,
+Rust formatting, scaffold pin test (1 passed) and exact checkout workspace
+preflight passed. Session `wave18`, run `29e61b63-2bc9-45d5-b5d1-b67e20918bea`,
+checkout `/home/inanna/dev/exomonad-harness-runs/wave18`.
+Astra High began its first provider turn at `2026-09-26T23:34:44.357Z` and read
+the brief, async source notes, AgentSpec and Haskell workflow implementations.
+This establishes exposure, not automation use or measured savings.
+Full identities, binary hashes and log paths are in the harness
+`docs/wave18-launch.md`; validation outputs are under `/tmp/wave18-startup`.
+
 Wave17 was idle with no active or queued requests; root/worker interviews were
 retained before stop. `exomonad stop` succeeded, the wave17 tmux session disappeared,
 and no matching host process remained. Final roster and stop output are retained
