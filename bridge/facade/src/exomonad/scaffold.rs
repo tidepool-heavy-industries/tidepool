@@ -38,6 +38,8 @@ modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
+  "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
+  "Project.FieldNotesChecks", "Project.RebaseRouterChecks",
   "Project.Service", "Project.Repository",
 ]
 spec = "AgentSpec.agentSpec"
@@ -56,6 +58,9 @@ checks = [
   "Project.JevChecks.investigation",
   "Project.JevChecks.review",
   "Project.JevChecks.reflex",
+  "Project.RebaseRouterChecks.agentRef",
+  "Project.RebaseRouterChecks.facts",
+  "Project.FieldNotesChecks.policy",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
