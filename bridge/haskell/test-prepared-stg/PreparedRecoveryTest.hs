@@ -1,9 +1,11 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC
 import GHC.Driver.Main (hscTidy)
@@ -16,7 +18,8 @@ import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique)
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, varUnique)
+import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Stg.Syntax qualified as Stg
 import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode(..))
@@ -24,7 +27,9 @@ import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities
-  , projectPreparedTarget )
+  , prepareProjection, prepareProjectionWithReachability, projectSelected
+  , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
+  , admitReachFacts, emptyPreparedReachability, reachedUniques )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
@@ -36,6 +41,7 @@ import Tidepool.PreparedRecovery
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
   , newPreparedBodyCache, prepareModule, unelaboratedModule )
+import Tidepool.PreparedSites (SiteRejection(..))
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -90,9 +96,11 @@ main = do
         [identity] -> pure identity
         found -> fail ("expected homeOther entry, got " ++ show found)
       other <- recover otherEntry
+      assertProjectionEquivalent (context { projectionEntry = otherEntry }) other
       assert (not (any recoveredFst (closureModules other)))
         "second target inherited the first target's fst dependency"
       repeated <- recover entry
+      assertProjectionEquivalent context repeated
       assert (any recoveredFst (closureModules repeated))
         "returning to the first target lost its defining-module recovery"
       assert (closureFactCacheHits repeated > 0)
@@ -102,6 +110,9 @@ main = do
       pure first
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
+    liftIO $ assertProjectionEquivalent context closure
+    liftIO $ assertReachExpansion context closure
+    liftIO $ assertRejectionBoundary context closure
     liftIO $ assert (all (not . namedResidual) (closureFailures closure))
       ("nullary constructor remained a recovery residual: " ++ show (closureFailures closure))
     liftIO $ assert (all (\original -> originalModuleRetained original (closureModules closure)) modules)
@@ -109,6 +120,7 @@ main = do
     liftIO $ assertNullaryRecoveryProjection context closure
     liftIO $ incompleteSubsetContract home context
     liftIO $ hidden_defining_module hsc context hidden
+    liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
     assertOverlapMerge = do
@@ -143,6 +155,105 @@ main = do
             _ -> ioError (userError "subset lookup did not retain an a body")
         other -> ioError (userError
           ("subset lookup changed the full Rec group shape: " ++ show (length other)))
+
+    projectionResult projection = fmap fst (projection >>= projectSelected)
+
+    assertProjectionEquivalent context closure = do
+      let modules = closureModules closure
+          old = projectionResult (prepareProjection context modules)
+          carried = projectionResult
+            (prepareProjectionWithReachability context modules (closureReachability closure))
+      assert (old == carried)
+        ("carried reachability changed projection for " ++ show (projectionEntry context)
+          ++ ": " ++ show (fmap (length . programBindings) old)
+          ++ " vs " ++ show (fmap (length . programBindings) carried))
+
+    assertReachExpansion context closure = do
+      let modules = closureModules closure
+          home = take 2 modules
+          recovered = drop 2 modules
+          seeds = nonDetEltsUniqSet (preparedSeedUniques context home)
+          initial = admitReachFacts seeds (map (preparedModuleReachFacts context) home)
+            emptyPreparedReachability
+          recoveredFacts = map (preparedModuleReachFacts context) recovered
+          partial = admitReachFacts seeds
+            (map (map (\(binder, _) -> (binder, []))) recoveredFacts) initial
+          expanded = admitReachFacts seeds recoveredFacts partial
+      assert (all (`elementOfUniqSet` reachedUniques expanded) seeds)
+        "replacement lost seeded tops"
+      assert (projectionResult
+        (prepareProjectionWithReachability context modules expanded)
+          == projectionResult (prepareProjection context modules))
+        "incrementally admitted recovered modules changed selection"
+
+    assertRejectionBoundary context closure = do
+      let modules = closureModules closure
+      case modules of
+        home : rest -> case [binder | binder <- topBindersOfModule home
+            , varUnique binder `elementOfUniqSet` reachedUniques (closureReachability closure)] of
+          selectedBinder : _ -> do
+            let rejected = home { pmSiteRejections =
+                  SiteRejection selectedBinder "injected site" : pmSiteRejections home }
+                withRejection = rejected : rest
+                old = prepareProjection context withRejection
+                carried = prepareProjectionWithReachability context withRejection
+                  (closureReachability closure)
+            assert (fmap (const ()) old == fmap (const ()) carried)
+              "carried reachability changed typed site rejection"
+            case carried of
+              Left (RejectedTypedSite message) | message == "injected site" -> pure ()
+              _ -> ioError (userError "reachable injected site was not rejected")
+          [] -> ioError (userError "no reached home binder for rejection check")
+        [] -> ioError (userError "recovery returned no modules")
+
+    retainedProjectionBoundary hsc context modules = do
+      let home = case modules of
+            first : _ -> first
+            [] -> error "retained projection fixture has no modules"
+          identity occurrence = case [symbol | symbol <- either (error . show) id
+              (preparedTopIdentities [home]), symbolOccurrence symbol == occurrence] of
+            [symbol] -> symbol
+            found -> error ("expected " ++ Text.unpack occurrence ++ " identity, got " ++ show found)
+          retainedContext = context
+            { projectionEntry = identity "homeOther"
+            , projectionRetainedGenerations =
+                Map.singleton (identity "homeValue") 11
+            }
+      cache <- newFatIfaceCache
+      ownerCache <- newOwnerInterfaceCache
+      bodyCache <- newPreparedBodyCache
+      retained <- recoverPreparedClosure hsc cache ownerCache bodyCache retainedContext modules
+      assertProjectionEquivalent retainedContext retained
+      case projectionResult
+        (prepareProjectionWithReachability retainedContext (closureModules retained)
+          (closureReachability retained)) of
+        Right program -> assert
+          (any (\global -> globalIdentity global == identity "homeValue"
+              && globalRequiredGeneration global == Just 11) (programGlobals program))
+          "retained top did not become a generation-bound global"
+        Left failure -> ioError (userError ("retained projection failed: " ++ show failure))
+      case closureModules retained of
+        retainedHome : rest -> case [binder | binder <- topBindersOfModule retainedHome
+            , occNameString (nameOccName (varName binder)) == "homeValue"] of
+          retainedBinder : _ -> do
+            let markedHome = retainedHome
+                  { pmSiteRejections = SiteRejection retainedBinder "skipped site"
+                      : pmSiteRejections retainedHome }
+                markedModules = markedHome : rest
+            assert (projectionResult
+              (prepareProjectionWithReachability retainedContext markedModules
+                (closureReachability retained))
+                == projectionResult (prepareProjection retainedContext markedModules))
+              "retained top's skipped site changed projection"
+            case prepareProjectionWithReachability retainedContext markedModules
+              (closureReachability retained) of
+              Right _ -> pure ()
+              Left failure -> ioError (userError
+                ("retained top's skipped site was rejected: " ++ show failure))
+          [] -> ioError (userError "retained fixture has no homeValue binder")
+        [] -> ioError (userError "retained recovery returned no modules")
+
+    topBindersOfModule prepared = concatMap (topBinders . fst) (pmBindings prepared)
 
 
     prepareNamed hsc name = do

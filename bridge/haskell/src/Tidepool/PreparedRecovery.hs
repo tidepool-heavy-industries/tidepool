@@ -79,6 +79,8 @@ data RecoveredClosure = RecoveredClosure
   -- immutable body-set memo.  This is intentionally target-local: no target's
   -- reachability or accounting is ever retained.
   , closureFactCacheHits :: Int
+  -- | Final target-local closure over the modules in 'closureModules'.
+  , closureReachability :: PreparedReachability
   }
 
 -- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
@@ -208,7 +210,7 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
               emitCount timing "prepared_recover_rounds" rounds
               emitCount timing "prepared_recover_module_preparations" preparedModules
               hits <- readIORef factHits
-              pure (RecoveredClosure modules failures hits)
+              pure (RecoveredClosure modules failures hits reach)
             else do
               ((nextGroups, dirty, nextFailures), lookupMs) <- timeSection $ foldM
                 (lookupOne cache homeOwners) (groups, Set.empty, failures) pending

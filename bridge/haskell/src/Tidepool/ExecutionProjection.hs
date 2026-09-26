@@ -6,6 +6,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , PreparedProjection
   , prepareProjection
+  , prepareProjectionWithReachability
   , projectSelected
   , preparedTopIdentities
   , preparedTargetReferences
@@ -290,8 +291,8 @@ projectPreparedTargetWithConstructors context modules =
   prepareProjection context modules >>= projectSelected
 
 -- | Selection retains the exact context and identity map that authorized it.
--- Its binding lists are forced here so timing selection measures the complete
--- reachability walk, rather than charging its thunks to projection later.
+-- Its binding lists are forced here so selection work is not charged to
+-- lowering later.
 data PreparedProjection = PreparedProjection ProjectionContext [PreparedModule] (VarEnv SymbolIdentity)
 
 prepareProjection :: ProjectionContext -> [PreparedModule]
@@ -299,7 +300,30 @@ prepareProjection :: ProjectionContext -> [PreparedModule]
 prepareProjection _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 prepareProjection context modules =
   let (identities, selected) = selectPreparedTarget context modules
-      bindingCount = sum [length (pmBindings prepared) | prepared <- selected]
+  in finishProjection context modules identities selected
+
+-- | Recovery already closed these exact modules under the target's seeds.
+-- Keep identity assignment over every live top: filtering first would change
+-- collision suffixes and the standing of retained definitions.
+prepareProjectionWithReachability :: ProjectionContext -> [PreparedModule]
+  -> PreparedReachability -> Either ProjectionError PreparedProjection
+prepareProjectionWithReachability _ [] _ =
+  Left (UnsupportedPreparedShape "execution program has no modules")
+prepareProjectionWithReachability context modules reach =
+  finishProjection context modules (buildTopIdentityMap modules)
+    [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
+    | prepared <- modules
+    , any isReachable (pmBindings prepared)
+    ]
+  where
+    isReachable (binding, _) = any
+      ((`elementOfUniqSet` reachedUniques reach) . varUnique)
+      (topBinders binding)
+
+finishProjection :: ProjectionContext -> [PreparedModule] -> VarEnv SymbolIdentity
+  -> [PreparedModule] -> Either ProjectionError PreparedProjection
+finishProjection context modules identities selected =
+  let bindingCount = sum [length (pmBindings prepared) | prepared <- selected]
       identityCount = length (nonDetEltsUFM identities)
       reachable = mkUniqSet [ varUnique binder | prepared <- selected
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding ]

@@ -49,7 +49,7 @@ import Tidepool.GhcPipeline
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjection, projectSelected, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -498,7 +498,8 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
       (recover (projectionEntry context))
     reportRecoveryResiduals target (closureFailures recovered)
     selected <- timePhase timing "prepared_project" $
-      requireProjection (prepareProjection context (closureModules recovered))
+      requireProjection (prepareProjectionWithReachability context
+        (closureModules recovered) (closureReachability recovered))
     (program, constructors, bytes) <- timePhase timing "prepared_encode" $ do
       (program, constructors) <- requireProjection (projectSelected selected)
       bytes <- evaluate (encodeWireProgram program)
