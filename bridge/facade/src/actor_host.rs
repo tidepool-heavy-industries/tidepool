@@ -5832,8 +5832,17 @@ async fn deliver_pending_checked(
         // otherwise never reach the model, so those surface out of band. Any
         // other phase, a rejection included, stays a hard barrier.
         if front_tracked_row_is_in_flight(inbox) {
-            deliver_out_of_order_notices(actor, inbox, thread, backend, &cwd, runtime_observation)
-                .await?;
+            deliver_out_of_order_notices(
+                actor,
+                inbox,
+                thread,
+                backend,
+                &cwd,
+                runtime_observation,
+                watch_retained,
+                watch_observed_since,
+            )
+            .await?;
         }
         return deliver_tracked_message(
             actor,
@@ -5865,28 +5874,17 @@ async fn deliver_pending_checked(
                 out_of_order_delivered.push(message.sequence);
                 return false;
             }
-            let DurableActorEvent::Typed(TypedActorEvent::WatchChanged { notification }) =
-                &message.payload
-            else {
-                return true;
-            };
-            if !watch_retained(notification.owner, notification.watch) {
-                suppressed_watches.push((message.sequence, notification.owner, notification.watch));
-                return false;
+            match watch_notice_disposition(&message.payload, watch_retained, watch_observed_since) {
+                WatchNoticeDisposition::Deliver => true,
+                WatchNoticeDisposition::Forgotten(owner, watch) => {
+                    suppressed_watches.push((message.sequence, owner, watch));
+                    false
+                }
+                WatchNoticeDisposition::Observed(owner, watch) => {
+                    stale_watches.push((message.sequence, owner, watch));
+                    false
+                }
             }
-            // Queued while the owner was mid-turn, this notice can describe a
-            // transition the owner already picked up by polling the same
-            // watch in the meantime (`ObserveWatchWith`/`pollWatch`).
-            // Re-announcing it would prompt over state the owner already has.
-            if watch_observed_since(
-                notification.owner,
-                notification.watch,
-                notification.occurred_at_unix_ms,
-            ) {
-                stale_watches.push((message.sequence, notification.owner, notification.watch));
-                return false;
-            }
-            true
         })
         .collect::<Vec<_>>();
     if pending.is_empty() {
@@ -5967,7 +5965,7 @@ async fn deliver_pending_checked(
         inbox_sequence,
         inbox_watermark,
         event_count = pending.len(),
-        "actor activation batch delivered"
+        "actor activation batch queued for native presentation"
     );
     if !suppressed_watches.is_empty() {
         tracing::debug!(
@@ -6018,6 +6016,35 @@ fn front_tracked_row_is_in_flight(inbox: &ActorInbox) -> bool {
     )
 }
 
+enum WatchNoticeDisposition {
+    Deliver,
+    Forgotten(ActorRef, exomonad_actor::WatchId),
+    Observed(ActorRef, exomonad_actor::WatchId),
+}
+
+fn watch_notice_disposition(
+    event: &DurableActorEvent,
+    watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
+    watch_observed_since: &(dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync),
+) -> WatchNoticeDisposition {
+    let DurableActorEvent::Typed(TypedActorEvent::WatchChanged { notification }) = event else {
+        return WatchNoticeDisposition::Deliver;
+    };
+    if !watch_retained(notification.owner, notification.watch) {
+        return WatchNoticeDisposition::Forgotten(notification.owner, notification.watch);
+    }
+    // A later watch revision remains meaningful even if an earlier transition
+    // was already read through pollWatch or ObserveWatchWith.
+    if watch_observed_since(
+        notification.owner,
+        notification.watch,
+        notification.occurred_at_unix_ms,
+    ) {
+        return WatchNoticeDisposition::Observed(notification.owner, notification.watch);
+    }
+    WatchNoticeDisposition::Deliver
+}
+
 async fn deliver_out_of_order_notices(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -6025,6 +6052,8 @@ async fn deliver_out_of_order_notices(
     backend: &dyn InteractiveAgentBackend,
     cwd: &str,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
+    watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
+    watch_observed_since: &(dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync),
 ) -> Result<(), String> {
     let beyond_inbox = Arc::clone(inbox);
     let beyond = tidepool_runtime::spawn_blocking_in_span(move || {
@@ -6034,19 +6063,32 @@ async fn deliver_out_of_order_notices(
     .map_err(|error| format!("inbox reader task: {error}"))?
     .map_err(|error| error.to_string())?;
     // Only notices overtake a stuck row; ordinary messages keep their order.
+    let mut suppressed = Vec::new();
     let beyond: Vec<_> = beyond
         .into_iter()
         .filter(|message| {
-            matches!(
+            if !matches!(
                 message.payload,
                 DurableActorEvent::Typed(
                     TypedActorEvent::SettlementChanged { .. }
                         | TypedActorEvent::WatchChanged { .. }
                         | TypedActorEvent::RequestCancellation { .. }
                 )
-            )
+            ) {
+                return false;
+            }
+            match watch_notice_disposition(&message.payload, watch_retained, watch_observed_since) {
+                WatchNoticeDisposition::Deliver => true,
+                WatchNoticeDisposition::Forgotten(..) | WatchNoticeDisposition::Observed(..) => {
+                    suppressed.push(message.sequence);
+                    false
+                }
+            }
         })
         .collect();
+    // These rows remain behind the tracked cursor, but must also stay silent
+    // when that barrier eventually clears in this process.
+    inbox.mark_surfaced_out_of_order(suppressed.iter().copied());
     if beyond.is_empty() {
         return Ok(());
     }
@@ -6071,7 +6113,7 @@ async fn deliver_out_of_order_notices(
     tracing::info!(
         actor = ?actor,
         sequences = ?sequences,
-        "delivered settlement/watch notice queued behind a stuck native delivery"
+        "queued settlement/watch notice past a pending native delivery"
     );
     Ok(())
 }

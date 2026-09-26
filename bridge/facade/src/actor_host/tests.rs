@@ -2599,6 +2599,152 @@ async fn queued_watch_notice_already_observed_by_the_owner_is_acknowledged_witho
 }
 
 #[tokio::test]
+async fn watch_notices_past_a_tracked_barrier_use_the_same_observation_filter() {
+    use exomonad_node::DeliveryPhase;
+
+    for (retained, occurred_at_unix_ms, should_push) in [
+        (false, 1_000, false), // Forgotten handle.
+        (true, 1_000, false),  // Transition already observed at 2_000.
+        (true, 3_000, true),   // A newer transition still needs a wake.
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (inbox, actor, thread) = tracked_delivery_fixture(root.path(), &["front"]).await;
+        let watch = exomonad_actor::WatchId(19);
+        inbox
+            .publish(DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
+                notification: exomonad_actor::WatchNotification {
+                    owner: actor,
+                    watch,
+                    label: format!("join-{occurred_at_unix_ms}"),
+                    previous: exomonad_actor::WatchStateProjection::Pending,
+                    current: exomonad_actor::WatchStateProjection::Ready,
+                    transition: exomonad_actor::WatchTransition::Ready,
+                    occurred_at_unix_ms,
+                    sequence: exomonad_actor::ActorEventSequence(2),
+                    watermark: exomonad_actor::ActorEventSequence(2),
+                },
+            }))
+            .unwrap();
+        inbox
+            .begin_tracked_delivery(1)
+            .unwrap()
+            .unconfirmed()
+            .unwrap();
+        let backend = LostAckThenLate {
+            late: exomonad_agent::InputAdmission::Presented,
+            submissions: std::sync::Mutex::new(Vec::new()),
+            queries: std::sync::Mutex::new(Vec::new()),
+            pushes: std::sync::Mutex::new(Vec::new()),
+        };
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+        let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+        let without_evidence = Mutex::new(BTreeMap::new());
+        let retained_check = |owner, id| owner == actor && id == watch && retained;
+        let observed_check = |owner, id, at| owner == actor && id == watch && at <= 2_000;
+        let tick = || {
+            deliver_pending_checked(
+                actor,
+                &inbox,
+                &thread,
+                &backend,
+                &producer,
+                &reconciliations,
+                root.path(),
+                &observation,
+                &retained_check,
+                &observed_check,
+                &|| false,
+                &without_evidence,
+            )
+        };
+
+        tick().await.unwrap();
+        assert_eq!(delivery_phase(&inbox, 1), DeliveryPhase::Presented);
+        assert_eq!(
+            backend.pushes.lock().unwrap().len(),
+            usize::from(should_push)
+        );
+        assert!(inbox.surfaced_out_of_order().contains(&2));
+        // Once the barrier clears, the ordinary batch path acknowledges the
+        // already selected notice without pushing it again.
+        tick().await.unwrap();
+        assert_eq!(inbox.cursor(), 2);
+        assert_eq!(
+            backend.pushes.lock().unwrap().len(),
+            usize::from(should_push)
+        );
+    }
+}
+
+#[tokio::test]
+async fn newer_watch_revision_still_queues_after_an_observed_transition() {
+    use exomonad_agent::BackendThreadId;
+
+    let root = tempfile::tempdir().unwrap();
+    let inbox =
+        Arc::new(ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap());
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let watch = exomonad_actor::WatchId(19);
+    for (index, occurred_at_unix_ms) in [1_000, 3_000].into_iter().enumerate() {
+        inbox
+            .publish(DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
+                notification: exomonad_actor::WatchNotification {
+                    owner: actor,
+                    watch,
+                    label: format!("join-{occurred_at_unix_ms}"),
+                    previous: exomonad_actor::WatchStateProjection::Pending,
+                    current: exomonad_actor::WatchStateProjection::Ready,
+                    transition: exomonad_actor::WatchTransition::Ready,
+                    occurred_at_unix_ms,
+                    sequence: exomonad_actor::ActorEventSequence(index as u64 + 1),
+                    watermark: exomonad_actor::ActorEventSequence(index as u64 + 1),
+                },
+            }))
+            .unwrap();
+    }
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(false),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba5".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
+    deliver_pending_checked(
+        actor,
+        &inbox,
+        &thread,
+        &backend,
+        &producer,
+        &reconciliations,
+        root.path(),
+        &observation,
+        &|owner, id| owner == actor && id == watch,
+        &|owner, id, at| owner == actor && id == watch && at <= 2_000,
+        &|| false,
+        &Mutex::new(BTreeMap::new()),
+    )
+    .await
+    .unwrap();
+
+    let messages = backend.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("join-3000"));
+    assert!(!messages[0].contains("join-1000"));
+    assert_eq!(inbox.cursor(), 2);
+}
+
+#[tokio::test]
 async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
     use exomonad_agent::{
         BackendThreadId, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
