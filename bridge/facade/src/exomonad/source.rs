@@ -737,7 +737,14 @@ impl ExomonadSourceReload {
     fn ensure_helper_active(&self, branch: &str) -> Result<SourceRevision> {
         let seed = self.helper_root.join("empty");
         std::fs::create_dir_all(&seed)?;
-        std::fs::create_dir_all(self.helper_draft(branch))?;
+        let draft = self.helper_draft(branch);
+        if branch == "run" && !draft.exists() {
+            let workspace_seed = self.workspace.join(".exomonad/workspace/seeds/helpers");
+            if workspace_seed.is_dir() {
+                crate::actor_host::copy_helper_draft(&workspace_seed, &draft)?;
+            }
+        }
+        std::fs::create_dir_all(&draft)?;
         self.helper_layer(branch)
             .ensure_active_from(self.frozen.identity(), &[seed])
     }
@@ -1852,6 +1859,36 @@ mod tests {
         .unwrap();
         std::fs::write(authored.join("Project/Work.hs"), source).unwrap();
         (project, run)
+    }
+
+    #[test]
+    fn first_root_helper_layer_seeds_its_draft_before_active_creation() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let seed = project.path().join(".exomonad/workspace/seeds/helpers");
+        std::fs::create_dir_all(&seed).unwrap();
+        let source = "module SessionHelpers where\nanswer :: Int\nanswer = 42\n";
+        std::fs::write(seed.join("SessionHelpers.hs"), source).unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+
+        reload.ensure_helper_active("run").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
+            source
+        );
+        assert!(reload
+            .helper_layer("run")
+            .read_active()
+            .unwrap()
+            .unwrap()
+            .modules
+            .is_empty());
     }
 
     #[test]
