@@ -1,11 +1,35 @@
 ---
 name: exomonad-cleanup
-description: Retire Exomonad workers and fork groups deliberately — inspect a cleanup plan, execute it, and read the two-phase stop outcomes. Load before retiring anything, or when a stop reports that resources are still retained.
+description: Retain a pre-retirement kaizen interview, then retire Exomonad workers and fork groups deliberately — inspect a cleanup plan, execute it, and read the two-phase stop outcomes. Load before retiring anything, or when a stop reports that resources are still retained.
 ---
 
 Cleanup is a decision, not housekeeping. Keep valuable specialists; retire a
-group when its obligations are settled and you know they are. For routine
-retirement, plan and execute in one cell:
+group when its obligations are settled and you know they are.
+
+## Before retirement: kaizen interview
+
+Before retiring completed model actors, obtain and retain a brief interview
+while their context is still available. Include the root at run completion and
+workers/reviewers with relevant firsthand evidence. Reuse answers already in
+handoffs or friction reports; ask follow-ups only for missing useful evidence.
+
+Ask what helped, what caused waits or confusion, and which recurring work could
+have been handled by a helper or actor. Include useful and failed automation,
+coordination/review handoffs, and one concrete change they would try next.
+Request exact calls, commands, commits or artifacts where available; separate
+observations from inferred causes and unmeasured savings.
+
+Read the answers before retiring the actor. Retain them in the project's
+interview/friction record with actor and run identities, then route actionable
+findings to a fix, bounded experiment or explicit deferred item. An interview
+request being delivered is not an answer. Do not repeat an already retained
+interview to satisfy ceremony. For an unresponsive actor or urgent stop, retain
+the available trace and record that the interview was unavailable; do not delay
+necessary cancellation or resource release.
+
+## Plan and execute
+
+For routine retirement, plan and execute in one cell:
 
 ```haskell
 cleanupReceipt <- executeCleanup =<< planCleanupFor worker
