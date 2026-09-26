@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Post-wave15 improvements](post-wave15-improvements.md): completion-oriented
+  Bash with bounded contextual follow-ups, evidence access, source composition
+  and review friction; next RSI experiment and measurements.
+
 - [RSI iteration 3](rsi-iteration-3.md): wave-10 interview decisions, stale
   reminders, incremental typed review tools and proposed offline restart wave.
 - [Request scoped typed tools](request-scoped-tools.md): design check for
