@@ -371,3 +371,29 @@ does not watch Haskell files and has no build-time stdlib digest. A run snapshot
 alone cannot reject an already-mismatched old binary. Build-bound identity plus
 existing source capture is a larger build-policy decision; Sol writes the
 bounded design to runtime-source-isolation.md, without changing live sources.
+
+
+### User-directed performance and helper batch — 2026-09-26 06:58 UTC
+
+Inanna explicitly endorsed measured performance work, helper efficacy, runtime
+source isolation (including dependency-as-code benefits), and resulting prompt
+fixes. Three parallel investigations/implementations are active:
+
+- audit_abstractions traces wave14 compile56.8s and checkout35.6/44s episodes
+  through actual compile phases and lock lifetimes before changing mechanisms.
+  Implement clear owner fix in an isolated worktree with focused checks; no
+  snapshot validation/cancellation weakening or shared daemon restart.
+- wave14_launch_audit traces the precise actor2 successful/actor5 failed helper
+  paths, including active import roots and publication. Separate runtime defect
+  from missed reload, nonexistent test selection and unnecessary4GiB constraint.
+- managed_root_integration implements runtime source isolation in
+  codex/runtime-stdlib-snapshot after user approval of the build-policy change.
+  Design4b95565e7 binds dev stdlib/actor sources to build identity, validates
+  admission and captures run-owned immutable sources via existing owners. Main
+  and live hosts stay unchanged until review and focused checks.
+
+Prompt candidate77e8128 on harness rsi/question-prompt adds owner-side exact
+reviewer checkout preparation, actual named-test selection, adjustable experiment
+resource choices and helper publication/import diagnostics. No new Haskell
+snippet or API. Diff checked; independent evidence review requested before
+integration. Earlier DesignQuestion reference e194a5b already on harness master.
