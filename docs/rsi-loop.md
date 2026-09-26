@@ -74,6 +74,45 @@ focused preflight results. A failed preflight is evidence; distinguish a test
 assertion from a compiler, launch or environment failure. Preserve the existing
 shared services and use the repository's matched build/check entry points.
 
+## Threshold audits for every run
+
+Choose explicit operation/threshold pairs before the run and refine them when
+new friction appears. Audit every observed crossing through a stated cutoff,
+not just the worst anecdote. Begin with these triggers and tune them from
+measured evidence; they are investigation triggers, not automatic failures:
+
+| Axis | Initial trigger | Investigate |
+|---|---|---|
+| Latency | Every Haskell cell over 10 seconds | Queue, compiler phases, checkout wait/hold, execution, judgment, unaccounted time |
+| Repeated work | Repeated identical lookup/check/compile with unchanged inputs | Missing supplied context, duplicate owner, cache validity, replay |
+| Orientation | Any discovery of facts the host or requester already knows | Prompt/API gaps, environment setup, source/contract packets |
+| Coordination | Repeated unchanged poll, duplicate review, missed question, or lost update | Event routing, pending vs terminal state, request ownership |
+| Correctness | Every rejected typed reply, zero-test pass claim, or wrong-source review | API shape, source identity, actual executed evidence |
+| Resources | Unexpected bulk copy, retained resource after cleanup, or budget crossing | Source/mount boundaries, lifetime ownership, cancellation, storage growth |
+| Context and output | Repeated truncation, output rereads, or rediscovery after a fork | Evidence selection, retained handles, shared prefix and inheritance |
+| Model effort | Repeated root relay or judgment on code-decidable facts | Typed actors, reusable compositions, deterministic guards |
+
+For each crossing record operation/actor identity, input/source revision, threshold,
+observed value, phase breakdown, outcome and evidence. Include failed, cancelled
+and still-running operations; completed-call timing rows alone miss hangs. State
+coverage and missing instrumentation. Preserve units and distinguish wall time,
+CPU, allocations, retained bytes, tool calls and model rounds. Nested timing spans
+must not be added as independent costs.
+
+Group crossings by owning mechanism, then use bounded parallel investigations.
+Classify findings as necessary task work, avoidable repeated work, contention,
+implementation defect, or unresolved. Seek deletion of redundant work and cleaner
+ownership before larger caches, more workers or instructions to avoid the API.
+Report measured facts separately from causal hypotheses; contention coinciding
+with a slow phase does not establish how much time it caused.
+
+Each actionable finding becomes an owned fix or explicit deferred card, with a
+failure case and a check that exercises the real consumer. Compare before/after
+on the same workload where possible, then observe the next run for regressions
+and shifted costs. Retain compact tables/diagrams and link detailed evidence;
+use existing traces before adding instrumentation. An audit is complete when
+crossings are accounted for and actions assigned, not when every cost is zero.
+
 ## 3. Run and observe
 
 The Exomonad root owns assignment, integration and product delivery. The external
