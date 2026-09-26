@@ -93,3 +93,40 @@ Initial instruction executed; root authored contract `b43cdb1` and began helper
 publication. Harness `docs/wave13-launch.md` records exact source and pin.
 Read the **run checkout's** NEXT/logs on future ticks. A Luna observer is
 sampling startup. Next timer remains 22:11 PDT.
+
+
+## Second scheduled check — 2026-09-26 05:11 UTC
+
+Wave13 remains active, not accepted. Run
+`8d739b47-74e4-47e1-8bd2-7989bdda729e`; checkout
+`/home/inanna/dev/exomonad-harness-runs/wave13`. Launch owner repaired runtime
+`cargo run` into a prebuilt-binary launcher at harness `ef862550`; root's
+standalone acceptance `5ab5fea` remains unverified at this check. Independent
+review actor8 is working. Preserve wave12 demo hostPID3202992 on port4600.
+
+Two independently traced infrastructure failures prevented intended parallelism:
+
+- Child actors3–7 encountered `tmux new-window` occupied-index errors. Their
+  memory admission was immediate; this is not a physical-memory diagnosis.
+  Atomic insertion already existed in held branch5e61feecc but was excluded
+  from launch main. Isolate and test that fix before integration. A proposed
+  duplicate-flag commit05f276810 was caught in review and must not be merged.
+- Root's focused jobs `fe09bae8-66e5-4028-978f-7687acf35563` and
+  `47cf4320-1d6b-4e80-a23f-897ff29c2d3f` requested8GiB, the entire general
+  command pool. The preserved demo job `2e996f94-9093-49f7-ba56-a11814d5d00e`
+  holds1GiB. Both jobs therefore remained queued and were cancelled without
+  execution or output streams. Journal sequences54651/54840 are admissions;
+  after cancellation54757, a queued4GiB job allocated54761, started54765,
+  completed54772. Use a realistic smaller request, not implicit overcommit.
+  Audit existing queue observations for a typed admission-blockage explanation.
+
+A completed-call timing sample at05:17Z has24 calls over10s. Four longest
+completed observations are about300s, with compiler time0–853ms and command
+wait about300s. These are not evidence of five-minute compilation. Retained
+raw derivation: `/tmp/wave13-slow-completed-calls.json`; owning run log above.
+Backgrounded cells are call observations, not command completion evidence.
+
+Direct native `codex queue` to the root failed with a session-metadata error;
+operator delivery is being investigated before claiming the root received the
+reservation diagnosis. No running host or daemon was restarted. Next scheduled
+check remains22:56PDT through `tidepool-rsi-supervisor.timer`.
