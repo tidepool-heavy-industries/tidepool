@@ -10,6 +10,24 @@ use std::time::Duration;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const UNIT: &str = "exomonad-command-resources.service";
 
+/// Join an existing shared resource owner without starting or restarting it.
+/// Model-free recipe checks call this only when a command asks for a backend.
+pub(crate) async fn connect_existing(
+    policy: CommandResourcePolicy,
+    run: &str,
+) -> Result<Arc<CommandResourceClient>> {
+    policy.validate()?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or("XDG_RUNTIME_DIR is required for shared command resources")?;
+    let socket = PathBuf::from(runtime)
+        .join("exomonad-commands")
+        .join("resources.sock");
+    if !socket.exists() {
+        return Err("shared command resource service is unavailable for recipe commands".into());
+    }
+    Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?)
+}
+
 pub(super) async fn connect(
     policy: CommandResourcePolicy,
     run: &str,

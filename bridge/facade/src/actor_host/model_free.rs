@@ -120,10 +120,4 @@ impl ModelFreeSession {
             root_installation: *root_installation,
         })
     }
-
-    pub async fn shutdown(self) -> Result<()> {
-        self.forest.shutdown().await;
-        self.hosted.await?;
-        Ok(())
-    }
 }

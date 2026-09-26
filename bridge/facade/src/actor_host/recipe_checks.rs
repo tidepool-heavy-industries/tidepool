@@ -6,7 +6,9 @@ use super::*;
 use crate::exomonad::workspace::FrozenWorkspace;
 use crate::generated::recipe_check::RecipeCheckReq;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::future::Future;
 use tidepool_bridge::FromHaskell;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
@@ -30,10 +32,7 @@ pub(crate) async fn run(
         println!("Recipe {entry}; definitions {}", selected.identity());
         let mut driver = Driver::start(workspace, selected.clone()).await?;
         let result = driver.evaluate(entry, selected);
-        let cleanup = match driver.session.take() {
-            Some(session) => session.shutdown().await,
-            None => Ok(()),
-        };
+        let cleanup = driver.shutdown_session().await;
         driver.installations.clear();
         driver.pending.clear();
         match (result, cleanup) {
@@ -104,6 +103,10 @@ struct Driver {
     assertions: Vec<String>,
     executor: tokio::runtime::Handle,
     round: usize,
+    resource_policy: exomonad_node::command_resources::CommandResourcePolicy,
+    resource_run: String,
+    command_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
+    command_producers: HashSet<ActorRef>,
 }
 
 impl Driver {
@@ -141,6 +144,7 @@ impl Driver {
             ],
         )?;
         let defaults = selected.config()?;
+        let resource_policy = defaults.resources.clone();
         let haskell_root = selected.runtime_actors().to_path_buf();
         let config = ActorHostConfig {
             systemd_slice: None,
@@ -178,6 +182,10 @@ impl Driver {
             assertions: Vec::new(),
             executor: tokio::runtime::Handle::current(),
             round: 0,
+            resource_policy,
+            resource_run: format!("recipe-{}", uuid::Uuid::new_v4().simple()),
+            command_resources: None,
+            command_producers: HashSet::new(),
         })
     }
 
@@ -269,8 +277,8 @@ impl Driver {
     async fn turn(&mut self, key: CheckActor, source: String) -> Result<String> {
         let endpoint = self.installation(key)?.policy.clone();
         let call_id = uuid::Uuid::new_v4().simple().to_string();
-        let result = endpoint
-            .dispatch_boxed(ToolInvocation {
+        let result = self
+            .pump(endpoint.dispatch_boxed(ToolInvocation {
                 context: Some(ToolInvocationContext {
                     context_call_id: Some(call_id.clone()),
                     thread_id: "recipe-check".into(),
@@ -280,15 +288,17 @@ impl Driver {
                 }),
                 name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(source.clone()),
-            })
-            .await;
+            }))
+            .await?;
         // Complete the actual admitting tool boundary before another actor is driven.
-        let completion = endpoint
-            .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "recipe-check".into(),
-                call_id,
-            })
-            .await;
+        let completion = self
+            .pump(
+                endpoint.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+                    thread_id: "recipe-check".into(),
+                    call_id,
+                }),
+            )
+            .await?;
         let result = result.map_err(|error| {
             runtime_error(format!("resident recipe turn failed:\n{source}\n{error}"))
         })?;
@@ -320,47 +330,10 @@ impl Driver {
                     .recv()
                     .await
                     .ok_or("check deployment stream closed")?;
-                if let LocalResidentDeployment::PolicyInstalled(installation) = event {
-                    let session = self.session()?;
-                    if let [worktree] = installation.launch_worktrees.as_slice() {
-                        let tree = session
-                            .worktrees
-                            .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
-                            .ok_or("admitted check worktree missing")?;
-                        let principal = WorktreePrincipal::exact_actor(
-                            &runtime_namespace(session.session_root.path()),
-                            installation.actor.identity().id.0,
-                            installation.actor.identity().incarnation.0,
-                        );
-                        if session
-                            .bindings
-                            .lock()
-                            .current(tree.id())
-                            .map(|row| row.agent())
-                            != Some(&principal)
-                            || installation.worktree_custody.is_none()
-                        {
-                            return Err(runtime_error(
-                                "recipe actor lacks exact admitted worktree custody",
-                            ));
-                        }
+                if let Some(event) = self.handle_deployment(event).await? {
+                    if matches(&event) {
+                        return Ok(event);
                     }
-                    session.authority.install_grant(
-                        installation.actor.identity().into(),
-                        worktree_grant(installation.effective_role.role()),
-                    );
-                    if let Some(gate) = &installation.fork_gate {
-                        gate.mark_ready()?;
-                    }
-                    self.installations
-                        .insert(installation.actor.identity(), *installation);
-                } else if matches(&event) {
-                    return Ok(event);
-                } else if matches!(
-                    event,
-                    LocalResidentDeployment::SessionReady { .. }
-                        | LocalResidentDeployment::RequestUpdate { .. }
-                ) {
                     self.pending.push_back(event);
                 }
             }
@@ -369,15 +342,252 @@ impl Driver {
         .map_err(|_| runtime_error("recipe timed out waiting for the requested resident event"))?
     }
 
-    async fn restart(&mut self) -> Result<String> {
-        self.session
-            .take()
+    async fn pump<F: Future>(&mut self, future: F) -> Result<F::Output> {
+        tokio::pin!(future);
+        loop {
+            let event = tokio::select! {
+                output = &mut future => return Ok(output),
+                event = self.session.as_mut().ok_or("closed check session")?.deployments.recv() =>
+                    event.ok_or("check deployment stream closed")?,
+            };
+            if let Some(event) = self.handle_deployment(event).await? {
+                self.pending.push_back(event);
+            }
+        }
+    }
+
+    async fn shutdown_session(&mut self) -> Result<()> {
+        let shutdown = if let Some(session) = &self.session {
+            let forest = Arc::clone(&session.forest);
+            self.pump(forest.shutdown()).await.map(|_| ())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = shutdown {
+            let resources = self.finish_resources().await;
+            return Err(match resources {
+                Ok(()) => error,
+                Err(resources) => runtime_error(format!(
+                    "resident shutdown failed: {error}; command resource cleanup also failed: {resources}"
+                )),
+            });
+        }
+        let hosted_result = self.await_hosted().await;
+        let resources = self.finish_resources().await;
+        drop(self.session.take());
+        match (hosted_result, resources) {
+            (Err(hosted), Err(resources)) => Err(runtime_error(format!(
+                "resident host cleanup failed: {hosted}; command resource cleanup also failed: {resources}"
+            ))),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn await_hosted(&mut self) -> Result<()> {
+        loop {
+            let event = {
+                let session = self.session.as_mut().ok_or("closed check session")?;
+                tokio::select! {
+                    biased;
+                    event = session.deployments.recv() => event,
+                    result = &mut session.hosted => {
+                        result?;
+                        break;
+                    }
+                }
+            };
+            match event {
+                Some(event) => {
+                    if let Some(event) = self.handle_deployment(event).await? {
+                        self.pending.push_back(event);
+                    }
+                }
+                None => {
+                    (&mut self.session.as_mut().ok_or("closed check session")?.hosted).await?;
+                    break;
+                }
+            }
+        }
+        while let Ok(event) = self
+            .session
+            .as_mut()
             .ok_or("closed check session")?
-            .shutdown()
-            .await?;
+            .deployments
+            .try_recv()
+        {
+            if let Some(event) = self.handle_deployment(event).await? {
+                self.pending.push_back(event);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_deployment(
+        &mut self,
+        event: LocalResidentDeployment,
+    ) -> Result<Option<LocalResidentDeployment>> {
+        match event {
+            LocalResidentDeployment::PolicyInstalled(installation) => {
+                let session = self.session()?;
+                if let [worktree] = installation.launch_worktrees.as_slice() {
+                    let tree = session
+                        .worktrees
+                        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
+                        .ok_or("admitted check worktree missing")?;
+                    let principal = WorktreePrincipal::exact_actor(
+                        &runtime_namespace(session.session_root.path()),
+                        installation.actor.identity().id.0,
+                        installation.actor.identity().incarnation.0,
+                    );
+                    if session
+                        .bindings
+                        .lock()
+                        .current(tree.id())
+                        .map(|row| row.agent())
+                        != Some(&principal)
+                        || installation.worktree_custody.is_none()
+                    {
+                        return Err(runtime_error(
+                            "recipe actor lacks exact admitted worktree custody",
+                        ));
+                    }
+                }
+                session.authority.install_grant(
+                    installation.actor.identity().into(),
+                    worktree_grant(installation.effective_role.role()),
+                );
+                if let Some(gate) = &installation.fork_gate {
+                    gate.mark_ready()?;
+                }
+                self.installations
+                    .insert(installation.actor.identity(), *installation);
+                Ok(None)
+            }
+            LocalResidentDeployment::CommandBackend(request) => {
+                let resources = match &self.command_resources {
+                    Some(resources) => Ok(Arc::clone(resources)),
+                    None => crate::exomonad::resources::connect_existing(
+                        self.resource_policy.clone(),
+                        &self.resource_run,
+                    )
+                    .await
+                    .map(|resources| {
+                        self.command_resources = Some(Arc::clone(&resources));
+                        resources
+                    }),
+                };
+                let backend = resources
+                    .map_err(|error| {
+                        tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                            "recipe command resources unavailable: {error}"
+                        ))
+                    })
+                    .and_then(|resources| {
+                        let bubblewrap = resolve_scope_bubblewrap(&self.config.pane_environment)
+                            .map_err(|error| {
+                                tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                                    "cannot resolve bubblewrap for recipe commands: {error}"
+                                ))
+                            })?;
+                        let session = self.session().map_err(|error| {
+                            tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                error.to_string(),
+                            )
+                        })?;
+                        Ok(Arc::new(commands::HostCommandBackend::new(
+                            resources,
+                            request.owner,
+                            resident_command_roots(
+                                &session.authority,
+                                &session.worktrees,
+                                &self.config.workspace,
+                                request.owner,
+                            ),
+                            bubblewrap,
+                        ))
+                            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
+                    });
+                if backend.is_ok() {
+                    self.command_producers.insert(request.owner);
+                }
+                request.supply(backend);
+                Ok(None)
+            }
+            LocalResidentDeployment::NotificationSend(command) => {
+                command.rejected(exomonad_actor::NotificationError::Unavailable);
+                Ok(None)
+            }
+            LocalResidentDeployment::NotificationPoll(command) => {
+                command.observed(Err(exomonad_actor::NotificationError::Unavailable));
+                Ok(None)
+            }
+            LocalResidentDeployment::ReleaseAwait(request) => {
+                let release = match self.seal_actor(request.actor).await {
+                    Ok(()) => exomonad_actor::ResourceRelease::Released,
+                    Err(error) => exomonad_actor::ResourceRelease::Retained(format!(
+                        "command resource producer cleanup remains unconfirmed: {error}"
+                    )),
+                };
+                request.answer(release);
+                Ok(None)
+            }
+            LocalResidentDeployment::Retired { actor, .. } => {
+                self.session()?.authority.remove_grant(actor.into());
+                if let Err(error) = self.seal_actor(actor).await {
+                    tracing::warn!(?actor, %error, "recipe command producer retirement remains unconfirmed");
+                }
+                Ok(None)
+            }
+            other => Ok(Some(other)),
+        }
+    }
+
+    async fn seal_actor(&mut self, actor: ActorRef) -> std::io::Result<()> {
+        if self.command_producers.contains(&actor) {
+            let resources = self
+                .command_resources
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("command resource owner is unavailable"))?;
+            resources.seal_producer(&producer(actor)).await?;
+            self.command_producers.remove(&actor);
+        }
+        Ok(())
+    }
+
+    async fn finish_resources(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Some(resources) = &self.command_resources {
+            for actor in self.command_producers.clone() {
+                match resources.seal_producer(&producer(actor)).await {
+                    Ok(()) => {
+                        self.command_producers.remove(&actor);
+                    }
+                    Err(error) => failures.push(format!("{actor:?}: {error}")),
+                }
+            }
+        } else if !self.command_producers.is_empty() {
+            return Err(runtime_error(
+                "command resource producers remain unsealed: resource owner unavailable",
+            ));
+        }
+        if failures.is_empty() {
+            self.command_resources = None;
+            Ok(())
+        } else {
+            Err(runtime_error(format!(
+                "command resource producers remain unsealed: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
+    async fn restart(&mut self) -> Result<String> {
+        self.shutdown_session().await?;
         self.installations.clear();
         self.pending.clear();
         self.round += 1;
+        self.resource_run = format!("recipe-{}", uuid::Uuid::new_v4().simple());
         self.config.run_root = self
             .runtime
             .path()
@@ -471,6 +681,10 @@ impl Driver {
             RecipeRestart => cx.respond(executor.block_on(self.restart())?)?,
         })
     }
+}
+
+fn producer(actor: ActorRef) -> String {
+    format!("{}-{}", actor.id.0, actor.incarnation.0)
 }
 
 impl DispatchEffect for Driver {
