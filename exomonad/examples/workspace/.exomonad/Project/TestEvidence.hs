@@ -12,7 +12,7 @@ module Project.TestEvidence
   , FailureEvidence (..), FocusedDiagnosis (..)
   , PreparationEvidence (..), startFocusedAfter
   , startFocused, startFocusedIn, collectFocused, diagnoseFocused, finishFocused
-  , focusedPassed, focusedExecution, focusedSourceAssurance
+  , focusedPassed, focusedExecution, focusedSourceAssurance, focusedResultSummary
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -208,6 +208,58 @@ focusedSourceAssurance result = case focusedEvidence result of
     | Just dirty <- recordWorkingTree record -> SourceModified dirty
     | otherwise -> SourceUnrecorded
   where spec = focusedSpec result
+
+-- | A handoff view of the original job and its retained facts. The job is
+-- also the handle for 'Cmd.readOutput' on either stream; the artifact path is
+-- evidence provenance, not a requirement to reopen a child's checkout.
+focusedResultSummary :: FocusedRun -> FocusedResult -> Text
+focusedResultSummary run result =
+  "original job " <> jobText
+    <> "; requested source " <> focusedSource (runSpec run)
+    <> "; recorded source " <> maybe "unknown" id recordedSource
+    <> "; source " <> assuranceText assurance
+    <> "; preparation " <> Text.pack (show (focusedPreparation result))
+    <> "; terminal " <> Text.pack (show (Cmd.commandOutcome receipt))
+    <> "; cleanup " <> Text.pack (show (Cmd.commandCleanup receipt))
+    <> "; test phase " <> testPhase
+    <> "; " <> selected
+    <> "; executed " <> execution
+    <> "; runner counts " <> maybe "unknown" (Text.pack . show . recordSummaries) record
+    <> "; runner exit " <> maybe "unknown" (Text.pack . show . recordExitCode) record
+    <> "; executable " <> maybe "unknown" recordExecutable record
+    <> "; digest " <> maybe "unknown" recordDigest record
+    <> "; runner output " <> maybe "unknown" recordOutput record
+    <> "; artifact " <> maybe "unknown" id (focusedEvidencePath result)
+    <> "; output refs Stdout " <> jobText <> ", Stderr " <> jobText
+    <> either ("; evidence unknown: " <>) (const "; evidence recorded") (focusedEvidence result)
+    <> if sameRun then "" else "; original/result identity mismatch"
+  where
+    jobText = Text.pack (show (runJob run))
+    receipt = Cmd.commandResult (focusedCommand result)
+    sameRun = runSpec run == focusedSpec result
+      && runJob run == Cmd.completedJob (focusedCommand result)
+    assurance = if sameRun then focusedSourceAssurance result else SourceUnrecorded
+    record = either (const Nothing) Just (focusedEvidence result)
+    recordedSource = recordSource =<< record
+    testPhase = case focusedPreparation result of
+      PreparationFailed _ -> "not entered"
+      _ -> case record of
+        Just _ -> "runner reported"
+        Nothing -> "not established"
+    selected = case focusedEvidence result of
+      Left _ -> "matched unknown, runnable unknown"
+      Right record -> "matched " <> count (recordMatched record)
+        <> ", runnable " <> count (recordRunnable record)
+    count = maybe "unknown" (Text.pack . show . length)
+    assuranceText SourceVerified = "verified"
+    assuranceText (SourceModified _) = "dirty"
+    assuranceText (SourceDifferent _) = "different"
+    assuranceText SourceUnrecorded = "unrecorded"
+    execution = case if sameRun then focusedExecution result else ExecutionUnknown of
+      ExecutionPassed passed -> Text.pack (show passed) <> " passed"
+      ExecutionFailed passed failed -> Text.pack (show passed) <> " passed, "
+        <> Text.pack (show failed) <> " failed"
+      ExecutionUnknown -> "unknown"
 
 -- The originating command reads its own artifact before exit. A completion
 -- actor may observe the job without being able to open the originating

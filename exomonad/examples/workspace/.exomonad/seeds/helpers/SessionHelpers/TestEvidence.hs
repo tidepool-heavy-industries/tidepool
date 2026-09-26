@@ -4,16 +4,16 @@
 -- and acceptance rules in the shared owner; specialize commands and policy here.
 module SessionHelpers.TestEvidence
   ( module Project.TestEvidence, runTests, CheckDefinition (..), checkAt, runCheck
+  , module Project.FocusedGateExample, plannedCheck
   ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import Project.FocusedGateExample
 import Project.TestEvidence
 import qualified Tidepool.Command as Cmd
-import Tidepool.Effects.Core (Commands)
-import Data.Text (Text)
-import Project.FocusedGateExample (GateStart, startGate)
 import Tidepool.Actors.Exomonad (AgentRef)
-import Tidepool.Effects.Core (Actor)
+import Tidepool.Effects.Core (Actor, Commands)
 import Tidepool.Worktree (GitOid, renderGitOid)
 
 -- Remix the definition; supply the committed candidate at each invocation.
@@ -30,6 +30,15 @@ checkAt candidate definition = FocusedSpec
 runCheck :: (Member Actor effects, Member Commands effects) => AgentRef -> GitOid -> Cmd.Memory -> CheckDefinition -> Eff effects GateStart
 runCheck owner candidate memory definition =
   startGate owner (checkIntent definition) memory (checkAt candidate definition)
+
+-- | Adapt one reusable project definition to the shared check plan.
+plannedCheck :: CheckDefinition -> Cmd.Memory -> CheckPreparation -> PlanCheck
+plannedCheck definition memory preparation = PlanCheck
+  { planName = checkIntent definition
+  , planSpec = (`checkAt` definition)
+  , planMemory = memory
+  , planPreparation = preparation
+  }
 
 -- Start once, retain the result, then compose watchChecks or collectFocused.
 -- Tune this reservation and specialize a FocusedSpec for the current work.

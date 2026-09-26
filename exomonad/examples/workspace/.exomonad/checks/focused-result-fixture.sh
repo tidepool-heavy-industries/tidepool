@@ -2,7 +2,7 @@
 set -euo pipefail
 
 case "$1" in
-  pass|fail|unknown|dirty|missingfile|zero|setup|short) ;;
+  pass|fail|preparedfail|unknown|dirty|missingfile|zero|setup|short|expired) ;;
   *) exit 2 ;;
 esac
 
@@ -14,6 +14,9 @@ if [[ "$1" == missingfile ]]; then
   echo "focused test evidence: /tmp/exomonad-missing-evidence-$$.json" >&2
   exit 0
 fi
+if [[ "$1" == preparedfail ]]; then
+  echo 'focused preparation exit: 0' >&2
+fi
 
 if [[ "${2:-}" == managed ]]; then
   mkdir -p .focused-evidence
@@ -21,7 +24,7 @@ if [[ "${2:-}" == managed ]]; then
 else
   evidence_dir=$(mktemp -d)
 fi
-if [[ "$1" == pass || "$1" == dirty || "$1" == zero ]]; then
+if [[ "$1" == pass || "$1" == dirty || "$1" == zero || "$1" == expired ]]; then
   exit_code=0
   passed=1
   failed=0
@@ -59,6 +62,10 @@ cat > "$evidence_dir/evidence.json" <<EOF
 {"source":"fixture-source","working_tree_status":"$working_tree_status","executable":"fixture-executable","sha256":"fixture-digest","output":"$evidence_dir/output.log","matched":["fixture::one"],"runnable":$runnable,"summaries":[[$passed,$failed,0,0,0]],"exit_code":$exit_code}
 EOF
 echo "focused test evidence: $evidence_dir/evidence.json" >&2
+if [[ "$1" == expired ]]; then
+  head -c 2097152 /dev/zero | tr '\0' x >&2
+  printf '\n' >&2
+fi
 cat "$evidence_dir/output.log" >&2
 echo 'focused test record begin' >&2
 cat "$evidence_dir/evidence.json" >&2

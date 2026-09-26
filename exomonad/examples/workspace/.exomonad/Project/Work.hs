@@ -10,7 +10,7 @@
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
-  , lunaTask, lunaTaskFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, reviewAgain, repair
+  , lunaTask, lunaTaskFrom, lunaTaskInputFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, reviewAgain, repair
   , candidateAtSubmission
   , requestIncorporation, consultDesign
   , settledValue
@@ -22,6 +22,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (AgentInspection, Commands, Forks, GitRef (..))
+import Tidepool.Inspection (WorkbenchDisplay)
 import Tidepool.Worktree (renderGitOid, renderWorktreeError)
 import qualified Tidepool.Command as Cmd
 import Project.Types
@@ -110,9 +111,18 @@ solTask label effort = solTaskFrom label effort currentCheckout
 -- this sugar -- see Project.Review's startReviewer and
 -- checks/review-continuation.hs for that shape.
 lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
-lunaTaskFrom label effort source task = withInstructions (projectPrompt "task") $
-  withContext (selected taskContext) $ withModel "luna" $ withEffort effort $
-  coding source (assignment label task)
+lunaTaskFrom label effort source = lunaTaskInputFrom label effort source taskContext
+
+-- | Selected-context task work can carry typed project data alongside its
+-- rendered context, including an opaque actor handle allocated before fork.
+-- Keep the task role prompt and Luna placement in this single owner.
+lunaTaskInputFrom
+  :: WorkbenchDisplay input
+  => Label -> ForkEffort -> WorktreeSeed -> (input -> Text) -> input
+  -> Branch CodingEffects input result
+lunaTaskInputFrom label effort source context input = withInstructions (projectPrompt "task") $
+  withContext (selected context) $ withModel "luna" $ withEffort effort $
+  coding source (assignment label input)
 
 solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label effort source task = withInstructions (projectPrompt "task") $

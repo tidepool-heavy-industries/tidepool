@@ -16,7 +16,10 @@ counts. Wave18 is a standalone browser harness milestone, not an adapter launch.
 - Source/artifact provenance is exposed through the operator owner: library 4/4
   and binary 1/1; a live mounted artifact query is not claimed.
 - Focused checks retain original jobs, preparation, source assurance, counts and
-  stdout/stderr recovery. Candidate-once plans compose multiple checks.
+  stdout/stderr recovery. Candidate-once plans compose multiple checks. Final
+  focused recipes passed 27/27, 2/2, 5/5 and 5/5; definition identities
+  `4bd4e753` (consumer compile) and `6ce039c0` (narrowed recipe configuration).
+  Both installed harness consumers match their compiled drafts byte-for-byte.
 - Background investigation watches one original job and at most two supplied
   read-only probes. Terminal and pending-probe recipes each passed 5/5; the pending
   case uses a FIFO barrier and verifies successful diagnostics in a mounted checkout.
@@ -30,10 +33,12 @@ counts. Wave18 is a standalone browser harness milestone, not an adapter launch.
 - Baseline incorporation passes typed collector handles to selected Luna workers;
   report and verified acceptance remain distinct. Initial episode passed 17/17.
   Live owner-choice trials motivated a simpler single-choice semantic boundary;
-  the revised implementation is awaiting its final compile check.
+  the revised implementation passed its final definition compile (no repeated
+  collector recipe); root live single-choice trials passed 5/5.
 - Reminders operate on explicitly supplied immutable episodes and preserve the
   existing routing sink. Core bounded recipe passed 6/6; actual HostJev cases
-  passed 3/3. Routing consumer verification is in progress.
+  passed 3/3. Routing consumer passed 6/6, including preservation of typed unavailable
+  notification receipts, duplicate suppression and changed-question episodes.
 - Harness release preparation stages a real release executable and exercises the
   production launcher through the browser journey. Twelve Python script checks
   passed; the actual release-binary journey is pending.

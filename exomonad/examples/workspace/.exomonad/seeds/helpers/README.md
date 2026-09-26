@@ -21,6 +21,28 @@ over the retained `CheckEntry` and `CheckOutcome` and receive `Just summary`.
 It returns `Nothing` if the watcher has not settled yet. A root actor and a
 child actor each call `startGate` in their own checkout.
 
+Retain the `FocusedRun` from `GateWatching run watcher` or
+`GateWatchRefused run issue`. If the watcher binding is lost, call
+`collectFocused run` to read the original job's terminal evidence. If a new
+notice is needed, call `reopenGate owner name run`; a still-live old watcher
+may also send a notice. If only the original `Cmd.Job` and spec were retained,
+reconstruct `FocusedRun spec job` or `PreparedFocusedRun spec job` according
+to the original start. A missing notebook binding does not mean the job is
+missing, and recovery never submits it again. A prepared run without its
+preparation marker remains `PreparationUnknown`.
+
+For several named checks, use `plannedCheck definition memory preparation` to
+build `[PlanCheck]` values. Each has a name, memory reservation and
+`WithoutPreparation` or `PrepareWith` function.
+The function receives the candidate at invocation and returns prerequisite
+argv for that original job. Call `Right started <- startCheckPlan me candidate checks`.
+In a later cell use `report <- readCheckPlan started`, then `planSummary report` and
+`planPassed report`. `planStarts started` retains every original run or typed
+start refusal; `planState report` retains terminal receipts for admitted jobs.
+The plan has one aggregate watcher. Its terminal notice names refused starts
+and says when not all requested checks ran. Unknown, pending, failed or refused
+members never produce `planPassed = True`.
+
 Call `startFocused (Cmd.GiB 2) spec` with a memory limit appropriate to the
 check, and handle `Left (NonPositiveExpected n)` before using the `Right`
 `FocusedRun`. To work while it runs, give the retained run a name and attach

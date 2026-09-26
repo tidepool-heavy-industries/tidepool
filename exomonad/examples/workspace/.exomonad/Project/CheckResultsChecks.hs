@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeOperators #-}
 
 module Project.CheckResultsChecks
-  ( preparedCompletion, completionRouting, managedEvidence, runningCommandCleanup
+  ( preparedCompletion, completionRouting, retainedRecovery, managedEvidence, runningCommandCleanup
   , EvidenceProbe (probeStart, probePrepared, probeRead, probeMove), evidenceProbe
   ) where
 
@@ -60,6 +60,14 @@ completionRouting = do
         , "late <- Cmd.start (fixture \"pass\")"
         ]
   void $ turn owner setup
+  planRefusals <- turn owner
+    "let zero = PlanCheck { planName = \"zero\", planSpec = const (spec { focusedExpected = 0 }), planMemory = Cmd.MiB 64, planPreparation = WithoutPreparation }\nlet empty = PlanCheck { planName = \"empty preparation\", planSpec = const spec, planMemory = Cmd.MiB 64, planPreparation = PrepareWith (const []) }\nRight refusedPlan <- startCheckPlan me (\"0123456789abcdef0123456789abcdef01234567\" :: GitOid) [zero, empty]\nrefusedReport <- readCheckPlan refusedPlan\n(planPassed refusedReport, planSummary refusedReport, planWatcher refusedPlan)"
+  check "plan retains all setup refusals without admitting a command or watcher"
+    (all (`Text.isInfixOf` lastOutput planRefusals)
+      ["False", "not all requested checks ran", "NonPositiveExpected 0", "EmptyPreparation", "Nothing"])
+  duplicatePlan <- turn owner
+    "duplicate <- startCheckPlan me (\"0123456789abcdef0123456789abcdef01234567\" :: GitOid) [zero, zero]\ncase duplicate of { Left (DuplicateCheckName \"zero\") -> True; _ -> False }"
+  check "duplicate plan names refuse before any submission" (lastOutput duplicatePlan == "True")
   invalidCount <- turn owner
     "bad <- startFocused (Cmd.MiB 256) (spec { focusedExpected = 0 })\ncase bad of { Left (NonPositiveExpected 0) -> True; _ -> False }"
   check "zero expected tests are rejected before command submission" (lastOutput invalidCount == "True")
@@ -72,6 +80,52 @@ completionRouting = do
     "duplicate <- watchChecks me NotifySummary [(\"same\", FocusedRun spec late), (\"same\", FocusedRun spec late)]\ncase duplicate of { Left (DuplicateCheckName \"same\") -> True; _ -> False }"
   check "duplicate watcher names have a typed refusal" (lastOutput duplicate == "True")
   void $ awaitOutput owner "Cmd.status late" (Text.isInfixOf "CommandFinished")
+  recovered <- turn owner
+    "recovered <- reopenGate me \"recovered\" (FocusedRun spec late)\ncase recovered of { GateWatching run _ -> runJob run == late; _ -> False }"
+  check "a later notebook cell reattaches the original job without submission"
+    (lastOutput recovered == "True")
+  recoveredResult <- awaitOutput owner
+    "case recovered of { GateWatching _ handle -> do { state <- readChecks handle; pure (checksSummary state) }; _ -> pure \"refused\" }"
+    (Text.isInfixOf "recovered: passed")
+  check "reopened completed job retains its terminal evidence"
+    ("recovered: passed" `Text.isInfixOf` recoveredResult)
+  direct <- turn owner
+    "original <- collectFocused (FocusedRun spec late)\n(focusedPassed original, Cmd.completedJob (focusedCommand original) == late, focusedPreparation original)"
+  check "direct recovery reads the original completion and its preparation state"
+    ("(True,True,NoPreparation)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput direct))
+  originalPacket <- turn owner
+    "original <- collectFocused (FocusedRun spec late)\nfocusedResultSummary (FocusedRun spec late) original"
+  check "recovered packet names the original job and both retained stream references"
+    (all (`Text.isInfixOf` lastOutput originalPacket)
+      ["original job", "requested source fixture-source", "recorded source fixture-source", "output refs Stdout", "Stderr", "executed 1 passed"])
+  unclean <- turn owner
+    "original <- collectFocused (FocusedRun spec late)\nlet Cmd.Finished job _ output = focusedCommand original\nlet retained = original { focusedCommand = Cmd.Finished job (Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandRetained) output }\n(focusedExecution retained, focusedPassed retained)"
+  check "a passing original check with retained cleanup is not accepted"
+    ("(ExecutionPassed1,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput unclean))
+  mistakenPreparation <- turn owner
+    "original <- collectFocused (PreparedFocusedRun spec late)\n(focusedPreparation original, focusedPassed original)"
+  check "recovery cannot claim unrecorded preparation succeeded"
+    ("(PreparationUnknown,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput mistakenPreparation))
+  wrongSource <- turn owner
+    "wrong <- collectFocused (FocusedRun (spec { focusedSource = \"other-source\" }) late)\n(focusedSourceAssurance wrong, focusedPassed wrong)"
+  check "recovered original job does not prove a different source"
+    ("(SourceDifferent(Just\"fixture-source\"),False)" `Text.isInfixOf`
+      Text.filter (/= ' ') (lastOutput wrongSource))
+  wrongPacket <- turn owner
+    "wrong <- collectFocused (FocusedRun (spec { focusedSource = \"other-source\" }) late)\nfocusedResultSummary (FocusedRun (spec { focusedSource = \"other-source\" }) late) wrong"
+  check "wrong-source packet carries requested and recorded source without claiming assurance"
+    (all (`Text.isInfixOf` lastOutput wrongPacket)
+      ["requested source other-source", "recorded source fixture-source", "source different"])
+  void $ turn owner
+    "Right partialWatcher <- watchChecksWithRefusals me NotifySummary [(\"refused\", NonPositiveExpected 0)] [(\"late\", FocusedRun spec late)]"
+  partial <- awaitOutput owner
+    "partialState <- readChecks partialWatcher\nlet partialPlan = PlanStart [(\"refused\", Left (NonPositiveExpected 0)), (\"late\", Right (FocusedRun spec late))] (Just (Right partialWatcher))\nlet partialReport = PlanReport partialPlan (Just partialState)\n(planPassed partialReport, planSummary partialReport, length (checkNotices partialState))"
+    (Text.isInfixOf "late: passed")
+  check ("partial admission keeps the passed original but refuses whole-plan acceptance: " <> Text.take 200 partial)
+    (all (`Text.isInfixOf` partial)
+      ["False", "not all requested checks ran", "refused: start refused", "late: passed", "original job", "output refs Stdout"])
+  void $ turn owner "finishChecks partialWatcher"
+  void $ turn owner "case recovered of { GateWatching _ handle -> finishChecks handle >> pure (); _ -> pure () }"
   void $ turn owner
     "failed <- Cmd.start (fixture \"fail\")\nunknown <- Cmd.start (fixture \"unknown\")\nRight watcher <- watchChecks me NotifyProblems [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed), (\"unknown\", FocusedRun spec unknown)]"
   observed <- awaitOutput owner
@@ -105,7 +159,18 @@ completionRouting = do
     (Text.isInfixOf "late: passed")
   check "aggregate policy records one named summary attempt after late completions"
     (all (`Text.isInfixOf` summary) ["late: passed", "failed: failed", "matched 1", "runnable 1", "CommandExited 0", "CommandClean", "; artifact /"])
+  handoff <- turn owner
+    "import Project.HandoffExamples\nview <- readChecks summarizer\nhandoffProposal (Blocked \"pending handoff\" []) Nothing view []"
+  check "parent handoff includes complete original check packets"
+    (all (`Text.isInfixOf` lastOutput handoff)
+      ["Observed checks:", "late: passed", "failed: failed", "original job", "output refs Stdout", "runner counts"])
   void $ turn owner "finishChecks summarizer"
+
+  preparedFail <- turn owner
+    "preparedFailedJob <- Cmd.start (fixture \"preparedfail\")\npreparedFailed <- collectFocused (PreparedFocusedRun spec preparedFailedJob)\n(focusedPassed preparedFailed, focusedResultSummary (PreparedFocusedRun spec preparedFailedJob) preparedFailed)"
+  check "packet separates passed preparation from failed terminal test"
+    (all (`Text.isInfixOf` lastOutput preparedFail)
+      ["False", "preparation PreparationPassed", "terminal CommandExited 1", "test phase runner reported", "executed 0 passed, 1 failed", "runner exit Just 1"])
 
   void $ turn owner
     "dirty <- Cmd.start (fixture \"dirty\")\nRight dirtyWatcher <- watchChecks me NotifyProblems [(\"dirty\", FocusedRun spec dirty)]"
@@ -123,6 +188,11 @@ completionRouting = do
     (Text.isInfixOf "did not retain its evidence record")
   check "missing embedded evidence stays unknown without a second file read"
     (all (`Text.isInfixOf` missing) ["CheckUnknown", "did not retain its evidence record"])
+  missingPacket <- turn owner
+    "missingView <- readChecks missingWatcher\nchecksSummary missingView"
+  check "missing packet keeps original output references and marks counts unknown"
+    (all (`Text.isInfixOf` lastOutput missingPacket)
+      ["missing: unknown", "matched unknown", "executed unknown", "evidence unknown", "output refs Stdout"])
   void $ turn owner "finishChecks missingWatcher"
 
   setup <- turn owner
@@ -130,6 +200,25 @@ completionRouting = do
   check "zero selection, incomplete setup, and short execution stay distinct"
     ("(ZeroSelection,SetupIncomplete,ExecutionUnknown,SetupIncomplete)"
       `Text.isInfixOf` Text.filter (/= ' ') (lastOutput setup))
+
+retainedRecovery :: Member RecipeCheck effects => Eff effects ()
+retainedRecovery = do
+  owner <- root
+  let fixture = Text.pack workspaceRoot <> "/checks/focused-result-fixture.sh"
+  void $ turn owner $ Text.unlines
+    [ "let spec = FocusedSpec \"fixture check\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
+    , "let fixture kind = Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"bash\", " <> Text.pack (show fixture) <> ", kind])"
+    ]
+  expired <- turn owner
+    "expiredJob <- Cmd.start (fixture \"expired\")\nexpiredResult <- Cmd.quiet (collectFocused (FocusedRun spec expiredJob))\n(focusedExecution expiredResult, focusedPassed expiredResult, focusedEvidence expiredResult)"
+  check ("a retained job with an incomplete output page cannot prove a pass: " <> Text.take 240 (lastOutput expired))
+    (all (`Text.isInfixOf` lastOutput expired)
+      ["ExecutionUnknown", "False", "focused command output is incomplete"])
+  cancelled <- turn owner
+    "cancelledJob <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))\nCmd.cancel cancelledJob\ncancelledResult <- Cmd.quiet (collectFocused (PreparedFocusedRun spec cancelledJob))\n(focusedPreparation cancelledResult, focusedPassed cancelledResult, Cmd.commandCleanup (Cmd.commandResult (focusedCommand cancelledResult)))"
+  check "cancelled original job cannot prove preparation or whole-check acceptance"
+    (all (`Text.isInfixOf` lastOutput cancelled)
+      ["PreparationUnknown", "False"])
 
 data EvidenceProbe mode = EvidenceProbe
   { probeState :: mode :- State ()

@@ -16,18 +16,26 @@ modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
-  "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
-  "Project.FieldNotesChecks", "Project.RebaseRouterChecks",
+  "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.SupervisionProfiles",
+  "Project.FieldNotesChecks", "Project.RebaseRouterChecks", "Project.BaselineIncorporationChecks",
   "Project.Service", "Project.Repository", "Project.CheckResults", "Project.FocusedGateExample",
   "Project.PrepareContinue", "Project.RetainedEvidence",
   "Project.AssumptionWatch", "Project.ParallelInvestigate", "Project.SlowCommandWatch",
+  "Project.BackgroundInvestigator",
+  "Project.WorkflowReminders", "Project.WorkflowReminderExamples", "Project.WorkflowReminderRoutingChecks",
   "Project.Interview", "Project.WorkflowExamples", "Project.ReviewFlow",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
+  "Project.WorkflowReminderChecks.bounded",
+  "Project.WorkflowReminderRoutingChecks.questionRouting",
+  "Project.WorkflowReminderChecks.semanticCases",
   "Project.FollowupChecks.bounded",
   "Project.AutomationChecks.integration",
   "Project.CheckResultsChecks.completionRouting",
+  "Project.CheckResultsChecks.retainedRecovery",
+  "Project.BackgroundInvestigatorChecks.terminalFailure",
+  "Project.BackgroundInvestigatorChecks.pendingProbe",
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",
   "Project.RoutingChecks.notificationRetention",
@@ -44,7 +52,12 @@ checks = [
   "Project.JevChecks.reflex",
   "Project.RebaseRouterChecks.agentRef",
   "Project.RebaseRouterChecks.facts",
+  "Project.BaselineIncorporationChecks.episode",
   "Project.FieldNotesChecks.policy",
+  "Project.ReviewFlowChecks.oneComponent",
+  "Project.ReviewFlowChecks.failurePaths",
+  "Project.ReviewFlowChecks.effectfulRouting",
+  "Project.ReviewFlowChecks.workflowExample",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in

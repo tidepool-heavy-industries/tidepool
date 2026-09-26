@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 // Keep this in step with this repository's .exomonad/workspace gitlink.
 // `exomonad new` pulls the source from DEFAULT_WORKSPACE_URL, but must install
 // the commit this release compiled and checked, even if the remote advances.
-pub(super) const DEFAULT_WORKSPACE_REV: &str = "2599a6434b5f09ab176b29a851b6a680ef4aa45d";
+pub(super) const DEFAULT_WORKSPACE_REV: &str = "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84";
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
@@ -43,6 +43,8 @@ modules = [
   "Project.Service", "Project.Repository", "Project.CheckResults",
   "Project.PrepareContinue", "Project.RetainedEvidence", "Project.AssumptionWatch",
   "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
+  "Project.FocusedGateExample", "Project.ReviewFlow", "Project.BackgroundInvestigator",
+  "Project.BaselineIncorporation", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
