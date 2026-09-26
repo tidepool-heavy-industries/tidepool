@@ -540,6 +540,7 @@ impl ForkGroupRegistry {
             });
         }
         group.commit_requested = true;
+        tracing::info!(group = id.0, actor = ?owner, "fork group commit requested");
         publish_if_ready(group);
         Ok(group.phase.subscribe())
     }
@@ -554,6 +555,7 @@ impl ForkGroupRegistry {
             return Err(ForkGroupError::Unknown(id.0));
         }
         group.ready.insert(child);
+        tracing::info!(group = id.0, actor = ?child, "fork child queue ready");
         publish_if_ready(group);
         Ok(())
     }
@@ -702,6 +704,7 @@ impl ForkGroupRegistry {
             state.groups[id]
                 .phase
                 .send_replace(ForkGroupPhase::Committed);
+            tracing::info!(group = id.0, actor = ?owner, "fork group published");
         }
         Ok(())
     }

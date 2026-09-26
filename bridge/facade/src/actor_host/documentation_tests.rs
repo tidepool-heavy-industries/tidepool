@@ -689,6 +689,99 @@ async fn published_unfold_watch_and_request_examples_execute() {
 }
 
 #[tokio::test]
+async fn record_actor_unfold_publishes_and_routes_child_reply() {
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("config.toml"),
+                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['LaunchFixture']\n",
+            ).unwrap();
+            std::fs::write(
+                authored.join("LaunchFixture.hs"),
+                include_str!("record_actor_unfold.hs"),
+            ).unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                ).unwrap(),
+            );
+        },
+    ).await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        r#"import LaunchFixture
+Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
+launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"#,
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        "R.send (launchAndAwait (R.client launcher)) ()",
+    )
+    .await;
+    let child = campaign
+        .next_deployment(
+            "record actor's reviewer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                LocalResidentDeployment::NotificationSend(notice) => {
+                    panic!("unexpected launch notice: {}", notice.message())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    assert!(
+        child.fork_boundary.is_none(),
+        "resident handler has no notebook completion"
+    );
+    let _custody = open_test_fork(&campaign, &child);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        child.fork_gate.as_ref().unwrap().wait_committed(),
+    )
+    .await
+    .expect("resident admission must publish without a notebook callback")
+    .unwrap();
+    campaign
+        .next_deployment(
+            "review request activation",
+            Duration::from_secs(60),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child.actor.identity() =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let reply = child
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw("respond (\"review complete\" :: Text)".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply["status"], "replied", "{reply}");
+    let result = committed(root.as_ref(), "R.call (readReply (R.client launcher)) ()").await;
+    assert!(result.to_string().contains("review complete"), "{result}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_label_literals_fail_before_actor_side_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
@@ -1426,13 +1519,16 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             .await;
         match collected {
             Collected::Child(child) => {
-                let expected_effort = child
-                    .label
-                    .ends_with("/consumer-tests")
-                    .then_some(exomonad_actor::ForkEffort::Medium);
+                let expected_effort = if child.label.ends_with("/consumer-tests") {
+                    Some(exomonad_actor::ForkEffort::Medium)
+                } else if child.label.ends_with("/later-wave/domain") {
+                    Some(exomonad_actor::ForkEffort::Low)
+                } else {
+                    None
+                };
                 assert_eq!(
                     child.fork_effort, expected_effort,
-                    "the consumer explicitly requests Medium; the domain leaves selection to the host default"
+                    "explicit effort is preserved; omitted effort stays a host default"
                 );
                 let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
                 assert_eq!(boundary.thread_id, "actor-host-vertical");

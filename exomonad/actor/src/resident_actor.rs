@@ -1016,7 +1016,7 @@ pub struct ResidentKernelBehavior<H, O> {
     runtime_observation: crate::ActorRuntimeObservationHandle,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
-    active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    fork_publication: ForkPublication,
     active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
     pending_fork_publications: Vec<PendingForkPublication>,
@@ -1026,6 +1026,22 @@ pub struct ResidentKernelBehavior<H, O> {
     /// `taskSource` of the current request's session input, read from its
     /// rendered preview when the request was presented.
     assignment_base: Option<String>,
+}
+
+// Even a raw operator notebook with no provider boundary publishes at the
+// end of its input. A resident handler has no later notebook completion.
+enum ForkPublication {
+    Resident,
+    Workbench(Option<tidepool_runtime::session::WorkbenchForkBoundary>),
+}
+
+impl ForkPublication {
+    fn boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
+        match self {
+            Self::Resident => None,
+            Self::Workbench(boundary) => boundary.as_ref(),
+        }
+    }
 }
 
 struct PendingForkPublication {
@@ -1070,7 +1086,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn pending_in_tool_block(&self, target: ActorRef) -> bool {
-        self.active_fork_boundary.is_some() && self.environment.fork_groups.is_pending_child(target)
+        self.fork_publication.boundary().is_some()
+            && self.environment.fork_groups.is_pending_child(target)
     }
 
     /// Replace `standing`, logging the transition. The sole place `standing`
@@ -1166,7 +1183,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             workbench_executions: Arc::default(),
             active_route: None,
-            active_fork_boundary: None,
+            fork_publication: ForkPublication::Resident,
             active_workbench_control: None,
             settled_fork_boundaries: Vec::new(),
             pending_fork_publications: Vec::new(),
@@ -2296,7 +2313,7 @@ where
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         if descriptor.fork_group().is_some() {
             if self.policy_installed
-                && self.active_fork_boundary.as_ref().is_none_or(|boundary| {
+                && self.fork_publication.boundary().is_none_or(|boundary| {
                     boundary.thread_id.is_empty() || boundary.call_id.is_empty()
                 })
             {
@@ -2304,7 +2321,7 @@ where
                     "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
                 ));
             }
-            descriptor = descriptor.with_fork_boundary(self.active_fork_boundary.clone());
+            descriptor = descriptor.with_fork_boundary(self.fork_publication.boundary().cloned());
         }
         if !self
             .descriptor
@@ -3496,22 +3513,23 @@ where
                     }
                     let group_path = group.to_string();
                     let maximum = budget.maximum_active_children.map(usize::from);
-                    let (group_id, reservations) = match self.active_fork_boundary.clone() {
-                        Some(boundary) => self.environment.fork_groups.begin_at_boundary(
-                            context.actor,
-                            group,
-                            branches,
-                            maximum,
-                            boundary,
-                        ),
-                        None => self.environment.fork_groups.begin(
-                            context.actor,
-                            group,
-                            branches,
-                            maximum,
-                        ),
-                    }
-                    .map_err(|error| self.name_coordinator(error))?;
+                    let (group_id, reservations) =
+                        match self.fork_publication.boundary().cloned() {
+                            Some(boundary) => self.environment.fork_groups.begin_at_boundary(
+                                context.actor,
+                                group,
+                                branches,
+                                maximum,
+                                boundary,
+                            ),
+                            None => self.environment.fork_groups.begin(
+                                context.actor,
+                                group,
+                                branches,
+                                maximum,
+                            ),
+                        }
+                        .map_err(|error| self.name_coordinator(error))?;
                     Ok::<_, String>((group_id, group_path, reservations))
                 })();
                 match admitted {
@@ -3613,6 +3631,19 @@ where
                             )
                             .await;
                     }
+                }
+                // Resident actor handlers have no provider tool completion to
+                // publish their children. Publish this admission before resuming
+                // the handler, which may immediately await a child's reply.
+                // Notebook groups remain fenced by their completion boundary.
+                if matches!(self.fork_publication, ForkPublication::Resident) {
+                    self.environment
+                        .fork_groups
+                        .publish_groups(&[group], context.actor)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
+                    tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
                 }
                 self.environment
                     .runner
@@ -4574,10 +4605,9 @@ where
                 vec!["helpers: this host installs no source layers.".into()],
             );
         };
-        let (outcome, detail) = match layers.reload_helpers(
-            tidepool_repr::PrincipalId::from(context.actor),
-            also_check,
-        ) {
+        let (outcome, detail) = match layers
+            .reload_helpers(tidepool_repr::PrincipalId::from(context.actor), also_check)
+        {
             crate::SourceLayerReload::Unavailable(detail) => ("unavailable", detail),
             crate::SourceLayerReload::Rejected {
                 active,
@@ -5698,7 +5728,9 @@ where
                                                 text,
                                                 (8 * 1024).min(limit).saturating_sub(512),
                                             );
-                                            *text = format!("retained as {binding} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}");
+                                            *text = format!(
+                                                "retained as {binding} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
+                                            );
                                         } else {
                                             *text =
                                                 format!("retained as {binding} :: Cmd.Job\n{text}");
@@ -6655,7 +6687,7 @@ where
                         cell_display_remaining = cell_display_remaining.saturating_sub(spent);
                     }
                     if self.environment.fork_groups.has_ready(context.actor) {
-                        let publication = if self.active_fork_boundary.is_none() {
+                        let publication = if self.fork_publication.boundary().is_none() {
                             self.environment.fork_groups.publish_ready(context.actor)
                         } else {
                             Ok(Vec::new())
@@ -7428,7 +7460,7 @@ where
             let reply = match retained {
                 Some(WorkbenchBoundaryRecord::Terminal(reply)) => Some(reply),
                 Some(WorkbenchBoundaryRecord::Unconfirmed) => {
-                    return Ok(crate::WorkbenchBoundaryReconciliation::Pending)
+                    return Ok(crate::WorkbenchBoundaryReconciliation::Pending);
                 }
                 None => None,
             };
@@ -7821,7 +7853,7 @@ where
                     .begin(execution, request.clone(), invocation);
             }
             self.active_workbench_control = control.clone();
-            self.active_fork_boundary = request.fork_boundary().cloned();
+            self.fork_publication = ForkPublication::Workbench(request.fork_boundary().cloned());
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
             // exec) — see `crate::call_timing`. The scope wraps the whole
@@ -7851,7 +7883,7 @@ where
                 Err(_) => "error".to_string(),
             };
             call_scope.finish(&call_outcome);
-            self.active_fork_boundary = None;
+            self.fork_publication = ForkPublication::Resident;
             self.active_workbench_control = None;
             match &result {
                 Ok(KernelStep::Continue(_)) => self
@@ -7982,7 +8014,7 @@ where
                 ),
                 call_id: format!("route:{}", watch.0),
             };
-            self.active_fork_boundary = Some(completion.clone());
+            self.fork_publication = ForkPublication::Workbench(Some(completion.clone()));
             let result = async {
                 let mut outcome = self
                     .environment
@@ -8091,7 +8123,7 @@ where
             let (_, notifications) = self.environment.requests.abort_unsubmitted(context.actor);
             self.publish_watch_notifications(notifications).await;
             self.active_route = None;
-            self.active_fork_boundary = None;
+            self.fork_publication = ForkPublication::Resident;
             let notification = self
                 .environment
                 .requests
