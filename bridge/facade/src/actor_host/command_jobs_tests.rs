@@ -2380,6 +2380,111 @@ async fn foreground_completion_before_budget_returns_inline_without_notice() {
 }
 
 #[tokio::test]
+async fn sibling_actor_progresses_during_foreground_command_wait() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|long-running|]").await;
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+
+    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    let child = campaign
+        .next_deployment(
+            "sibling actor installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    let _custody = child
+        .worktree_custody
+        .clone()
+        .expect("child checkout binding remains live for this test");
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign
+        .next_deployment(
+            "sibling actor ready",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await;
+
+    let foreign = super::tests::dispatch_haskell_script_result(
+        child.policy.as_ref(),
+        "Cmd.observeCompletion (Cmd.Observation 0 1024) job",
+    )
+    .await;
+    let rendered = match foreign {
+        Ok(value) => value.to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(rendered.contains("not authorized"), "{rendered}");
+    campaign.assert_no_deployment("foreign observation armed an owner notice", |event| {
+        matches!(event, LocalResidentDeployment::SettlementChanged { notification } if notification.command_job.is_some())
+    });
+
+    let policy = campaign.root_installation.policy.clone();
+    let waiting = tokio::spawn(async move {
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "Cmd.observeCompletion (Cmd.Observation 30000 1024) job",
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                campaign
+                    .root_installation
+                    .runtime_observation
+                    .snapshot()
+                    .workbench_posture,
+                exomonad_actor::ActorWorkbenchPosture::AwaitingEffect { effect, .. }
+                    if effect == "command job"
+            ) {
+                break;
+            }
+            assert!(
+                !waiting.is_finished(),
+                "command observation ended before its wait effect"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("command wait effect was not reached");
+
+    let sibling = tokio::time::timeout(
+        Duration::from_secs(10),
+        dispatch_haskell_script(child.policy.as_ref(), "40 + 2 :: Int"),
+    )
+    .await
+    .expect("sibling actor did not progress while the command waited");
+    assert_eq!(sibling["status"], "committed", "{sibling}");
+    assert!(sibling.to_string().contains("42"), "{sibling}");
+    assert!(
+        !waiting.is_finished(),
+        "command wait ended before sibling progress"
+    );
+    backend.finish();
+    let observed = waiting.await.unwrap();
+    assert_eq!(observed["status"], "committed", "{observed}");
+    assert_eq!(backend.executions(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();

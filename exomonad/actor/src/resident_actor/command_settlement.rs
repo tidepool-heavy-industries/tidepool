@@ -160,6 +160,9 @@ impl CommandSettlements {
         job: &str,
         milliseconds: i64,
     ) -> Result<tidepool_bridge_effects::CommandStatus, CommandError> {
+        if self.jobs.owner(job)? != owner {
+            return Err(CommandError::CommandUnauthorized);
+        }
         let observed = self.jobs.wait(owner, job, milliseconds).await?;
         if matches!(
             observed,

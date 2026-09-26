@@ -271,8 +271,9 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
   current <- checked <$> send (CommandAwaitWith key milliseconds)
   presentStatus key bytes False current
 
--- | Observe with a bounded foreground wait and a completion notice for a
--- still-running job. The command is not relaunched or cancelled at handoff.
+-- | Observe an owned job with a bounded foreground wait and a completion
+-- notice if it is still running. Foreign observers can use 'observe' or
+-- 'awaitFinished' with a watch. Handoff never relaunches or cancels the job.
 observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
   current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
@@ -313,7 +314,7 @@ observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job 
   current <- checked <$> send (CommandAwaitWith key milliseconds)
   presentObserved options retained prepare current
 
--- | Wait for a useful foreground interval. If the job is still live, the
+-- | Wait on an owned job for a useful foreground interval. If still live, the
 -- command owner arms its single completion settlement before this returns.
 -- A finish racing that handoff is reported by the notice for the same job.
 observeWithCompletion ::
