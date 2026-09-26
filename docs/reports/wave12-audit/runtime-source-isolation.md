@@ -95,4 +95,18 @@ match between a dev binary and those files at admission.
   consumers with focused Nix-backed checks. No live daemon restart is needed
   for these fixtures.
 
-No runtime implementation or live service was changed for this investigation.
+## Implemented boundary
+
+The follow-up implementation binds dev binaries to a source identity emitted
+by `build.rs`, captures both libraries in `FrozenWorkspace` format 2, and uses
+those captures for driver, reload, recipe, and child compiles. The selection
+also records the generated Core directory identity, so host recovery with a
+binary that emits a different Core fails closed. A previous format 1 run
+requires a new run. Release builds keep their embedded source identity and
+verify every captured Haskell source against the embedded tables.
+
+The run capture is independent of later checkout edits. It is operational
+source isolation, not a filesystem permission boundary against a process with
+write access to the run root. The separately built development compiler still
+needs its normal endpoint validation; this change does not pin a replacement
+compiler to an old host. No live service was restarted for this work.

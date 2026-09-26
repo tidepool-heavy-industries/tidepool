@@ -141,13 +141,14 @@ impl Driver {
             ],
         )?;
         let defaults = selected.config()?;
+        let haskell_root = selected.runtime_actors().to_path_buf();
         let config = ActorHostConfig {
             systemd_slice: None,
             source_exclude: defaults.launch.source_exclude,
             command_resources: None,
             exomonad_executable: std::env::current_exe()?,
             workspace_inputs: Some(selected),
-            haskell_root: crate::haskell_sources::ensure_exomonad_haskell()?,
+            haskell_root,
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("selection-0"),
             root_binding_path: runtime.path().join("unused-native-binding.json"),
@@ -238,8 +239,8 @@ impl Driver {
         declarations.push(tidepool_mcp::recipe_check_decl());
         let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
         let mut includes = effects.include_paths().to_vec();
-        includes.push(self.config.haskell_root.clone());
-        includes.push(crate::haskell_sources::ensure_embedded_stdlib()?);
+        includes.push(selected.runtime_actors().to_path_buf());
+        includes.push(selected.runtime_stdlib().to_path_buf());
         includes.extend(selected.include.iter().cloned());
         let refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         // Pieces, not a whole module string: `compile_and_run` assembles the

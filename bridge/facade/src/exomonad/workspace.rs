@@ -62,6 +62,15 @@ pub struct FrozenWorkspace {
     files: BTreeMap<PathBuf, String>,
     config: String,
     library_identity: String,
+    #[serde(default)]
+    core_identity: String,
+    #[serde(default)]
+    runtime_stdlib: PathBuf,
+    #[serde(default)]
+    runtime_actors: PathBuf,
+    /// Detect added Haskell modules as well as edits to recorded files.
+    #[serde(default)]
+    runtime_capture_identity: String,
 }
 
 impl FrozenWorkspace {
@@ -70,13 +79,37 @@ impl FrozenWorkspace {
         let manifest = directory.join("selection.json");
         if manifest.exists() {
             let frozen: Self = serde_json::from_slice(&std::fs::read(&manifest)?)?;
-            if frozen.version != 1 {
+            if frozen.version != 2 {
                 return Err("unsupported frozen workspace format; start a new swarm".into());
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
                 );
+            }
+            if frozen.core_identity != generated_core_identity()? {
+                return Err(
+                    "frozen workspace generated Core differs from this build; start a new swarm"
+                        .into(),
+                );
+            }
+            let capture_root = directory.canonicalize()?;
+            for (root, sentinel) in [
+                (&frozen.runtime_stdlib, "Tidepool/Prelude.hs"),
+                (&frozen.runtime_actors, "Tidepool/Check.hs"),
+            ] {
+                if !root.canonicalize()?.starts_with(&capture_root)
+                    || !root.join(sentinel).is_file()
+                {
+                    return Err("frozen runtime library is outside its run capture".into());
+                }
+            }
+            let captured_identity = tidepool_toolchain::cache::source_roots_identity(
+                crate::haskell_sources::DEV_SOURCE_DOMAIN,
+                &[frozen.runtime_stdlib.clone(), frozen.runtime_actors.clone()],
+            )?;
+            if captured_identity != frozen.runtime_capture_identity {
+                return Err("frozen runtime library source changed".into());
             }
             for (relative, hash) in &frozen.files {
                 let bytes = std::fs::read(directory.join(relative))?;
@@ -95,6 +128,8 @@ impl FrozenWorkspace {
             }
         }
         let base = workspace.join(".exomonad");
+        let runtime_sources = crate::haskell_sources::runtime_source_roots()?;
+        let runtime_identity = crate::haskell_sources::runtime_capture_identity(&runtime_sources)?;
         std::fs::create_dir_all(&directory)?;
         let mut files = BTreeMap::new();
         let mut include = Vec::new();
@@ -107,6 +142,13 @@ impl FrozenWorkspace {
             capture_sources(source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
         }
+        let captured = capture_runtime_libraries(
+            &runtime_sources,
+            &runtime_identity,
+            &directory,
+            capture,
+            &mut files,
+        )?;
         for entry in config
             .haskell
             .checks
@@ -174,14 +216,21 @@ impl FrozenWorkspace {
             prompts.insert(name, text);
         }
         let library_identity = crate::haskell_sources::source_identity()?;
+        let core_identity = generated_core_identity()?;
         let source_prefix = PathBuf::from(format!("sources/{capture}"));
+        // Library bytes are represented by the build-bound identity above.
+        // Their per-run capture UUID must not change an otherwise identical
+        // workspace selection's logical identity.
+        let library_prefix = PathBuf::from(format!("libraries/{capture}"));
         let logical_files = files
             .iter()
+            .filter(|(path, _)| !path.starts_with(&library_prefix))
             .map(|(path, hash)| (path.strip_prefix(&source_prefix).unwrap_or(path), hash))
             .collect::<Vec<_>>();
         let identity = blake3::hash(&serde_json::to_vec(&(
             &config_text,
             &library_identity,
+            &core_identity,
             &prompts,
             logical_files,
         ))?)
@@ -212,7 +261,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 1,
+            version: 2,
             identity,
             include,
             modules: config.haskell.modules,
@@ -224,6 +273,10 @@ impl FrozenWorkspace {
             files,
             config: config_text,
             library_identity,
+            core_identity,
+            runtime_stdlib: captured[0].clone(),
+            runtime_actors: captured[1].clone(),
+            runtime_capture_identity: runtime_identity,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
@@ -231,6 +284,14 @@ impl FrozenWorkspace {
 
     pub(crate) fn identity(&self) -> &str {
         &self.identity
+    }
+
+    pub(crate) fn runtime_stdlib(&self) -> &Path {
+        &self.runtime_stdlib
+    }
+
+    pub(crate) fn runtime_actors(&self) -> &Path {
+        &self.runtime_actors
     }
 
     /// This run's verified capture of the workspace's source roots, in search
@@ -270,6 +331,15 @@ impl FrozenWorkspace {
         config.launch.validate()?;
         Ok(config)
     }
+}
+
+fn generated_core_identity() -> Result<String> {
+    let root = tidepool_mcp::ensure_effects_core_module()?;
+    Ok(root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("generated Core directory has no valid name")?
+        .to_owned())
 }
 
 /// The project-relative path of the authored workspace directory: the last
@@ -665,6 +735,36 @@ pub(super) fn capture_sources(
     capture_tree(source, relative, destination, files, false)
 }
 
+fn capture_runtime_libraries(
+    sources: &[PathBuf; 2],
+    expected_identity: &str,
+    directory: &Path,
+    capture: uuid::Uuid,
+    files: &mut BTreeMap<PathBuf, String>,
+) -> Result<[PathBuf; 2]> {
+    let relative = [
+        PathBuf::from(format!("libraries/{capture}/stdlib")),
+        PathBuf::from(format!("libraries/{capture}/actors")),
+    ];
+    for (source, path) in sources.iter().zip(&relative) {
+        capture_sources(source, path, directory, files)?;
+    }
+    let captured = [directory.join(&relative[0]), directory.join(&relative[1])];
+    let captured_identity = tidepool_toolchain::cache::source_roots_identity(
+        crate::haskell_sources::DEV_SOURCE_DOMAIN,
+        &captured,
+    )?;
+    let source_identity = tidepool_toolchain::cache::source_roots_identity(
+        crate::haskell_sources::DEV_SOURCE_DOMAIN,
+        sources,
+    )?;
+    if captured_identity != expected_identity || source_identity != expected_identity {
+        return Err("runtime Haskell library changed during run capture".into());
+    }
+    crate::haskell_sources::verify_runtime_capture(&captured, expected_identity)?;
+    Ok(captured)
+}
+
 fn capture_tree(
     source: &Path,
     relative: &Path,
@@ -697,7 +797,7 @@ fn capture_tree(
         } else if all_authored
             || matches!(
                 entry.path().extension().and_then(|x| x.to_str()),
-                Some("hs" | "lhs" | "hs-boot" | "h")
+                Some("hs" | "lhs" | "hs-boot" | "lhs-boot" | "h")
             )
         {
             let bytes = std::fs::read(entry.path())?;
@@ -715,6 +815,116 @@ mod tests {
         reason = "test: launches short-lived git one-shots to build fixture repositories"
     )]
     use super::*;
+
+    #[test]
+    fn runtime_libraries_are_captured_and_changed_sources_refuse_publication() {
+        if crate::haskell_sources::DEV_SOURCE_IDENTITY.is_none() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let stdlib = root.path().join("stdlib");
+        let actors = root.path().join("actors");
+        std::fs::create_dir_all(stdlib.join("Tidepool")).unwrap();
+        std::fs::create_dir_all(actors.join("Tidepool")).unwrap();
+        std::fs::write(stdlib.join("Tidepool/Prelude.hs"), "old stdlib").unwrap();
+        std::fs::write(actors.join("Tidepool/Check.hs"), "old actors").unwrap();
+        let sources = [stdlib.clone(), actors.clone()];
+        let expected = tidepool_toolchain::cache::source_roots_identity(
+            crate::haskell_sources::DEV_SOURCE_DOMAIN,
+            &sources,
+        )
+        .unwrap();
+        let destination = root.path().join("run");
+        let captured = capture_runtime_libraries(
+            &sources,
+            &expected,
+            &destination,
+            uuid::Uuid::new_v4(),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        std::fs::write(stdlib.join("Tidepool/Prelude.hs"), "new stdlib").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(captured[0].join("Tidepool/Prelude.hs")).unwrap(),
+            "old stdlib"
+        );
+        assert!(capture_runtime_libraries(
+            &sources,
+            &expected,
+            &destination,
+            uuid::Uuid::new_v4(),
+            &mut BTreeMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn frozen_runtime_library_mutation_fails_host_load() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n",
+        )
+        .unwrap();
+        let selected = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        std::fs::write(
+            selected.runtime_stdlib().join("Tidepool/Prelude.hs"),
+            "mutated",
+        )
+        .unwrap();
+        assert!(FrozenWorkspace::load(project.path(), run.path()).is_err());
+    }
+
+    #[test]
+    fn pre_capture_selection_requires_explicit_new_run() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n",
+        )
+        .unwrap();
+        FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let mut selection: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        selection["version"] = serde_json::json!(1);
+        selection.as_object_mut().unwrap().remove("runtime_stdlib");
+        selection.as_object_mut().unwrap().remove("runtime_actors");
+        selection
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_capture_identity");
+        selection.as_object_mut().unwrap().remove("core_identity");
+        std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
+    }
+
+    #[test]
+    fn generated_core_identity_must_match_on_host_load() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n",
+        )
+        .unwrap();
+        FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let mut selection: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        selection["core_identity"] = serde_json::json!("different-core");
+        std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
+        assert!(error.to_string().contains("generated Core differs"));
+    }
 
     #[test]
     fn selection_freezes_dependencies_prompts_and_configuration_until_next_run() {

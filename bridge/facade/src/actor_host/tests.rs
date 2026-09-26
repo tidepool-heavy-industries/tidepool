@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn driver_sources_use_run_captured_libraries() {
+    let project = tempfile::tempdir().unwrap();
+    let run = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+    std::fs::write(
+        project.path().join(".exomonad/config.toml"),
+        "[defaults]\nmodel = 'gpt-6-sol'\n",
+    )
+    .unwrap();
+    let selected =
+        crate::exomonad::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
+    let sources = driver_sources(
+        Path::new("unused-live-actors"),
+        Some(&selected),
+        run.path(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(sources.include[2], selected.runtime_actors());
+    assert_eq!(sources.include[3], selected.runtime_stdlib());
+}
+
+#[test]
 fn later_host_before_root_admission_creates_missing_journals() {
     let directory = tempfile::tempdir().unwrap();
     let binding = directory.path().join("root-binding.json");

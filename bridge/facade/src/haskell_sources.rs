@@ -2,7 +2,8 @@
 //!
 //! The build script walks each complete source tree, but only when
 //! `TIDEPOOL_EMBED_HASKELL=1` (release/install builds); otherwise it emits
-//! empty bundles and this module resolves the checkout on disk instead. This
+//! empty bundles plus a build-bound source identity, and this module validates
+//! the checkout before a run captures it. This
 //! module owns the one content-addressed materializer used by both the
 //! public Tidepool library and Exomonad's public surface and private
 //! interactive driver.
@@ -11,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_exomonad_haskell.rs"));
+include!(concat!(env!("OUT_DIR"), "/dev_source_identity.rs"));
+
+pub(crate) const DEV_SOURCE_DOMAIN: &[u8] = b"tidepool-facade-dev-source-identity";
 
 fn content_hash(entries: &[(&str, &str)]) -> String {
     // Length-prefix both fields so different path/content partitions cannot
@@ -25,13 +29,13 @@ fn content_hash(entries: &[(&str, &str)]) -> String {
 /// Identity of the library interfaces embedded in this build. Workspace
 /// selections must not silently resume against a different imported surface.
 ///
-/// A dev build (`TIDEPOOL_EMBED_HASKELL` unset) embeds nothing, so there is no
-/// fixed content to hash; instead this hashes the on-disk `bridge/haskell/lib`
-/// and `bridge/haskell/actors` trees the build actually reads from, so
-/// resuming against a workspace still fails closed when either tree changed.
+/// A dev build embeds no source bytes, but its build script binds this binary
+/// to the complete source identity it saw at build time.
 pub(crate) fn source_identity() -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
     if EMBEDDED_STDLIB.is_empty() && EMBEDDED_EXOMONAD_HASKELL.is_empty() {
-        return dev_source_identity();
+        return Ok(DEV_SOURCE_IDENTITY
+            .expect("dev Haskell source identity is emitted by build.rs")
+            .to_owned());
     }
     Ok(format!(
         "{}:{}",
@@ -40,29 +44,78 @@ pub(crate) fn source_identity() -> Result<String, tidepool_toolchain::cache::Sou
     ))
 }
 
-/// [`source_identity`]'s dev-mode path: locate the checkout's stdlib and
-/// actors trees and hash them with the same source-revision identity the
-/// runtime uses elsewhere, rather than inventing a second content digest.
-fn dev_source_identity() -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
-    let stdlib = tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
-        .map(|location| location.dir)
-        .ok();
-    let actors = locate_exomonad_haskell();
-    dev_source_identity_from(stdlib, actors)
+/// Resolve source roots for one run and refuse a dev checkout that changed
+/// after the binary was built. Release bundles are already bound to the binary.
+pub(crate) fn runtime_source_roots() -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
+    let roots = [ensure_embedded_stdlib()?, ensure_exomonad_haskell()?];
+    if let Some(expected) = DEV_SOURCE_IDENTITY {
+        verify_dev_source_roots(&roots, expected)?;
+    }
+    Ok(roots)
 }
 
-/// Testable core of [`dev_source_identity`]: hash whichever of the stdlib and
-/// actors directories were actually located. A missing tree contributes
-/// nothing rather than a placeholder path, since [`source_roots_identity`]
-/// hashes root count and content, not the root paths themselves — so a build
-/// that cannot find one tree still gets a distinct identity from one that
-/// found both.
-fn dev_source_identity_from(
-    stdlib: Option<PathBuf>,
-    actors: Option<PathBuf>,
+/// The capture must compare its copied bytes with the binary's fixed dev
+/// identity, not another reading of a mutable checkout after admission.
+pub(crate) fn runtime_capture_identity(
+    roots: &[PathBuf; 2],
 ) -> Result<String, tidepool_toolchain::cache::SourceManifestError> {
-    let roots: Vec<PathBuf> = [stdlib, actors].into_iter().flatten().collect();
-    tidepool_toolchain::cache::source_roots_identity(b"tidepool-facade-dev-source-identity", &roots)
+    match DEV_SOURCE_IDENTITY {
+        Some(identity) => Ok(identity.to_owned()),
+        None => tidepool_toolchain::cache::source_roots_identity(DEV_SOURCE_DOMAIN, roots),
+    }
+}
+
+pub(crate) fn verify_runtime_capture(
+    roots: &[PathBuf; 2],
+    expected_identity: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if DEV_SOURCE_IDENTITY.is_some() {
+        return verify_dev_source_roots(roots, expected_identity);
+    }
+    for (root, entries) in roots
+        .iter()
+        .zip([EMBEDDED_STDLIB, EMBEDDED_EXOMONAD_HASKELL])
+    {
+        let actual = tidepool_toolchain::cache::source_root_manifest(root)?;
+        let mut expected = entries
+            .iter()
+            .map(|(relative, content)| {
+                (
+                    PathBuf::from(relative),
+                    blake3::hash(content.as_bytes()).to_hex().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        if actual != expected {
+            let differing = actual
+                .iter()
+                .zip(&expected)
+                .position(|(found, embedded)| found != embedded)
+                .unwrap_or(actual.len().min(expected.len()));
+            return Err(format!(
+                "captured embedded Haskell library differs from this build at entry {differing}: found {:?}, embedded {:?}",
+                actual.get(differing),
+                expected.get(differing)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_dev_source_roots(
+    roots: &[PathBuf; 2],
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let selected = tidepool_toolchain::cache::source_roots_identity(DEV_SOURCE_DOMAIN, roots)?;
+    if selected != expected {
+        return Err(
+            "dev Haskell library differs from this build; rebuild Exomonad before starting a run"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// The stdlib fallbacks a dev build carries: the source tree this binary was
@@ -162,8 +215,8 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// A dev build embeds nothing, so there is no fixed bundle to materialize:
 /// callers (the interactive driver's GHC include path, recipe checks) need a
 /// real directory containing `Tidepool.Prelude` et al., not an empty
-/// materialized stand-in. Resolve the checkout's stdlib the same way
-/// [`source_identity`]'s dev path does.
+/// materialized stand-in. Run admission validates this selected checkout
+/// against the identity embedded by the dev build before capturing it.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if EMBEDDED_STDLIB.is_empty() {
         return tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
@@ -296,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_source_identity_from_changes_when_an_input_directory_changes() {
+    fn dev_source_selection_rejects_an_edit_or_missing_tree() {
         let root = tempfile::tempdir().unwrap();
         let stdlib = root.path().join("lib");
         let actors = root.path().join("actors");
@@ -304,22 +357,17 @@ mod tests {
         std::fs::create_dir_all(&actors).unwrap();
         std::fs::write(actors.join("Check.hs"), "module Tidepool.Check where\n").unwrap();
 
-        let before = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone())).unwrap();
+        let roots = [stdlib.clone(), actors.clone()];
+        let before =
+            tidepool_toolchain::cache::source_roots_identity(DEV_SOURCE_DOMAIN, &roots).unwrap();
+        verify_dev_source_roots(&roots, &before).unwrap();
         std::fs::write(
             actors.join("Check.hs"),
             "module Tidepool.Check where\n-- changed\n",
         )
         .unwrap();
-        let after = dev_source_identity_from(Some(stdlib.clone()), Some(actors.clone())).unwrap();
-        assert_ne!(
-            before, after,
-            "changing an actors file must change the identity"
-        );
-
-        let missing_actors = dev_source_identity_from(Some(stdlib), None).unwrap();
-        assert_ne!(
-            after, missing_actors,
-            "a missing tree must not silently collide with one that was found"
-        );
+        assert!(verify_dev_source_roots(&roots, &before).is_err());
+        std::fs::remove_dir_all(actors).unwrap();
+        assert!(verify_dev_source_roots(&roots, &before).is_err());
     }
 }

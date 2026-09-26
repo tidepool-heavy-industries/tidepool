@@ -1281,7 +1281,7 @@ async fn run_host(
         &options.run_root.join("resource-budget.json"),
         &serde_json::to_vec_pretty(&limits)?,
     )?;
-    let haskell_root = crate::haskell_sources::ensure_exomonad_haskell()?;
+    let haskell_root = workspace_inputs.runtime_actors().to_path_buf();
     let research_policy = configuration.research;
     if host_generation > 1 {
         let mut status = RunStatus::new(

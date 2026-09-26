@@ -2760,12 +2760,7 @@ pub(crate) fn validate_workspace_program(
     inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    compile_driver(
-        &crate::haskell_sources::ensure_exomonad_haskell()?,
-        Some(inputs),
-        run_root,
-        None,
-    )?;
+    compile_driver(inputs.runtime_actors(), Some(inputs), run_root, None)?;
     Ok(())
 }
 
@@ -2964,8 +2959,15 @@ fn driver_sources(
     let declarations = exomonad_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
-    include.push(haskell_root.to_path_buf());
-    include.push(crate::haskell_sources::ensure_embedded_stdlib()?);
+    include.push(
+        inputs
+            .map(|inputs| inputs.runtime_actors().to_path_buf())
+            .unwrap_or_else(|| haskell_root.to_path_buf()),
+    );
+    include.push(match inputs {
+        Some(inputs) => inputs.runtime_stdlib().to_path_buf(),
+        None => crate::haskell_sources::ensure_embedded_stdlib()?,
+    });
     let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble_with_companions_hiding(
             &declarations,
