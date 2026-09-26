@@ -6,6 +6,21 @@ capabilities that make better outcomes possible. Building `exomonad-harness` is
 the current product workload. A wave is a local work cycle, not a release of the
 whole vision.
 
+## The harness destination
+
+The product workload builds a custom home for Exomonad agents, ultimately replacing
+Codex as their harness. Target GPT-6 capabilities directly, with asynchronous tool
+calls as an early foundation; earlier-model compatibility is not a requirement.
+Use the available Codex source and actual provider contract to ground decisions.
+Concurrent execution, model continuation, result delivery and terminality are
+separate behaviors to verify.
+
+Typed mailboxes, event hooks and Haskell continuations should be native parts of
+that interaction model. Discover where they let authored machinery advance useful
+work without another model turn, and where semantic judgment is still valuable.
+Prove extension seams with standalone deterministic consumers before integration.
+Each wave should produce usable behavior and evidence for the next design slice.
+
 ## Working defaults
 
 Prioritize parallel work and Luna delegation, with Sol owning shared decisions
