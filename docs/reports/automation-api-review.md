@@ -1,10 +1,25 @@
 # Automation API review — 2026-09-26
 
-This is an implementation review of the next-wave helper batch, before prompt
-exposure. Runtime verification and integration are still in progress. The first
-CheckResults recipe passed six assertions through the production command backend,
-including late completion, failure, missing evidence, notification policy and
-dirty-source reporting; shutdown also completed. Other actor recipes are pending.
+The validated helper batch is published at shared workspace `d07eefb8` and
+pinned by Tidepool `46764b87a`. The combined notebook check passed 23 assertions,
+with definitions fingerprint `cc25ee85b276ad10e5923dab21652c878ab8b3dfbee82226e7472929b69500e0`.
+It covers handoff, assumptions, interviews, terminal review readiness,
+preparation/evidence recovery, probes and slow-command observation. Earlier
+focused checks separately proved the focused-test watcher/diagnostics (13),
+preparation/recovery (6), and command shutdown (2). The offline host refuses
+notification delivery; those checks prove attempted sends and retained refusals.
+Live notice delivery and Jev judgment utility remain wave observations.
+
+The harness seed now delegates evidence parsing and acceptance to
+`Project.TestEvidence`, removing its duplicate implementation. Ten validated
+operations are discoverable through the harness menu; first exposure is recorded
+only after wave15 actually starts. Browser orchestration and automatic review/
+repair remain outside that menu while their separate behavior gates finish.
+The browser review found a redundant readiness command losing its continuation,
+a forgeable preparation token and an opaque failure display. Repairs are isolated.
+The review-loop stall was traced to an old test-driver binary not pumping fork
+readiness events; a matched run subsequently proved one full repair lifecycle,
+with additional failure-path checks still pending.
 
 ## Findings and required changes
 
