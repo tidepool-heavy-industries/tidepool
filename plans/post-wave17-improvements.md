@@ -2,10 +2,17 @@
 
 ## Status and evidence
 
-Planned 2026-09-26; implementation has not started. Three independent Sol Medium
+Implementation in progress, 2026-09-26. Three independent Sol Medium
 planning agents traced source ownership; the supervisor reviewed their proposals
 against the wave17 handoff/interviews and root transcript. Agents performed no
-builds or edits. The next step is an isolated worktree implementation batch.
+builds or edits during planning. Implementation uses isolated worktrees under
+`/home/inanna/dev/rsi-post17` with one expensive check slot.
+
+Current deliveries (not yet an integrated release): A `f829792ba`, four focused
+tests passed; C/H through `f618a59`, Haskell verification pending; D `cf96f11d8`,
+Haskell verification pending. B and F are active. E has eight launcher/preparation
+script tests and four browser-preparation tests passing; the changed Rust consumer
+and actual release journey still need compilation and execution.
 
 Run: `ae20a047-cb39-41e1-8621-efd3035fd719`; branch `rsi/wave17` in
 `/home/inanna/dev/exomonad-harness-runs/wave17`. Checked source `6c28a79`,
@@ -268,6 +275,43 @@ suite. Shared workspace commit must be published before pinning; sync template a
 harness, verify exact final gitlinks. Keep dirty worktrees and all user commits.
 
 ## Next-wave gates and scorecard
+
+### Three approved workflow prototypes
+
+Inanna approved exploring all three together. Each must have a concrete project
+consumer and a small callable Haskell interface. These are compositions of the
+existing owners, with a shared three-wave exposure period and separate evidence.
+
+1. **Acceptance steward (C/H).** Supply the integrated candidate once and a list
+   of named checks, memory budgets and candidate-dependent preparation. Retain
+   every original job and start refusal, aggregate into one terminal notice, and
+   recover the same jobs later. The harness consumer combines the four retained
+   Engine/Store checks and browser acceptance. Measure setup/recovery turns,
+   duplicate notices, and whether one summary was sufficient to decide acceptance.
+2. **Review coordinator (D).** Use existing ReviewFlow for exact-candidate review
+   and repair, then ask that same authority owner to clean up its reviewer groups
+   after interviews. Retain verdict and cleanup receipts independently. Measure
+   manual routing/cleanup calls, refused root cleanup attempts, and outstanding
+   resources. Do not turn findings-only work into another review tree.
+3. **Background investigator.** Compose SlowCommandWatch and ParallelInvestigate
+   around an original command handle. Start with terminal-failure diagnostics;
+   add one slow-command episode only where an actual useful probe is available.
+   A project supplies a small set of read-only commands and relevance descriptions.
+   Deterministic rules handle known cases; Jev may choose among those values or
+   abstain. At most two diagnostic probes per episode, bounded output, one compact
+   report with original outcome, selected probes, receipts and remaining unknowns.
+   Keep pending diagnostic handles recoverable. Never retry the original job,
+   invent shell commands, or treat a diagnosis as passing test evidence.
+
+For the investigator, first inspect the existing followFailure/followFailureWith
+and watcher callbacks before adding any actor type. Its intended opportunity is
+the failed-check -> inspect stderr -> choose a read -> inspect result sequence.
+Success means the next frontier turn receives useful evidence already gathered.
+Measure irrelevant probes and service failures as well as useful diagnoses;
+report potential avoided turns separately from observed tool-call counts.
+
+Prompt examples must compile and name when each workflow is useful, how to retain
+its handle, and when to return to direct individual operations. No use quota.
 
 Before launch: clean mounted root with authored helpers, validated helper import/
 child snapshot, recoverable original check result, coordinator cleanup tests,
