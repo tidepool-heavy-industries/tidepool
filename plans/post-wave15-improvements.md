@@ -91,6 +91,17 @@ mechanical source/evidence collection and explicit invocation contracts.
 
 ## Delivery batch and acceptance
 
+The API-quality interview strengthens the Haskell-first contract: longer shell
+waits alone leave evidence/source/review work with the model. Extend the existing
+authored command and review entrypoints, with the direct Bash tool as an adapter.
+Ship working compositions for start -> completion -> evidence, preparation ->
+readiness -> check, and candidate -> source preflight -> review. Each encodes a
+small desired workflow while retaining typed unresolved outcomes and callbacks.
+Avoid making agents discover and assemble ten independent utilities before the
+first useful action. The Engine worker did not recall noticing the specific API
+names; the root knew the menu but lacked a complete working composition. These
+are distinct findings, not evidence that the unused abstractions lack utility.
+
 Use isolated worktrees with three parallel implementation lanes after fixing the
 shared observation/report contract. No new process owner or general agent loop.
 
