@@ -159,3 +159,15 @@ timer is authorized by the one-shot supervision check itself. The user has now
 authorized stopping the old wave12 run/demo; perform that as separate scoped
 cleanup after confirming its identity and retained interviews. Preserve demo
 data, unrelated Tailscale routes, shared daemons, dirty checkouts and all commits.
+
+
+## Integration observation
+
+The focused evidence recipe's compiler reached 7,488 MiB after eight requests
+and rotated at the scoped 7,168 MiB ceiling (11:38:20Z; compiler log under
+`/tmp/tidepool-dev-shell.Xhdqr3/nix-shell.6AEevV/tidepool-extract-daemon.pX2hRM/`).
+A preceding 2 GiB scoped gate rotated after almost every request. The latter was
+rerun with the existing run-sized one-worker budget; shared daemons were untouched.
+The larger observed residency is a measurement card for the next performance
+audit, not justification for raising every run's memory budget. Separate broad
+import/fixture compilation from ordinary notebook-cell cost before changing policy.

@@ -15,8 +15,12 @@ if [[ "$1" == missingfile ]]; then
   exit 0
 fi
 
-mkdir -p .exomonad/build
-evidence_dir=$(mktemp -d "$(pwd)/.exomonad/build/focused-fixture-XXXXXXXX")
+if [[ "${2:-}" == managed ]]; then
+  mkdir -p .focused-evidence
+  evidence_dir=$(mktemp -d "$(pwd)/.focused-evidence/focused-fixture-XXXXXXXX")
+else
+  evidence_dir=$(mktemp -d)
+fi
 if [[ "$1" == pass || "$1" == dirty || "$1" == zero ]]; then
   exit_code=0
   passed=1
