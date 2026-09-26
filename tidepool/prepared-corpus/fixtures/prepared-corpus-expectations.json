@@ -1557,7 +1557,7 @@
       ]
     }
   },
-  "oracle_fingerprint": "9b6f875037389411099cf4190ae4a0de0a0891feece703dacd4b316574c8c3c4",
+  "oracle_fingerprint": "a11e5ded7015be5bd39a5c9c5e76b7849486a0e52fbc882fcd57c7bc719b4349",
   "oracle_payload_digest": "35ea9188d22b81bb8703f2cac36831935afc114d55acf1176009552d08565a98",
   "refusals": {
     "Box": {

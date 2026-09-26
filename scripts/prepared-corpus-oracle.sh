@@ -48,20 +48,21 @@ jq -r '.programs[] | .expectation_key // empty' "$manifest" \
 # Mirrors scripts/fixtures.sh: every input that can change a rendered value.
 inputs_fingerprint() {
   {
-    find bridge/haskell/lib "$oracle_source" -type f -print
-    printf '%s\n' \
+    find bridge/haskell/lib "$oracle_source" \
+      -type d -name '*_cbor' -prune -o -type f ! -name '*.cbor' -print0
+    printf '%s\0' \
       flake.nix \
       flake.lock \
       bridge/haskell/cabal.project \
       bridge/haskell/test/Suite.hs \
       scripts/prepared-corpus-oracle.sh
-  } | LC_ALL=C sort | xargs sha256sum
+  } | LC_ALL=C sort -z | xargs -0 -r sha256sum
   printf 'flags %s\n' "${ghc_flags[*]}"
   printf 'ghc %s\n' "$required_ghc"
   printf 'timeout %s\n' "$eval_timeout"
   printf 'jq %s\n' "$(jq --version)"
   printf 'names %s\n' "$(sha256sum <"$work/names" | cut -d' ' -f1)"
-} 2>/dev/null
+}
 
 fingerprint() { inputs_fingerprint | sha256sum | cut -d' ' -f1; }
 
