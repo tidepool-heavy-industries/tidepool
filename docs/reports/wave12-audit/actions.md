@@ -86,3 +86,10 @@ lock. Retry uses `/home/inanna/dev/exomonad-harness-runs/wave13`, branch
 `rsi/wave13`, leaving the protected demo and original checkout untouched.
 Launch log `/tmp/rsi-wave13-launch-isolated.log`. No root task is considered
 started until the launch and initial-message receipt are recorded.
+
+Wave13 launch succeeded: run `8d739b47-74e4-47e1-8bd2-7989bdda729e`, tmux
+`wave13`, root `%547`, thread `01a0dc01-bca8-7b11-97b9-06b79d9d51f6`.
+Initial instruction executed; root authored contract `b43cdb1` and began helper
+publication. Harness `docs/wave13-launch.md` records exact source and pin.
+Read the **run checkout's** NEXT/logs on future ticks. A Luna observer is
+sampling startup. Next timer remains 22:11 PDT.
