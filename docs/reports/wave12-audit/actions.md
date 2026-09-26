@@ -149,3 +149,48 @@ an8GiB job, so active-turn delivery is under investigation. The queue-observatio
 implementation is assigned to `audit_abstractions` in isolated branch
 `perf/command-queue-observation`; use the existing owner and per-job observation,
 preserve FIFO and protected bypass, and expose no other-run identities.
+
+
+## Third scheduled check — 2026-09-26 05:56 UTC
+
+Wave13 is still active; no successor launched. The root incorporated the
+reservation diagnosis and used4GiB. At harness `cf19ed4`, helper executions
+passed server8/8 and standalone1/1; helper source/notes retained as `fbf08e6`.
+This proves execution after publication/import. It does not yet prove reuse by
+two distinct actors or reduced model/tool calls. Root notes missing cleanliness
+metadata (`working_tree_status: null`), so its strict helper verdict remains
+False despite passing assertions. Investigate runner provenance separately.
+
+Reviewed launch `ef86255` integrated as `d39a7ac`. Real preparation executed
+web14/14 and browser journey1/1 but then failed artifact lookup because
+CARGO_TARGET_DIR differs from the assumed target path. Independent review
+rejected repair19a6818: failed preparation could leave an older default binary
+launchable. Further repair is in progress. Standalone production-binary test
+already passed unrelated-cwd login, commands/child messages, missing assets,
+SIGINT reopen and SIGKILL reopen with isolated port/data. These are not yet a
+successful final integrated preparation/script launch. Keep exact acceptance
+boundaries and update the handoff only after final checks.
+
+Correction to prior monitoring inference: repeated graph observations with
+`awaiting_effect: command job` and the same provider turn did NOT prove one
+indefinite call. Completed timings show bash ending05:23:18 after301209ms and
+write_stdin ending05:28:21 after300247ms. They were sequential bounded waits.
+Current sample retains40 completed call observations over10s,16 added since
+05:17; `/tmp/wave13-slow-completed-calls-0556.json`. Longest new waits again
+spent about300s on command observation, under1s compiling.
+
+Queue visibility f53900607 passed independent review and integrated as
+`39bd8b1a3`. Owner/RPC/protocol/Haskell/hosted receipt tests passed in its worktree;
+integrated focused checks are running. No scheduling change or cross-run IDs.
+An old shared resource service degrades to generic queued; it has NOT been
+restarted. Deployment and generated-effect integration checks remain distinct.
+
+Managed-root branch54d1d479e remains held. Scoped review found changed-parent
+symlink import risk and uncancellable/nonregular authored-file reads during
+root service preparation. Repairs and focused reproductions assigned separately.
+No broad integration or live-host change authorized by review alone. A separate
+assignment traces launch errors being erased into generic host-shutdown
+cancellations, which hid wave13's tmux diagnosis from its parent.
+
+Protected demo still listens on4600 as hostPID3202992. Timer remains active;
+next tick23:41PDT. Existing run/log/source/pin identities remain unchanged.
