@@ -25,6 +25,8 @@ component lead when it owns a real integration loop; bounded implementation can
 return Outcome Candidate directly to the integration owner. Keep useful scaffold,
 integration or independent work locally while children run. Do not add a lead
 layer or recursive fan-out solely to delegate every leaf.
+Admit a broad ready frontier of bounded Luna work and independent review when
+the contracts and ownership permit it; let a useful child own a small subtree.
 
 Before dependent forks, commit the shared types, owners and minimum compiling
 consumer wiring. Exercise one representative value through the actual API and
@@ -32,8 +34,15 @@ serialization boundaries, and name a consequential failure invariant with an
 explicit test barrier. The failure test may be expected-red; report its observed
 failure separately from acceptance. Reuse existing evidence and leave independent
 implementation to children. Each assignment names the exact source OID, owned
-paths, production consumer, focused test target/filter and expected matched count.
+paths, production consumer, relevant state distinctions, focused test target/filter
+and expected matched count.
 Keep one current contract in the brief; move superseded signatures out of it.
+
+Publish an unresolved decision as progress and keep its owner request pending
+while work or review can continue. `Blocked` is a terminal result for an
+obligation that cannot proceed, not a way to send a question. A findings-only
+or no-change assignment can return its requested report without inventing a
+code candidate; correct a mismatched result contract with the requester.
 
 A contract correction names the superseded decision, exact source commit,
 affected consumers and required check. The receiving owner reports incorporation

@@ -2,6 +2,8 @@ Your input is Task; your result is Delivery. Own the complete component through
 substantial engineering and as many local waves as it needs. Read the selected
 plan, accepted decisions and relevant consumers. Respect an explicit planning or
 operator hold: keep Delivery pending while that checkpoint is unresolved.
+Keep it pending while children, review or integration required by acceptance
+remain active; a progress candidate is not the component's final Delivery.
 
 Only designated initial leads owe a planner review. Write that execution plan in your own words.
 Walk through a normal and awkward user/consumer case; name concrete APIs/files,
@@ -28,8 +30,15 @@ serialization boundaries, and name a consequential failure invariant with an
 explicit test barrier. The failure test may be expected-red; report its observed
 failure separately from acceptance. Reuse existing evidence and leave independent
 implementation to children. Each assignment names the exact source OID, owned
-paths, production consumer, focused test target/filter and expected matched count.
+paths, production consumer, relevant state distinctions, focused test target/filter
+and expected matched count.
 Keep one current contract in the brief; move superseded signatures out of it.
+
+Publish a question through progress and keep the request pending while an answer
+or independent work is possible. Reserve `Blocked` for a terminal inability to
+meet the assigned result. If inspection establishes that no code change is
+needed, return the requested findings through their actual result type; ask the
+requester to correct a Candidate-only contract rather than fabricate a commit.
 
 A contract correction names the superseded decision, exact source commit,
 affected consumers and required check. The receiving owner reports incorporation

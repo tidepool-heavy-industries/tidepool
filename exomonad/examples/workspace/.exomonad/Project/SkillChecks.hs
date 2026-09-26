@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Project.SkillChecks (skills, reviewProvenance) where
 
-import Prelude hiding (readFile)
+import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -161,6 +161,17 @@ reviewProvenance = do
     ("let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\ninspectFull (reviewBase (reviewBasis current) == " <> gitOidLiteral baseline
       <> " && candidateCommit latest == " <> gitOidLiteral candidate <> ")")
   check "typed request preserves both revision identities" (lastOutput fields == "True")
+  scoped <- turn (checkActor reviewer)
+    ("import qualified Tidepool.Agent.Reply as ReviewReply\n"
+      <> "oldScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\n"
+      <> "let oldId = case oldScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }\n"
+      <> "inspectFull (case oldScope of { ReviewReply.RequestActive _ active -> if candidateCommit (reviewInput active) == "
+      <> gitOidLiteral candidate <> " then (\"active\" :: String) else \"wrong candidate\"; ReviewReply.RequestUnavailable err -> show err })")
+  check ("request scope borrows the exact active review input: " <> lastOutput scoped)
+    (lastOutput scoped == "active")
+  mismatched <- turn (checkActor reviewer)
+    "wrongInput <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope () (Outcome ReviewDecision)))\nwrongResult <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest ()))\ninspectFull (case (wrongInput, wrongResult) of { (ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch, ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch) -> True; _ -> False })"
+  check "wrong request input and result types refuse before borrowing" (lastOutput mismatched == "True")
   void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet conclusion = \"review provenance fixture\" :: Text"
   prompt <- readFile (checkActor reviewer) (Text.pack workspaceRoot <> "/prompts/review.md")
   let section = snd (Text.breakOn "For acceptance" prompt)
@@ -182,7 +193,29 @@ reviewProvenance = do
   void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
   void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- reviewAgain (responseActor reviewer) [label|assigned-retry|] assignedRequest"
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
-  void $ turn (checkActor reviewer) (head blocks)
+  revisedScope <- turn (checkActor reviewer)
+    ("newScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\n"
+      <> "let newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }\n"
+      <> "inspectFull (case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber request /= oldId && candidateCommit (reviewInput active) == "
+      <> gitOidLiteral revised <> "; _ -> False })")
+  check "reviewAgain replaces request identity and mounted input" (lastOutput revisedScope == "True")
+  staleSubmission <- turn (checkActor reviewer)
+    ("import qualified Project.ReviewTools as ReviewTool\nimport Tidepool.Agent.Contract (handler)\nlet submit = handler (ReviewTool.submit_review ReviewTool.tools)\nstale <- submit (ReviewTool.ReviewSubmitInput oldId "
+      <> gitOidLiteral revised <> " [\"checked revised candidate\"] \"assigned acceptance\")\ninspectFull (case stale of { ReviewTool.RequestIdMismatch _ -> True; _ -> False })")
+  check "review tool refuses the previous request id" (lastOutput staleSubmission == "True")
+  wrongCandidate <- turn (checkActor reviewer)
+    ("wrong <- submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral candidate
+      <> " [\"checked revised candidate\"] \"assigned acceptance\")\ninspectFull (case wrong of { ReviewTool.CandidateOidMismatch _ -> True; _ -> False })")
+  check "review tool refuses the previous candidate commit" (lastOutput wrongCandidate == "True")
+  writeFile (checkActor reviewer) "review-provenance.txt" "dirty review checkout\n"
+  dirtySubmission <- turn (checkActor reviewer)
+    ("dirty <- submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral revised
+      <> " [\"checked revised candidate\"] \"assigned acceptance\")\ninspectFull (case dirty of { ReviewTool.ReviewCheckoutDirty -> True; _ -> False })")
+  check "review tool refuses a dirty checkout" (lastOutput dirtySubmission == "True")
+  void $ git (checkActor reviewer) ["restore", "--", "review-provenance.txt"]
+  void $ turn (checkActor reviewer)
+    ("submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral revised
+      <> " [\"checked revised candidate\"] \"assigned acceptance\")")
   retained <- turn owner "answer <- pollResponse assignedReview\ninspectFull (case answer of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> reviewedBasis checked == AssignedTask assigned && reviewedCandidate checked == reviewInput assignedRequest; _ -> False }; _ -> False })"
   check "assigned acceptance preserves the whole Task, decisions and candidate gates"
     (lastOutput retained == "True")

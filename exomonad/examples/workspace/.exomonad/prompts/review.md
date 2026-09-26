@@ -54,6 +54,15 @@ let reviewed = ReviewedCandidate (reviewBasis current) latest checks conclusion
 respond (Produced (Accepted reviewed))
 ```
 
+You can also submit acceptance with `submit_review`. Read the current request id
+with `requestIdNumber` from `currentRequest :: Eff CodingEffects
+(RequestScope ReviewRequest (Outcome ReviewDecision))`, and pass it as
+`expectedRequestId`. Pass `candidateCommit (reviewInput current)` as
+`expectedCandidateOid`, plus the checks performed now as `submittedChecks` and
+your conclusion as `submittedRationale`. The tool reads the live typed request
+again, verifies the bound checkout's HEAD and clean state, then settles the
+same reply. A refusal leaves the request open; inspect it before trying again.
+
 The reviewed candidate is the single source of its reviewed revision. Keep source
 check limits accurate; do not launder earlier checks into a later head. Return
 Blocked with evidence if review cannot continue. Remain available for repairs

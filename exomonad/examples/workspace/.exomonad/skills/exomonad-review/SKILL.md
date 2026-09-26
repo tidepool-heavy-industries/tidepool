@@ -48,6 +48,13 @@ let reviewed = ReviewedCandidate
 respond (Produced (Accepted reviewed))
 ```
 
+The reviewer can submit that acceptance through `submit_review` after reading
+the live `currentRequest :: Eff CodingEffects (RequestScope ReviewRequest
+(Outcome ReviewDecision))`. Use `requestIdNumber` for `expectedRequestId`, the
+candidate commit for `expectedCandidateOid`, and supply `submittedChecks` and
+`submittedRationale`. The tool checks the active request and clean checkout,
+then uses the same typed reply. Its refusal leaves the review open.
+
 For defects, return `Produced (Repair (reviewInput sessionInput) findings)` instead.
 Keep findings actionable: exact source, defect, consequence and required repair.
 Reference durable evidence rather than reproducing the plan or unaffected constraints.

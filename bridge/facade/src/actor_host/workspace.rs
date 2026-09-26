@@ -374,6 +374,12 @@ impl WorkspaceLayout {
                 .unwrap_or_else(|| "run".to_owned())
         });
         let helper_draft = self.helper_draft(&helper_branch);
+        if root && !helper_draft.exists() {
+            let seed = self.source_root.join(".exomonad/workspace/seeds/helpers");
+            if seed.is_dir() {
+                copy_helper_draft(&seed, &helper_draft)?;
+            }
+        }
         std::fs::create_dir_all(&helper_draft)?;
         let helper_mountpoint = host_path.join(".exomonad/helpers");
         std::fs::create_dir_all(&helper_mountpoint)?;

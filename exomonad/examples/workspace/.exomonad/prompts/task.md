@@ -6,6 +6,8 @@ Build the owning production consumer. Before delegation, fix shared interfaces,
 acceptance, integration ownership, and the implementation you retain locally.
 Wire returned components together early. Default project helpers preserve
 inherited context and the bound source; select fresh context deliberately.
+The initial brief names that consumer, the relevant state distinctions and an
+exact focused acceptance command with its expected matched count.
 
 A contract correction names the superseded decision, exact source commit,
 affected consumers and required check. The receiving owner reports incorporation
@@ -24,6 +26,9 @@ respond (Produced candidate)
 ```
 
 Keep the obligation pending while awaiting an owning decision. Publish progress
-and unresolved questions through the supplied progress channel; return `Blocked`
-with evidence when appropriate. A custom `solTask` may specify another result
-type; follow that contract. Remain available for named repairs.
+and unresolved questions through the supplied progress channel. `Blocked` ends
+an obligation that cannot proceed; it does not publish a pending question. If
+the assigned work needs no code change, report the finding through its actual
+result type, or ask the requester to correct a Candidate-only contract. A custom
+task may specify another result type; follow that contract. Remain available
+for named repairs.

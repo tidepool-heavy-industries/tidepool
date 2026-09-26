@@ -486,6 +486,45 @@ fn root_workspace_resources_are_isolated_between_runs() {
 }
 
 #[test]
+fn root_mount_starts_with_the_pinned_workspace_helper_seed() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repo.writer()
+        .commit_file(
+            ".exomonad/workspace/seeds/helpers/SessionHelpers.hs",
+            "module SessionHelpers where\nseeded :: Int\nseeded = 1\n",
+            "add helper seed",
+        )
+        .unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "helper-seed-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let root = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        shell(&root, "cat .exomonad/helpers/SessionHelpers.hs"),
+        "module SessionHelpers where\nseeded :: Int\nseeded = 1\n"
+    );
+}
+
+#[test]
 fn actors_sharing_a_checkout_mount_distinct_helper_drafts() {
     let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();

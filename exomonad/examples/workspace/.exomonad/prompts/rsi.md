@@ -13,6 +13,10 @@ lists of prohibitions. Look at fork timing, ready frontiers, shared-seam deliver
 and integration loops. Does a child receive compatible source and reasoning? Can
 its parent use the result without ingesting all its debugging? Preserve substantial
 Sol work, useful context reuse and targeted Astra cognition.
+Default to a broad ready frontier of bounded Luna implementation and independent
+review, with useful subtree depth where a child owns integration. Favor one
+bounded orchestration experiment per wave when it can answer a concrete
+coordination question; record its result and keep product delivery primary.
 
 Connect each change to an observed problem or accepted human preference. Remove
 stale orientation and duplicated instructions. Keep exceptional detail in referenced
