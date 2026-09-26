@@ -112,6 +112,28 @@ invariant. Preserve unfamiliar but valid use cases: do not turn each error into
 a new prohibition. Interview the affected actor where intent remains unclear,
 and review proposed fixes against both the failed case and ordinary valid use.
 
+Audit opportunities and successful behavior alongside failures. Look for repeated
+command/read/judgment sequences that could become a useful notebook function,
+recurring relay that an actor could handle, and helpers that descendants could
+reuse. A missed abstraction is a counterfactual proposal, not an observed defect:
+name its actual consumers, construction/validation cost, expected reuse and the
+evidence that it would improve this workload. Do not equate more abstractions
+with better work or penalize a sensible one-off command.
+
+For abstractions that were created, trace actual use: which calls or model rounds
+it replaced, who reused or customized it, how it preserved failure evidence, and
+what maintenance or discovery cost it introduced. Distinguish defined, compiled,
+executed, reused and inherited successfully. A concise function that nobody used
+is not demonstrated value. Investigate successful compositions to identify what
+enabled them—an example, available primitive, shared prefix, task shape or actor
+initiative—and promote those conditions through remixable seeds, prompts and
+cleaner APIs. Retain counterexamples where the abstraction cost more than it saved.
+
+Use bounded subagent audits for both missed opportunities and positive examples;
+compare them across actors before generalizing. The next experiment should test
+whether the proposed affordance produces useful adoption, rather than merely
+whether actors comply with an instruction to create a helper.
+
 For each crossing record operation/actor identity, input/source revision, threshold,
 observed value, phase breakdown, outcome and evidence. Include failed, cancelled
 and still-running operations; completed-call timing rows alone miss hangs. State
