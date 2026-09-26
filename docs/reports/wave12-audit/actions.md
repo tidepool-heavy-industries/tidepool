@@ -442,3 +442,42 @@ interview without preventing necessary release. Skill validator passed via
 uv PyYAML environment; initial ambient Python lacked yaml. No code tests needed.
 Next timer01:11:20 PDT /08:11:20 UTC. Wave15 waits for required gates and a
 compiled useful automation trial, not timer expiry.
+
+
+### Automation implementation batch — 2026-09-26
+
+User stopped tidepool-rsi-supervisor.timer; verified inactive. Do not re-enable
+or respond to stale timer ticks by scheduling new work. User has approved twelve
+small configurable actors/composable helpers, including the six additional
+operations in harness automation-trial plan424b642. Each gets three waves of
+actual prompt exposure before non-use pruning. Relevant opportunities, discovery,
+attempt, failure/fallback, useful consumption and token/attention evidence stay
+separate. Pending or unsafe entrypoints are not advertised as available.
+
+Runtime source isolation integrated as bbf48b228 after independent review.
+Real CLI admission with scratch edited stdlib and actor trees separately refused
+with the expected rebuild message (/tmp/runtime-admission-807ogd79). Main focused
+checks3/3 passed: helper inheritance, driver captured libraries, changed-library
+capture refusal. Matched just exomonad-build passed. No live host/daemon restart;
+full live child/reload isolation still not measured. Perf activation split stays
+held for source freshness follow-up; same-actor helper reload race was disproved,
+shared-layer publication case still under investigation.
+
+Automation branches are isolated and unpinned. Managed-root agent owns
+CheckResults/TestEvidence, diagnostics, prerequisite preparation and command
+recovery. It found model-free recipe Driver never services CommandBackend:
+commands cannot start, so recipe hangs are not memory pressure. Production-owner
+backend support is being added in isolated codex/recipe-command-support, with
+turn/event pumping and exact cleanup. Audit-abstractions owns terminal review
+readiness, existing Project.Review repair loop hardening, interview collection
+and supplied-fact handoff composition. Helper-delivery agent owns assumption
+watch/parallel command probes f3f1d890 (compiled plus6 pure checks; runtime actor
+checks pending), then fixed production browser scenario composition and slow-job
+observation. Root owns integration and prompt/three-wave exposure ledger.
+
+Harness master has reviewed prompt guidance42d5dc6/da5ceed and corrected concrete
+trial portfolioffa3d66. Next prompt menu will contain callable signatures and
+compiled examples only after focused acceptance. Isolated harness branch
+rsi/automation-prompts424b642 adds the twelve-entry exposure ledger. Shared
+workspace integration branchrsi/automation-integration has cleanup skille0dd95a;
+future pin waits for the tested assembled automation surface.
