@@ -438,6 +438,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
             CODING,
             None,
             None,
+            None,
         )
         .unwrap();
     shell(&first, "echo first > .exomonad/build/cargo/marker");
@@ -448,6 +449,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
             "actor-0-1",
             true,
             CODING,
+            None,
             None,
             None,
         )
@@ -465,6 +467,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
             CODING,
             None,
             None,
+            None,
         )
         .unwrap();
     shell(
@@ -480,6 +483,60 @@ fn root_workspace_resources_are_isolated_between_runs() {
         std::fs::read_to_string(legacy.join("retained")).unwrap(),
         "old run"
     );
+}
+
+#[test]
+fn actors_sharing_a_checkout_mount_distinct_helper_drafts() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "source", "seed").unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "helper-mount-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let first = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "first-actor",
+            true,
+            CODING,
+            None,
+            None,
+            Some("first-helpers".into()),
+        )
+        .unwrap();
+    let second = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "second-actor",
+            true,
+            CODING,
+            None,
+            None,
+            Some("second-helpers".into()),
+        )
+        .unwrap();
+    shell(
+        &first,
+        "echo 'module SessionHelpers where' > .exomonad/helpers/SessionHelpers.hs",
+    );
+    assert_eq!(
+        shell(&first, "cat .exomonad/helpers/SessionHelpers.hs"),
+        "module SessionHelpers where\n"
+    );
+    assert_eq!(
+        shell(&second, "test ! -e .exomonad/helpers/SessionHelpers.hs"),
+        ""
+    );
+    assert_ne!(first.helper_draft, second.helper_draft);
 }
 
 #[tokio::test]
@@ -511,7 +568,16 @@ async fn live_capture_inherits_dirty_source_after_host_git_activity() {
         backend: backend.clone(),
     };
     let workspace = layout
-        .prepare(repo.path().into(), None, "root", true, CODING, None, None)
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     let native = NativeProcess::start(&workspace, &backend);
     let binding = runtime.path().join("binding.json");
@@ -714,7 +780,16 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         backend: backend.clone(),
     };
     let workspace = layout
-        .prepare(repo.path().into(), None, "root", true, CODING, None, None)
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert!(build(&workspace).iter().any(|fresh| !fresh));
     let _native = NativeProcess::start(&workspace, &backend);

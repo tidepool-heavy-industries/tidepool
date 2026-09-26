@@ -2420,8 +2420,24 @@ where
         // by every actor in the forest; an actor's OWN layer travels on its
         // descriptor instead, and neither ever moves afterwards.
         let source_layers = self.environment.source_layers.clone();
+        let helper_branch = if let Some(layers) = &source_layers {
+            Some(
+                layers
+                    .prepare_helpers(
+                        context.actor.into(),
+                        &launch_worktrees,
+                        prepared_workspace.is_some(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+            )
+        } else {
+            None
+        };
         if let Some(layers) = &source_layers {
-            descriptor = descriptor.with_source_layer(layers.layer_include(&launch_worktrees));
+            descriptor = descriptor.with_source_layer(layers.layer_include_for(
+                helper_branch.as_deref().unwrap_or_default(),
+                &launch_worktrees,
+            ));
         }
         let allocated_label = descriptor.label().to_string();
         let admitted_worktree = prepared_workspace
@@ -2443,7 +2459,11 @@ where
         // can be named as its own. This happens before the child runs, so its
         // first cell already reaches its own layer and no other.
         if let Some(layers) = &source_layers {
-            layers.bind(child.identity().into(), &bound_worktrees);
+            layers.bind_for(
+                child.identity().into(),
+                helper_branch.as_deref().unwrap_or_default(),
+                &bound_worktrees,
+            );
         }
         Ok((child, allocated_label, admitted_worktree))
     }

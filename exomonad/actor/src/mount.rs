@@ -57,6 +57,25 @@ impl ActorSourceImports {
 /// service the host hands out for that principal is bound to the same layer,
 /// so an actor cannot reach another actor's source by asking differently.
 pub trait ActorSourceLayers: Send + Sync {
+    /// Reserve one actor-private helper branch before the actor has an ID.
+    /// A prepared fork workspace may already have copied its branch.
+    fn prepare_helpers(
+        &self,
+        _creator: PrincipalId,
+        _worktrees: &[String],
+        _prepared_fork: bool,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    fn layer_include_for(&self, _helper_branch: &str, worktrees: &[String]) -> Vec<PathBuf> {
+        self.layer_include(worktrees)
+    }
+
+    fn bind_for(&self, actor: PrincipalId, _helper_branch: &str, worktrees: &[String]) {
+        self.bind(actor, worktrees);
+    }
+
     /// The include roots for an actor launched with `worktrees`, ahead of
     /// every shared root. Empty when that checkout contributes no source of
     /// its own, which is the ordinary case.

@@ -33,6 +33,7 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
         tmux: TmuxSession::new("resource-test-must-not-launch").unwrap(),
         backend: native_interactive_backend(config.interactive_agent.clone()),
         worktrees: campaign.worktrees.clone(),
+        source_layers: None,
         bindings: campaign.bindings.clone(),
         actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
             config.run_root.join("resource-test-actors.jsonl"),

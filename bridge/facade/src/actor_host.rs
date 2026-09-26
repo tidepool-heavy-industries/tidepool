@@ -39,6 +39,7 @@ mod tui_sleep_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
+pub(crate) use workspace::copy_helper_draft;
 use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
 mod model_free;
 mod prompt_catalog;
@@ -2039,6 +2040,7 @@ struct InteractiveLaunchContext {
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
+    source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     bindings: Arc<Mutex<BindingTable>>,
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
@@ -3545,6 +3547,7 @@ async fn run_interactive_applications(
         tmux: tmux.clone(),
         backend: Arc::clone(&backend),
         worktrees: worktrees.clone(),
+        source_layers: source_layers.clone(),
         bindings: Arc::clone(&bindings),
         actor_recovery,
         recovered_threads: Arc::clone(&recovered_threads),
@@ -4731,6 +4734,7 @@ async fn launch_prepared_interactive_application(
         tmux,
         backend,
         worktrees,
+        source_layers,
         bindings: _,
         actor_recovery,
         recovered_threads,
@@ -4802,6 +4806,9 @@ async fn launch_prepared_interactive_application(
                 native_tools: installation.effective_role.native_tools(),
                 workspace: installation.effective_role.workspace(),
             };
+            let helper_branch = source_layers
+                .as_ref()
+                .and_then(|layers| layers.helper_branch_for(actor.identity().into()));
             tidepool_runtime::spawn_blocking_in_span(move || {
                 layout.prepare(
                     host_path,
@@ -4811,6 +4818,7 @@ async fn launch_prepared_interactive_application(
                     policy,
                     None,
                     build_snapshot,
+                    helper_branch,
                 )
             })
             .await

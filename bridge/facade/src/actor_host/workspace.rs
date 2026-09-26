@@ -345,6 +345,7 @@ impl WorkspaceLayout {
         policy: exomonad_actor::ForkWorkspacePolicy,
         mut source: Option<OverlayResourceLease>,
         inherited_build: Option<OverlaySnapshot>,
+        helper_branch: Option<String>,
     ) -> io::Result<Arc<PreparedWorkspace>> {
         let visible = PathBuf::from(ACTOR_PROJECT_ROOT);
         self.worktrees
@@ -366,10 +367,12 @@ impl WorkspaceLayout {
             root.then(|| root_worktrees.managed_root()),
         );
         let resource_root = self.resource_root(key);
-        let helper_branch = worktree
-            .as_ref()
-            .map(|id| id.as_str().to_owned())
-            .unwrap_or_else(|| "run".to_owned());
+        let helper_branch = helper_branch.unwrap_or_else(|| {
+            worktree
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| "run".to_owned())
+        });
         let helper_draft = self.helper_draft(&helper_branch);
         std::fs::create_dir_all(&helper_draft)?;
         let helper_mountpoint = host_path.join(".exomonad/helpers");
@@ -483,9 +486,9 @@ impl WorkspaceLayout {
 }
 
 /// Copy a branch's mutable helper draft at a fork boundary. The caller holds
-/// the parent workspace publication gate; the two manifests additionally make
+/// the parent helper publication lock; the two manifests additionally make
 /// concurrent file edits fail closed instead of creating a torn child draft.
-fn copy_helper_draft(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn copy_helper_draft(source: &Path, destination: &Path) -> io::Result<()> {
     use super::overlay_resource::source_manifest;
 
     let excluded: [&std::ffi::OsStr; 0] = [];
@@ -1073,6 +1076,7 @@ impl WorkspaceLayout {
                 policy,
                 None,
                 build,
+                None,
             )?;
             return Ok(AdmittedWorkspace {
                 handle: handle_to_wire(&handle),
@@ -1088,6 +1092,7 @@ impl WorkspaceLayout {
             policy,
             source,
             build,
+            None,
         )?;
         let handle = self
             .worktrees
@@ -1135,6 +1140,7 @@ impl WorkspaceLayout {
             policy,
             None,
             build,
+            None,
         )?;
         Ok(AdmittedWorkspace {
             handle,
