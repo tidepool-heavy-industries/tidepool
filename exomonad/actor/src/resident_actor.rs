@@ -1949,6 +1949,32 @@ fn join_roster_rows(roster: &[(String, String)]) -> String {
         .join("\n")
 }
 
+async fn await_cleanup_releases<F, Fut>(
+    stopped: Vec<(
+        ActorRef,
+        Option<crate::resident_workbench::AgentStopProjection>,
+    )>,
+    release: F,
+) -> Vec<crate::resident_workbench::CleanupStepProjection>
+where
+    F: Fn(ActorRef) -> Fut,
+    Fut: std::future::Future<Output = crate::resident_workbench::AgentStopProjection>,
+{
+    futures_util::future::join_all(stopped.into_iter().map(|(actor, outcome)| {
+        let release = &release;
+        async move {
+            crate::resident_workbench::CleanupStepProjection::StoppedActor(
+                actor,
+                match outcome {
+                    Some(outcome) => outcome,
+                    None => release(actor).await,
+                },
+            )
+        }
+    }))
+    .await
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusView {
     Concise,
@@ -3275,13 +3301,14 @@ where
                 }
 
                 let mut stop_failed = false;
+                let mut stopped = Vec::with_capacity(plan.actors.len());
                 for actor_plan in &plan.actors {
                     let actor = actor_plan.actor;
                     let outcome = if actor_plan.terminal {
-                        AgentStopProjection::AlreadyStopped
+                        Some(AgentStopProjection::AlreadyStopped)
                     } else if !self.idle_for_cleanup(actor) {
                         stop_failed = true;
-                        AgentStopProjection::Failed("provider is not confirmed idle; cleanup observation is stale or needs attention".into())
+                        Some(AgentStopProjection::Failed("provider is not confirmed idle; cleanup observation is stale or needs attention".into()))
                     } else if let Some(target) = kernel.resolve(actor) {
                         match target
                             .retire_by(
@@ -3298,19 +3325,25 @@ where
                         {
                             Ok(terminal) => {
                                 self.publish_retired(actor, terminal);
-                                self.stopped_projection(actor).await
+                                None
                             }
                             Err(error) => {
                                 stop_failed = true;
-                                AgentStopProjection::Failed(error.to_string())
+                                Some(AgentStopProjection::Failed(error.to_string()))
                             }
                         }
                     } else {
                         stop_failed = true;
-                        AgentStopProjection::Unavailable
+                        Some(AgentStopProjection::Unavailable)
                     };
-                    steps.push(CleanupStepProjection::StoppedActor(actor, outcome));
+                    stopped.push((actor, outcome));
                 }
+                // `plan.actors` is deepest-first. Publish every admitted stop
+                // in that order before waiting for independently owned host
+                // releases; one slow release must not delay the next stop.
+                steps.extend(
+                    await_cleanup_releases(stopped, |actor| self.stopped_projection(actor)).await,
+                );
 
                 if !stop_failed {
                     for actor in plan.actors.iter().map(|actor| actor.actor) {
@@ -9465,6 +9498,7 @@ mod tests {
         disposition_for_non_command_failure, lookup_response, settlement_refusal,
         workbench_failure_after_operations, workbench_response, ChildExitObservations,
     };
+    use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
@@ -9473,6 +9507,87 @@ mod tests {
         WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
         WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRunStatus,
     };
+
+    #[tokio::test]
+    async fn cleanup_release_waits_are_concurrent_and_keep_stop_order() {
+        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let waits = actors.into_iter().map(|actor| (actor, None)).collect();
+        let outcomes = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::await_cleanup_releases(waits, |actor| {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    if actor == actors[1] {
+                        AgentStopProjection::StoppedRetaining("workspace retained".into())
+                    } else {
+                        AgentStopProjection::StoppedReleasing
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("all release waits must be polled together");
+        assert_eq!(outcomes.len(), 3);
+        for (index, step) in outcomes.into_iter().enumerate() {
+            let CleanupStepProjection::StoppedActor(actor, outcome) = step else {
+                panic!("unexpected cleanup step");
+            };
+            assert_eq!(actor, actors[index]);
+            assert!(matches!(
+                outcome,
+                AgentStopProjection::StoppedReleasing | AgentStopProjection::StoppedRetaining(_)
+            ));
+            if index == 1 {
+                assert!(
+                    matches!(outcome, AgentStopProjection::StoppedRetaining(detail) if detail == "workspace retained")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_failed_stops_do_not_request_release() {
+        let actor = ActorRef::first(ActorId(2));
+        let outcomes = super::await_cleanup_releases(
+            vec![(
+                actor,
+                Some(AgentStopProjection::Failed("stop failed".into())),
+            )],
+            |_| async { panic!("failed stop cannot request release") },
+        )
+        .await;
+        assert!(matches!(
+            outcomes.as_slice(),
+            [CleanupStepProjection::StoppedActor(_, AgentStopProjection::Failed(detail))]
+                if detail == "stop failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_release_wait_experiment() {
+        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
+        let delay = std::time::Duration::from_millis(40);
+        let serial_start = std::time::Instant::now();
+        for _ in actors {
+            tokio::time::sleep(delay).await;
+        }
+        let serial = serial_start.elapsed();
+
+        let batch_start = std::time::Instant::now();
+        let outcomes = super::await_cleanup_releases(
+            actors.into_iter().map(|actor| (actor, None)).collect(),
+            |_| async move {
+                tokio::time::sleep(delay).await;
+                AgentStopProjection::StoppedNow
+            },
+        )
+        .await;
+        let batch = batch_start.elapsed();
+        assert_eq!(outcomes.len(), 3);
+        eprintln!("cleanup release wait experiment: serial={serial:?}, batched={batch:?}");
+    }
 
     /// A reply fenced by an update still in delivery tells the model which
     /// request is waiting, that queued messages appear only at a turn end, and that an earlier
