@@ -124,7 +124,7 @@ evidenceProbe spec =
     { probeState = ()
     , probeStart = \() -> FocusedRun spec <$> Cmd.start
         (Cmd.withMemory (Cmd.MiB 64)
-          (Cmd.argv ["bash", "checks/focused-result-fixture.sh", "pass", "managed"]))
+          (Cmd.argv ["bash", Text.pack workspaceRoot <> "/checks/focused-result-fixture.sh", "pass", "managed"]))
     , probeRead = \path -> do
         started <- Cmd.tryStart (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv ["cat", path]))
         case started of
