@@ -582,6 +582,264 @@ fn root_mount_starts_with_the_pinned_workspace_helper_seed() {
 }
 
 #[test]
+fn root_mount_keeps_authored_helpers_clean_and_preserves_host_bytes() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repo.writer()
+        .commit_file(
+            ".exomonad/workspace/seeds/helpers/SessionHelpers/BrowserChecks.hs",
+            "module SessionHelpers.BrowserChecks where\n",
+            "add generic helpers",
+        )
+        .unwrap();
+    for (path, body) in [
+        (
+            ".exomonad/helpers/README.md",
+            "project helper documentation\n",
+        ),
+        (
+            ".exomonad/helpers/SessionHelpers.hs",
+            "module SessionHelpers (custom) where\ncustom = 1\n",
+        ),
+        (
+            ".exomonad/helpers/SessionHelpers/Custom.hs",
+            "module SessionHelpers.Custom where\n",
+        ),
+    ] {
+        repo.writer()
+            .commit_file(path, body, "author project helpers")
+            .unwrap();
+    }
+    let original_git = std::fs::read(repo.path().join(".git/HEAD")).unwrap();
+    let original_helpers =
+        std::fs::read(repo.path().join(".exomonad/helpers/SessionHelpers.hs")).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "authored-helper-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let root = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        shell(&root, "cat .exomonad/helpers/SessionHelpers.hs"),
+        String::from_utf8(original_helpers.clone()).unwrap()
+    );
+    assert_eq!(
+        shell(&root, "cat .exomonad/helpers/README.md"),
+        "project helper documentation\n"
+    );
+    assert_eq!(shell(&root, "test -f .exomonad/helpers/SessionHelpers/Custom.hs; test ! -e .exomonad/helpers/SessionHelpers/BrowserChecks.hs; git status --porcelain"), "");
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/HEAD")).unwrap(),
+        original_git
+    );
+    assert_eq!(
+        std::fs::read(repo.path().join(".exomonad/helpers/SessionHelpers.hs")).unwrap(),
+        original_helpers
+    );
+}
+
+fn repo_with_nested_workspace_submodule() -> (
+    exomonad_worktree::testing::TestRepo,
+    exomonad_worktree::testing::TestRepo,
+    exomonad_worktree::testing::TestRepo,
+) {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let workspace = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let nested = exomonad_worktree::testing::TestRepo::init().unwrap();
+    nested
+        .writer()
+        .commit_file("Nested.hs", "module Nested where\n", "nested module")
+        .unwrap();
+    workspace
+        .writer()
+        .commit_file("Project.hs", "module Project where\n", "workspace module")
+        .unwrap();
+    workspace
+        .git()
+        .try_run(
+            workspace.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                nested.path().to_str().unwrap(),
+                "nested",
+            ],
+        )
+        .unwrap();
+    workspace
+        .git()
+        .try_run(
+            workspace.path(),
+            &["commit", "-qm", "record nested submodule"],
+        )
+        .unwrap();
+    repo.writer()
+        .commit_file("README.md", "project\n", "project")
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                workspace.path().to_str().unwrap(),
+                ".exomonad/workspace",
+            ],
+        )
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &["commit", "-qm", "record workspace submodule"],
+        )
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+            ],
+        )
+        .unwrap();
+    (repo, workspace, nested)
+}
+
+#[test]
+fn root_mount_resolves_relative_workspace_and_nested_gitfiles() {
+    let (repo, _workspace, _nested) = repo_with_nested_workspace_submodule();
+    let workspace_gitfile = repo.path().join(".exomonad/workspace/.git");
+    let nested_gitfile = repo.path().join(".exomonad/workspace/nested/.git");
+    let original_workspace = std::fs::read(&workspace_gitfile).unwrap();
+    let original_nested = std::fs::read(&nested_gitfile).unwrap();
+    assert!(original_workspace.starts_with(b"gitdir: ../"));
+    assert!(original_nested.starts_with(b"gitdir: ../"));
+    let workspace_config = exomonad_worktree::git::inspect::git_dir(
+        repo.git(),
+        &repo.path().join(".exomonad/workspace"),
+    )
+    .unwrap()
+    .join("config");
+    let nested_config = exomonad_worktree::git::inspect::git_dir(
+        repo.git(),
+        &repo.path().join(".exomonad/workspace/nested"),
+    )
+    .unwrap()
+    .join("config");
+    let original_workspace_config = std::fs::read(&workspace_config).unwrap();
+    let original_nested_config = std::fs::read(&nested_config).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "nested-gitfile-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let root = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(shell(&root, "git -C .exomonad/workspace status --porcelain; git -C .exomonad/workspace/nested status --porcelain; git status --porcelain"), "");
+    assert_eq!(
+        shell(
+            &root,
+            "git -C .exomonad/workspace rev-parse --show-toplevel"
+        ),
+        format!("{ACTOR_PROJECT_ROOT}/.exomonad/workspace\n")
+    );
+    assert_eq!(
+        shell(
+            &root,
+            "git -C .exomonad/workspace/nested rev-parse --show-toplevel"
+        ),
+        format!("{ACTOR_PROJECT_ROOT}/.exomonad/workspace/nested\n")
+    );
+    assert!(shell(&root, "cat .exomonad/workspace/.git").starts_with("gitdir: /"));
+    assert!(shell(&root, "cat .exomonad/workspace/nested/.git").starts_with("gitdir: /"));
+    assert_eq!(
+        std::fs::read(&workspace_gitfile).unwrap(),
+        original_workspace
+    );
+    assert_eq!(std::fs::read(&nested_gitfile).unwrap(), original_nested);
+    assert_eq!(
+        std::fs::read(&workspace_config).unwrap(),
+        original_workspace_config
+    );
+    assert_eq!(
+        std::fs::read(&nested_config).unwrap(),
+        original_nested_config
+    );
+}
+
+#[test]
+fn root_mount_refuses_broken_workspace_gitfile_before_launch() {
+    let (repo, _workspace, _nested) = repo_with_nested_workspace_submodule();
+    let gitfile = repo.path().join(".exomonad/workspace/.git");
+    std::fs::write(&gitfile, "gitdir: ../missing-admin\n").unwrap();
+    let original = std::fs::read(&gitfile).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let layout = WorkspaceLayout {
+        run_namespace: "broken-gitfile-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    assert!(layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "root",
+            true,
+            CODING,
+            None,
+            None,
+            None
+        )
+        .is_err());
+    assert_eq!(std::fs::read(&gitfile).unwrap(), original);
+}
+
+#[test]
 fn actors_sharing_a_checkout_mount_distinct_helper_drafts() {
     let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();

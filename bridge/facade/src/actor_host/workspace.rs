@@ -373,11 +373,8 @@ impl WorkspaceLayout {
                 .unwrap_or_else(|| "run".to_owned())
         });
         let helper_draft = self.helper_draft(&helper_branch);
-        if root && !helper_draft.exists() {
-            let seed = self.source_root.join(".exomonad/workspace/seeds/helpers");
-            if seed.is_dir() {
-                copy_helper_draft(&seed, &helper_draft)?;
-            }
+        if root {
+            initialize_helper_draft(&self.source_root, &helper_draft)?;
         }
         std::fs::create_dir_all(&helper_draft)?;
         let helper_mountpoint = host_path.join(".exomonad/helpers");
@@ -422,6 +419,15 @@ impl WorkspaceLayout {
                     boundary.with_read_only_overlay(&canonical, visible.join(".exomonad"))
                 }
                 .map_err(io::Error::other)?;
+        }
+        if root {
+            boundary = mount_workspace_gitfiles(
+                boundary,
+                self.worktrees.git(),
+                &self.source_root.join(".exomonad/workspace"),
+                &visible.join(".exomonad/workspace"),
+                &resource_root.join("workspace-gitfiles"),
+            )?;
         }
         boundary = boundary
             .with_read_only_overlay(&helper_draft, &helper_draft)
@@ -488,6 +494,120 @@ impl WorkspaceLayout {
             publication: Arc::new(tokio::sync::Mutex::new(WorkspacePublication::default())),
         }))
     }
+}
+
+/// Initialize a run's mutable draft once. An authored helper directory owns
+/// its complete contents, including intentional deletions from the seed.
+pub(crate) fn initialize_helper_draft(workspace: &Path, draft: &Path) -> io::Result<()> {
+    if draft.exists() {
+        return Ok(());
+    }
+    let authored = workspace.join(".exomonad/helpers");
+    let seed = workspace.join(".exomonad/workspace/seeds/helpers");
+    if authored.is_dir() {
+        copy_helper_draft(&authored, draft)
+    } else if seed.is_dir() {
+        copy_helper_draft(&seed, draft)
+    } else {
+        std::fs::create_dir_all(draft)
+    }
+}
+
+/// Git's relative gitfiles are located at the host checkout, while actors see
+/// the same checkout at a stable path. Overlay absolute pointers in the actor
+/// view without changing the host's tracked or administrative bytes.
+fn mount_workspace_gitfiles(
+    mut boundary: ProcessMountBoundary,
+    git: &exomonad_worktree::git::GitCli,
+    workspace: &Path,
+    visible: &Path,
+    generated: &Path,
+) -> io::Result<ProcessMountBoundary> {
+    if !workspace.is_dir() {
+        return Ok(boundary);
+    }
+    let mut pending = vec![(
+        workspace.to_path_buf(),
+        visible.to_path_buf(),
+        PathBuf::new(),
+    )];
+    while let Some((host, target, relative)) = pending.pop() {
+        let gitfile = host.join(".git");
+        let metadata = match std::fs::symlink_metadata(&gitfile) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && relative.as_os_str().is_empty() =>
+            {
+                return Ok(boundary);
+            }
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace .git is a symlink",
+            ));
+        }
+        if metadata.is_file() {
+            let admin =
+                exomonad_worktree::git::inspect::git_dir(git, &host).map_err(io::Error::other)?;
+            let common = exomonad_worktree::git::inspect::git_common_dir(git, &host)
+                .map_err(io::Error::other)?;
+            if common != admin {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "linked workspace Git metadata cannot be normalized for the actor mount",
+                ));
+            }
+            let pointer = generated.join(&relative).join("gitfile");
+            std::fs::create_dir_all(pointer.parent().expect("gitfile has parent"))?;
+            std::fs::write(&pointer, format!("gitdir: {}\n", admin.display()))?;
+            boundary = boundary
+                .with_read_only_overlay(&pointer, target.join(".git"))
+                .map_err(io::Error::other)?;
+            // Submodule administration records core.worktree relative to its
+            // host gitdir. Git honors that value even when its gitfile points
+            // correctly at the administration directory, so bind a private
+            // config with the actor-visible worktree as the final value.
+            let host_config = admin.join("config");
+            let mut config = std::fs::read(&host_config)?;
+            if !config.ends_with(b"\n") {
+                config.push(b'\n');
+            }
+            config.extend_from_slice(
+                format!("[core]\n\tworktree = {}\n", target.display()).as_bytes(),
+            );
+            let actor_config = generated.join(&relative).join("config");
+            std::fs::write(&actor_config, config)?;
+            boundary = boundary
+                .with_read_only_overlay(&actor_config, &host_config)
+                .map_err(io::Error::other)?;
+        } else if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace .git is not a file or directory",
+            ));
+        }
+        let tracked = git
+            .try_run(&host, &["ls-files", "--stage", "-z"])
+            .map_err(io::Error::other)?;
+        for entry in tracked.nul_fields() {
+            let Some((mode, path)) = entry.split_once('\t') else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Git index entry",
+                ));
+            };
+            if !mode.starts_with("160000 ") {
+                continue;
+            }
+            let nested = host.join(path);
+            if nested.is_dir() {
+                pending.push((nested, target.join(path), relative.join(path)));
+            }
+        }
+    }
+    Ok(boundary)
 }
 
 /// Copy a branch's mutable helper draft at a fork boundary. The caller holds
