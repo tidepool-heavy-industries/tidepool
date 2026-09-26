@@ -76,3 +76,22 @@ before deciding whether its provenance needs stronger semantics.
   for a matched deployment. Freeze the runtime Haskell library with the binary
   and generated effects, or build from an isolated immutable checkout while old
   runs remain. Project-source freezing alone does not prove runtime matching.
+
+
+## Wave14 outcome and next trial design
+
+- Product Send-only hook integrated and verified through real deterministic
+  browser consumer75a1e014. Independent review caught typed-serialization and
+  pending-claim cleanup defects; expected-red became integrated green.
+- Helper owner consumption succeeded; reviewer import failed before execution.
+  Structural cause confirmed in fork helper-layer directory selection;3018f18b5
+  corrects owner path and tests inheritance of published revision separately
+  from an invalid later draft. Root4GiB insistence was unnecessary trial overhead.
+- Compile attribution: actor3 activation held shared checkout43.870s, including
+  GHC43.791s; other actors waited35.6/44s. Split fix is review-held pending source
+  freshness analysis. Compile queue, compilation and checkout waits stay separate.
+- Next automations are configurable actors and composable project helpers with
+  stable typed interfaces. Trial explicit menus, record actual consumption and
+  token/turn savings or newly affordable useful work, then prune unused surface.
+  Start with command completion, grouped evidence and review readiness. Jev
+  selects bounded semantic continuations; deterministic facts remain code-owned.

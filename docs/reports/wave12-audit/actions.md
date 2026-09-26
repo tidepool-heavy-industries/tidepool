@@ -397,3 +397,48 @@ reviewer checkout preparation, actual named-test selection, adjustable experimen
 resource choices and helper publication/import diagnostics. No new Haskell
 snippet or API. Diff checked; independent evidence review requested before
 integration. Earlier DesignQuestion reference e194a5b already on harness master.
+
+
+### Scheduled supervision — 2026-09-26 07:26 UTC
+
+Wave14 completed and accepted at product75a1e014. Supervisor read all five
+retained focused evidence JSONs from actor1's build overlay: each exact source,
+1 selected/executed/passed, exit0; helper README dirt explicit. Copies are now
+harness docs/wave14-supervisor-evidence.json (310080e). Root/worker/reviewer
+interviews retained. Corrected stale handoff claim that launch record was still
+a template:7f06c78 already held exact identities. Wave14 merged to harness
+master; production files byte-identical to75a1e014 (Git diff checked).
+
+Cleanup skill loaded. Graph before stop: root idle, provider succeeded, no
+requests, all six children already retired; only root and operator remained.
+Root stopAgent returned StoppedNow. Scoped CLI stop exited0 and wave14 tmux
+is gone. Host status nevertheless reports FAILED with addressable resources
+retained / unsupported host work-process settlement. Retain storage and receipts;
+do not equate stopped actor/tmux with proven complete host resource release.
+Protected wave12 demo still HTTP200 on4600. No subsequent wave launched.
+
+Reviewed helper path fix3018f18b5 integrated as7fd4562b1. Actual fork owner
+read .resources/<run>/layers instead of .resources/<run>/helpers/layers;
+regression exercises published valid revision plus invalid later draft and
+passes1/1 in isolated worktree. No live runtime deployment yet.
+Runtime isolation8414e2e45 independently reviewed with no current blocker;
+real old-binary edited-library admission and full child/reload check remain
+integration gates. Activation split3ea4ece99 removes measured43.9s compile
+under checkout; independent reviewer is investigating source-layer freshness
+before integration. No measured after-change speedup claimed.
+
+Automation batch proceeds in isolated shared-workspace branches: configurable
+command-completion/check-summary actor and existing evidence parser owner;
+review readiness uses terminal submission evidence, not progress claims.
+Concrete trial plan285d345 on harness rsi/question-prompt describes six small
+mechanisms, prompt discovery and pruning; helper reload guidance corrected to
+consumer-bound branch scope. No generic conceptual DSL planned.
+
+User requested cleanup skill require pre-retirement kaizen interview. Added
+in shipped skill90af4a86d and isolated shared-workspace012414c (pin pending).
+Read/retain answers before stop, reuse existing interviews, route findings to
+fix/experiment/deferred item; unresponsive actors or urgent stops record missing
+interview without preventing necessary release. Skill validator passed via
+uv PyYAML environment; initial ambient Python lacked yaml. No code tests needed.
+Next timer01:11:20 PDT /08:11:20 UTC. Wave15 waits for required gates and a
+compiled useful automation trial, not timer expiry.
