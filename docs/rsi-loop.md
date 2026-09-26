@@ -92,6 +92,26 @@ measured evidence; they are investigation triggers, not automatic failures:
 | Context and output | Repeated truncation, output rereads, or rediscovery after a fork | Evidence selection, retained handles, shared prefix and inheritance |
 | Model effort | Repeated root relay or judgment on code-decidable facts | Typed actors, reusable compositions, deterministic guards |
 
+Thresholds can be events as well as numbers. Audit every type/parser error,
+explicit expression of confusion, misunderstood contract, wrong API assumption,
+failed tool invocation and recovery loop. Treat confusion inferred from behavior
+as a hypothesis until the trace or interview supports it. A rejected cell is
+observable; why the actor wrote it still needs investigation.
+
+Give investigation subagents bounded episodes or clusters of the same symptom.
+Each receives the exact call/error, relevant preceding context, exposed prompt/API
+revision and eventual recovery. Ask what the actor knew, what it reasonably
+inferred, what was missing or misleading, and the smallest change that would
+prevent recurrence. Distinguish expected exploratory feedback from avoidable
+misdirection; count attempts, recovery work and downstream effects separately.
+
+Possible owners include the shared prompt, assignment renderer, Haskell API,
+compiler diagnostic, environment provisioning and runtime. Prefer a better type,
+default or diagnostic when repeated prompting would make callers maintain an
+invariant. Preserve unfamiliar but valid use cases: do not turn each error into
+a new prohibition. Interview the affected actor where intent remains unclear,
+and review proposed fixes against both the failed case and ordinary valid use.
+
 For each crossing record operation/actor identity, input/source revision, threshold,
 observed value, phase breakdown, outcome and evidence. Include failed, cancelled
 and still-running operations; completed-call timing rows alone miss hangs. State
