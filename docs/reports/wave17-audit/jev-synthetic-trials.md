@@ -33,3 +33,25 @@ Limits: one small hand-authored sample, no statistical efficacy claim, no measur
 round savings. Baseline ambiguous-owner trials remain pending a source correction:
 per-item questions must identify their subject; question IDs alone are not model
 input. Integrated-source and production-consumer checks remain separate gates.
+
+## Owner routing revision
+
+The supervisor personally ran five owner-routing cases before and after a policy
+revision: browser-only change, store-only change, both owners, missing change
+evidence, and instruction-like log text opposing the actual owner.
+
+An initial per-owner Choice battery selected the right top alternatives but gave
+the irrelevant owner a doubtful negative in the browser-only case (0.56 mass,
+0.35 confidence, 0.14 margin). Requiring every negative to settle would escalate
+this straightforward route. Missing evidence also produced weak positive top
+choices rather than the intended unclear category, though settlement refused them.
+
+The revised single Choice asks for one supplied owner or explicit unresolved
+(shared/absent/insufficient). All five cases selected the expected route at
+0.92/0.96/0.95/0.94/0.93 mass, respectively. Shared and missing cases selected
+unresolved. This revision also fixes an earlier untested Noul battery whose
+per-item questions failed to name their owner; request IDs do not supply that
+semantic context. Retained raw trials are the two `jev-owner-*-trials.json` files.
+
+This is evidence for the narrower question shape on these examples, not a
+population efficacy claim. Deterministic exact-owner matching still runs first.
