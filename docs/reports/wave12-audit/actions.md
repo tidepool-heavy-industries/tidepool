@@ -230,3 +230,49 @@ ordinary-host lifetime gate open. Verification agent is executing only that
 isolated host gate; no port4600 migration or run teardown has begun. Root and
 reviewer interviews are retained in the run checkout. Cleanup skill loaded;
 terminal and released remain separate facts. New wave remains gated.
+
+
+### Product accepted and run stopped — 06:15 UTC
+
+Wave13's external ordinary-host gate passed: copied prepared binary/assets,
+launch from `/` via user systemd, host-visible PID and cgroup independent of
+actor namespace, login/WebSocket/echo/reconnect, exact SIGKILL and persisted
+reopen, exact SIGINT exit0 and port release. No Cargo at runtime. The initial
+unit lacked Bash in its service PATH; successful units supplied the standard
+host PATH. Evidence is tracked as harness `docs/wave13-host-gate.json`, with
+hashes, source and invocation IDs; no secret retained. Acceptance docs951ab0d
+and all reviewed wave13 work merged to harness master `88ff710`. Production
+paths are byte-identical to tested d2de055 (verified Git diff). Original demo
+hostPID3202992 remains on4600. Worktree helper deletions remain preserved.
+
+Root retirement returned StoppedNow. Wave13 host/compiler stopped and its tmux
+session is gone. **Full resource release is not proven:** old failed launch
+actors3–7 retain process/workspace custody because supervisor socket lookup
+returns ENOENT. Shutdown status remains failed/retained; do not delete those
+resources or equate absent processes with a complete release receipt.
+
+Native launch-cause preservation integrated as `3cbb987d9`; failure and ordinary
+shutdown focused tests passed2/2. Tmux insertion fixfece13978 remains integrated.
+A further provisional cleanup patch in `scoped-never-started` is UNSAFE and
+uncommitted: tmux3.7c client.c maps lost-server IPC to normal exit1, so nonzero
+status/empty output cannot prove no child started. Keep the worktree as evidence;
+never integrate its never-started classification. A reliable launch fence or
+receipt needs a separate design; generic ENOENT must not become a release claim.
+
+Oracle owner fix integrated `42db232c0`: exclude generated CBOR artifacts,
+NUL-delimit paths and expose hashing errors. Synthetic regression passes1/1;
+retained-manifest check passes. Native GHC regeneration changed only script's
+self-dependent fingerprint, not expected values/payload digest. This explains
+why restoring the old Haskell library alone did not repair the stale check.
+The full corpus execution previously stopped at the oracle gate; it is not
+reported as a fresh full pass. Matched `just exomonad-build` now passed.
+
+Wave14 brief is harness36cdebf: first typed pass-through before-request hook via
+existing Provider/Engine/Store and deterministic browser consumer; three Luna
+obligations plus independent review, and a genuine two-actor composed helper
+trial. Isolated branch rsi/wave14 atfb38791, workspace pin98aef85. Only that new
+worktree's submodule gitfile was made absolute using the existing normalization
+contract. Host Git status is clean; actual actor-namespace check is pending.
+Runtime build is42db232c0, catalog39. Workspace check/launch still pending at
+this entry. No second working wave overlaps wave13; old retained resources and
+wave12 demo remain untouched.
