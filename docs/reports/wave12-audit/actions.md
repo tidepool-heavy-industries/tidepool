@@ -8,13 +8,16 @@ a recommendation into a standing rule.
 
 | Work | Owner / status | Acceptance evidence |
 |---|---|---|
-| Responsive compiler control under one busy worker | compiler_control, implementing | Barrier tests for control response, bounded admission, acknowledgment and shutdown |
+| Responsive compiler control under one busy worker | cf6a5fa8f, integration review | Focused tests passed; review whether busy rejection can trigger fallback workers before merge |
 | Reuse recovered reachability in projection | f4252f72d, awaiting integration review and corpus gate | Focused equivalence test and extractor build passed; full fixtures gate outstanding; speedup unmeasured |
-| Cancel fork imports without fallback launch | review_finish, implemented; extending cleanup | Build and pre-cancel test passed; in-flight copy kill/reap and partial-launch cleanup still required |
-| Failed admission releases provisional resources | review_finish, active | Deterministic collision/failure cases and no orphaned resources |
+| Cancel fork imports without fallback launch | cancellation branch through 5e61feecc, awaiting review | Build, pre-cancel, in-flight copy kill/reap and captured-source cleanup tests passed |
+| Failed admission releases provisional resources | 5e61feecc, awaiting review | Concurrent tmux insertion tested; provisional Git receipts deliberately retained by owner contract |
 | Managed root baseline, private overlays and explicit integration | queued for next implementation slot | Approved managed-root plan; policy/importer exist, production composition and acceptance remain |
-| Clear producer contracts and completion evidence | root, queued | Future assignments distinguish component checks from integrated behavior, expected-red tests and actual acceptance |
+| Clear producer contracts and completion evidence | harness a6a39c3, isolated prompt branch | Clarification, expected-red prerequisites, retained checkout and pending-update guidance corrected; diff checked |
 | Reconcile audit evidence and action ownership | root, active | Correct actor identities and resolve conflicting helper-import claims before treating reports as settled |
+| Jev shared-service breaker | main 136790a14 | 14 focused tests passed; facade compiled; no running host changed |
+| Stale notice filtering and accurate queue logs | compiler_control, active | Same watch-observation checks for both delivery paths; presentation remains separate |
+| Overlap independent resource-release waits | review_finish, active | Preserve descendant retirement order; separate within-group fix from multi-group experiment |
 
 ## Investigation and experiments
 
@@ -29,9 +32,14 @@ a recommendation into a standing rule.
   concrete question. Continue independent work when available. Do not treat a
   legitimate question as a failure or require a complete contract before every
   fork. Parent decisions and source changes still need explicit incorporation.
-- **Repeated unavailable Jev judgments:** investigate the issuer and structured
-  error classification before choosing suppression or retry policy. The report
-  observed repeated HTTP 402 responses; do not silently disable authored calls.
+- **Repeated unavailable Jev judgments:** breaker implemented at the existing
+  shared JevClient owner. Account failures pause provider calls with one recovery
+  probe; callers receive explicit failures, never invented judgments.
+- **Command handle failure:** traced to a mistyped ID, not registry loss. Audit
+  handle reuse/transcription ergonomics before proposing lifecycle changes.
+- **Broader Luna audits:** repeated compilation dispatched; context cost and
+  artifact amplification queued for worker slots. See [experiments](experiments.md)
+  for bounded trials and their acceptance evidence.
 
 ## Dispatch policy
 

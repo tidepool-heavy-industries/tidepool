@@ -36,7 +36,14 @@ audit assignments.
 
 ## Execution status
 
-Register created; trials are queued, not run. Jev, notice selection and cleanup
-implementation occupy the current three worker slots. Dispatch the Luna audits
-as those slots free, alongside the approved managed-root and review/environment
-work. Do not impose all trials on one live product wave.
+Register created; trials are queued, not run. Jev implementation is committed;
+its slot now runs the Luna compilation audit. Notice selection and cleanup
+implementation occupy the other worker slots. Dispatch further Luna audits as
+slots free, alongside managed-root and review/environment work. Do not impose
+all trials on one live product wave.
+
+Source inspection already found that `scripts/cargo-focused-test` records the
+commit, dirty status, executable hash, selection and executed summaries. Extend
+that owner only for demonstrated gaps; do not add a second evidence subsystem.
+In particular, test source mutation during build and missing preparation inputs
+before deciding whether its provenance needs stronger semantics.
