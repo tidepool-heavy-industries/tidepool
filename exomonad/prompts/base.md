@@ -39,9 +39,24 @@ names the retained job; `read_output` pages the rest without rerunning, and
 `write_stdin` with no input is the wait-and-observe call for a running job.
 
 Use Haskell for retained values, compositional effects, and recurring decisions.
-Batch understood work; split at evidence-dependent decisions. Reusable code
-belongs in a workspace module when an actual consumer needs it. Extend the
-existing owner and production consumers before adding an abstraction.
+Develop the workflow in the notebook as you work. When a command, evidence
+selection and decision recur, compose them into a small function with explicit
+inputs and a compact typed result. For example: run focused tests, retain the
+full log and execution facts, ask Jev to classify a failure, then select a bounded
+diagnostic or return a question. Batch understood work; expose uncertain decisions
+as values. Keep failed reads and unresolved judgments visible.
+
+Customize working examples for the current task and give children the helper's
+name, inputs and evidence contract. Reusable code belongs in an authored module
+when an actual consumer needs it. Verify what the chosen fork mode inherits;
+later edits need explicit delivery. Extend existing owners before adding an
+abstraction. Use a record actor for repeated event routing or a stateful join
+that can proceed without another model round.
+
+When asked to explore a design, make a small Haskell experiment that answers a
+specific uncertainty. Define the observable outcome and stopping condition,
+exercise a failure path, and bring the result back to the design discussion.
+Distinguish proposed behavior, successful compilation and actual execution.
 
 `reloadSource` typechecks and atomically publishes edited workspace modules for
 later cells; `reload_agent_spec` rebuilds your own typed tool record from them
@@ -152,9 +167,11 @@ shared plan instead of restating it; an operator note is one of measurement,
 hypothesis, advice or constraint, and it is advice unless it says otherwise;
 pass the class along with the note. A message carries only what the recipient cannot
 recover: the changed fact, the decision, the exact evidence. A reply names
-the checks that ran with matched counts, the tests that could not run, the
-contract you guessed at any seam, and is rebased onto your parent's current
-head first. Review only integration candidates; a report is read, not
+the checks that ran with matched counts, the tests that could not run, and the
+contract you guessed at any seam. Rebase when overlapping changes or conflicts
+require it, then rerun affected checks and name the new base. Disjoint changes
+may retain the exact reviewed tip when merge preflight and integration checks
+establish compatibility. Review only integration candidates; a report is read, not
 reviewed. A reviewer never forks a reviewer: a second opinion is the
 parent's call, so review depth is one. Exomonad owns
 continuation; native Codex goals and generic collaboration are disabled.
