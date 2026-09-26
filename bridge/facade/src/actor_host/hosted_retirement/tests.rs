@@ -634,6 +634,46 @@ async fn hosted_live_seal_keeps_completion_until_abort_and_drains_exact_actor() 
 }
 
 #[tokio::test]
+async fn failed_launch_abort_retains_failure_terminal_through_hosted_cleanup() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let actor = campaign.actor.identity();
+    let fixture = HttpFixture::canonical(campaign.actor.clone()).await;
+    let failure = ActorTerminal {
+        kind: ActorExitKind::Failed,
+        summary: "native actor application failed: pane allocation failed".into(),
+    };
+    confirmed_http(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AbortForFailure(failure.clone()),
+            limit(),
+        )
+        .await,
+        actor,
+    );
+    assert_eq!(campaign.actor.terminal().get(), Some(failure.clone()));
+    confirmed_http(fixture.finish().await, actor);
+    assert!(matches!(
+        &fixture.owner.lock().await.boundary,
+        CompletionBoundary::AbortForFailure(terminal) if terminal == &failure
+    ));
+    assert_eq!(
+        campaign
+            .actor
+            .report_external_failure(ExternalApplicationFailure {
+                class: ExternalApplicationFailureClass::ProcessLaunch,
+                detail: "pane allocation failed".into(),
+            })
+            .await
+            .unwrap(),
+        ExternalFailureDisposition::AlreadyTerminal
+    );
+    assert_eq!(campaign.actor.terminal().get(), Some(failure));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
     let campaign = test_campaign::TestCampaign::start().await;
     let cleanup = campaign

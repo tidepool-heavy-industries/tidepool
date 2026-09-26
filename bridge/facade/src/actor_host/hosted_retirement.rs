@@ -7,10 +7,11 @@ use exomonad_agent::{
 };
 use futures_util::future::BoxFuture;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompletionBoundary {
     AwaitingNativeDecision,
     AbortForShutdown,
+    AbortForFailure(ActorTerminal),
 }
 pub(super) type HostedOwner = Arc<tokio::sync::Mutex<HostedRetirement>>;
 pub(super) type HostedSlot = Arc<Mutex<Option<HostedOwner>>>;
@@ -373,7 +374,12 @@ pub(super) async fn observe(
 ) -> HostedObservation {
     tokio::time::timeout(timeout, async {
         let mut state = owner.lock().await;
-        if boundary == CompletionBoundary::AbortForShutdown {
+        if matches!(&boundary, CompletionBoundary::AbortForFailure(_))
+            || (matches!(&boundary, CompletionBoundary::AbortForShutdown)
+                && !matches!(state.boundary, CompletionBoundary::AbortForFailure(_)))
+        {
+            // A later cleanup poll cannot replace the launch failure with a
+            // generic shutdown after the first waiter times out.
             state.boundary = boundary;
         }
         state.advance().await;
@@ -456,9 +462,14 @@ impl HostedRetirement {
                 return;
             }
         }
-        if self.boundary != CompletionBoundary::AbortForShutdown {
-            return;
-        }
+        let shutdown_terminal = match &self.boundary {
+            CompletionBoundary::AwaitingNativeDecision => return,
+            CompletionBoundary::AbortForShutdown => ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "host selected completion abort for shutdown".into(),
+            },
+            CompletionBoundary::AbortForFailure(terminal) => terminal.clone(),
+        };
         if self.shutdown.is_none() && self.actor.terminal().get().is_some() {
             self.resident = account(exact, self.actor.terminal().cleanup());
         } else {
@@ -471,10 +482,7 @@ impl HostedRetirement {
                 let actor = self.actor.clone();
                 self.shutdown = Some(Operation::Pending(Box::pin(async move {
                     actor
-                        .shutdown_with_cleanup(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "host selected completion abort for shutdown".into(),
-                        })
+                        .shutdown_with_cleanup(shutdown_terminal)
                         .await
                         .map_err(|error| error.to_string())
                 })));

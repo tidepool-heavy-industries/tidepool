@@ -1981,6 +1981,13 @@ struct InteractiveApplicationError {
     actor: ActorRef,
     operation: InteractiveOperation,
     detail: String,
+    disposition: LaunchDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchDisposition {
+    Failed,
+    Cancelled,
 }
 
 async fn apply_application_failure(
@@ -2012,6 +2019,7 @@ fn application_error(
         actor,
         operation,
         detail: error.to_string(),
+        disposition: LaunchDisposition::Failed,
     }
 }
 
@@ -3815,8 +3823,11 @@ async fn run_interactive_applications(
                                 ))
                             });
                             if let Err(error) = &result {
-                                launch_observation
-                                    .publish_launch_pending(format!("launch failed: {}", error.detail));
+                                let state = match error.disposition {
+                                    LaunchDisposition::Failed => "launch failed",
+                                    LaunchDisposition::Cancelled => "launch cancelled",
+                                };
+                                launch_observation.publish_launch_pending(format!("{state}: {}", error.detail));
                             }
                             (local_actor, result)
                         });
@@ -4222,17 +4233,22 @@ async fn run_interactive_applications(
                     Some(Ok((local_actor, Err(error)))) => {
                         let actor = local_actor.identity();
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
-                            owner.launch = HostLaunchState::Failed(error.detail.clone());
+                            owner.launch = match error.disposition {
+                                LaunchDisposition::Failed => HostLaunchState::Failed(error.detail.clone()),
+                                LaunchDisposition::Cancelled => HostLaunchState::Abandoned,
+                            };
                             owner.cancel();
                         }
-                        if let Err(error) = apply_application_failure(
-                            local_actor,
-                            ExternalApplicationFailure {
-                                class: error.operation.failure_class(),
-                                detail: error.detail,
+                        if error.disposition == LaunchDisposition::Failed {
+                            if let Err(error) = apply_application_failure(
+                                local_actor,
+                                ExternalApplicationFailure {
+                                    class: error.operation.failure_class(),
+                                    detail: error.detail,
+                                }
+                            ).await {
+                                break Some(error);
                             }
-                        ).await {
-                            break Some(error);
                         }
                     }
                     Some(Err(error)) => break Some(format!("interactive launch task: {error}")),
@@ -5059,9 +5075,8 @@ async fn launch_prepared_interactive_application(
     let retirement_service = service.clone();
     let launch_result = async {
     if cancelled.try_recv().is_ok() {
-        return Err(socket_launch_failure(
+        return Err(socket_launch_cancelled(
             actor_identity,
-            InteractiveOperation::LaunchProcess,
             "launch cancelled after hosted work submission",
             socket_directory,
         ));
@@ -5352,9 +5367,8 @@ async fn launch_prepared_interactive_application(
                 tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
             }
         }
-        return Err(socket_launch_failure(
+        return Err(socket_launch_cancelled(
             actor_identity,
-            InteractiveOperation::LaunchProcess,
             "launch cancelled during exact process activation",
             socket_directory,
         ));
@@ -5388,9 +5402,8 @@ async fn launch_prepared_interactive_application(
                 tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
             }
         }
-        return Err(socket_launch_failure(
+        return Err(socket_launch_cancelled(
             actor_identity,
-            InteractiveOperation::LaunchProcess,
             "launch cancelled after native submission",
             socket_directory,
         ));
@@ -5448,18 +5461,26 @@ async fn launch_prepared_interactive_application(
     }))
     }
     .await;
-    if launch_result.is_err() {
-        // best-effort: the launch already failed and `launch_result` below is
-        // what's returned; these settle bookkeeping for the retirement
-        // service so custody isn't left retained, but a failure here has no
-        // separate action to take.
+    if let Err(error) = &launch_result {
+        // The hosted service can retire this actor before the host consumes
+        // `launch_result`. Carry the launch failure into that terminal so
+        // request settlement sees the original cause after cleanup.
         hosted_retirement::confirm_no_input_producer(&retirement_service)
             .await
             .ok();
+        let boundary = match error.disposition {
+            LaunchDisposition::Failed => {
+                hosted_retirement::CompletionBoundary::AbortForFailure(ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary: format!("native actor application failed: {}", error.detail),
+                })
+            }
+            LaunchDisposition::Cancelled => hosted_retirement::CompletionBoundary::AbortForShutdown,
+        };
         drop(
             hosted_retirement::observe(
                 &retirement_service,
-                hosted_retirement::CompletionBoundary::AbortForShutdown,
+                boundary,
                 APPLICATION_TASK_GRACE_TIMEOUT,
             )
             .await,
@@ -5526,6 +5547,17 @@ fn socket_launch_failure(
         _ => cause.to_string(),
     };
     application_error(actor, operation, detail)
+}
+
+fn socket_launch_cancelled(
+    actor: ActorRef,
+    cause: impl fmt::Display,
+    socket: SocketDirectory,
+) -> InteractiveApplicationError {
+    let mut error =
+        socket_launch_failure(actor, InteractiveOperation::LaunchProcess, cause, socket);
+    error.disposition = LaunchDisposition::Cancelled;
+    error
 }
 
 async fn deliver_session_activation(
