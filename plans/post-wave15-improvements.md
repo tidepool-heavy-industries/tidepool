@@ -82,13 +82,69 @@ is enough to be useful; no requirement for universal automation.
 
 ## Interview and next-wave design
 
-Root and reviewer interviews are retained. A focused root follow-up asks why it
-chose short polls, which observations changed decisions, why helpers were skipped,
-which follow-ups it would delegate, and which missing contract/source facts drove
-churn. Read that answer before finalizing the batch or retiring root.
+Root and reviewer interviews, including the focused follow-up, are retained and
+read. Root reports no still-running observation changed a product decision. It
+describes polling as manual completion management, and the watcher failure as a
+reason to distrust compact acceptance summaries. Several unused helpers did not
+fit the task; their absence is not proof of discovery failure. Root recommends
+mechanical source/evidence collection and explicit invocation contracts.
+
+## Delivery batch and acceptance
+
+Use isolated worktrees with three parallel implementation lanes after fixing the
+shared observation/report contract. No new process owner or general agent loop.
+
+1. **Command continuation:** own the Bash default, cancellable waiting, automatic
+   handoff of the same job and one completion notice. Ordinary calls expose
+   completion intent rather than requiring a yield interval. Keep explicit
+   observation for interactive callers. Start with a 60-second foreground budget;
+   expiry hands off without killing the process. Existing explicit background
+   remains immediate. Treat existing explicit yield requests as observation mode
+   during migration; remove them from normal examples. Prove completion/timeout
+   races cannot lose or duplicate delivery and siblings still make progress.
+2. **Evidence and contextual follow-up:** fix worktree authority and trace HTTP
+   409 before adding recovery policy. Extend the existing focused evidence owner
+   and shell presenter. Exact results remain code-derived. On ambiguous terminal
+   failure or insufficient relevant output, Jev may select at most two bounded
+   read-only follow-ups from supplied candidates, using command intent and evidence.
+   Default to no extra inference for complete small results. Unknown judgments or
+   service failure return the original facts. No generated arbitrary commands.
+3. **Review handoffs:** review and integrate the existing `3501f1f` ReviewFlow
+   implementation rather than creating another coordinator. Add declared required
+   sibling commits to its deterministic source preflight. Reject empty repair
+   findings at the owning review boundary and return correction to the reviewer.
+   Default to at most two implementation repair rounds; escalate scope changes,
+   missing dependencies or exhausted budget. Notify root on accepted candidate or
+   escalation; root retains integration authority and independent review remains.
+
+Integration owner reviews the three lanes and updates shipped tool descriptions,
+compiled examples and project prompting against the resulting source. Introduce
+one component-specific check function composed from the repaired evidence API;
+give its actual name and arguments to a child with a real repeated consumer.
+Retain unused helpers for their agreed exposure window; do not enlarge the menu.
+Include concrete provider/schema examples and prerequisite checks in the next
+shared contract, and reconcile the automation journal's exposure/use statuses.
+
+Verification uses focused owner checks and one combined real-consumer gate. Cover
+completion racing handoff, cancellation, sibling progress, bounded output and
+Jev failure; managed-worktree evidence access and explicit access refusal;
+stale review source, contradictory/empty repair, accepted exact candidate and
+repair exhaustion. Reuse immutable fixtures; do not run a full battery per lane.
+Browser-helper publication stays held until its owned-worktree consumer executes.
+
+Build the full-wave baseline before comparing savings: deduplicate call IDs and
+inherited history, count command starts, observation rounds, diagnostic rereads,
+review relays and outcomes per opportunity. Aim to remove at least half the
+routine command-observation rounds in comparable episodes; this is an experiment
+target, not a promised whole-wave reduction. Report whole-wave frontier usage,
+Jev overhead, latency and correctness separately. Replay demonstrates potential;
+the next wave demonstrates adoption and realized savings. Give the review flow
+one real bounded component trial and keep integration review explicit.
 
 Do not expand the product scope merely to exercise every helper. The next product
 slice should offer real command/evidence opportunities; test the Bash workflow
 there and keep other changes distinguishable. No successor launch or repeated
-timer is authorized by the one-shot supervision check itself. Preserve wave12
-demo, Tailscale, shared daemons, dirty checkouts and all commits.
+timer is authorized by the one-shot supervision check itself. The user has now
+authorized stopping the old wave12 run/demo; perform that as separate scoped
+cleanup after confirming its identity and retained interviews. Preserve demo
+data, unrelated Tailscale routes, shared daemons, dirty checkouts and all commits.
