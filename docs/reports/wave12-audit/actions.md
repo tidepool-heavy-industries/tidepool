@@ -481,3 +481,16 @@ compiled examples only after focused acceptance. Isolated harness branch
 rsi/automation-prompts424b642 adds the twelve-entry exposure ledger. Shared
 workspace integration branchrsi/automation-integration has cleanup skille0dd95a;
 future pin waits for the tested assembled automation surface.
+
+User subsequently confirmed all practical additions and a minimum three exposed
+waves per automation, even initially unused. Harness424b642 introduces the
+12-entry machine-readable trial inventory and exposure rules (integrated on
+master separately); pending entries are not callable menu claims. Never prune
+for simple non-use before checking opportunities and prompting. Timer remains
+stopped by user. Six extra tasks are queued by owner alongside current features.
+
+Root review of production-backed recipe seam found unconditional ReleaseAwait
+Released would overclaim command cleanup. Implementation is held until actual
+producer/resource receipts and shutdown ordering are correct. Only disposable
+check process stopped; no shared daemon restarted. Actor automation runtime
+acceptance depends on this seam; compiled/pure checks alone are labeled as such.
