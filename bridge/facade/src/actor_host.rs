@@ -2404,8 +2404,8 @@ pub(crate) async fn run(
                 let availability = match build {
                     Some(build) => match build.inspect_artifact(&relative_path).await {
                         ArtifactInspection::Present(layers) => {
-                            crate::run_map::ArtifactAvailability::RetainedLayers {
-                                layers: layers
+                            crate::run_map::ArtifactAvailability::BackingEntries {
+                                entries: layers
                                     .into_iter()
                                     .map(|layer| crate::run_map::ArtifactLayer {
                                         order: layer.order,

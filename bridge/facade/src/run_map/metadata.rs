@@ -7,9 +7,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-/// One read-only operator observation of a build artifact. `retained_layers`
-/// names physical backing copies; it does not assert which copy the merged
-/// overlay presented, or that a stopped actor still has a mounted view.
+/// One read-only operator observation of a build artifact. Backing entries
+/// are physical regular files in retained layers. Overlay metadata may make
+/// an entry a whiteout; this does not prove artifact content or which copy
+/// the merged view presented.
 #[derive(Debug, Serialize)]
 pub struct ArtifactProvenance {
     pub run_id: String,
@@ -21,8 +22,8 @@ pub struct ArtifactProvenance {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ArtifactAvailability {
-    RetainedLayers {
-        layers: Vec<ArtifactLayer>,
+    BackingEntries {
+        entries: Vec<ArtifactLayer>,
         visible_source: Evidence<String>,
     },
     Missing,
@@ -260,14 +261,14 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn artifact_receipt_keeps_retained_layers_distinct_from_visible_source() {
+    fn artifact_receipt_keeps_backing_entries_distinct_from_visible_source() {
         let receipt = ArtifactProvenance {
             run_id: "run-1".into(),
             actor: ActorRef::first(ActorId(3)),
             logical_path: "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/evidence.json"
                 .into(),
-            availability: ArtifactAvailability::RetainedLayers {
-                layers: vec![ArtifactLayer {
+            availability: ArtifactAvailability::BackingEntries {
+                entries: vec![ArtifactLayer {
                     order: 0,
                     host_path: "/private/lower/evidence.json".into(),
                     current_upper: false,
@@ -279,8 +280,8 @@ mod tests {
         };
         let value = serde_json::to_value(receipt).unwrap();
         assert_eq!(value["run_id"], "run-1");
-        assert_eq!(value["availability"]["state"], "retained_layers");
-        assert_eq!(value["availability"]["layers"][0]["current_upper"], false);
+        assert_eq!(value["availability"]["state"], "backing_entries");
+        assert_eq!(value["availability"]["entries"][0]["current_upper"], false);
         assert_eq!(
             value["availability"]["visible_source"]["certainty"],
             "unknown"

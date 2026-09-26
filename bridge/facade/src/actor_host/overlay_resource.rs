@@ -61,8 +61,8 @@ impl SharedOverlayResource {
     }
 
     /// Inspect only the backing paths owned by this live publication. The
-    /// result identifies physical retained copies, not which overlay entry is
-    /// visible after whiteouts, opaque directories, or nested mounts.
+    /// result identifies regular backing entries, some of which can be overlay
+    /// metadata; it does not prove visible artifact content.
     pub(super) async fn inspect_artifact(&self, relative: &Path) -> ArtifactInspection {
         if !valid_artifact_path(relative) {
             return ArtifactInspection::RefusedPath;
@@ -1052,6 +1052,18 @@ mod tests {
         );
         assert_eq!(
             shared.inspect_artifact(Path::new("../result.json")).await,
+            ArtifactInspection::RefusedPath
+        );
+        assert_eq!(
+            shared
+                .inspect_artifact(Path::new("/outside/result.json"))
+                .await,
+            ArtifactInspection::RefusedPath
+        );
+        assert_eq!(
+            shared
+                .inspect_artifact(&PathBuf::from("x".repeat(4097)))
+                .await,
             ArtifactInspection::RefusedPath
         );
         shared.retire().await.unwrap();
