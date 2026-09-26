@@ -46,3 +46,23 @@ a recommendation into a standing rule.
 Use isolated worktrees for implementation. Reuse agent slots as tasks finish.
 Keep live hosts and their compiler daemons untouched. Run focused checks during
 parallel work and the necessary broader gate at integration boundaries.
+
+## Scheduled supervision
+
+User authorized recurring 45-minute RSI investigation, interview, completed-run
+teardown and next-wave launch while away. Installed user-systemd timer:
+`tidepool-rsi-supervisor.timer`; first wake 2026-09-25 21:26 PDT, then every
+45 minutes. It queues a message to supervisor Codex thread
+`01a0dad6-69ba-7ce0-aed3-cd9192d82ff5`; this requires the machine and attached
+Codex session to remain available. Coalesce delayed ticks, never overlap waves.
+Inspect `systemctl --user list-timers tidepool-rsi-supervisor.timer` and
+`journalctl --user -u tidepool-rsi-supervisor.service` for scheduling/delivery.
+Stop with `systemctl --user stop tidepool-rsi-supervisor.timer` when the user
+ends unattended supervision.
+
+Preserve the live browser demo and its Tailscale route. Teardown concerns the
+completed Exomonad run's actors/resources; inspect cleanup ownership and receipts
+before stopping anything. Launch the next Sol-root wave only after its brief and
+required checks are ready, with bounded parallel work and one experiment. Timer
+expiration alone is not a launch gate. Current wave12 product is delivered;
+its root retrospective has been requested, and implementation work continues.
