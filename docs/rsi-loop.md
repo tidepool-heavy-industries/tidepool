@@ -22,6 +22,21 @@ calls and model rounds while preserving failure boundaries and evidence. Promote
 successful compositions into compiled examples. Code owns authoritative facts;
 Jev supplies typed semantic judgments where those facts need interpretation.
 
+Aim for near-zero avoidable orientation at actor activation. Supply stable
+interaction mechanics in the shared prompt, role-specific workflow in role
+instructions, and current source/environment/ownership/check facts in the task
+packet. The first useful action should be apparent without reconstructing how
+to use the harness. Validate environment and helper availability before promising
+them; prompts do not repair a broken runtime surface.
+
+Audit each actor's initial tool sequence through its first useful task action.
+Record time and calls spent on harness/API/environment discovery separately from
+necessary source inspection, contract analysis and failure investigation. A first
+edit is not the only useful action. Count rediscovery and wrong turns throughout
+the assignment too. Replace repeated discovery with precise, source-backed entry
+points and compiled examples; avoid blanket bans on reading or a larger ritual
+inventory. Keep changing facts after the shared prefix so inheritance stays useful.
+
 A clean win is a known, implementable solution, even when implementation spans
 several layers. Separate that work from unresolved design questions and experiments.
 For the current harness workload, prove extension points through standalone stubs
