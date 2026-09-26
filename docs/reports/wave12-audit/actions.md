@@ -357,3 +357,17 @@ changes or shared daemon restart authorized by this investigation.
 
 Protected demo HTTP200 at this tick. Timer next00:26:19 PDT (07:26:19 UTC).
 Dirty NEXT/helper files and retained cleanup resources remain untouched.
+
+Follow-up06:46UTC: independent prompt review passed;8e4f772 cherry-picked to
+harness master as e194a5b for the next wave. Active wave14 prompts unchanged.
+Actor2 helper consumption is proven in hosted-operations/2.v1.jsonl seq51:
+startFocused/finishFocused at81ef34ce, Store1 selected/executed/passed, dirty
+source reported. Reviewer actor5 seq12 failed module import, input1/3; no
+commands ran. Direct fallback Store/tree tests passed1/1 each at seq30/36.
+Thus one implementation owner consumed the helper; reviewer reuse still failed.
+
+Runtime isolation investigation held before code: development build deliberately
+does not watch Haskell files and has no build-time stdlib digest. A run snapshot
+alone cannot reject an already-mismatched old binary. Build-bound identity plus
+existing source capture is a larger build-policy decision; Sol writes the
+bounded design to runtime-source-isolation.md, without changing live sources.
