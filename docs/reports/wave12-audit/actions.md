@@ -303,3 +303,12 @@ Preserved wave12 demo still HTTP200 on4600. Wave13 has no live host/compiler,
 but uncertain old custody is retained. Timer remains scheduled23:41:18 PDT
 (06:41:18 UTC). No overlapping wave. Keep runtime Haskell/schema edits isolated
 while these hosts run; no shared daemon restart.
+
+Initial audit detail (06:31:05–06:36:05 UTC): completed Haskell cells above10s
+were12,607ms (compile11,070ms, Jev1,063ms, execution135ms) and22,189ms
+(compile10,512ms, Jev1,037ms; remaining time not attributed by this sample).
+The2,870ms cell is below threshold. Actor2's rejected cell06:35:15 supplied
+an incomplete DesignQuestion constructor, leaving required fields unapplied;
+retain as model-facing API ergonomics evidence. Actor2 had16 captured Jev
+effects:2 actual HTTP403 RBAC denials and14 circuit-open responses without a
+backend request. These counts are actor-specific, not a whole-run total.
