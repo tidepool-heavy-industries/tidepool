@@ -152,10 +152,10 @@ sitedVerbs =
       DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
   , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
-      "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [0, 1]
+      "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [1, 2]
       DeliverHostAnswer SelectedAnswer)
       { vsAnswerSource = EffectResult
-      , vsDerivedInput = Just (1, ResponseResultEvidence)
+      , vsDerivedInput = Just (2, ResponseResultEvidence)
       }
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
