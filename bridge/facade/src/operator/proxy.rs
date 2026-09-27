@@ -42,6 +42,27 @@ impl From<&str> for ProxyError {
 /// `status.json` files naming that session with a not-yet-terminal phase and
 /// a still-present operator socket.
 pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, ProxyError> {
+    let matches = live_run_roots(runs_dir, session)?;
+    match matches.len() {
+        0 => Err(format!(
+            "no live run for session {session:?} (looked in {})",
+            runs_dir.display()
+        )
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => Err(format!(
+            "session {session:?} matches multiple live runs: {}",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into()),
+    }
+}
+
+fn live_run_roots(runs_dir: &Path, session: &str) -> Result<Vec<PathBuf>, ProxyError> {
     let mut matches = Vec::new();
     let entries = std::fs::read_dir(runs_dir).map_err(|e| {
         format!(
@@ -71,33 +92,55 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
         if !run_root.join("operator/operator.sock").exists() {
             continue;
         }
-        matches.push(
-            entry
-                .file_name()
-                .to_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| run_root.display().to_string()),
-        );
+        matches.push(run_root);
+    }
+    Ok(matches)
+}
+
+fn default_runs_dirs() -> Result<Vec<PathBuf>, ProxyError> {
+    let state = tidepool_toolchain::paths::state_dir()
+        .map_err(|error| ProxyError(format!("cannot locate durable Exomonad state: {error}")))?
+        .join("exomonad/runs");
+    let legacy = tidepool_toolchain::paths::cache_dir().join("exomonad/runs");
+    let mut roots = vec![state];
+    if !roots.contains(&legacy) {
+        roots.push(legacy);
+    }
+    Ok(roots)
+}
+
+fn run_root_for_session_in_roots(
+    runs_dirs: &[PathBuf],
+    session: &str,
+) -> Result<PathBuf, ProxyError> {
+    let mut matches = Vec::new();
+    for runs_dir in runs_dirs {
+        if !runs_dir.exists() {
+            continue;
+        }
+        matches.extend(live_run_roots(runs_dir, session)?);
     }
     match matches.len() {
         0 => Err(format!(
             "no live run for session {session:?} (looked in {})",
-            runs_dir.display()
+            runs_dirs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
         .into()),
-        1 => Ok(runs_dir.join(&matches[0])),
+        1 => Ok(matches.remove(0)),
         _ => Err(format!(
-            "session {session:?} matches multiple live runs: {}",
-            matches.join(", ")
+            "session {session:?} matches multiple live runs across state and legacy cache: {}",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
         .into()),
     }
-}
-
-fn default_runs_dir() -> PathBuf {
-    tidepool_toolchain::paths::cache_dir()
-        .join("exomonad")
-        .join("runs")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,8 +356,10 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
             "exomonad proxy requires FILE (or `-` for stdin) unless --actors is given".into(),
         )));
     }
-    let runs_dir = options.runs_dir.unwrap_or_else(default_runs_dir);
-    let run_root = run_root_for_session(&runs_dir, &options.session)?;
+    let run_root = match options.runs_dir {
+        Some(runs_dir) => run_root_for_session(&runs_dir, &options.session)?,
+        None => run_root_for_session_in_roots(&default_runs_dirs()?, &options.session)?,
+    };
     let socket = run_root.join("operator/operator.sock");
     let client = client_for(&socket)?;
     let session = resident_operator_session(&run_root, &client, options.fresh).await?;
@@ -474,6 +519,32 @@ mod tests {
         let error = run_root_for_session(runs.path(), "shared").unwrap_err();
         assert!(error.to_string().contains("run-a"));
         assert!(error.to_string().contains("run-b"));
+    }
+
+    #[test]
+    fn default_discovery_reaches_legacy_and_refuses_cross_root_ambiguity() {
+        let state = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        write_status(
+            &legacy.path().join("legacy-run"),
+            "shared",
+            crate::exomonad::RunPhase::Starting,
+        );
+        let roots = vec![state.path().into(), legacy.path().into()];
+        assert_eq!(
+            run_root_for_session_in_roots(&roots, "shared").unwrap(),
+            legacy.path().join("legacy-run")
+        );
+        write_status(
+            &state.path().join("state-run"),
+            "shared",
+            crate::exomonad::RunPhase::Starting,
+        );
+        let error = run_root_for_session_in_roots(&roots, "shared")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("legacy-run"));
+        assert!(error.contains("state-run"));
     }
 
     #[test]

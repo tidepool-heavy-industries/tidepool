@@ -1,8 +1,10 @@
 //! Canonical on-disk path resolution for Tidepool.
 //!
-//! Three scopes:
+//! Four scopes:
 //! - regenerable **cache** ([`cache_dir`]) — the materialized bundled stdlib, the
 //!   generated `Tidepool.Effects` module, and the compiled-artifact memo cache;
+//! - user-global durable **state** ([`state_dir`]) — Exomonad run roots and
+//!   managed worktrees;
 //! - user-global **config** ([`config_dir`]) — the authored verb `lib/`,
 //!   `secrets/`, and `config.toml`;
 //! - **project-local** state — `.tidepool/` discovered by walking up from the
@@ -11,10 +13,11 @@
 //! The launch CWD remains the Fs sandbox root — and Exec's initial working
 //! directory only; Exec itself is not filesystem-sandboxed (see
 //! `bridge/handlers/CLAUDE.md`'s Sandboxing section) — and is intentionally
-//! NOT resolved here. Env overrides honored: `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+//! NOT resolved here. Env overrides honored: `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME`,
 //! `TIDEPOOL_CONFIG_DIR`. The legacy single-home root `~/.tidepool` is honored if
 //! it exists, so setups that predate the XDG split keep working.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 fn home() -> Option<PathBuf> {
@@ -32,6 +35,41 @@ pub fn cache_dir() -> PathBuf {
         return h.join(".cache").join("tidepool");
     }
     std::env::temp_dir().join("tidepool")
+}
+
+/// Durable user state. There is deliberately no temporary-directory fallback:
+/// losing this root would lose Exomonad journals and uncommitted work.
+pub fn state_dir() -> io::Result<PathBuf> {
+    state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+}
+
+fn state_dir_from(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> io::Result<PathBuf> {
+    if let Some(value) = xdg_state_home {
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "XDG_STATE_HOME must be an absolute path",
+            ));
+        }
+        return Ok(path.join("tidepool"));
+    }
+    let path = home.map(PathBuf::from).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "durable state requires XDG_STATE_HOME or HOME",
+        )
+    })?;
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HOME must be an absolute path for durable state",
+        ));
+    }
+    Ok(path.join(".local/state/tidepool"))
 }
 
 /// Socket of the persistent compile daemon `just daemon-start` keeps warm:
@@ -318,6 +356,30 @@ fn load_secrets_from(dir: &Path, report: &mut SecretsReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_state_requires_a_stable_absolute_root() {
+        use std::ffi::OsString;
+        let os = |value: &str| Some(OsString::from(value));
+        assert_eq!(
+            state_dir_from(os("/state"), os("/home/user")).unwrap(),
+            PathBuf::from("/state/tidepool")
+        );
+        assert_eq!(
+            state_dir_from(None, os("/home/user")).unwrap(),
+            PathBuf::from("/home/user/.local/state/tidepool")
+        );
+        assert_eq!(
+            state_dir_from(None, None).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            state_dir_from(os("relative"), os("/home/user"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 
     /// `load_secrets_from` loads valid `*_API_KEY` files (trimmed), ignores
     /// bad names / non-key files, and lets an already-set env var win.

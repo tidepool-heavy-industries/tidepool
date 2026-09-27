@@ -2166,9 +2166,11 @@ pub(crate) async fn run(
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
     let workspace = config.workspace.clone();
-    let (worktrees, bindings) =
-        tidepool_runtime::spawn_blocking_in_span(move || actor_worktree_resources(&workspace))
-            .await??;
+    let resource_run_root = run_root.clone();
+    let (worktrees, bindings) = tidepool_runtime::spawn_blocking_in_span(move || {
+        actor_worktree_resources(&workspace, &resource_run_root)
+    })
+    .await??;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
@@ -2724,32 +2726,164 @@ async fn await_applications(
 
 fn actor_worktree_resources(
     workspace: &Path,
+    run_root: &Path,
 ) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
-    let root = actor_worktree_storage_root(workspace);
+    let root = actor_worktree_storage_root(workspace, run_root)?;
     actor_worktree_resources_at(&root, workspace)
 }
 
 pub(crate) fn ensure_actor_workspace_available(
     workspace: &Path,
 ) -> Result<(), exomonad_worktree::WorktreeError> {
-    let bindings = actor_worktree_storage_root(workspace).join("bindings");
+    let state = tidepool_toolchain::paths::state_dir().map_err(|error| {
+        exomonad_worktree::WorktreeError::StorageFailure {
+            path: workspace.to_path_buf(),
+            detail: error.to_string(),
+        }
+    })?;
+    let bindings =
+        actor_worktree_storage_root_in(&state.join("exomonad"), workspace).join("bindings");
     if BindingTable::has_live_owner(&bindings)? {
         return Err(exomonad_worktree::WorktreeError::StorageFailure {
             path: bindings,
             detail: "another Exomonad host owns this workspace; stop its session and wait for shutdown before launching again".into(),
         });
     }
+    let legacy = actor_worktree_storage_root_in(
+        &tidepool_toolchain::paths::cache_dir().join("exomonad"),
+        workspace,
+    );
+    if legacy != bindings.parent().unwrap() && legacy_has_meaningful_state(&legacy)? {
+        return Err(exomonad_worktree::WorktreeError::StorageFailure {
+            path: legacy,
+            detail: "legacy managed worktrees remain in the cache; inspect and retire them or recover the old host using its recorded --run-root before starting a new state-root run; no data was moved".into(),
+        });
+    }
+    if let Some(run_root) = legacy_active_run_for_workspace(workspace)? {
+        return Err(exomonad_worktree::WorktreeError::StorageFailure {
+            path: run_root,
+            detail: "a legacy cache-root run still records this workspace as active; recover or stop that run using its explicit --run-root before starting a state-root run".into(),
+        });
+    }
     Ok(())
 }
 
-fn actor_worktree_storage_root(workspace: &Path) -> PathBuf {
+fn legacy_active_run_for_workspace(
+    workspace: &Path,
+) -> Result<Option<PathBuf>, exomonad_worktree::WorktreeError> {
+    let runs = tidepool_toolchain::paths::cache_dir().join("exomonad/runs");
+    active_run_for_workspace_in(&runs, workspace)
+}
+
+fn active_run_for_workspace_in(
+    runs: &Path,
+    workspace: &Path,
+) -> Result<Option<PathBuf>, exomonad_worktree::WorktreeError> {
+    let entries = match std::fs::read_dir(runs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(exomonad_worktree::WorktreeError::StorageFailure {
+                path: runs.to_path_buf(),
+                detail: error.to_string(),
+            })
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+            path: runs.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+        let run_root = entry.path();
+        let bytes = match std::fs::read(run_root.join("status.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(exomonad_worktree::WorktreeError::StorageFailure {
+                    path: run_root,
+                    detail: error.to_string(),
+                })
+            }
+        };
+        let status = crate::exomonad::decode_run_status(&bytes).map_err(|error| {
+            exomonad_worktree::WorktreeError::StorageFailure {
+                path: run_root.join("status.json"),
+                detail: error.to_string(),
+            }
+        })?;
+        if status.workspace.as_path() == workspace
+            && !matches!(
+                status.phase,
+                crate::exomonad::RunPhase::Exited | crate::exomonad::RunPhase::Failed { .. }
+            )
+        {
+            return Ok(Some(run_root));
+        }
+    }
+    Ok(None)
+}
+
+fn actor_worktree_storage_root(
+    workspace: &Path,
+    run_root: &Path,
+) -> Result<PathBuf, exomonad_worktree::WorktreeError> {
+    let family = run_root
+        .parent()
+        .filter(|runs| runs.file_name().is_some_and(|name| name == "runs"))
+        .and_then(Path::parent)
+        .filter(|exomonad| exomonad.file_name().is_some_and(|name| name == "exomonad"));
+    let exomonad = match family {
+        Some(family) => family.to_path_buf(),
+        None => tidepool_toolchain::paths::state_dir()
+            .map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+                path: run_root.to_path_buf(),
+                detail: error.to_string(),
+            })?
+            .join("exomonad"),
+    };
+    Ok(actor_worktree_storage_root_in(&exomonad, workspace))
+}
+
+fn actor_worktree_storage_root_in(exomonad: &Path, workspace: &Path) -> PathBuf {
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
-    tidepool_toolchain::paths::cache_dir()
-        .join("exomonad")
-        .join("actor-worktrees")
-        .join(project)
+    exomonad.join("actor-worktrees").join(project)
+}
+
+fn legacy_has_meaningful_state(root: &Path) -> Result<bool, exomonad_worktree::WorktreeError> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(exomonad_worktree::WorktreeError::StorageFailure {
+                    path: directory,
+                    detail: error.to_string(),
+                })
+            }
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+                    path: directory.clone(),
+                    detail: error.to_string(),
+                })?;
+            let kind = entry.file_type().map_err(|error| {
+                exomonad_worktree::WorktreeError::StorageFailure {
+                    path: entry.path(),
+                    detail: error.to_string(),
+                }
+            })?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() != ".owner.lock" {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn actor_worktree_resources_at(
@@ -3227,8 +3361,9 @@ fn compile_root(
         lost = recovery_report.lost.len(),
         "attached Exomonad root declaration recovery manifest"
     );
-    let event_registry =
-        WorktreeRegistry::open(actor_worktree_storage_root(&config.workspace).join("registry"))?;
+    let event_registry = WorktreeRegistry::open(
+        actor_worktree_storage_root(&config.workspace, run_root)?.join("registry"),
+    )?;
     let event_journal = EventJournal::open(run_root.join("repo-events.jsonl"))?;
     let event_handler = RepoEventHandler::with_registry_namespace(
         WorktreeMonitor::new(GitCli::new(), event_journal),

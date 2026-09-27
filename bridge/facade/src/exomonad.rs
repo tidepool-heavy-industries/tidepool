@@ -656,7 +656,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = exomonad_log_path(&workspace, &run_id);
     let compiler_log_path = exomonad_compiler_log_path(&workspace, &run_id);
-    let run_root = tidepool_toolchain::paths::cache_dir()
+    let run_root = tidepool_toolchain::paths::state_dir()?
         .join("exomonad")
         .join("runs")
         .join(&run_id);
@@ -2112,6 +2112,7 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
         "TMUX_TMPDIR",
         "XDG_RUNTIME_DIR",
         "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
         "XDG_CONFIG_HOME",
         "TIDEPOOL_EXTRACT",
         "TIDEPOOL_EXTRACT_WORKER",

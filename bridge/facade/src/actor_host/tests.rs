@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn recorded_run_root_selects_its_own_managed_worktree_family() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("project");
+    let legacy_run = root.path().join("cache/exomonad/runs/old-run");
+    let state_run = root.path().join("state/exomonad/runs/new-run");
+    assert_eq!(
+        actor_worktree_storage_root(&workspace, &legacy_run).unwrap(),
+        actor_worktree_storage_root_in(&root.path().join("cache/exomonad"), &workspace)
+    );
+    assert_eq!(
+        actor_worktree_storage_root(&workspace, &state_run).unwrap(),
+        actor_worktree_storage_root_in(&root.path().join("state/exomonad"), &workspace)
+    );
+}
+
+#[test]
+fn empty_legacy_directories_do_not_block_but_retained_content_does() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("actor-worktrees/project");
+    std::fs::create_dir_all(legacy.join("bindings")).unwrap();
+    std::fs::write(legacy.join("bindings/.owner.lock"), "").unwrap();
+    assert!(!legacy_has_meaningful_state(&legacy).unwrap());
+    std::fs::write(legacy.join("bindings/worktree.json"), "retained").unwrap();
+    assert!(legacy_has_meaningful_state(&legacy).unwrap());
+}
+
+#[test]
+fn legacy_run_status_fences_only_its_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let runs = root.path().join("runs");
+    let run = runs.join("old-run");
+    std::fs::create_dir_all(&run).unwrap();
+    let workspace = root.path().join("project");
+    std::fs::write(
+        run.join("status.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 4, "run_id": "old-run", "workspace": workspace,
+            "session": "old-session", "agent": {"model": "test-model", "effort": "low"},
+            "phase": {"state": "starting"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        active_run_for_workspace_in(&runs, &workspace).unwrap(),
+        Some(run)
+    );
+    assert_eq!(
+        active_run_for_workspace_in(&runs, &root.path().join("other")).unwrap(),
+        None
+    );
+}
+
+#[test]
 fn driver_sources_use_run_captured_libraries() {
     let project = tempfile::tempdir().unwrap();
     let run = tempfile::tempdir().unwrap();
