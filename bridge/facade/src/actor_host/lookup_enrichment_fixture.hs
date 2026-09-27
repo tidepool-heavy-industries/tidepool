@@ -77,6 +77,15 @@ exampleIdentityCheck = do
              (lookupExample entry)
     _ -> False)
 
+renderedExampleCheck :: Member Lookup effects => Eff effects Bool
+renderedExampleCheck = do
+  rendered <- Tools.executeWith (\_ _ -> pure [])
+    (Tools.LookupArguments ["Cmd.start", "Cmd.start"])
+  pure (T.count "```haskell" rendered == 1
+    && "import qualified Tidepool.Command as Cmd" `T.isInfixOf` rendered
+    && "finishCommandWatcher watcher" `T.isInfixOf` rendered
+    && "Project/BackgroundCommandExample.hs" `T.isInfixOf` rendered)
+
 emptySelectionCheck :: (Member Jev effects, Member Reflect effects) => Eff effects Bool
 emptySelectionCheck = null <$> Project.select [] []
 

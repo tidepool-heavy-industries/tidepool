@@ -259,6 +259,11 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
         include_str!("lookup_enrichment_fixture.hs"),
     )
     .unwrap();
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        include_str!("lookup_agent_spec.hs"),
+    )
+    .unwrap();
     std::fs::create_dir_all(authored.join("checks")).unwrap();
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     for path in [
@@ -354,6 +359,13 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
     assert!(
         example.contains("True"),
         "resolved example identity lost: {example}"
+    );
+    let rendered = dispatch_haskell_script(policy, "LookupFixture.renderedExampleCheck")
+        .await
+        .to_string();
+    assert!(
+        rendered.contains("True"),
+        "inline example rendering failed: {rendered}"
     );
     let namespaces = dispatch_haskell_script(policy, "LookupFixture.namespaceCheck")
         .await
