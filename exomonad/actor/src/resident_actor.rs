@@ -10687,7 +10687,7 @@ mod tests {
                 message: "Fields of ‘MergeRequest’ not initialised: mergeSourceWorktree".into(),
             }],
         };
-        let (warnings, diagnostics) = committed_declaration_warnings(&checked, 0);
+        let (warnings, diagnostics) = super::committed_declaration_warnings(&checked, 0);
         let response = workbench_response(
             WorkbenchRunStatus::Committed,
             vec![WorkbenchItemReceipt {
