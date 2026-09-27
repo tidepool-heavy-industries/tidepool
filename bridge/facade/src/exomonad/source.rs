@@ -1611,14 +1611,9 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .insert(actor, ActorSourceScope::RunReadOnly);
     }
 
-    /// Publish the caller's own layer, through exactly the path the `Source`
-    /// effect takes.
-    ///
-    /// Same `scope` resolution, same gate, same transaction. An actor asking
-    /// for its spec to be reloaded therefore reaches the one layer the host
-    /// bound to it and no other, and a coding actor still cannot republish the
-    /// swarm's source graph — not because this is checked, but because the
-    /// only layer it can name is its own.
+    /// Publish the run layer through the same transaction as the `Source`
+    /// effect. Only the run owner may publish; workers read the run graph and
+    /// checkpoint actors retain their frozen graph.
     fn reload(
         &self,
         actor: PrincipalId,
@@ -1780,6 +1775,9 @@ mod tests {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
         );
         let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(captured.identities.len(), 2);
+        assert!(captured.identities[0].starts_with("helpers:"));
+        assert!(captured.identities[1].starts_with("run:"));
         assert!(!captured.include_paths.is_empty());
         assert!(captured
             .include_paths
@@ -1808,6 +1806,13 @@ mod tests {
             .unwrap_err();
         assert!(refusal.contains("source revisions differ"));
         assert!(captured.include_paths[0].exists());
+        let checkpoint_actor = PrincipalId::new(1, 1);
+        reload.bind_checkpoint_for(checkpoint_actor, "run", &captured);
+        assert_eq!(
+            reload.freeze_checkpoint_layer(checkpoint_actor).unwrap(),
+            captured,
+            "a checkpoint descendant must retain the frozen helper and run graph"
+        );
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
