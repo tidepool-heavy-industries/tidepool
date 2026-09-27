@@ -74,6 +74,13 @@ Most changes touch one of three layers, and it helps to know which:
 
 ## Planning improvements
 
+For every RSI pass and audit, reconstruct the full workflow before tuning the
+mechanism where friction appeared: intended outcome, actual steps, participant
+knowledge, ownership, dependencies and continuation. Consider how the flow could
+work differently, including removing steps or changing responsibility and
+admission order. Compare alternatives against retained wave evidence before
+choosing a repair. See [the RSI method](docs/rsi-loop.md#method-reconstruct-the-workflow-before-tuning-its-mechanisms).
+
 After removing a subsystem or specializing a boundary, investigate each axis:
 runtime latency and throughput; allocation and retained memory; generated code
 size; artifact and scratch-disk use; build and test time; dependency fanout;

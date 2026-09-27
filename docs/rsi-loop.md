@@ -57,6 +57,34 @@ several layers. Separate that work from unresolved design questions and experime
 For the current harness workload, prove extension points through standalone stubs
 and production consumers before attempting Exomonad integration.
 
+## Method: reconstruct the workflow before tuning its mechanisms
+
+Apply this method in every RSI pass and every audit analysis. Start with the
+intended outcome and reconstruct the whole logical flow: what happened, why each
+step existed, what each participant knew, who owned the next action, and what
+event could advance the work. Follow dependencies and feedback across actors,
+tools and runtime boundaries. The location of a symptom is the starting point
+for investigation; establish where the workflow actually went wrong.
+
+Before choosing a repair, describe how the work could happen differently. Consider
+removing a step, changing admission order, moving responsibility to its proper
+owner, retaining a continuation, or replacing repeated model work with authored
+machinery. Compare these alternatives with tuning the existing mechanism. Use
+evidence from earlier waves to test whether the same structural problem recurs.
+Keep causal hypotheses separate from observations and seek valid counterexamples.
+
+For example, repeated reminders to a worker awaiting a parent's interface decision
+require tracing preparation, admission, the question, ownership of the answer,
+delivery and resumption. Decide how that dependency should work before adjusting
+reminder timing or wording. A bounded containment fix may still be useful; record
+which underlying design question it leaves open.
+
+Each audit recommendation should name the intended flow, the observed divergence,
+the alternatives considered, and why the chosen intervention improves the whole
+flow. Verify the real consumer and failure paths, then observe the next wave for
+costs shifted elsewhere. Scale the investigation to the consequence; a clear local
+defect can justify a local fix without inventing a larger framework.
+
 ## Core target: improve the graph of model rounds
 
 First ask whether a step needs to exist. Prune mechanisms whose observed cost
