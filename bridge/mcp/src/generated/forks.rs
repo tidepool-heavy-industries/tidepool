@@ -9,7 +9,9 @@ pub fn forks_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "ForksBeginWith :: Bool -> Text -> [Text] -> Forks (Either Text (Int, Text, [Text]))",
-            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Maybe Text -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Maybe (Int, Int) -> Maybe Model -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
+            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Maybe Text -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Maybe (Int, Int) -> Maybe Model -> ForkContext -> Maybe Text -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
+            "ForksCheckpointWith :: Text -> Forks (Either CheckpointRefusal Text)",
+            "ForksCheckCheckpointWith :: Text -> Forks (Either CheckpointRefusal ())",
             "ForksPreviewWith :: ActorLaunchRole -> [ActorEffectKey] -> Maybe (Int, Int) -> Maybe Model -> Maybe ForkEffort -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Text, Int, Maybe Int), Maybe WorkerLaunchPreview))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",
@@ -20,6 +22,7 @@ pub fn forks_decl() -> crate::EffectDecl {
             "data WorkerLaunchPreview = WorkerLaunchPreview { launchModel :: Maybe Text, launchEffort :: ForkEffort, launchInstructions :: Text, launchBaseFingerprint :: Text, launchWorkspaceIdentity :: Maybe Text, launchModules :: [Text] } deriving (Show, Eq)",
             "data WorkerLifetime = ParentOwned | SwarmOwned deriving (Show, Eq)",
             "data ForkContext = InheritedContext | SelectedContext deriving (Show, Eq)",
+            "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
             "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectSleep | EffectCommands | EffectConsole | EffectNotifications | EffectJev | EffectActor | EffectReflect | EffectLookup | EffectRepoEvent | EffectSource | EffectJournal deriving (Show, Eq)",
             "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",

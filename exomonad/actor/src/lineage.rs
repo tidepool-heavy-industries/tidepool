@@ -527,6 +527,14 @@ impl ForkGroupRegistry {
             .collect()
     }
 
+    /// A published lease keeps its issuing machine resident after the actor
+    /// and its ordinary supervision scope retire.
+    pub fn retains_session(&self, session: SessionId) -> bool {
+        self.state.lock().checkpoints.values().any(|lease| {
+            lease.session == session && *lease.phase.borrow() == CheckpointPhase::Published
+        })
+    }
+
     pub fn begin(
         &self,
         owner: ActorRef,
@@ -1389,6 +1397,7 @@ mod tests {
             Err(CheckpointRefusal::WrongSession)
         ));
         assert_eq!(*lease.phase.borrow(), CheckpointPhase::Pending);
+        assert!(!groups.retains_session(SessionId(7)));
         assert!(groups
             .settle_checkpoints(
                 issuer,
@@ -1402,6 +1411,7 @@ mod tests {
         assert_eq!(*lease.phase.borrow(), CheckpointPhase::Pending);
         groups.settle_checkpoints(issuer, &boundary, true);
         groups.retire_actor(issuer);
+        assert!(groups.retains_session(SessionId(7)));
         lease.wait_published().await.unwrap();
         assert_eq!(
             groups.checkpoint(&token, SessionId(7)).unwrap().scope,
@@ -1504,6 +1514,55 @@ mod tests {
             ),
             Err(ForkGroupError::DescendantBudgetExceeded { maximum: 1, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_child_marks_group_ready_before_capture_is_published() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let coordinator = ActorRef::first(ActorId(2));
+        let child = ActorRef::first(ActorId(3));
+        let boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "call".into(),
+        };
+        let token = groups.capture_checkpoint(
+            "research".into(),
+            issuer,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            ScopeId(3),
+            boundary.clone(),
+        );
+        let lease = groups.checkpoint(&token, SessionId(7)).unwrap();
+        let (group, paths) = groups
+            .begin(
+                coordinator,
+                ActorPath::parse("coordinator/work").unwrap(),
+                vec![segment("child")],
+                None,
+            )
+            .unwrap();
+        groups
+            .claim_with_checkpoint(group, coordinator, &paths[0].allocated, Some(&token))
+            .unwrap();
+        groups.attach_child(group, coordinator, child).unwrap();
+        let phase = groups.request_commit(group, coordinator).unwrap();
+        let gate = groups.gate(group, child).unwrap();
+        gate.mark_ready().unwrap();
+        assert_eq!(*phase.borrow(), ForkGroupPhase::Ready);
+        groups.publish_groups(&[group], coordinator).unwrap();
+        gate.wait_committed().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), lease.wait_published())
+                .await
+                .is_err()
+        );
+        groups.settle_checkpoints(issuer, &boundary, true);
+        lease.wait_published().await.unwrap();
     }
 
     fn segment(value: &str) -> ActorPathSegment {

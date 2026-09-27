@@ -1034,6 +1034,7 @@ pub struct ResidentKernelBehavior<H, O> {
 enum ForkPublication {
     Resident,
     Workbench(Option<tidepool_runtime::session::WorkbenchForkBoundary>),
+    Route(tidepool_runtime::session::WorkbenchForkBoundary),
 }
 
 impl ForkPublication {
@@ -1041,6 +1042,14 @@ impl ForkPublication {
         match self {
             Self::Resident => None,
             Self::Workbench(boundary) => boundary.as_ref(),
+            Self::Route(boundary) => Some(boundary),
+        }
+    }
+
+    fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
+        match self {
+            Self::Workbench(Some(boundary)) => Some(boundary),
+            Self::Resident | Self::Workbench(None) | Self::Route(_) => None,
         }
     }
 }
@@ -3539,13 +3548,13 @@ where
                 let result: Result<String, crate::CheckpointRefusal> = async {
                     let boundary = self
                         .fork_publication
-                        .boundary()
-                        .cloned()
+                        .hosted_boundary()
                         .filter(|boundary| {
                             !boundary.thread_id.is_empty()
                                 && !boundary.call_id.is_empty()
                                 && !name.is_empty()
                         })
+                        .cloned()
                         .ok_or(crate::CheckpointRefusal::NoHostedBoundary)?;
                     let freeze_source = || {
                         self.environment
@@ -8286,7 +8295,7 @@ where
                 ),
                 call_id: format!("route:{}", watch.0),
             };
-            self.fork_publication = ForkPublication::Workbench(Some(completion.clone()));
+            self.fork_publication = ForkPublication::Route(completion.clone());
             let result = async {
                 let mut outcome = self
                     .environment
@@ -8670,15 +8679,11 @@ where
                 tracing::warn!(actor = ?kernel.identity(), %error, "failed checkpoint scope cleanup was retained");
             }
             self.release_session_state();
-            // `publish_retired` (above) already marked THIS actor terminal
-            // in the directory, so this scan cannot find itself: any other
-            // entry placed on the same session and still live means an
-            // inherited-context descendant (sharing this session rather
-            // than a dedicated one of its own) is still using it.
-            let other_actor_still_on_session =
-                self.environment.actors.lock().values().any(|record| {
-                    record.descriptor.placement().session == session && record.terminal.is_none()
-                });
+            // A live actor or published checkpoint keeps the issuing machine
+            // available after this actor's terminal record is written.
+            let session_retained = self.environment.actors.lock().values().any(|record| {
+                record.descriptor.placement().session == session && record.terminal.is_none()
+            }) || self.environment.fork_groups.retains_session(session);
             // A no-op check for every actor that never got a dedicated
             // child session (the shared session is never a member). One
             // bounded checkout, no wait for whoever still needs this
@@ -8687,7 +8692,7 @@ where
             if let Err(error) = self
                 .environment
                 .runner
-                .retire_child_session(session, other_actor_still_on_session)
+                .retire_child_session(session, session_retained)
                 .await
             {
                 tracing::warn!(
@@ -9862,6 +9867,20 @@ mod tests {
         WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
         WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRunStatus,
     };
+
+    #[test]
+    fn synthetic_route_boundary_cannot_issue_provider_checkpoint() {
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "route-owner:1@1".into(),
+            call_id: "route:9".into(),
+        };
+        assert!(super::ForkPublication::Route(boundary.clone())
+            .hosted_boundary()
+            .is_none());
+        assert!(super::ForkPublication::Workbench(Some(boundary))
+            .hosted_boundary()
+            .is_some());
+    }
 
     #[tokio::test]
     async fn cleanup_release_waits_are_concurrent_and_keep_stop_order() {

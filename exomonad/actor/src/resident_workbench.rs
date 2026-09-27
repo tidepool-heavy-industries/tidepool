@@ -1693,6 +1693,10 @@ impl ResidentRequest {
                 "begin context-fork group"
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksStartWith(..)) => "context fork",
+            Self::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(..)) => "checkpoint",
+            Self::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(..)) => {
+                "checkCheckpoint"
+            }
             Self::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(..)) => {
                 "preview context-fork policy"
             }
@@ -2082,13 +2086,13 @@ impl<H, O> ResidentActorRunner<H, O> {
     pub(crate) async fn retire_child_session(
         &self,
         session_id: tidepool_repr::SessionId,
-        other_actor_still_on_session: bool,
+        session_retained: bool,
     ) -> Result<(), ResidentActorWorkbenchError>
     where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        if other_actor_still_on_session
+        if session_retained
             || !self
                 .access
                 .child_sessions
@@ -6109,6 +6113,7 @@ where
         checkpoint_scope: tidepool_codegen::scope::ScopeId,
         provisional_scope: tidepool_codegen::scope::ScopeId,
     ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        let source_scope = context.placement.lexical_scope;
         self.access
             .with_machine(context, move |session, _, _| {
                 let scope = session.mint_scope(checkpoint_scope).ok_or_else(|| {
@@ -6116,7 +6121,7 @@ where
                         "checkpoint scope is no longer live".into(),
                     )
                 })?;
-                if !session.retain_scope_dependencies(context.placement.lexical_scope, scope) {
+                if !session.retain_scope_dependencies(source_scope, scope) {
                     session.retire_scope(scope);
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "authored entry dependencies were unavailable".into(),

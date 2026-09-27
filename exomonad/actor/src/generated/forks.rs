@@ -38,8 +38,11 @@ pub enum ForksReq {
         Option<crate::Model>,
         crate::ForkContext,
         Option<String>,
+        Option<String>,
         crate::WorkerLifetime,
     ),
+    ForksCheckpointWith(String),
+    ForksCheckCheckpointWith(String),
     ForksPreviewWith(
         crate::ActorLaunchRoleWire,
         Vec<crate::ActorEffectKeyWire>,
