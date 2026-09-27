@@ -272,8 +272,7 @@ pub struct ActorWorkbenchSource {
     workbench_imports: SourceImports,
     tools: Option<Arc<str>>,
     /// The workspace's `[haskell] spec` key, when it names one. Rule two of
-    /// spec discovery; rule one is a file in the actor's own checkout and
-    /// belongs to no shared value.
+    /// spec discovery; rule one is `AgentSpec.hs` in the run graph.
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
 }
@@ -595,10 +594,10 @@ impl HostCarrierKind {
     }
 }
 
-/// A carrier this workbench already built, and the source-layer revision it
+/// A carrier this workbench already built, and the ordered source revisions it
 /// was built against.
 struct CachedHostCarrier {
-    revision: Option<String>,
+    revision: Vec<Option<String>>,
     carrier: Arc<HostCarrier>,
 }
 
@@ -2656,8 +2655,8 @@ where
         context: &crate::ActorSessionContext,
     ) -> crate::agent_spec::ResolvedSpec {
         // The roots this actor's cells resolve a module in, in GHC's order:
-        // its own checkout's layer, then what the run provides. An actor with
-        // no checkout of its own, the root among them, finds the run's spec.
+        // private helpers, then the run graph. Helpers cannot define
+        // AgentSpec, so every actor discovers the run's current spec.
         let mut roots = context.source_layer.to_vec();
         roots.extend(self.access.source.base_include.iter().cloned());
         crate::agent_spec::resolve(
@@ -2682,12 +2681,7 @@ where
         install: u64,
     ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
-        // The revision of the root the spec was read from; a configured entry
-        // names no file, so it answers for the actor's own layer.
-        let revision = match resolved.file.as_deref().and_then(std::path::Path::parent) {
-            Some(root) => crate::agent_spec::layer_revision(&[root.to_path_buf()]),
-            None => crate::agent_spec::layer_revision(&context.source_layer),
-        };
+        let revision = resolved.source_revision();
         let Some(entry) = resolved.entry.clone() else {
             return Ok(None);
         };
@@ -2715,8 +2709,9 @@ where
         // only field is set, so both reach one installer and one retained
         // dispatcher shape.
         let installer = match resolved.rule {
-            crate::agent_spec::SpecRule::CheckoutModule
-            | crate::agent_spec::SpecRule::WorkspaceSpec => "installSpec",
+            crate::agent_spec::SpecRule::RunModule | crate::agent_spec::SpecRule::WorkspaceSpec => {
+                "installSpec"
+            }
             crate::agent_spec::SpecRule::WorkspaceTools
             | crate::agent_spec::SpecRule::BuiltinDefault => "installTools",
         };
@@ -3995,8 +3990,8 @@ where
     }
 
     /// The carrier this workbench built for `kind`, from the cache if one is
-    /// already there and still current for the actor's own source-layer
-    /// revision, otherwise built once, off checkout, and cached for every
+    /// already there and still current for the actor's full source graph,
+    /// otherwise built once, off checkout, and cached for every
     /// later call of any kind for the life of this workbench's lineage (see
     /// [`ResidentMachineAccess::sharing`]).
     ///
@@ -4012,7 +4007,12 @@ where
         context: &crate::ActorSessionContext,
         kind: HostCarrierKind,
     ) -> Result<Arc<HostCarrier>, ResidentActorWorkbenchError> {
-        let revision = crate::agent_spec::layer_revision(&context.source_layer);
+        let revision: Vec<Option<String>> = context
+            .source_layer
+            .iter()
+            .chain(self.access.source.base_include.iter())
+            .map(|root| crate::agent_spec::layer_revision(std::slice::from_ref(root)))
+            .collect();
         if let Some(cached) = self
             .access
             .carriers

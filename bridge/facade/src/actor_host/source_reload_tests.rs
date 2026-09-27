@@ -235,12 +235,10 @@ const CODING_CHILD: &str = "let campaign = \"source-reload\" :: CampaignLabel\n\
      let leaf = [label|editor|]\n\
      worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n";
 
-/// A child editing Haskell in its OWN checkout reloads its own layer: its
-/// later cells see the edit, the run's layer never moves, and the root — which
-/// shares that run layer with every other actor — keeps compiling against what
-/// it had.
+/// A historical checkout can carry stale or missing tooling. A child uses the
+/// run's current graph and cannot publish checkout edits into that graph.
 #[tokio::test]
-async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
+async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
@@ -267,8 +265,7 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     assert_eq!(launch.await.unwrap()["status"], "committed");
     let published_before = run_layer_target(&campaign);
 
-    // The checkout the child holds, and the module inside it that only the
-    // child compiles against.
+    // The checkout carries a historical copy of the authored package.
     let checkout = campaign
         .worktrees
         .lookup(&exomonad_worktree::WorktreeId::from_raw(
@@ -279,39 +276,30 @@ async fn a_child_reloads_its_own_checkout_and_leaves_the_run_alone() {
     let module = checkout.cwd().join(".exomonad/Project/Work.hs");
     assert!(module.exists(), "the checkout carries the authored package");
 
-    // Both actors start on the same answer, from their separate layers.
-    let before = committed(child.policy.as_ref(), "inspectFull answer").await;
-    assert_eq!(before["items"][0]["output"], "1", "{before}");
-
     std::fs::write(&module, work_module(41)).unwrap();
-    let reloaded = committed(
+    let stale = committed(child.policy.as_ref(), "inspectFull answer").await;
+    assert_eq!(stale["items"][0]["output"], "1", "{stale}");
+    std::fs::remove_file(&module).unwrap();
+    let missing = committed(child.policy.as_ref(), "inspectFull answer").await;
+    assert_eq!(missing["items"][0]["output"], "1", "{missing}");
+
+    let refused = committed(
         child.policy.as_ref(),
-        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ changed _ -> changed; _ -> [\"not published\"] })",
+        "outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
-    assert_eq!(
-        reloaded["items"][1]["output"], "[\"Project.Work\"]",
-        "{reloaded}"
-    );
-
-    // The child's LATER cell compiles against its own published revision…
-    let later = committed(child.policy.as_ref(), "inspectFull answer").await;
-    assert_eq!(later["items"][0]["output"], "41", "{later}");
-
-    // …and the run's layer did not move, so the root still compiles against
-    // the revision it started with.
+    assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
     assert_eq!(run_layer_target(&campaign), published_before);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 
-    // Provenance is per actor: the child's status names its own layer, at its
-    // own generation, while the root's is still the run's first revision.
+    // Both source status views name the run's current revision.
     let child_status = committed(
         child.policy.as_ref(),
         "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))",
     )
     .await;
-    assert_eq!(child_status["items"][1]["output"], "2", "{child_status}");
+    assert_eq!(child_status["items"][1]["output"], "1", "{child_status}");
     let root_status = committed(
         root.as_ref(),
         "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))",

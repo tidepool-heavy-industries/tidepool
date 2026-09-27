@@ -427,30 +427,6 @@ pub(super) fn resolve_source_roots(
     Ok(roots)
 }
 
-/// The authored source roots ONE CHECKOUT provides, in the same search order,
-/// skipping the ones that checkout does not have.
-///
-/// A managed checkout is a copy of the project, so `[haskell] source_roots`
-/// names the same directories relative to its own `.exomonad`. Two differences
-/// from [`resolve_source_roots`], both deliberate:
-///
-/// - A missing root is absent, not an error. A checkout that carries no
-///   `.exomonad` at all contributes no source, and the actor holding it compiles
-///   against exactly what every other actor does.
-/// - Flake inputs are not re-resolved. They are pinned by the run, identical
-///   in every checkout, and already on the search path beneath this layer; a
-///   checkout layer exists to shadow AUTHORED modules, and re-archiving a
-///   pinned input per checkout would be work with no effect.
-pub(super) fn checkout_source_roots(workspace: &Path, config: &HaskellConfig) -> Vec<PathBuf> {
-    let base = workspace.join(".exomonad");
-    config
-        .source_roots
-        .iter()
-        .filter_map(|root| base.join(root).canonicalize().ok())
-        .filter(|root| root.is_dir())
-        .collect()
-}
-
 /// The `nix` executable Exomonad invokes. One resolution, shared by the fetch
 /// that materializes a run's pinned inputs and by the lock `exomonad new` writes.
 pub(super) fn nix_bin() -> PathBuf {

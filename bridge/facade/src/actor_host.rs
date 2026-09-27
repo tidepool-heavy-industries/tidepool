@@ -3099,9 +3099,7 @@ fn find_module_source(roots: &[PathBuf], entry: &str) -> Option<String> {
 ///
 /// `replaces_run_layer` says which layer is being reloaded. The run's own
 /// reload stands in for the run's layer, exactly as publishing would. A
-/// checkout's reload goes in FRONT of it instead, because that is where the
-/// checkout's layer sits in its own actor's include list, and the run's layer
-/// must stay on the path beneath it either way.
+/// helper candidate sits in front of the run layer, as it does for actor cells.
 pub(crate) fn typecheck_candidate_revision(
     inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
@@ -3135,8 +3133,8 @@ pub(crate) fn typecheck_candidate_revision(
     Ok(())
 }
 
-/// The run's source service: the run's own layer, one layer per checkout that
-/// carries source, and which actor reaches which.
+/// The run's source service and branch-local helper layers. Only the run
+/// owner can publish authored tooling; workers read the same run graph.
 ///
 /// A run without a frozen workspace has no declared source roots, so there is
 /// nothing a reload could honestly read; that case has no service at all and
@@ -3160,8 +3158,7 @@ pub(crate) fn source_service(
                 .join(".resources")
                 .join(runtime_namespace(run_root))
                 .join("helpers"),
-        )
-        .with_worktrees(worktrees),
+        ),
     ))
 }
 
@@ -3179,8 +3176,8 @@ fn source_handler(
 struct CandidateSources<'a> {
     include: &'a [PathBuf],
     /// Does the candidate stand in for the run's own layer, or sit in front of
-    /// it? A run reload replaces it; a checkout reload adds its own layer and
-    /// leaves the run's exactly where it is.
+    /// it? A run reload replaces it; a helper reload adds its private layer
+    /// and leaves the run's exactly where it is.
     replaces_run_layer: bool,
     extra_modules: &'a [String],
 }
@@ -3519,7 +3516,8 @@ fn compile_root(
     );
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
-            exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[]),
+            exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[])
+                .map_err(std::io::Error::other)?,
         );
     }
     // A run that does not supply `Jev.Operators` gets a workbench without `J`,

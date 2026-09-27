@@ -574,14 +574,10 @@ async fn a_workspace_without_a_spec_file_reports_the_tools_key_and_behaves_as_be
     campaign.hosted.await.unwrap();
 }
 
-/// An actor whose own checkout carries `AgentSpec.hs` installs THAT, ahead of
-/// both configured keys, and says which rule matched and which file it read.
-/// The root, which has no checkout of its own, finds the run's copy by the same
-/// rule. Each reads its own roots first, so once the child edits its checkout
-/// the two are running two different specs, which is the whole reason
-/// discovery is per checkout.
+/// A child checkout can contain `AgentSpec.hs`, but the installed spec comes
+/// from the run's current graph for both root and child.
 #[tokio::test]
-async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
+async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
     let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
@@ -625,7 +621,7 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     );
 
     let child_status = status(child.policy.as_ref()).await;
-    assert!(child_status.contains("checkout module"), "{child_status}");
+    assert!(child_status.contains("run module"), "{child_status}");
     assert!(
         child_status.contains("AgentSpec.agentSpec"),
         "{child_status}"
@@ -635,32 +631,25 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     // spec filled, retained beside the tools it sits with.
     assert!(child_status.contains("slots=[afterTool]"), "{child_status}");
 
-    // The root has no checkout of its own, and finds the run's copy of the
-    // same module by the same rule: the first `AgentSpec.hs` in the roots its
-    // cells resolve, which for the root are the run's.
+    // Root and child resolve the same run module.
     let root_status = status(root.as_ref()).await;
-    assert!(root_status.contains("checkout module"), "{root_status}");
+    assert!(root_status.contains("run module"), "{root_status}");
 
-    // And the spec the child installed is the one serving its calls, slot and
-    // all — attributing its annotation to the revision of the checkout it was
-    // compiled from rather than to the run's.
+    // The run spec serves the child's calls and after-tool slot.
     let answered = probe(child.policy.as_ref()).await;
     assert!(answered.contains("one"), "{answered}");
     assert!(
         answered.contains("asked about this topic twice before"),
         "{answered}"
     );
-    assert!(!answered.contains("spec revision (run)"), "{answered}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
-/// A child editing its own checkout rebuilds its own spec, and the reload
-/// reaches that checkout's layer alone: the root, which shares the run's layer
-/// with every other actor, keeps answering with the record it installed.
+/// A child editing historical checkout tooling cannot reload the run spec.
 #[tokio::test]
-async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
+async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
     let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
@@ -707,11 +696,14 @@ async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
     )
     .unwrap();
     let receipt = reload(child.policy.as_ref()).await;
-    assert!(receipt.contains("swapped"), "{receipt}");
-    assert!(receipt.contains("checkout module"), "{receipt}");
+    assert!(receipt.contains("unavailable"), "{receipt}");
+    assert!(
+        receipt.contains("only the run owner can reload"),
+        "{receipt}"
+    );
+    assert!(receipt.contains("run module"), "{receipt}");
 
-    assert!(probe(child.policy.as_ref()).await.contains("two"));
-    // Scoped to the actor that asked: the root never saw this reload.
+    assert!(probe(child.policy.as_ref()).await.contains("one"));
     assert!(probe(root.as_ref()).await.contains("one"));
 
     campaign.forest.shutdown().await;
@@ -955,7 +947,7 @@ async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
     campaign.hosted.await.unwrap();
 }
 
-/// The root has no checkout of its own, and its spec is still the first
+/// The root uses the run graph, and its spec is still the first
 /// `AgentSpec.hs` its cells would resolve: no configuration key names it.
 #[tokio::test]
 async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
@@ -988,7 +980,7 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
     assert!(result.contains("twice before"), "{result}");
 
     let status = status(policy).await;
-    assert!(status.contains("rule=checkout module"), "{status}");
+    assert!(status.contains("rule=run module"), "{status}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

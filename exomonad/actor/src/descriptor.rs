@@ -241,9 +241,8 @@ impl ActorDescriptor {
         &self.source_imports
     }
 
-    /// Give this actor its own source layer: include roots only its cells see,
-    /// ahead of every shared root. Selected once, before the actor is spawned,
-    /// from the checkout the actor is launched with.
+    /// Give this actor private helper include roots ahead of the shared run
+    /// graph. Selected once before the actor is spawned.
     #[must_use]
     pub fn with_source_layer(mut self, layer: Vec<std::path::PathBuf>) -> Self {
         self.source_layer = layer.into();

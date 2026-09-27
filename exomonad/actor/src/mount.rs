@@ -54,17 +54,13 @@ impl ActorSourceImports {
     }
 }
 
-/// How a host turns the checkout an actor is launched with into that actor's
-/// own source layer.
+/// How a host installs branch-local helper source for an actor at launch.
 ///
 /// One implementation per host, supplied by the composition root that owns the
-/// run's source. The actor engine neither reads source roots nor knows where a
-/// run keeps its revisions: it asks once, while the actor is being
-/// constructed, for the include roots that actor alone compiles against, and
-/// then names the actor those roots belong to. Everything after that is
-/// structural — the layer is fixed on the actor's descriptor, and the source
-/// service the host hands out for that principal is bound to the same layer,
-/// so an actor cannot reach another actor's source by asking differently.
+/// run's source. The actor engine asks once, while the actor is being
+/// constructed, for its private helper include roots. The hosted run tooling
+/// remains in the shared graph; a checkout's historical package is not
+/// included automatically.
 pub trait ActorSourceLayers: Send + Sync {
     fn freeze_checkpoint_layer(
         &self,
@@ -80,7 +76,7 @@ pub trait ActorSourceLayers: Send + Sync {
         helper_branch: &str,
         worktrees: &[String],
     ) -> Result<Vec<PathBuf>, String> {
-        let selected = self.layer_include_for(helper_branch, worktrees);
+        let selected = self.layer_include_for(helper_branch, worktrees)?;
         if checkpoint.identities.is_empty() {
             Ok(selected)
         } else {
@@ -107,7 +103,11 @@ pub trait ActorSourceLayers: Send + Sync {
         Ok(String::new())
     }
 
-    fn layer_include_for(&self, _helper_branch: &str, worktrees: &[String]) -> Vec<PathBuf> {
+    fn layer_include_for(
+        &self,
+        _helper_branch: &str,
+        worktrees: &[String],
+    ) -> Result<Vec<PathBuf>, String> {
         self.layer_include(worktrees)
     }
 
@@ -115,22 +115,15 @@ pub trait ActorSourceLayers: Send + Sync {
         self.bind(actor, worktrees);
     }
 
-    /// The include roots for an actor launched with `worktrees`, ahead of
-    /// every shared root. Empty when that checkout contributes no source of
-    /// its own, which is the ordinary case.
-    fn layer_include(&self, worktrees: &[String]) -> Vec<PathBuf>;
+    /// The actor's private helper roots, ahead of every shared root.
+    fn layer_include(&self, worktrees: &[String]) -> Result<Vec<PathBuf>, String>;
 
-    /// Bind the layer [`Self::layer_include`] just answered to the actor that
-    /// will compile against it, so that actor's own source calls act on
-    /// exactly that layer and no other.
+    /// Bind the source authority and helper branch selected at launch.
     fn bind(&self, actor: PrincipalId, worktrees: &[String]);
 
-    /// Re-read and publish `actor`'s OWN layer, with `also_check` naming
-    /// modules to pull into the checked closure beyond the configured list.
-    ///
-    /// The layer is the one [`Self::bind`] fixed for this principal and cannot
-    /// be chosen per call, so a reload is scoped to the actor that asked and
-    /// never upgrades a child. Hosts that install no layers answer
+    /// Re-read and publish the source layer this principal may own, with
+    /// `also_check` naming modules to pull into the checked closure. Hosts
+    /// that install no layers answer
     /// [`SourceLayerReload::Unavailable`], which is also the default.
     fn reload(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
         let _ = (actor, also_check);
@@ -227,14 +220,12 @@ impl ActorCompileView {
         self.session.workbench_imports(&self.external)
     }
 
-    /// This actor's own source layer, then the deployment-wide roots, then the
+    /// This actor's helper layer, then the deployment-wide roots, then the
     /// session's module tree.
     ///
-    /// The layer leads because GHC takes the first root that provides a module:
-    /// an actor editing a module inside its own checkout shadows the run's copy
-    /// for its own cells and for nobody else's. An actor with no checkout of
-    /// its own carries an empty layer and gets exactly the deployment-wide
-    /// list, which is what the root itself carries.
+    /// The helper layer leads because GHC takes the first root that provides a
+    /// module. The host limits helpers to the reserved namespace, so checkout
+    /// tooling cannot shadow the run's graph.
     #[must_use]
     pub fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
         if self.source_layer.is_empty() {
@@ -384,9 +375,8 @@ pub struct ActorSessionContext {
     pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
     pub haskell_effects_alias: String,
-    /// Include roots this actor alone compiles against, ahead of every shared
-    /// root. Empty for an actor with no checkout of its own — the root, the
-    /// operator workbench, and every actor launched without a worktree. Fixed
+    /// Helper include roots this actor alone compiles against, ahead of every
+    /// shared root. Fixed
     /// when the actor is constructed; there is no setter, because an actor's
     /// search path must not move under a cell that is already compiling.
     pub source_layer: std::sync::Arc<[PathBuf]>,

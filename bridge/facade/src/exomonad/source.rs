@@ -1,4 +1,4 @@
-//! Live source layers: one per checkout, plus the run's own.
+//! Live source layers: the run's authored tooling and branch-local notebook helpers.
 //!
 //! A run freezes its Haskell source roots once, into
 //! `<run_root>/workspace/sources/<capture>/<index>`, and that capture is
@@ -12,23 +12,9 @@
 //! <run_root>/workspace/active -> revisions/<identity>
 //! ```
 //!
-//! and an actor launched with a managed checkout gets one of its own, captured
-//! from that checkout's `.exomonad` source roots:
-//!
-//! ```text
-//! <run_root>/workspace/checkouts/<worktree>/revisions/<identity>/{0,…,resources}
-//! <run_root>/workspace/checkouts/<worktree>/active -> revisions/<identity>
-//! ```
-//!
-//! A layer is the same object either way — same capture walk, same content
-//! identity, same typecheck before publication, same one-`rename(2)`
-//! publication — and differs only in where it lives and what it reads. What
-//! differs is reach: the run's layer sits ahead of the frozen capture in the
-//! include list every actor shares, and a checkout layer sits ahead of THAT,
-//! in one actor's include list alone
-//! (`exomonad_actor::ActorCompileView::include_paths`). So an actor editing a
-//! module inside its own checkout shadows the run's copy for its own later
-//! cells and for nobody else's.
+//! A managed checkout's historical `.exomonad` package is not silently added
+//! to the graph. Every actor uses the run's current tooling, while
+//! `SessionHelpers` remain branch-local.
 //!
 //! Publishing a revision is one `rename(2)` of a symlink: a compile that opens
 //! `active/0` sees either the whole previous revision or the whole new one,
@@ -38,20 +24,14 @@
 //! Not implemented, and why: an actor's already-installed tool record is not
 //! re-derived on reload (it is a one-shot compile at actor startup; the
 //! refresh boundary is the actor's next incarnation); `exomonad check --recipes`
-//! still compiles against the frozen capture only; deleting a module from a
-//! source root stops it being updated but not being importable, since the
-//! frozen capture stays on the search path beneath the active layer; and a
-//! checkout's declaration validation still runs against the forest-wide run
-//! layer rather than the checkout's own, because the session library's
-//! validation include and the resident machine are shared by the whole
-//! forest.
+//! still compiles against the frozen capture only. A run reload that removes
+//! an authored module is rejected before the frozen floor can expose it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::{fs::File, os::unix::fs::OpenOptionsExt};
 
-use exomonad_worktree::{GitCli, WorktreeId, WorktreeManager};
+use exomonad_worktree::GitCli;
 use parking_lot::{Mutex, RwLock};
 use tidepool_repr::PrincipalId;
 
@@ -125,8 +105,8 @@ impl PendingRevision {
     }
 }
 
-/// One mutable source layer: its revisions, and the symlink naming the live
-/// one. The run has one; so does every checkout that carries source.
+/// One mutable source layer: its revisions and the symlink naming the live one.
+/// The run and each helper branch have separate layers.
 #[derive(Clone, Debug)]
 pub(crate) struct SourceLayer {
     directory: PathBuf,
@@ -144,20 +124,10 @@ impl SourceLayer {
             revision_include_paths(&path, record.roots),
         ))
     }
-    /// The run's own layer, shared by every actor that has no checkout layer
-    /// of its own.
+    /// The run's own layer, shared by every actor.
     pub(crate) fn new(run_root: &Path) -> Self {
         Self {
             directory: run_root.join("workspace"),
-        }
-    }
-
-    /// The layer belonging to one managed checkout. It lives under the run
-    /// root, never inside the checkout, so a capture can never read a
-    /// previous capture of itself and Git never sees it.
-    pub(crate) fn checkout(run_root: &Path, worktree: &str) -> Self {
-        Self {
-            directory: run_root.join("workspace").join("checkouts").join(worktree),
         }
     }
 
@@ -208,9 +178,7 @@ impl SourceLayer {
     }
 
     /// The include roots the layer's owner compiles against, read from the
-    /// published record rather than a caller-supplied count. A checkout layer
-    /// captures whatever roots that checkout has, which need not be as many as
-    /// the run froze.
+    /// published record rather than a caller-supplied count.
     pub(crate) fn active_include_paths(&self) -> Result<Vec<PathBuf>> {
         let record = self.read_record()?;
         Ok(record
@@ -578,17 +546,6 @@ fn revision_root_count(directory: &Path) -> Result<usize> {
     Ok(indices.len())
 }
 
-/// One checkout's source layer, and the checkout it is read from.
-#[derive(Clone)]
-struct CheckoutSource {
-    layer: SourceLayer,
-    workspace: PathBuf,
-    /// The authored roots this checkout provides, resolved once, when the
-    /// actor holding the checkout was constructed. Fixing them there is what
-    /// makes the actor's search path and its reload target the same thing.
-    roots: Arc<[PathBuf]>,
-}
-
 /// Which layer one actor's own source calls act on.
 ///
 /// Selected when the actor is constructed and never afterwards, so an actor
@@ -597,12 +554,9 @@ struct CheckoutSource {
 /// this point, because by then the layer is already decided.
 #[derive(Clone)]
 enum ActorSourceScope {
-    /// The run's own layer. Publishing here changes what every actor without a
-    /// layer of its own compiles against, so it belongs to the actor that owns
-    /// the run.
+    /// The run's own layer. Publishing here changes what every actor compiles
+    /// against, so it belongs to the actor that owns the run.
     Run,
-    /// The actor's own checkout layer.
-    Checkout(CheckoutSource),
     /// The run's layer, readable but not publishable. This actor compiles
     /// against it — that is what `sourceStatus` reports — and has no source of
     /// its own to publish.
@@ -614,11 +568,10 @@ enum ActorSourceScope {
 
 /// The run's answer to the `Source` effect, for every actor in it.
 ///
-/// It owns the run's frozen workspace, where its authored source lives, the
-/// run's own layer, and one layer per checkout that carries source. The
+/// It owns the run's frozen workspace and authored source layer. The
 /// compile that decides whether a candidate is acceptable is the run's
-/// ordinary driver compile, so every reload — the run's and a checkout's — is
-/// checked by exactly the compiler the run uses.
+/// ordinary driver compile, so a run reload is checked by exactly the
+/// compiler the run uses.
 pub(crate) struct ExomonadSourceReload {
     frozen: FrozenWorkspace,
     workspace: PathBuf,
@@ -626,13 +579,6 @@ pub(crate) struct ExomonadSourceReload {
     helper_root: PathBuf,
     haskell_root: PathBuf,
     layer: SourceLayer,
-    /// Resolves a launch worktree id to the checkout on disk. Absent in the
-    /// unit tests below, which exercise the run's own layer only.
-    worktrees: Option<WorktreeManager>,
-    /// One layer per checkout, by worktree id, materialized on first use.
-    /// `None` records a checkout that carries no source of its own, so the
-    /// answer is not recomputed for every actor that holds it.
-    checkouts: Mutex<HashMap<String, Option<CheckoutSource>>>,
     /// Helper branches are keyed by `run` for the root and by worktree id for
     /// forked actors. Each branch has its own draft and active revision.
     helpers: Mutex<HashMap<String, SourceLayer>>,
@@ -664,22 +610,12 @@ impl ExomonadSourceReload {
             helper_root,
             haskell_root,
             layer,
-            worktrees: None,
-            checkouts: Mutex::new(HashMap::new()),
             helpers: Mutex::new(HashMap::new()),
             scopes: RwLock::new(HashMap::new()),
             helper_scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
             drift_seen: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Resolve launch worktrees through this manager, which is what makes
-    /// per-checkout layers possible at all.
-    #[must_use]
-    pub(crate) fn with_worktrees(mut self, worktrees: WorktreeManager) -> Self {
-        self.worktrees = Some(worktrees);
-        self
     }
 
     pub(crate) fn with_helper_root(mut self, root: PathBuf) -> Self {
@@ -729,7 +665,6 @@ impl ExomonadSourceReload {
     fn pinned_checkpoint_graph(
         &self,
         helper_branch: &str,
-        checkout: Option<&CheckoutSource>,
     ) -> Result<exomonad_actor::CheckpointSourceLayer> {
         self.layer.ensure_active(&self.frozen)?;
         let mut identities = Vec::new();
@@ -741,9 +676,6 @@ impl ExomonadSourceReload {
             Ok(())
         };
         add(&self.helper_layer(helper_branch), "helpers")?;
-        if let Some(checkout) = checkout {
-            add(&checkout.layer, "checkout")?;
-        }
         add(&self.layer, "run")?;
         Ok(exomonad_actor::CheckpointSourceLayer {
             identities,
@@ -785,57 +717,6 @@ impl ExomonadSourceReload {
             .ensure_active_from(self.frozen.identity(), &[seed])
     }
 
-    /// The layer belonging to the checkout an actor is launched with, made
-    /// live on first use. `None` when the actor holds no checkout, when the
-    /// checkout is not a managed worktree, or when it carries no `.exomonad`
-    /// source of its own — in every one of those cases the actor simply
-    /// compiles against what the run provides.
-    fn checkout(&self, worktrees: &[String]) -> Option<CheckoutSource> {
-        let manager = self.worktrees.as_ref()?;
-        let [id] = worktrees else { return None };
-        let mut known = self.checkouts.lock();
-        if let Some(checkout) = known.get(id) {
-            return checkout.clone();
-        }
-        // Only an answer is remembered. A lookup that failed may succeed once
-        // the worktree has finished being made, and remembering the failure
-        // would leave every actor on this checkout read-only for the whole run.
-        match self.materialize_checkout(manager, id) {
-            Ok(resolved) => {
-                known.insert(id.clone(), resolved.clone());
-                resolved
-            }
-            Err(error) => {
-                tracing::warn!(worktree = %id, %error, "checkout source layer unavailable");
-                None
-            }
-        }
-    }
-
-    fn materialize_checkout(
-        &self,
-        manager: &WorktreeManager,
-        id: &str,
-    ) -> Result<Option<CheckoutSource>> {
-        let Some(handle) = manager.lookup(&WorktreeId::from_raw(id))? else {
-            return Ok(None);
-        };
-        let config = self.frozen.config()?;
-        let roots = super::workspace::checkout_source_roots(handle.cwd(), &config.haskell);
-        if roots.is_empty() {
-            return Ok(None);
-        }
-        let layer = SourceLayer::checkout(&self.run_root, id);
-        // Revision one before the actor exists, so its very first cell already
-        // resolves `active/<index>` and the include list is well-formed.
-        layer.ensure_active_from(self.frozen.identity(), &roots)?;
-        Ok(Some(CheckoutSource {
-            layer,
-            workspace: handle.cwd().to_path_buf(),
-            roots: roots.into(),
-        }))
-    }
-
     fn wire(revision: &SourceRevision) -> tidepool_bridge_effects::SrRevision {
         tidepool_handlers::revision_to_wire(
             &revision.identity,
@@ -867,37 +748,6 @@ impl ExomonadSourceReload {
             &candidate,
             &self.workspace,
             true,
-            also_check,
-            intent,
-        )
-    }
-
-    /// Reload one checkout's own layer. Same transaction, one checkout's
-    /// source, and the run's layer stays exactly where it is: the candidate
-    /// goes in FRONT of it for the check, never in place of it.
-    fn reload_checkout(
-        &self,
-        checkout: &CheckoutSource,
-        also_check: &[String],
-        intent: Option<&str>,
-    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
-    {
-        let active = checkout
-            .layer
-            .ensure_active_from(self.frozen.identity(), &checkout.roots)
-            .map_err(unreadable)?;
-        let pending = checkout
-            .layer
-            .capture_from_roots(self.frozen.identity(), &checkout.roots)
-            .map_err(unreadable)?;
-        let candidate = |pending: &PendingRevision| pending.include_paths(checkout.roots.len());
-        self.settle(
-            &checkout.layer,
-            active,
-            pending,
-            &candidate,
-            &checkout.workspace,
-            false,
             also_check,
             intent,
         )
@@ -976,17 +826,6 @@ impl ExomonadSourceReload {
                     .filter(|module| protected_modules.contains(module)),
             );
         }
-        if let Some(checkout) = self.checkout(&[branch.to_owned()]) {
-            if let Some(checkout_active) = checkout.layer.read_active().ok().flatten() {
-                lower_modules.extend(
-                    checkout_active
-                        .modules
-                        .iter()
-                        .map(|(module, _)| module.clone())
-                        .filter(|module| protected_modules.contains(module)),
-                );
-            }
-        }
         if let Some(module) = lower_modules.first() {
             return SourceLayerReload::Rejected {
                 active: active.identity,
@@ -1059,6 +898,28 @@ impl ExomonadSourceReload {
             .iter()
             .map(|(module, _)| module.as_str())
             .collect();
+        let pending_modules: std::collections::BTreeSet<&str> = pending
+            .revision()
+            .modules
+            .iter()
+            .map(|(module, _)| module.as_str())
+            .collect();
+        if replaces_run_layer {
+            let removed: Vec<_> = active_modules
+                .difference(&pending_modules)
+                .copied()
+                .collect();
+            if !removed.is_empty() {
+                return Ok(SrReloadOutcome::ReloadRejected(
+                    Self::wire(&active),
+                    Self::wire(pending.revision()),
+                    format!(
+                        "removed module(s) {} would resolve from the frozen run capture; restart with a new source graph",
+                        removed.join(", ")
+                    ),
+                ));
+            }
+        }
         let configured_modules: std::collections::BTreeSet<&str> =
             self.frozen.import_modules().collect();
         let new_modules: Vec<&str> = pending
@@ -1142,16 +1003,6 @@ impl ExomonadSourceReload {
                         .map_err(unreadable)?;
                 ("run".to_owned(), roots)
             }
-            // A checkout's roots are its own directories, so they name it.
-            ActorSourceScope::Checkout(checkout) => (
-                checkout
-                    .roots
-                    .iter()
-                    .map(|root| root.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(":"),
-                checkout.roots.to_vec(),
-            ),
         };
         let signature = super::workspace::sources_signature(&roots).map_err(unreadable)?;
         let active_now = match &scope {
@@ -1159,10 +1010,6 @@ impl ExomonadSourceReload {
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 self.layer.ensure_active(&self.frozen).map_err(unreadable)?
             }
-            ActorSourceScope::Checkout(checkout) => checkout
-                .layer
-                .ensure_active_from(self.frozen.identity(), &checkout.roots)
-                .map_err(unreadable)?,
         };
         if let Some((seen_signature, seen_active, drift)) = self.drift_seen.lock().get(&layer_key) {
             if *seen_signature == signature && *seen_active == active_now.identity {
@@ -1176,17 +1023,6 @@ impl ExomonadSourceReload {
                 let disk = self
                     .layer
                     .observe_from_workspace(&self.frozen, &self.workspace)
-                    .map_err(unreadable)?;
-                (active, disk)
-            }
-            ActorSourceScope::Checkout(checkout) => {
-                let active = checkout
-                    .layer
-                    .ensure_active_from(self.frozen.identity(), &checkout.roots)
-                    .map_err(unreadable)?;
-                let disk = checkout
-                    .layer
-                    .observe_from_roots(self.frozen.identity(), &checkout.roots)
                     .map_err(unreadable)?;
                 (active, disk)
             }
@@ -1623,13 +1459,10 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
                 ))
             }
             ActorSourceScope::Run => self.reload_run(also_check, intent),
-            ActorSourceScope::Checkout(checkout) => {
-                self.reload_checkout(&checkout, also_check, intent)
-            }
             ActorSourceScope::RunReadOnly => {
                 Err(tidepool_handlers::SourceError::SourceUnavailable(
-                    "this actor has no source layer of its own: it compiles against the run's, \
-                     which only the actor that owns the run republishes"
+                    "this actor uses the run's current tooling; only the run owner can reload it. \
+                     Checkout tooling edits are unavailable until a coherent checkout-source launch mode is selected"
                         .into(),
                 ))
             }
@@ -1656,17 +1489,6 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
                     .map_err(unreadable)?;
                 Ok(self.status_of(active, &disk))
             }
-            ActorSourceScope::Checkout(checkout) => {
-                let active = checkout
-                    .layer
-                    .ensure_active_from(self.frozen.identity(), &checkout.roots)
-                    .map_err(unreadable)?;
-                let disk = checkout
-                    .layer
-                    .observe_from_roots(self.frozen.identity(), &checkout.roots)
-                    .map_err(unreadable)?;
-                Ok(self.status_of(active, &disk))
-            }
         }
     }
 }
@@ -1682,12 +1504,11 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .unwrap_or_else(|| "run".to_owned());
         self.ensure_helper_active(&helper)
             .map_err(|error| error.to_string())?;
-        let checkout = match self.scope(issuer) {
+        match self.scope(issuer) {
             ActorSourceScope::Checkpoint(layer) => return Ok(layer),
-            ActorSourceScope::Checkout(checkout) => Some(checkout),
-            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => None,
-        };
-        self.pinned_checkpoint_graph(&helper, checkout.as_ref())
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {}
+        }
+        self.pinned_checkpoint_graph(&helper)
             .map_err(|error| error.to_string())
     }
 
@@ -1696,7 +1517,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         checkpoint: &exomonad_actor::CheckpointSourceLayer,
         creator: PrincipalId,
         helper_branch: &str,
-        worktrees: &[String],
+        _worktrees: &[String],
     ) -> std::result::Result<Vec<PathBuf>, String> {
         let _one_at_a_time = self.gate.lock();
         let candidate = match self.scope(creator) {
@@ -1704,8 +1525,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             _ => {
                 self.ensure_helper_active(helper_branch)
                     .map_err(|error| error.to_string())?;
-                let checkout = self.checkout(worktrees);
-                self.pinned_checkpoint_graph(helper_branch, checkout.as_ref())
+                self.pinned_checkpoint_graph(helper_branch)
                     .map_err(|error| error.to_string())?
             }
         };
@@ -1762,56 +1582,33 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(branch)
     }
 
-    fn layer_include(&self, worktrees: &[String]) -> Vec<PathBuf> {
+    fn layer_include(&self, worktrees: &[String]) -> std::result::Result<Vec<PathBuf>, String> {
         self.layer_include_for(&Self::helper_branch(worktrees), worktrees)
     }
 
-    fn layer_include_for(&self, branch: &str, worktrees: &[String]) -> Vec<PathBuf> {
-        let mut helper_paths = match self.ensure_helper_active(&branch) {
-            Ok(_) => self
-                .helper_layer(&branch)
-                .active_include_paths()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, branch, "session helper layer has no include roots");
-                    Vec::new()
-                }),
-            Err(error) => {
-                tracing::warn!(%error, branch, "session helper layer could not be initialized");
-                Vec::new()
-            }
-        };
-        helper_paths.extend(
-            self.checkout(worktrees)
-                .map(|checkout| {
-                    checkout
-                        .layer
-                        .active_include_paths()
-                        .unwrap_or_else(|error| {
-                            tracing::warn!(%error, "checkout source layer has no include roots");
-                            Vec::new()
-                        })
-                })
-                .unwrap_or_default(),
-        );
-        helper_paths
+    fn layer_include_for(
+        &self,
+        branch: &str,
+        _worktrees: &[String],
+    ) -> std::result::Result<Vec<PathBuf>, String> {
+        self.ensure_helper_active(branch)
+            .map_err(|error| format!("session helper layer could not be initialized: {error}"))?;
+        self.helper_layer(branch)
+            .active_include_paths()
+            .map_err(|error| format!("session helper layer has no include roots: {error}"))
     }
 
     fn bind(&self, actor: PrincipalId, worktrees: &[String]) {
         self.bind_for(actor, &Self::helper_branch(worktrees), worktrees);
     }
 
-    fn bind_for(&self, actor: PrincipalId, helper_branch: &str, worktrees: &[String]) {
+    fn bind_for(&self, actor: PrincipalId, helper_branch: &str, _worktrees: &[String]) {
         self.helper_scopes
             .write()
             .insert(actor, helper_branch.to_owned());
-        if let Err(error) = self.ensure_helper_active(&helper_branch) {
-            tracing::warn!(%error, branch = helper_branch, "session helper layer unavailable at bind");
-        }
-        let scope = match self.checkout(worktrees) {
-            Some(checkout) => ActorSourceScope::Checkout(checkout),
-            None => ActorSourceScope::RunReadOnly,
-        };
-        self.scopes.write().insert(actor, scope);
+        self.scopes
+            .write()
+            .insert(actor, ActorSourceScope::RunReadOnly);
     }
 
     /// Publish the caller's own layer, through exactly the path the `Source`
@@ -2296,7 +2093,9 @@ mod tests {
             .unwrap();
         assert_ne!(first.identity, parent_at_fork.identity);
 
-        let child = SourceLayer::checkout(run.path(), "child");
+        let child = SourceLayer {
+            directory: run.path().join("workspace/checkouts/child"),
+        };
         let inherited = child.inherit_active_from(&parent, &roots).unwrap();
         assert_eq!(inherited.identity, parent_at_fork.identity);
         assert_eq!(child.read_active().unwrap(), Some(inherited.clone()));
@@ -2507,8 +2306,8 @@ mod tests {
                 .contains("value = 1")
         );
         assert_ne!(
-            ActorSourceLayers::layer_include_for(&reload, parent_branch, &worktrees)[0],
-            ActorSourceLayers::layer_include_for(&reload, &child_branch, &worktrees)[0]
+            ActorSourceLayers::layer_include_for(&reload, parent_branch, &worktrees).unwrap()[0],
+            ActorSourceLayers::layer_include_for(&reload, &child_branch, &worktrees).unwrap()[0]
         );
         std::fs::write(
             parent_draft.join("SessionHelpers.hs"),
@@ -2585,51 +2384,6 @@ mod tests {
         // record became durable.
         std::fs::write(layer.active_record(), old_record).unwrap();
         assert_eq!(layer.read_active().unwrap(), Some(second));
-    }
-
-    /// A checkout's layer is the run's layer's equal in every way but two:
-    /// where it lives, and who sees it. Materializing one leaves the run's
-    /// exactly where it was, and a checkout with no authored source of its own
-    /// has no roots to capture and so gets no layer at all.
-    #[test]
-    fn a_checkout_layer_is_its_own_and_leaves_the_run_alone() {
-        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let run_layer = SourceLayer::new(run.path());
-        let published = run_layer.ensure_active(&frozen).unwrap();
-
-        // A checkout of the same project, carrying different source.
-        let checkout = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(checkout.path().join(".exomonad/Project")).unwrap();
-        std::fs::write(
-            checkout.path().join(".exomonad/Project/Work.hs"),
-            "module Project.Work where\nwork :: Int\nwork = 2\n",
-        )
-        .unwrap();
-        let haskell = frozen.config().unwrap().haskell;
-        let roots = super::super::workspace::checkout_source_roots(checkout.path(), &haskell);
-        let layer = SourceLayer::checkout(run.path(), "tree-7");
-        let first = layer.ensure_active_from(frozen.identity(), &roots).unwrap();
-
-        assert_ne!(first.identity, published.identity);
-        assert!(run
-            .path()
-            .join("workspace/checkouts/tree-7/active")
-            .exists());
-        assert_eq!(run_layer.read_active().unwrap().unwrap(), published);
-
-        // Its include roots are its own, read from what it actually captured
-        // rather than from the run's root count.
-        let include = layer.active_include_paths().unwrap();
-        assert_eq!(include.len(), roots.len() + 1);
-        assert!(std::fs::read_to_string(include[0].join("Project/Work.hs"))
-            .unwrap()
-            .contains("work = 2"));
-
-        // A checkout with no authored package contributes nothing, which is
-        // how an ordinary coding worktree ends up with no layer.
-        let bare = tempfile::tempdir().unwrap();
-        assert!(super::super::workspace::checkout_source_roots(bare.path(), &haskell).is_empty());
     }
 
     // ------------------------------------------------------------------
@@ -2970,184 +2724,6 @@ mod tests {
     }
 
     #[test]
-    fn a_checkout_reload_commits_its_captured_workspace_and_rejects_a_broken_dependent() {
-        let (project, run, reload) = cooperating_pair();
-        let child_root = tempfile::tempdir().unwrap();
-        let child = child_root.path().join("child");
-        let git = GitCli::new();
-        git.try_run(
-            project.path(),
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "child",
-                child.to_str().unwrap(),
-                "HEAD",
-            ],
-        )
-        .unwrap();
-        let child_workspace = child.join(".exomonad/workspace");
-        git.try_run(
-            &child,
-            &[
-                "clone",
-                "-q",
-                project.path().join(".exomonad/workspace").to_str().unwrap(),
-                ".exomonad/workspace",
-            ],
-        )
-        .unwrap();
-        git.try_run(&child_workspace, &["config", "user.name", "Reload test"])
-            .unwrap();
-        git.try_run(
-            &child_workspace,
-            &["config", "user.email", "reload-test@example.invalid"],
-        )
-        .unwrap();
-        let root_head_before = git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap();
-        let root_status_before = git
-            .try_run(
-                project.path(),
-                &["status", "--porcelain=v1", "--untracked-files=all"],
-            )
-            .unwrap();
-        let root_workspace_head_before = git
-            .try_run(
-                &project.path().join(".exomonad/workspace"),
-                &["rev-parse", "HEAD"],
-            )
-            .unwrap();
-        let root_source_before =
-            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
-                .unwrap();
-        let roots = super::super::workspace::checkout_source_roots(
-            &child,
-            &reload.frozen.config().unwrap().haskell,
-        );
-        let layer = SourceLayer::checkout(run.path(), "child");
-        let before = layer
-            .ensure_active_from(reload.frozen.identity(), &roots)
-            .unwrap();
-        let run_before = reload.layer.ensure_active(&reload.frozen).unwrap();
-        let checkout = CheckoutSource {
-            layer: layer.clone(),
-            workspace: child.clone(),
-            roots: roots.into(),
-        };
-
-        write_types(&child, "evidenceAmount");
-        write_work(&child, "evidenceAmount");
-        let outcome = reload.reload_checkout(&checkout, &[], None).unwrap();
-        let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(
-            previous,
-            published,
-            changed,
-            workspace,
-        ) = outcome
-        else {
-            panic!("a consistent child pair must publish: {outcome:?}");
-        };
-        assert_eq!(previous.identity, before.identity);
-        assert_ne!(published.identity, before.identity);
-        assert_eq!(changed, vec!["Project.Types", "Project.Work"]);
-        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitted(commit, drift) =
-            workspace
-        else {
-            panic!("child workspace must be committed: {workspace:?}");
-        };
-        assert!(drift.is_empty());
-        assert_eq!(
-            git.try_run(&child_workspace, &["rev-parse", "HEAD"])
-                .unwrap()
-                .trimmed(),
-            commit
-        );
-        assert!(
-            git.try_run(
-                &child_workspace,
-                &["show", &format!("{commit}:Project/Types.hs")]
-            )
-            .unwrap()
-            .stdout
-            .contains("evidenceAmount"),
-            "the commit must contain the captured checkout bytes"
-        );
-        assert!(
-            git.try_run(
-                &child,
-                &["ls-files", "--stage", "--", ".exomonad/workspace"]
-            )
-            .unwrap()
-            .stdout
-            .contains(&commit),
-            "the child index must stage the new gitlink"
-        );
-        assert_eq!(reload.layer.read_active().unwrap().unwrap(), run_before);
-
-        write_types(&child, "brokenAccessor");
-        let child_head_before = git
-            .try_run(&child_workspace, &["rev-parse", "HEAD"])
-            .unwrap();
-        let child_index_before = git
-            .try_run(
-                &child,
-                &["ls-files", "--stage", "--", ".exomonad/workspace"],
-            )
-            .unwrap();
-        let active_before = layer.read_active().unwrap().unwrap();
-        let outcome = reload.reload_checkout(&checkout, &[], None).unwrap();
-        let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, _, diagnostics) =
-            outcome
-        else {
-            panic!("a broken child dependent must reject: {outcome:?}");
-        };
-        assert!(diagnostics.contains("evidenceAmount"), "{diagnostics}");
-        assert_eq!(active.identity, active_before.identity);
-        assert_eq!(layer.read_active().unwrap().unwrap(), active_before);
-        assert_eq!(
-            git.try_run(&child_workspace, &["rev-parse", "HEAD"])
-                .unwrap(),
-            child_head_before
-        );
-        assert_eq!(
-            git.try_run(
-                &child,
-                &["ls-files", "--stage", "--", ".exomonad/workspace"]
-            )
-            .unwrap(),
-            child_index_before
-        );
-        assert_eq!(reload.layer.read_active().unwrap().unwrap(), run_before);
-        assert_eq!(
-            git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap(),
-            root_head_before
-        );
-        assert_eq!(
-            git.try_run(
-                project.path(),
-                &["status", "--porcelain=v1", "--untracked-files=all"]
-            )
-            .unwrap(),
-            root_status_before
-        );
-        assert_eq!(
-            git.try_run(
-                &project.path().join(".exomonad/workspace"),
-                &["rev-parse", "HEAD"]
-            )
-            .unwrap(),
-            root_workspace_head_before
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
-                .unwrap(),
-            root_source_before
-        );
-    }
-
-    #[test]
     fn a_reload_can_supply_a_one_line_workspace_commit_intent() {
         let (project, _run, reload) = cooperating_pair();
         write_types(project.path(), "evidenceAmount");
@@ -3370,6 +2946,24 @@ mod tests {
         assert_ne!(work(&status.disk), before);
         assert_eq!(status.disk.generation, 0, "an unpublished snapshot");
         drop(run);
+    }
+
+    #[test]
+    fn deleting_an_authored_module_refuses_stale_frozen_fallback() {
+        let (project, _run, reload) = cooperating_pair();
+        let active = reload.layer.ensure_active(&reload.frozen).unwrap();
+        std::fs::remove_file(project.path().join(".exomonad/workspace/Project/Types.hs")).unwrap();
+        let outcome =
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
+                .unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(previous, _, diagnostics) =
+            outcome
+        else {
+            panic!("module deletion must be rejected: {outcome:?}");
+        };
+        assert_eq!(previous.identity, active.identity);
+        assert!(diagnostics.contains("Project.Types"), "{diagnostics}");
+        assert_eq!(reload.layer.read_active().unwrap(), Some(active));
     }
 
     /// `drift` answers the same question `status` does, plus the module a

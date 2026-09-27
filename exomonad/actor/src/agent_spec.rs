@@ -1,11 +1,7 @@
 //! Where one actor's spec comes from.
 //!
-//! A spec is one Haskell module in the actor's own checkout, exporting one
-//! value. It is found by convention rather than by configuration, because the
-//! configuration that exists cannot express it: `[haskell] tools` is one
-//! workspace-global key, resolved once at composition-root construction and
-//! threaded identically into every actor, and a spec per checkout is exactly
-//! what that is not.
+//! A spec is one Haskell module in the run's current tooling graph, exporting
+//! one value. It is found by convention before the configured workspace keys.
 //!
 //! Discovery being implicit carries one obligation, which is the whole reason
 //! this module answers a value rather than a string: the rule that matched, the
@@ -25,9 +21,8 @@ pub(crate) const SPEC_VALUE: &str = "agentSpec";
 /// Which of the four rules answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecRule {
-    /// `AgentSpec.agentSpec`, found in a source root of the actor's own
-    /// checkout.
-    CheckoutModule,
+    /// `AgentSpec.agentSpec`, found in the active include roots.
+    RunModule,
     /// The workspace's `[haskell] spec` key, for a workspace that wants
     /// another name.
     WorkspaceSpec,
@@ -40,7 +35,7 @@ pub enum SpecRule {
 impl SpecRule {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::CheckoutModule => "checkout module",
+            Self::RunModule => "run module",
             Self::WorkspaceSpec => "workspace spec key",
             Self::WorkspaceTools => "workspace tools key",
             Self::BuiltinDefault => "built-in default",
@@ -65,13 +60,25 @@ pub struct ResolvedSpec {
 }
 
 impl ResolvedSpec {
+    /// Revision of the module that supplies this entry, using the same first
+    /// matching include root GHC will read. Configured entries have no
+    /// discovery file, so their module path must be resolved here too.
+    pub(crate) fn source_revision(&self) -> Option<String> {
+        let (module, _) = self.entry.as_deref()?.rsplit_once('.')?;
+        let source = PathBuf::from(module.replace('.', "/")).with_extension("hs");
+        self.searched
+            .iter()
+            .find(|root| root.join(&source).is_file())
+            .and_then(|root| layer_revision(std::slice::from_ref(root)))
+    }
+
     /// One line naming the rule and the file, for status and for a reload
     /// receipt.
     pub(crate) fn describe(&self) -> String {
         let entry = self.entry.as_deref().unwrap_or("(none)");
         match &self.file {
-            // The file is read from a published revision deep in the run's
-            // cache. A reader edits the copy in their own source roots, so the
+            // The file is read from a published revision under the run root.
+            // A reader edits the copy in the run's authored source roots, so the
             // name they know is shown; `file` keeps the path that was read.
             Some(file) => format!(
                 "rule={} entry={entry} file={}",
@@ -102,10 +109,9 @@ impl ResolvedSpec {
 
 /// Resolve one actor's spec, stopping at the first rule that answers.
 ///
-/// `layer` is the actor's own source layer — the include roots it alone
-/// compiles against, ahead of everything shared. An actor with no checkout of
-/// its own carries an empty layer, so rule one cannot answer for it and the
-/// workspace's keys decide, which is exactly today's behaviour.
+/// `layer` is the exact include graph this actor compiles against, private
+/// helper roots first and shared run roots after them. Helper roots may only
+/// contain `SessionHelpers`, so a discovered `AgentSpec` comes from the run.
 pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
     let searched: Vec<PathBuf> = layer.to_vec();
     if let Some(file) = layer.iter().find_map(|root| {
@@ -113,7 +119,7 @@ pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> Re
         candidate.is_file().then_some(candidate)
     }) {
         return ResolvedSpec {
-            rule: SpecRule::CheckoutModule,
+            rule: SpecRule::RunModule,
             entry: Some(format!("{SPEC_MODULE}.{SPEC_VALUE}")),
             file: Some(file),
             searched,
@@ -143,13 +149,12 @@ pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> Re
     }
 }
 
-/// The revision an actor's own source layer currently resolves to.
+/// The revision a published source include root currently resolves to.
 ///
 /// Carried from install, not tracked: a layer's include roots are
 /// `<layer>/active/<index>`, `active` is a symlink to `revisions/<identity>`,
-/// and the identity is the resolved directory's own name. An actor with no
-/// layer of its own has none to name, and says so by answering `None` rather
-/// than borrowing the run's.
+/// and the identity is the resolved directory's own name. Non-layer roots
+/// answer `None`.
 pub(crate) fn layer_revision(layer: &[PathBuf]) -> Option<String> {
     let root = layer.first()?;
     let resolved = std::fs::canonicalize(root).ok()?;
@@ -241,7 +246,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
     /// Rule one wins over both configured keys, and names the file it was read
     /// from, so a model never has to guess which spec is live.
     #[test]
-    fn a_spec_module_in_the_checkout_answers_first() {
+    fn a_spec_module_in_the_run_graph_answers_first() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("AgentSpec.hs"), "module AgentSpec where\n").unwrap();
         let resolved = resolve(
@@ -249,16 +254,16 @@ agentSpec = defaultSpec { specTools = Tools.tools }
             Some("Project.Spec.agentSpec"),
             Some("Project.Tools.tools"),
         );
-        assert_eq!(resolved.rule, SpecRule::CheckoutModule);
+        assert_eq!(resolved.rule, SpecRule::RunModule);
         assert_eq!(resolved.entry.as_deref(), Some("AgentSpec.agentSpec"));
         assert_eq!(resolved.file, Some(root.path().join("AgentSpec.hs")));
         assert_eq!(resolved.checked_module().as_deref(), Some("AgentSpec"));
     }
 
-    /// A checkout with no spec file behaves exactly as today: the workspace's
+    /// A run graph with no spec file uses the workspace's
     /// keys decide, in their existing order.
     #[test]
-    fn a_checkout_without_a_spec_file_falls_through_in_order() {
+    fn a_run_without_a_spec_file_falls_through_in_order() {
         let root = tempfile::tempdir().unwrap();
         let layer = [root.path().to_path_buf()];
         let with_spec = resolve(
@@ -279,8 +284,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         assert_eq!(nothing.checked_module(), None);
     }
 
-    /// An actor with no layer of its own searches nothing and names nothing,
-    /// which is the ordinary case for every actor without a checkout.
+    /// With no include roots, configured keys still determine the rule.
     #[test]
     fn an_actor_without_a_layer_reports_the_configured_rule() {
         let resolved = resolve(&[], None, Some("Tidepool.Command.Tools.tools"));
@@ -288,5 +292,24 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         assert!(resolved.searched.is_empty());
         assert!(resolved.describe().contains("workspace tools key"));
         assert_eq!(layer_revision(&[]), None);
+    }
+
+    #[test]
+    fn configured_entry_names_the_run_revision_that_supplies_its_module() {
+        let root = tempfile::tempdir().unwrap();
+        let revision = root.path().join("revisions/revision-one/0");
+        std::fs::create_dir_all(revision.join("Project")).unwrap();
+        std::fs::write(
+            revision.join("Project/Tools.hs"),
+            "module Project.Tools where\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("revisions/revision-one", root.path().join("active")).unwrap();
+        let resolved = resolve(
+            &[root.path().join("active/0")],
+            None,
+            Some("Project.Tools.tools"),
+        );
+        assert_eq!(resolved.source_revision().as_deref(), Some("revision-one"));
     }
 }

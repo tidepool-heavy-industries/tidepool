@@ -2491,10 +2491,12 @@ where
                         &launch_worktrees,
                     )
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                None => layers.layer_include_for(
-                    helper_branch.as_deref().unwrap_or_default(),
-                    &launch_worktrees,
-                ),
+                None => layers
+                    .layer_include_for(
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &launch_worktrees,
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
             };
             descriptor = descriptor.with_source_layer(layer);
         }
