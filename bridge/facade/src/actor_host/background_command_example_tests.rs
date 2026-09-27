@@ -21,22 +21,7 @@ async fn workspace_campaign() -> TestCampaign {
     TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
-        |config| {
-            crate::exomonad::workspace::copy_authored(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../exomonad/examples/workspace"),
-                &config.workspace,
-            )
-            .unwrap();
-            super::test_campaign::commit_workspace(&config.workspace);
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_root,
-                )
-                .unwrap(),
-            );
-        },
+        super::jev_tests::pinned_jev_workspace,
     )
     .await
 }
@@ -95,6 +80,11 @@ async fn completion_case(
 #[tokio::test]
 async fn background_command_example_retains_success_failure_and_unavailable_capture() {
     let mut campaign = workspace_campaign().await;
+    committed(
+        &campaign,
+        "import qualified Project.BackgroundCommandExampleChecks",
+    )
+    .await;
     let success = completion_case(&mut campaign, 0, false).await;
     assert!(success.contains("CommandExited 0"), "{success}");
     assert!(success.contains("CaptureComplete"), "{success}");
