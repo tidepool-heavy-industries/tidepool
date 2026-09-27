@@ -1963,6 +1963,140 @@ async fn completed_command_output_survives_a_later_failure_in_the_same_computati
     campaign.hosted.await.unwrap();
 }
 
+/// Resident command results for the cross-repository hosted response fixture.
+/// Each result crosses the same dispatch boundary as the focused command tests.
+pub(crate) async fn result_presentation_cases() -> Vec<(
+    &'static str,
+    &'static str,
+    Result<serde_json::Value, exomonad_actor::ResidentToolError>,
+    Vec<&'static str>,
+    Option<bool>,
+    bool,
+)> {
+    let mut cases = Vec::new();
+
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    let backend = TestCommands::completed("result");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let prefix = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_prefix_failure.hs"),
+    )
+    .await;
+    assert_eq!(backend.executions(), 1);
+    cases.push((
+        "runtime-failure-after-completed-prefix",
+        "command_prefix_failure.hs via resident Haskell dispatch",
+        prefix,
+        vec!["failure-after-command", "stdout ·", "result"],
+        Some(false),
+        false,
+    ));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":"incomplete"})),
+    }));
+    let backend = TestCommands::completed("retained bytes");
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let incomplete = running.await.unwrap();
+    assert_eq!(backend.executions(), 1);
+    cases.push((
+        "incomplete-output",
+        "structured bash with unavailable output transport",
+        incomplete,
+        vec![
+            "retained as",
+            "read_output session_id=",
+            "Do not rerun",
+            "Output observation unavailable",
+            "output transport lost",
+        ],
+        None,
+        true,
+    ));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+
+    let mut campaign = TestCampaign::start().await;
+    committed(
+        &campaign,
+        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]",
+    )
+    .await;
+    let backend = TestCommands::completed("preserved");
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let recovery = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_binding_failure.hs"),
+    )
+    .await;
+    assert_eq!(backend.executions(), 1);
+    cases.push((
+        "recovery-instruction",
+        "command_binding_failure.hs via resident Haskell dispatch",
+        recovery,
+        vec!["Continue with: result <- Cmd.await retainedBeforeFailure"],
+        None,
+        false,
+    ));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":"large"})),
+    }));
+    let backend = TestCommands::completed(&format!("BEGIN\n{}\nEND\n", "λ".repeat(32_000)));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let large = running.await.unwrap();
+    assert_eq!(backend.executions(), 1);
+    let large_output = large.as_ref().unwrap()["items"][0]["output"]
+        .as_str()
+        .unwrap();
+    assert!(large_output.contains("BEGIN") && large_output.contains("END"));
+    cases.push((
+        "retained-result-reference-amid-large-output",
+        "structured bash with 64000-byte stdout",
+        large,
+        vec![
+            "retained as",
+            "read_output session_id=",
+            "Do not rerun",
+            "output bytes not displayed",
+        ],
+        None,
+        true,
+    ));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+
+    cases
+}
+
 #[tokio::test]
 async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
     use std::sync::atomic::Ordering::Release;
