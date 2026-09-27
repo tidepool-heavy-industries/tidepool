@@ -28,14 +28,32 @@ This is an authority boundary, not missing reminder intelligence. Passing an
 opaque Response into another actor does not transfer request ownership. A
 coordinator that can advance a request must originate it.
 
-## Chosen first implementation
+## Revised implementation scope
+
+The accepted scope is now a recursive typed `WorkPlan a`, with typed parallel
+joins, sequencing, component ownership, review, integration and verification.
+Sol Medium leads the wave; bounded Luna trees own parallel components. An
+authored coordinator owns execution requests and routes routine events. It
+reuses Routing, ReviewFlow, Merge and Checks rather than adding competing
+request or evidence registries. Ordinary clarification travels by message;
+`updateRequest` is reserved for an explicit change to an execution obligation.
+
+Delegable context checkpoints let a coordinator admit later children from an
+exact hosted prefix. Checkpoint publication, source coherence, issuer retirement,
+budget attenuation and explicit lease release are runtime obligations. Prove
+the small composed flow before running the recursive whole-wave experiment.
+
+The original one-worker design below is retained as a rehearsal and explanation
+of request authority, not a restriction to a one-worker launch.
+
+## Prerequisite-correction rehearsal
 
 1. Finish a finite discovery request when discovery is necessary. Retain the
    worker and its useful context. Skip discovery when the contract is known.
 2. A persistent authored coordinator starts the execution request on that worker
    with `requestWithProgressInto`. Its callback retains Response and Progress
    before submission. Reuse `Project.Routing` for question and result history.
-3. A designated owner supplies an accepted decision against the full current
+3. For a changed execution obligation, a designated owner supplies an accepted decision against the full current
    Question and exact baseline. Validate sender and question/source identity;
    a matching question label alone is insufficient.
 4. The coordinator issues the update through its own request authority. Refusal,
@@ -93,5 +111,6 @@ settlements, wrong updates and setup cost; do not infer savings from compilation
 - Browser recovery and application wiring need checks through actual product
   consumers; independent component correctness is insufficient.
 
-The live wave remains on its frozen executable. These changes are evaluated in
-the next eligible wave after focused checks, source pinning and launch gates.
+Wave19 ended in storage exhaustion. Its retained evidence and recovery findings
+are in `docs/reports/wave19-audit/`. These changes are evaluated in wave20 after
+focused checks, source pinning and launch gates.
