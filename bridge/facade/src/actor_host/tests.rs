@@ -1240,6 +1240,46 @@ fn recovery_preserves_root_logical_id_and_advances_actor_incarnation() {
 }
 
 #[test]
+fn root_recovery_ignores_operator_with_root_privileges() {
+    let root = ActorRef::first(exomonad_actor::ActorId(1));
+    let mut operator = durable_root(ActorRef::first(exomonad_actor::ActorId(2)));
+    operator.admission.label = "operator".into();
+    operator.application = None;
+    for records in [
+        vec![durable_root(root), operator.clone()],
+        vec![operator, durable_root(root)],
+    ] {
+        assert_eq!(
+            durable_root_identity(&records, Some("source-revision"))
+                .unwrap()
+                .unwrap()
+                .0,
+            root
+        );
+    }
+}
+
+#[test]
+fn root_recovery_does_not_skip_successor_without_application() {
+    let first = ActorRef::first(exomonad_actor::ActorId(1));
+    let mut successor = durable_root(next_actor_incarnation(first).unwrap());
+    successor.application = None;
+    assert_eq!(
+        durable_root_identity(&[durable_root(first), successor], Some("source-revision")).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn root_recovery_refuses_ambiguous_application_owners() {
+    let records = [
+        durable_root(ActorRef::first(exomonad_actor::ActorId(1))),
+        durable_root(ActorRef::first(exomonad_actor::ActorId(2))),
+    ];
+    assert!(durable_root_identity(&records, Some("source-revision")).is_err());
+}
+
+#[test]
 fn root_recovery_does_not_fall_back_past_incomplete_latest_evidence() {
     let first = ActorRef::first(exomonad_actor::ActorId(7));
     let second = ActorRef {

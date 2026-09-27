@@ -754,10 +754,32 @@ fn durable_root_identity(
     records: &[exomonad_actor::DurableActorRecord],
     accepted_source: Option<&str>,
 ) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
-    records
+    // Root privileges also belong to non-model operator actors. Identify the
+    // attached application's logical actor before selecting its latest
+    // incarnation; an incomplete successor must never revive its predecessor.
+    let applications: std::collections::BTreeSet<_> = records
         .iter()
         .filter(|record| {
             record.admission.role == "root"
+                && record.admission.creator.is_none()
+                && record.admission.supervisor_parent.is_none()
+                && record.admission.context_parent.is_none()
+                && record.application.is_some()
+        })
+        .map(|record| record.admission.actor.id)
+        .collect();
+    let mut applications = applications.into_iter();
+    let Some(root_id) = applications.next() else {
+        return Ok(None);
+    };
+    if applications.next().is_some() {
+        return Err(runtime_error("durable root application identity is ambiguous").into());
+    }
+    records
+        .iter()
+        .filter(|record| {
+            record.admission.actor.id == root_id
+                && record.admission.role == "root"
                 && record.admission.creator.is_none()
                 && record.admission.supervisor_parent.is_none()
                 && record.admission.context_parent.is_none()
