@@ -1,6 +1,6 @@
 # Wave19: four parallel feature trees
 
-Status: proposed product scope. Wave18 was explicitly stopped incomplete by the
+Status: user authorized launch after inter-wave integration (2026-09-27). Wave18 was explicitly stopped incomplete by the
 user; its supervisor handoff is 9e3f1be in the harness run checkout. No launch yet.
 Source examined: wave18 root ecf7a2616840ae8f2bbd864b59cfce630945d720;
 review retained wave18 WIP and state its failed recovery gate explicitly before
@@ -148,5 +148,5 @@ composition and passes it to its children when worthwhile; adoption is not a quo
 Wave18 retained WIP/interviews and verified resource release; an explicit owner
 for the still-red Engine/Store process-loss recovery gate; reviewed
 inter-wave integration; focused combined checks; matched binary/workspace pin and
-prompt revisions. Keep the next wave Sol-root. Launch this brief only after the
-user's product-scope discussion and required gates, without overlapping waves.
+prompt revisions. Keep the next wave Sol-root. The user approved this scope; launch after required integration gates, without
+overlapping runs. Wave19 owns the carried product recovery defect.
