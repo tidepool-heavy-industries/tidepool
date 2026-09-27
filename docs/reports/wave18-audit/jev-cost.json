@@ -1,0 +1,247 @@
+{
+  "source": "/home/inanna/dev/exomonad-harness-runs/wave18/.exomonad/logs/29e61b63-2bc9-45d5-b5d1-b67e20918bea.log",
+  "observed_lines": 115192,
+  "observed_last_timestamp": "2026-09-27T01:25:49.095517Z",
+  "successful_calls": {
+    "count": 1393,
+    "input": 15033124,
+    "output": 199014,
+    "input_min": 511,
+    "input_p50": 9538,
+    "input_p90": 22132,
+    "input_p99": 31554,
+    "input_max": 32974,
+    "output_p50": 104,
+    "output_p90": 104,
+    "output_max": 583,
+    "elapsed_ms": 216204
+  },
+  "after_tool_successful": {
+    "count": 1257,
+    "input": 13731313,
+    "output": 130728,
+    "input_min": 511,
+    "input_p50": 9190,
+    "input_p90": 22828,
+    "input_p99": 31626,
+    "input_max": 32974,
+    "output_p50": 104,
+    "output_p90": 104,
+    "output_max": 104,
+    "elapsed_ms": 194957
+  },
+  "explicit_successful": {
+    "count": 136,
+    "input": 1301811,
+    "output": 68286,
+    "input_min": 798,
+    "input_p50": 9878,
+    "input_p90": 10882,
+    "input_p99": 12373,
+    "input_max": 12820,
+    "output_p50": 541,
+    "output_p90": 583,
+    "output_max": 583,
+    "elapsed_ms": 21247
+  },
+  "failed_calls": {
+    "total": 106,
+    "by_kind": {
+      "max_tokens_exceeded": 101,
+      "timeout": 5
+    },
+    "after_tool": 105,
+    "explicit": 1
+  },
+  "slots": {
+    "total": 1583,
+    "by_disposition": {
+      "Abstained": 1576,
+      "Annotated": 7
+    },
+    "by_reason": {
+      "no_floor": 1250,
+      "transport": 105,
+      "message_send": 77,
+      "trivial_bash": 144,
+      "other": 7
+    },
+    "by_tool": {
+      "bash": 563,
+      "haskell": 872,
+      "lookup": 134,
+      "write_stdin": 5,
+      "read_output": 9
+    }
+  },
+  "after_tool_by_tool": {
+    "bash": {
+      "count": 386,
+      "input": 4303871,
+      "output": 40144,
+      "input_min": 853,
+      "input_p50": 9147,
+      "input_p90": 22051,
+      "input_p99": 32103,
+      "input_max": 32974,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 59659
+    },
+    "haskell": {
+      "count": 737,
+      "input": 7826844,
+      "output": 76648,
+      "input_min": 511,
+      "input_p50": 9047,
+      "input_p90": 22933,
+      "input_p99": 30032,
+      "input_max": 32873,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 114000
+    },
+    "lookup": {
+      "count": 120,
+      "input": 1475033,
+      "output": 12480,
+      "input_min": 603,
+      "input_p50": 12428,
+      "input_p90": 22621,
+      "input_p99": 28482,
+      "input_max": 28580,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 19331
+    },
+    "read_output": {
+      "count": 9,
+      "input": 53939,
+      "output": 936,
+      "input_min": 1217,
+      "input_p50": 5063,
+      "input_p90": 14767,
+      "input_p99": 14767,
+      "input_max": 14767,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 1198
+    },
+    "write_stdin": {
+      "count": 5,
+      "input": 71626,
+      "output": 520,
+      "input_min": 7132,
+      "input_p50": 14629,
+      "input_p90": 23372,
+      "input_p99": 23372,
+      "input_max": 23372,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 769
+    }
+  },
+  "after_tool_by_reason": {
+    "no_floor": {
+      "count": 1250,
+      "input": 13608989,
+      "output": 130000,
+      "input_min": 511,
+      "input_p50": 9147,
+      "input_p90": 22832,
+      "input_p99": 31626,
+      "input_max": 32974,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 193485
+    },
+    "other": {
+      "count": 7,
+      "input": 122324,
+      "output": 728,
+      "input_min": 12688,
+      "input_p50": 18504,
+      "input_p90": 19809,
+      "input_p99": 19809,
+      "input_max": 19809,
+      "output_p50": 104,
+      "output_p90": 104,
+      "output_max": 104,
+      "elapsed_ms": 1472
+    }
+  },
+  "top_actors": [
+    {
+      "actor": "9",
+      "calls": 367,
+      "input": 5128746
+    },
+    {
+      "actor": "1",
+      "calls": 235,
+      "input": 1586113
+    },
+    {
+      "actor": "11",
+      "calls": 147,
+      "input": 1213898
+    },
+    {
+      "actor": "10",
+      "calls": 107,
+      "input": 1060569
+    },
+    {
+      "actor": "44",
+      "calls": 104,
+      "input": 1324332
+    },
+    {
+      "actor": "17",
+      "calls": 90,
+      "input": 910246
+    },
+    {
+      "actor": "14",
+      "calls": 51,
+      "input": 713542
+    },
+    {
+      "actor": "19",
+      "calls": 46,
+      "input": 775308
+    },
+    {
+      "actor": "51",
+      "calls": 41,
+      "input": 489581
+    },
+    {
+      "actor": "20",
+      "calls": 32,
+      "input": 290128
+    },
+    {
+      "actor": "36",
+      "calls": 22,
+      "input": 179866
+    },
+    {
+      "actor": "13",
+      "calls": 21,
+      "input": 176384
+    }
+  ],
+  "unjoined_after_calls": 0,
+  "max_token_errors_by_tool": {
+    "bash": 33,
+    "haskell": 55,
+    "lookup": 13
+  }
+}

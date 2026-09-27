@@ -59,6 +59,19 @@ and production consumers before attempting Exomonad integration.
 
 ## Core target: improve the graph of model rounds
 
+First ask whether a step needs to exist. Prune mechanisms whose observed cost
+is high and whose benefit is unsupported, including generic judgments invoked
+after every tool call. Prefer an explicit task event and a narrow question.
+Recent conversational context should select non-tool messages within a total
+budget; add tool evidence deliberately for the judgment that needs it. A limit
+on turns alone does not bound a transcript with hundreds of tool calls.
+
+For semantic automation, execute obvious authorized cases and interrupt the
+frontier model on uncertainty. An uncertain answer does not authorize another
+investigation loop. A diagnostic probe is useful when selecting that probe is
+itself an obvious, bounded step. Explore, exploit and prune across iterations;
+do not turn these experiments into a commitment to one complete framework.
+
 ### Distill small decision flows into actors
 
 A core RSI goal is to distill recurring decision trees into Haskell effects and
