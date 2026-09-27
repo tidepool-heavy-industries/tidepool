@@ -11,6 +11,7 @@ module Tidepool.DiagJson
   , diagFromException
   , renderDiagsJson
   , renderDiag
+  , spanOf
   ) where
 
 import Control.Exception (Exception, SomeException)
@@ -45,7 +46,7 @@ newtype SourceRejection = SourceRejection String deriving Show
 instance Exception SourceRejection
 
 -- | Severity carried by one structured diagnostic.
-data DiagSeverity = DiagError | DiagWarning
+data DiagSeverity = DiagError | DiagWarning deriving (Eq)
 
 -- | One diagnostic: an optional source span, a severity ("error"/"warning"),
 -- and the rendered message text.
@@ -55,7 +56,7 @@ data Diag = Diag
   -- no real span for the diagnostic ('UnhelpfulSpan').
   , dSeverity :: DiagSeverity
   , dMessage  :: String
-  }
+  } deriving (Eq)
 
 -- | Every diagnostic (errors + warnings) carried by a caught 'SourceError',
 -- in the order GHC collected them.

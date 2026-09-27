@@ -354,7 +354,10 @@ harnessProfilePragmaLine =
 -- exists to ever throw a 'SourceError' — 'fromException' can only take the
 -- 'Nothing' branch there.
 reportDiags :: Either SomeException () -> IO ExitCode
-reportDiags (Left e) = do
+reportDiags = reportDiagsWithWarnings . fmap (const [])
+
+reportDiagsWithWarnings :: Either SomeException [Diag] -> IO ExitCode
+reportDiagsWithWarnings (Left e) = do
   let (outcome, diags) = case fromException e of
         Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
         Nothing -> case fromException e of
@@ -372,7 +375,8 @@ reportDiags (Left e) = do
     Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
     Nothing -> hPutStrLn stderr $ "Error: " ++ show e
   pure (ExitFailure 1)
-reportDiags (Right ()) = putStrLn (renderDiagsJson ReportSuccess []) >> pure ExitSuccess
+reportDiagsWithWarnings (Right warnings) =
+  putStrLn (renderDiagsJson ReportSuccess warnings) >> pure ExitSuccess
 
 -- | Whether a generic extraction needs stable session values in scope.
 hasSessionScope :: WorkerRequest -> Bool
@@ -849,6 +853,7 @@ runCellMode compiler caches args cellPath = do
     -- fall back to its own separate '--turn' request.
     when (requestCellFoldTurn args) $
       attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled
+    pure (crWarnings compiled)
   case res of
     Left _ -> do
       provisional <- readIORef provisionalOutput
@@ -856,7 +861,7 @@ runCellMode compiler caches args cellPath = do
         _ <- try (BS.writeFile out (encodeCellOut plan [] [] rendered)) :: IO (Either IOException ())
         pure ()
     Right _ -> pure ()
-  reportDiags res
+  reportDiagsWithWarnings res
 
 -- | After a successful whole-cell check, attempt ONE further compile in the
 -- SAME worker invocation — no separate spawn — when the cell resolved to

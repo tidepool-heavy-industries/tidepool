@@ -256,6 +256,8 @@ pub struct CellCheck {
     pub compile_generation: u64,
     pub compile_view_evidence: String,
     pub expression_plans: Vec<CheckedExpressionPlan>,
+    /// GHC warnings from the final whole-cell check, in authored coordinates.
+    pub warnings: Vec<crate::diag::ExtractDiag>,
 }
 
 impl CellCheck {
@@ -2203,31 +2205,34 @@ fn check_cell_impl(
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
-    if let Err(error) =
-        crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
-    {
-        let items = match std::fs::read(&out_path) {
-            Ok(bytes) => Some(
-                decode_cell_out(
-                    &bytes,
-                    req.cell_text,
-                    req.compile_generation,
-                    req.compile_view_evidence,
-                )?
-                .items,
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
+    let report =
+        match crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr) {
+            Ok(report) => report,
+            Err(error) => {
+                let items = match std::fs::read(&out_path) {
+                    Ok(bytes) => Some(
+                        decode_cell_out(
+                            &bytes,
+                            req.cell_text,
+                            req.compile_generation,
+                            req.compile_view_evidence,
+                        )?
+                        .items,
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                return Err(CellCheckFailure { error, items });
+            }
         };
-        return Err(CellCheckFailure { error, items });
-    }
     let bytes = std::fs::read(&out_path)?;
-    let checked = decode_cell_out(
+    let mut checked = decode_cell_out(
         &bytes,
         req.cell_text,
         req.compile_generation,
         req.compile_view_evidence,
     )?;
+    checked.warnings = report.diagnostics;
     // The worker writes `turn.cbor` only when it attempted AND succeeded at
     // the fold (`attemptCellFoldTurn` swallows its own failures and simply
     // leaves the file absent) — a malformed file here is a real protocol
@@ -2893,6 +2898,7 @@ fn decode_cell_out(
         compile_view_evidence: compile_view_evidence.to_owned(),
         expression_plans,
         prologue: decode_source_prologue(&root[3])?,
+        warnings: Vec::new(),
     })
 }
 
@@ -4194,6 +4200,81 @@ mod tests {
              default (Int, Double, Text)\n",
             crate::session::EVAL_PRAGMAS,
         )
+    }
+
+    #[test]
+    fn whole_cell_check_reports_missing_record_fields_without_rejecting_declaration() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("Prior.hs"),
+            "{-# OPTIONS_GHC -Wmissing-fields #-}\nmodule Prior where\n\
+             data Old = Old { oldHead :: Int, oldTail :: Int }\n\
+             {-# LINE 1 \"<cell>\" #-}\nold = Old { oldHead = 1 }\n",
+        )
+        .unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            root.path(),
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let template = super::super::workbench::resident_cell_check_template(
+            &runtime_eff_cell_preamble(),
+            EFF_ROW,
+            "Prior",
+        );
+        let declaration = "data MergeRequest = MergeRequest { mergeSourceHead :: Int, mergeSourceWorktree :: Int }\n";
+        let partial = format!("{declaration}request = MergeRequest {{ mergeSourceHead = 1 }}\n");
+        let checked = check_cell(CellCheckRequest {
+            session_id: None,
+            cell_text: &partial,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        })
+        .expect("partial record is a valid declaration");
+        assert!(
+            checked.warnings.iter().any(|warning| {
+                warning.severity == crate::diag::DiagnosticSeverity::Warning
+                    && warning
+                        .span
+                        .as_ref()
+                        .is_some_and(|span| span.file == "<cell>" && span.start_line == 2)
+                    && warning.message.contains("mergeSourceWorktree")
+            }),
+            "warnings: {:?}",
+            checked.warnings
+        );
+
+        let complete = format!(
+            "{declaration}request = MergeRequest {{ mergeSourceHead = 1, mergeSourceWorktree = 2 }}\n"
+        );
+        let checked = check_cell(CellCheckRequest {
+            session_id: None,
+            cell_text: &complete,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        })
+        .expect("complete record declaration");
+        assert!(
+            checked.warnings.is_empty(),
+            "warnings: {:?}",
+            checked.warnings
+        );
     }
 
     /// The checked plan owns both independent choices for every expression:

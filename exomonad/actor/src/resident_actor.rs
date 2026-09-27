@@ -6629,6 +6629,28 @@ where
                     warnings,
                     installed_bindings,
                 } => {
+                    let mut warnings = warnings;
+                    let mut diagnostics = Vec::new();
+                    if let Some(checked) = &cell_check {
+                        if checked.items[index].verdict.kind
+                            == tidepool_runtime::session::TurnKind::Decl
+                        {
+                            for warning in &checked.warnings {
+                                if cell_diagnostic_item_index(warning, &checked.items) != index {
+                                    continue;
+                                }
+                                let rendered =
+                                    tidepool_runtime::session::render_cell_compile_rejection(
+                                        &tidepool_runtime::CompileError::Diagnostics(vec![
+                                            warning.clone()
+                                        ]),
+                                        &checked.checked_cell_text,
+                                    );
+                                warnings.push(rendered.output);
+                                diagnostics.extend(rendered.diagnostics);
+                            }
+                        }
+                    }
                     let output = crate::workbench_display::resolve_job_binding_placeholder(
                         output,
                         &installed_bindings,
@@ -6744,7 +6766,7 @@ where
                         )));
                     }
                     receipts.push(WorkbenchItemReceipt {
-                        diagnostics: Vec::new(),
+                        diagnostics,
                         index,
                         kind: None,
                         span: None,
@@ -9232,22 +9254,8 @@ fn cell_check_rejection(
     match &failure.error {
         tidepool_runtime::CompileError::Diagnostics(diagnostics) => {
             for diagnostic in diagnostics {
-                let index = diagnostic
-                    .span
-                    .as_ref()
-                    .filter(|span| span.file == "<cell>")
-                    .and_then(|span| {
-                        checked.and_then(|analysis| {
-                            analysis.iter().position(|item| {
-                                item.source_items.iter().any(|item| {
-                                    let start = (item.span.start_line, item.span.start_column);
-                                    let end = (item.span.end_line, item.span.end_column);
-                                    let point = (span.start_line as usize, span.start_col as usize);
-                                    start <= point && point <= end
-                                })
-                            })
-                        })
-                    })
+                let index = checked
+                    .map(|analysis| cell_diagnostic_item_index(diagnostic, analysis))
                     .unwrap_or(0);
                 let rejection = tidepool_runtime::session::render_cell_compile_rejection(
                     &tidepool_runtime::CompileError::Diagnostics(vec![diagnostic.clone()]),
@@ -9281,6 +9289,27 @@ fn cell_check_rejection(
         }
     }
     workbench_response(WorkbenchRunStatus::Rejected, items, 0, total, checked)
+}
+
+fn cell_diagnostic_item_index(
+    diagnostic: &tidepool_toolchain::diag::ExtractDiag,
+    items: &[tidepool_runtime::session::CellAnalysisItem],
+) -> usize {
+    diagnostic
+        .span
+        .as_ref()
+        .filter(|span| span.file == "<cell>")
+        .and_then(|span| {
+            items.iter().position(|item| {
+                item.source_items.iter().any(|source| {
+                    let start = (source.span.start_line, source.span.start_column);
+                    let end = (source.span.end_line, source.span.end_column);
+                    let point = (span.start_line as usize, span.start_col as usize);
+                    start <= point && point <= end
+                })
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn workbench_response(
@@ -10535,6 +10564,7 @@ mod tests {
             compile_generation: 0,
             compile_view_evidence: String::new(),
             expression_plans: Vec::new(),
+            warnings: Vec::new(),
         };
         let committed = WorkbenchItemReceipt {
             diagnostics: Vec::new(),

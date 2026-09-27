@@ -303,9 +303,8 @@ pub struct WorkbenchItemReceipt {
     /// The compiler diagnostics behind this unit's `output` and `warnings`,
     /// kept as data: severity, the coordinate the rendered header shows, and
     /// the message body. Populated on the compile-rejection paths (cell check
-    /// and declaration validation); empty for a unit that committed, was
-    /// never run, or failed for a reason that is not a GHC diagnostics report
-    /// at all.
+    /// and declaration validation), and on committed declarations with GHC
+    /// warnings. Empty when no GHC diagnostics accompanied the unit.
     ///
     /// This never replaces `output`, and reading `output` is unaffected by
     /// its presence. It exists so a reader that needs the span, the severity,

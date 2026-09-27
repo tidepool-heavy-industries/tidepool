@@ -33,6 +33,7 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
@@ -212,6 +213,7 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
   , crInspectionProbes :: Map.Map String Id
   , crResultType :: Maybe Type
   , crCheckedBinderPins :: [CheckedBinderPin]
+  , crWarnings :: [Diag]
   }
 
 selectionKind :: PipelineSelection result -> PreparationKind
@@ -1952,7 +1954,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                 , prCapturedType = capturedType
                 , prCheckedBinderPins = checkedBinderPins
                 , prResultType   = resultTy
-                , prWarnings     = warnings
+                , prWarnings     = nub (map fst warnings)
                 , prTargetRdrEnv = tcg_rdr_env targetEnvironment
                 , prTargetTcGblEnv = targetEnvironment
                 }
@@ -2019,6 +2021,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   retainInterface " reason=session-value-interface"
               pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
         errors <- liftIO (nub . reverse <$> readIORef errorRef)
+        warnings <- liftIO (nub . reverse <$> readIORef warnRef)
         cpBeforeMerge plan loadFlag errors
         case [(tcg, probes) | Just (tcg, probes) <- checked] of
           [(tcg, probes)] -> do
@@ -2030,6 +2033,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               , crInspectionProbes = probes
               , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
               , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
+              , crWarnings = map snd warnings
               }
           _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
 
@@ -2317,20 +2321,20 @@ evictTargetMemo targetModName' memoRef =
 -- prevents the barrier from replacing the useful diagnostic with a generic
 -- "module load failed" error.
 --
--- Only diagnostics whose source span is @targetPath@ are recorded,
--- NOT a dependency module — the preamble/stdlib compile alongside it in the
--- same GHC session and must not leak their own warnings into the eval's).
+-- The physical-path arm records only @targetPath@. The cell check also accepts
+-- GHC's @<cell>@ LINE-pragmas for authored input; other targets still exclude
+-- virtual spans from dependency modules compiled in the same session.
 -- Rendered with 'mkLocMessage', the same formatter GHC's default log action
 -- uses, so the text carries the familiar @Expr.hs:<line>:<col>: warning:
 -- ...@ shape callers already parse compile errors out of. Delegates to
 -- `fallback` unconditionally so normal stderr printing is unaffected — this
 -- only ADDS a capture, it never suppresses.
 diagnosticCollectorHook
-  :: FilePath -> IORef [String] -> IORef [String] -> LogAction -> LogAction
+  :: FilePath -> IORef [(String, Diag)] -> IORef [String] -> LogAction -> LogAction
 diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
   case msgClass of
     MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
-      modifyIORef' warningRef (rendered :)
+      modifyIORef' warningRef ((rendered, structured) :)
     MCDiagnostic SevError _ _ | inTarget srcSpan ->
       modifyIORef' errorRef (rendered :)
     _ -> pure ()
@@ -2344,7 +2348,14 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
     rendered = Text.unpack $ Text.replace (Text.pack targetPath)
       (Text.pack (takeFileName targetPath)) (Text.pack renderedRaw)
     renderedRaw = renderWithContext defaultSDocContext (mkLocMessage msgClass srcSpan msg)
+    structured = Diag
+      { dFile = spanOf srcSpan
+      , dSeverity = DiagWarning
+      , dMessage = renderWithContext defaultSDocContext msg
+      }
     inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
+      || (takeFileName targetPath == "CellCheck.hs"
+          && unpackFS (srcSpanFile rss) == "<cell>")
     inTarget _ = False
 
 -- | The session-setup DynFlags transform, applied once by 'runCompile' and so
