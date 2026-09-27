@@ -87,7 +87,6 @@ async fn completion_case(
         1,
         "the original job must be the only execution"
     );
-    let result = evidence.to_string();
     let finished = committed(campaign, &example_stage("cleanup")).await;
     assert_eq!(finished["status"], "committed", "{finished}");
     format!("{} {} {}", projection, evidence, finished)

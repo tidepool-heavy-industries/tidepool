@@ -52,7 +52,6 @@ data CompletionProjection = CompletionProjection
 data CommandWatchState = CommandWatchState
   { originalJob :: Cmd.Job
   , retainedEvidence :: Maybe CompletionEvidence
-  , retainedProjection :: Maybe CompletionProjection
   } deriving (Show)
 
 data CommandWatcher mode = CommandWatcher
@@ -74,15 +73,12 @@ startCommandWatcher job = R.start specification
     specification :: ActorSpec CommandWatcher WatcherEffects
     specification = R.definition "background-command-example"
       (Actor.Selected knownEffects) CommandWatcher
-        { watcherState = CommandWatchState job Nothing Nothing
+        { watcherState = CommandWatchState job Nothing
         , watcherSnapshot = \() -> R.get
         , watcherCompletion = R.on (Cmd.completion job) $ \receipt -> do
             capture <- Cmd.readCommand job
-            let evidence = CompletionEvidence receipt capture
             R.modify' (\state -> state
-              { retainedEvidence = Just evidence
-              , retainedProjection = Just (completionProjection job evidence)
-              })
+              { retainedEvidence = Just (CompletionEvidence receipt capture) })
         }
 
 readCommandEvidence
@@ -96,14 +92,20 @@ readCommandProjection
   :: Member Actor effects
   => R.ActorHandle CommandWatcher
   -> Eff effects (Maybe CompletionProjection)
-readCommandProjection watcher =
-  fmap retainedProjection (R.call (watcherSnapshot (R.client watcher)) ())
+readCommandProjection watcher = do
+  state <- R.call (watcherSnapshot (R.client watcher)) ()
+  pure (completionProjection (originalJob state) <$> retainedEvidence state)
 
 finishCommandWatcher
   :: Member Actor effects
   => R.ActorHandle CommandWatcher
-  -> Eff effects (Actor.ActorExit CommandWatchState)
-finishCommandWatcher = R.finish
+  -> Eff effects (Actor.ActorExit (Maybe CompletionEvidence))
+finishCommandWatcher watcher = do
+  exit <- R.finish watcher
+  pure $ case exit of
+    Actor.Completed state -> Actor.Completed (retainedEvidence state)
+    Actor.Failed failure -> Actor.Failed failure
+    Actor.Cancelled reason -> Actor.Cancelled reason
 
 completionProjection :: Cmd.Job -> CompletionEvidence -> CompletionProjection
 completionProjection job evidence = CompletionProjection

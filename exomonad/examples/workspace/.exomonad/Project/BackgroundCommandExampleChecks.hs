@@ -6,6 +6,7 @@ module Project.BackgroundCommandExampleChecks (completion) where
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
+import Prelude hiding (readFile)
 import Project.BackgroundCommandExample
 import qualified Project.Checks as Checks
 import Tidepool.Check
