@@ -164,6 +164,9 @@ Admitting a child and registering its watch does not make a synchronously
 waiting cell receptive to input. A cell that waits for a child question blocks
 the same actor from handling the answer. Admit children and register the watch
 in a cell that returns; answer questions and inspect results in later turns.
+When awaiting Exomonad events, end the turn normally. Do not park in native
+`sleep`: it keeps the turn active and can prevent queued steering from being
+presented.
 Ending a caller's wait does not cancel work already admitted. `R.finish` drains
 an actor: it closes admission, finishes accepted calls, then returns an
 `ActorExit`; later calls are refused. `Cmd.cancel`, child cancellation, and
