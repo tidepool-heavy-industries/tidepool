@@ -1,9 +1,10 @@
 # Wave19: four parallel feature trees
 
-Status: proposed product scope, prepared before wave18 completion. No launch yet.
+Status: proposed product scope. Wave18 was explicitly stopped incomplete by the
+user; its supervisor handoff is 9e3f1be in the harness run checkout. No launch yet.
 Source examined: wave18 root ecf7a2616840ae8f2bbd864b59cfce630945d720;
-accepted-but-unmerged wave18 work and its final acceptance must be incorporated
-before freezing the wave19 baseline. User requests a Sol root with 3–5 mostly
+review retained wave18 WIP and state its failed recovery gate explicitly before
+freezing the wave19 baseline. Do not require the stopped wave to finish. User requests a Sol root with 3–5 mostly
 independent feature areas, each naturally owned by a Luna subtree.
 
 ## Milestone
@@ -144,7 +145,8 @@ composition and passes it to its children when worthwhile; adoption is not a quo
 
 ## Launch gates
 
-Wave18 product acceptance/interviews and deliberate resource disposition; reviewed
+Wave18 retained WIP/interviews and verified resource release; an explicit owner
+for the still-red Engine/Store process-loss recovery gate; reviewed
 inter-wave integration; focused combined checks; matched binary/workspace pin and
 prompt revisions. Keep the next wave Sol-root. Launch this brief only after the
 user's product-scope discussion and required gates, without overlapping waves.

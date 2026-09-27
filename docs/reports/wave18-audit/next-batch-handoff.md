@@ -156,3 +156,13 @@ source provenance and edits retained after a failed check; branch tip
 branch at `16b6f51`. This supersedes its earlier pending status above.
 Reviewed-checkpoint final rerun is in progress; checked-review behavioral tests,
 semantic trials and faithful reload regression remain pending.
+
+## Superseding run status: explicit wind-down
+
+Inanna ended wave18 incomplete; it is now stopped and release verified. See
+[wind-down, final interviews and actions](wind-down.md). Harness run WIP/handoff
+is committed at 9e3f1be. Do not wait for the stopped wave to close its product gate:
+the remaining Engine/Store process-loss recovery failure needs explicit ownership
+in the next work plan. Four final owner/worker interviews and the root's existing
+critique are retained. The new helper design/live-trial evidence is in
+[jev-pattern-trials.md](jev-pattern-trials.md).
