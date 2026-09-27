@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.WorkflowReminderChecks (bounded, semanticCases) where
+module Project.WorkflowReminderChecks (bounded, shadow, semanticCases, checkpointCases) where
 
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
@@ -11,7 +11,8 @@ bounded :: Member RecipeCheck effects => Eff effects ()
 bounded = do
   owner <- root
   void $ turn owner $ T.unlines
-    [ "import Project.WorkflowReminders"
+    [ "import qualified Data.Text as T"
+    , "import Project.WorkflowReminders"
     , "import Project.WorkflowReminderExamples"
     , "import qualified Tidepool.Actor.Record as R"
     , "let policy = reviewRelayPolicy { reminderEpisodeLimit = 2 }"
@@ -44,3 +45,46 @@ semanticCases = do
   check "semantic trial excludes shared design dispute" ("NotApplicable" `T.isInfixOf` output excluded)
   unknown <- turn owner "observed <- semanticReminder independentWorkPolicy (ReminderEpisode \"silence\" \"The actor has been silent for ten minutes. No ready tasks or dependencies were reported.\" \"one status observation\")\ninspectFull observed"
   check "semantic trial does not infer fork readiness from silence" (not ("Suggest" `T.isInfixOf` output unknown))
+
+-- Shadow execution proves the same decision path without an outgoing notice.
+shadow :: Member RecipeCheck effects => Eff effects ()
+shadow = do
+  owner <- root
+  void $ turn owner $ T.unlines
+    [ "import qualified Data.Text as T"
+    , "import Project.WorkflowReminders"
+    , "import Project.WorkflowReminderExamples"
+    , "import qualified Tidepool.Actor.Record as R"
+    , "let policy = reviewRelayPolicy { reminderEpisodeLimit = 2 }"
+    , "let episode = ReminderEpisode \"review-1\" \"exact review remains pending\" \"request 63\""
+    , "Right shadow <- startReminderTrialWith (\\_ _ -> pure Suggest) me policy"
+    , "let trial = trialReminders shadow"
+    ]
+  observed <- turn owner "entry <- R.call (reminderObserve (R.client trial)) episode\ninspectFull entry"
+  check "shadow suggestion retains judgment without notification receipt"
+    ("Suggest" `T.isInfixOf` output observed && "reminderReceipt = Nothing" `T.isInfixOf` output observed)
+  changed <- turn owner "R.call (reminderObserve (R.client trial)) (episode { reminderFacts = \"review has now settled\" })"
+  check "episode identity cannot silently reuse a judgment for changed evidence"
+    ("ReminderEpisodeChanged" `T.isInfixOf` output changed)
+  oversized <- turn owner "R.call (reminderObserve (R.client trial)) (ReminderEpisode \"large\" (T.replicate 7000 \"x\") \"original artifact\")"
+  check "total packet budget refuses oversized evidence before judgment"
+    ("ReminderPacketTooLarge" `T.isInfixOf` output oversized)
+  retained <- turn owner "state <- R.call (reminderRead (R.client trial)) ()\ninspectFull (length (reminderEntries state))"
+  check "refused episodes do not become judged entries" (lastOutput retained == "1")
+  void $ turn owner "R.finish trial"
+
+-- Bounded live replay of the observed module-only checkpoint and counterexamples.
+checkpointCases :: Member RecipeCheck effects => Eff effects ()
+checkpointCases = do
+  owner <- root
+  void $ turn owner "import Project.WorkflowReminders\nimport Project.WorkflowReminderExamples\nimport Project.NotificationTrial"
+  missing <- turn owner "semanticReminder consumerCheckpointPolicy (ReminderEpisode \"consumer-missing\" \"Agreed checkpoint: first compiling main.rs production invocation. Owner reports that checkpoint is due now. Candidate supplies a library module only; main.rs is explicitly not wired.\" \"Retained owner checkpoint and candidate diff\")"
+  check "declared checkpoint asks for missing production consumer" (lastOutput missing == "Suggest")
+  blocked <- turn owner "semanticReminder consumerCheckpointPolicy (ReminderEpisode \"expected-red\" \"Consumer tests intentionally remain red pending the producer owned by another actor. Parent acknowledged this dependency and accepted the waiting checkpoint.\" \"Expected-red report and parent acknowledgment\")"
+  check "acknowledged external producer is not a missed checkpoint" (lastOutput blocked == "NotApplicable")
+  silence <- turn owner "semanticReminder consumerCheckpointPolicy (ReminderEpisode \"quiet\" \"Actor has been quiet for ten minutes. No agreed checkpoint or current candidate is known.\" \"Elapsed-time observation only\")"
+  check "silence cannot establish a missed consumer checkpoint" (lastOutput silence /= "Suggest")
+  mixed <- turn owner "semanticReminder (notificationPolicy \"Integrate reviewed slices\") (ReminderEpisode \"mixed\" \"Already handled: candidate abc. Incoming event repeats candidate abc but also asks who owns the new browser file; that question is unresolved.\" \"Collector retained source-identified question\")"
+  check "shadow routing preserves novel question mixed with stale status" (lastOutput mixed == "Suggest")
+  stale <- turn owner "semanticReminder (notificationPolicy \"Integrate reviewed slices\") (ReminderEpisode \"stale\" \"Already handled and incorporated: candidate abc. Incoming event only repeats candidate abc, with no other claim, question, or change.\" \"Collector handled candidate and full incoming event\")"
+  check "shadow routing records entirely handled repetition" (lastOutput stale == "NotApplicable")

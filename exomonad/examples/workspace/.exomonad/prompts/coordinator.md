@@ -72,3 +72,9 @@ children; a menu seen by the parent does not establish discovery by a child.
 Before product review, name required sibling commits and check that the candidate
 contains them. A partial component review must say which integration gates remain.
 Preparation, executed checks, review and integration are distinct evidence.
+
+For recurring semantic decisions, `JEV-PATTERNS.md` points to compiled examples
+for failure triage, typed evidence selection and update comparison. Compose their
+question values with local questions; customize criteria and shared evidence.
+Keep uncertain decisions visible. Evaluate whether a helper removes a real
+coordination step before making it part of the workflow.

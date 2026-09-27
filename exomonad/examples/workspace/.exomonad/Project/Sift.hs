@@ -23,20 +23,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Jev.Operators (Packet ((:=)))
 import qualified Jev.Operators as J
+import Project.ConversationContext (recentConversationContext)
 import Tidepool.Aeson.Value (Value (String))
 import Tidepool.Effects.Core
-  ( ConversationRole (..),
-    ConversationTurn (..),
-    Jev,
-    Reflect,
-    TurnItem (..),
-    reflect,
-  )
+  ( Jev, Reflect )
 
-sectionTokens, focusTokens, recentConversationTokens, maximumScoredTokens, questionsPerRequest :: Int
+sectionTokens, focusTokens, maximumScoredTokens, questionsPerRequest :: Int
 sectionTokens = 512
 focusTokens = 1024
-recentConversationTokens = 4096
 maximumScoredTokens = 262144
 questionsPerRequest = 128
 
@@ -59,7 +53,7 @@ sift :: (Member Jev effects, Member Reflect effects) => Text -> Int -> Text -> E
 sift focus budget text
   | utf8Bytes text <= budget = pure text
   | otherwise = do
-      recent <- recentConversation
+      recent <- recentConversationContext
       let sections = applyScoringCeiling (maximumScoredTokens * 4) (numberSections (splitSections sectionTokens text))
       scored <- scoreSections focus recent sections
       pure $ case scored of
@@ -245,37 +239,6 @@ ranges = T.intercalate "," . map renderRange . runs . map value
     renderRange (first, last')
       | first == last' = sectionKey (SectionId first)
       | otherwise = sectionKey (SectionId first) <> "\8211" <> sectionKey (SectionId last')
-
--- | The last turns, filtered to user and assistant message text only --
--- excluding tool calls and tool results -- so scoring context stays on
--- what was said, not on what was run. Bounded to a fixed byte budget.
-recentConversation :: Member Reflect effects => Eff effects Text
-recentConversation = do
-  reflected <- reflect 100
-  pure $ case reflected of
-    Left _ -> ""
-    Right turns -> T.takeEnd (recentConversationTokens * 4) (T.concat (map renderTurn turns))
-
-renderTurn :: ConversationTurn -> Text
-renderTurn turn = T.concat (map renderItem (turnItems turn))
-
-renderItem :: TurnItem -> Text
-renderItem item = case item of
-  TurnMessage role text | isUserOrAssistant role -> roleName role <> ": " <> text <> "\n"
-  TurnMessage _ _ -> ""
-  TurnToolCall {} -> ""
-  TurnToolResult {} -> ""
-
-isUserOrAssistant :: ConversationRole -> Bool
-isUserOrAssistant RoleUser = True
-isUserOrAssistant RoleAssistant = True
-isUserOrAssistant _ = False
-
-roleName :: ConversationRole -> Text
-roleName RoleSystem = "system"
-roleName RoleDeveloper = "developer"
-roleName RoleUser = "user"
-roleName RoleAssistant = "assistant"
 
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf _ [] = []

@@ -11,7 +11,7 @@ module Project.CheckResults
   , NoticePolicy (..), CheckSetupIssue (..), CheckVerdict (..)
   , CheckExecution (..), SourceAssurance (..), CheckOutcome (..), CheckEntry (..)
   , CheckState (..), CheckNotice (..), CheckActor (checkSnapshot)
-  , watchChecks, watchChecksWithRefusals, readChecks, finishChecks, checkVerdict
+  , watchChecks, watchChecksWithRefusals, watchChecksInto, readChecks, finishChecks, checkVerdict
   , checkExecution, checkSourceAssurance, checkLine, checksSummary
   ) where
 
@@ -87,11 +87,30 @@ watchChecksWithRefusals
   => AgentRef -> NoticePolicy -> [(Text, FocusedSetupIssue)]
   -> [(Text, FocusedRun)]
   -> Eff effects (Either CheckSetupIssue (ActorHandle CheckActor))
-watchChecksWithRefusals owner policy refused runs = case runs of
+watchChecksWithRefusals owner policy refused =
+  watchChecksWith (NotifyChecks owner policy refused) refused
+
+-- A continuation receives the complete typed state once. It owns presentation;
+-- the check actor does not also wake a model with the same completion.
+watchChecksInto
+  :: Member Actor effects
+  => R.Send CheckState -> [(Text, FocusedRun)]
+  -> Eff effects (Either CheckSetupIssue (ActorHandle CheckActor))
+watchChecksInto destination = watchChecksWith (ForwardChecks destination) []
+
+data CheckDelivery
+  = NotifyChecks AgentRef NoticePolicy [(Text, FocusedSetupIssue)]
+  | ForwardChecks (R.Send CheckState)
+
+watchChecksWith
+  :: Member Actor effects
+  => CheckDelivery -> [(Text, FocusedSetupIssue)] -> [(Text, FocusedRun)]
+  -> Eff effects (Either CheckSetupIssue (ActorHandle CheckActor))
+watchChecksWith delivery refused runs = case runs of
   [] -> pure (Left NoFocusedChecks)
   _ -> case [name | (name, _) <- named, length (filter ((== name) . fst) named) > 1] of
     duplicate : _ -> pure (Left (DuplicateCheckName duplicate))
-    [] -> Right <$> R.start (checkDefinition owner policy refused runs)
+    [] -> Right <$> R.start (checkDefinition delivery runs)
   where named = [(name, ()) | (name, _) <- refused] ++ [(name, ()) | (name, _) <- runs]
 
 readChecks :: Member Actor effects => ActorHandle CheckActor -> Eff effects CheckState
@@ -100,8 +119,8 @@ readChecks watcher = R.call (checkSnapshot (R.client watcher)) ()
 finishChecks :: Member Actor effects => ActorHandle CheckActor -> Eff effects (Actor.ActorExit CheckState)
 finishChecks = R.finish
 
-checkDefinition :: AgentRef -> NoticePolicy -> [(Text, FocusedSetupIssue)] -> [(Text, FocusedRun)] -> ActorSpec CheckActor CheckEffects
-checkDefinition owner policy refused runs =
+checkDefinition :: CheckDelivery -> [(Text, FocusedRun)] -> ActorSpec CheckActor CheckEffects
+checkDefinition delivery runs =
   R.definition "focused-check-results" (Actor.Selected knownEffects) CheckActor
       { checkState = CheckState [CheckEntry name run Nothing | (name, run) <- runs] []
       , checkSnapshot = \() -> R.get
@@ -110,7 +129,12 @@ checkDefinition owner policy refused runs =
           | (name, run) <- runs, let job = runJob run]) completed
       }
   where
-    completed (name, run, receipt) = do
+    completed completion@(name, _, _) = do
+      state <- R.get
+      case [checkOutcome entry | entry <- checkEntries state, checkName entry == name] of
+        [Nothing] -> collect completion
+        _ -> pure ()
+    collect (name, run, receipt) = do
         result <- collectFocused run
         let outcome = CheckOutcome receipt result
         R.modify' (\state -> state { checkEntries =
@@ -118,14 +142,20 @@ checkDefinition owner policy refused runs =
             | entry <- checkEntries state] })
         state <- R.get
         let entry = CheckEntry name run (Just outcome)
-        case policy of
-          NotifyProblems | checkVerdict entry outcome /= CheckPassed -> notify (Just name) (checkLine entry)
-          NotifyAllTerminal -> notify (Just name) (checkLine entry)
-          _ -> pure ()
-        if policy == NotifySummary && all (maybe False (const True) . checkOutcome) (checkEntries state)
-          then notify Nothing (checksSummaryWithRefusals refused state)
-          else pure ()
-    notify name message = do
+        case delivery of
+          ForwardChecks destination ->
+            if all (maybe False (const True) . checkOutcome) (checkEntries state)
+              then R.send destination state
+              else pure ()
+          NotifyChecks owner policy refused -> do
+            case policy of
+              NotifyProblems | checkVerdict entry outcome /= CheckPassed -> notify owner (Just name) (checkLine entry)
+              NotifyAllTerminal -> notify owner (Just name) (checkLine entry)
+              _ -> pure ()
+            if policy == NotifySummary && all (maybe False (const True) . checkOutcome) (checkEntries state)
+              then notify owner Nothing (checksSummaryWithRefusals refused state)
+              else pure ()
+    notify owner name message = do
       sent <- sendMessage owner message
       R.modify' (\state -> state {checkNotices = checkNotices state ++ [CheckNotice name sent]})
 

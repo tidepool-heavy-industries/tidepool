@@ -40,7 +40,7 @@ import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-import Tidepool.Actors.Exomonad (GitOid)
+import Tidepool.Actors.Exomonad (GitOid, WorktreeId)
 import Tidepool.Worktree (renderGitOid)
 
 import Project.Reflex (Reflex)
@@ -73,7 +73,8 @@ instance Show CheckResult where
 -- Derived in the review's own checkout from the OID the reply carried, never
 -- from the child's file list.
 data Evidence = Evidence
-  { evidenceCandidate :: GitOid
+  { evidenceSource :: WorktreeId
+  , evidenceCandidate :: GitOid
   , evidenceStat :: Text
   , evidenceHunks :: Text
   , evidenceOutput :: Text

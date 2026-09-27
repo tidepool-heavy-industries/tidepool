@@ -2,7 +2,7 @@
 
 -- | Context-specific policies and one concrete progress-routing consumer.
 module Project.WorkflowReminderExamples
-  ( reviewRelayPolicy, independentWorkPolicy
+  ( reviewRelayPolicy, independentWorkPolicy, consumerCheckpointPolicy
   , questionEpisode, withQuestionReminders
   ) where
 
@@ -63,3 +63,13 @@ questionEpisode _ = Nothing
 -- receives only newly opened, source-identified question deltas.
 withQuestionReminders :: ActorHandle Reminders -> WorkSink value -> WorkSink value
 withQuestionReminders reminders = withReminders reminders questionEpisode
+
+-- A named milestone supplies the trigger. Tool counts and elapsed time do not.
+consumerCheckpointPolicy :: ReminderPolicy
+consumerCheckpointPolicy = ReminderPolicy
+  { reminderContext = "An owner agreed a first compiling production-consumer checkpoint for a component. The episode contains that agreement, the submitted candidate, and the demonstrated invocation boundary."
+  , reminderTrigger = "At that agreed checkpoint, the candidate is explicitly still module-only and has not demonstrated the agreed production invocation or request boundary. Ask once for the missing consumer artifact or a dependency clarification."
+  , reminderExclusions = "Abstain before the agreed checkpoint, when consumer evidence exists, or when expected-red consumer work is explicitly waiting on an acknowledged external producer. Unclear milestone or candidate evidence is unresolved. Never infer inactivity from silence, tool counts, or elapsed time."
+  , reminderSuggestion = "Show the agreed production-consumer artifact and its check, or identify the prerequisite blocking that checkpoint. Inspect and retain dirty work before any reassignment. This reminder does not authorize reassignment, cancellation, acceptance, or integration."
+  , reminderEpisodeLimit = 8
+  }

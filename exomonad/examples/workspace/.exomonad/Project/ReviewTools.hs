@@ -20,8 +20,8 @@ import Tidepool.Agent.Reply
   )
 import Tidepool.Actors.Worktree (boundWorktree, observeSubmission)
 import Tidepool.Effects.Core
-  ( BoundWorktree, DirtySummary (..), GitOid, HeadState (..)
-  , SubmissionObservation (..), WorkingState (..)
+  ( BoundWorktree, GitOid, HeadState (..)
+  , SubmissionObservation (..)
   )
 import Tidepool.Worktree (worktreeId)
 import Project.Types
@@ -85,7 +85,7 @@ submitReview submission = do
                 Right state
                   | headOid (submittedHead state) /= expectedCandidateOid submission ->
                       pure (ReviewCheckoutHeadMismatch (headOid (submittedHead state)))
-                  | not (cleanCheckout (workingState state)) -> pure ReviewCheckoutDirty
+                  | not (cleanReviewCheckout (workingState state)) -> pure ReviewCheckoutDirty
                   | otherwise -> case requestReplyOf scope of
                       Nothing -> pure NoActiveReview
                       Just reply -> do
@@ -100,10 +100,3 @@ scopeRefusal :: RequestScopeError -> ReviewSubmitRefusal
 scopeRefusal NoCurrentRequest = NoActiveReview
 scopeRefusal RequestTypeMismatch = ReviewTypeMismatch
 scopeRefusal RequestInputShadowed = ReviewInputShadowed
-
-cleanCheckout :: WorkingState -> Bool
-cleanCheckout state = case changes state of
-  DirtySummary [] [] [] _ -> case operation state of
-    Nothing -> True
-    Just _ -> False
-  _ -> False

@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, reviewReadiness, declaredRepair, forwardingFailure) where
+module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, reviewReadiness, reviewedCheckpoints, declaredRepair, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -297,6 +297,122 @@ reviewReadiness = do
       && "no bound-source evidence" `Text.isInfixOf` output cases
       && ",Nothing)" `Text.isInfixOf` output cases)
   void $ turn owner "finishWork readiness"
+
+reviewedCheckpoints :: Member RecipeCheck effects => Eff effects ()
+reviewedCheckpoints = do
+  owner <- root
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
+  void $ turn owner "import qualified Tidepool.Actor.Record as R\nimport qualified Data.Text as Text"
+  ordinary <- turn owner
+    "let progress = WorkProgress [] []\nnull (workEvidence progress) && null (workQuestions progress) && null (workReviewed progress)"
+  check "ordinary two-argument progress starts without reviewed evidence"
+    (lastOutput ordinary == "True")
+  script owner "reviewed-checkpoint-route"
+  reviewerActor <- activation
+  pending <- turn owner "admitReviewedCheckpoint reviewRequest reviewer"
+  check "an unsettled review handle cannot create a reviewed checkpoint"
+    ("CheckpointNotReady" `Text.isInfixOf` output pending)
+  void $ turn (checkActor reviewerActor)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [\"source read\"] \"accepted\")))"
+  mismatchedBasis <- turn owner
+    "admitReviewedCheckpoint (reviewRequest { reviewBasis = ExactScope sourceHead [] \"different\" }) reviewer"
+  check "a review for another basis is refused"
+    ("CheckpointBasisMismatch" `Text.isInfixOf` output mismatchedBasis)
+  mismatchedSource <- turn owner
+    "admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer"
+  check "a requested candidate without the review checkout HEAD is refused"
+    ("CheckpointSourceRejected" `Text.isInfixOf` output mismatchedSource)
+  void $ turn owner
+    "(alteredReview, _) <- reviewAgain (responseActor reviewer) [label|altered-review|] reviewRequest"
+  void activation
+  void $ turn (checkActor reviewerActor)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { checkedCommands = [\"different\"] }) [] \"accepted\")))"
+  mismatchedCandidate <- turn owner "admitReviewedCheckpoint reviewRequest alteredReview"
+  check "a reviewer verdict for another full candidate is refused"
+    ("CheckpointCandidateMismatch" `Text.isInfixOf` output mismatchedCandidate)
+  void $ turn owner
+    "(blockedReview, _) <- reviewAgain (responseActor reviewer) [label|blocked-review|] reviewRequest"
+  void activation
+  void $ turn (checkActor reviewerActor)
+    "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
+  blocked <- turn owner "admitReviewedCheckpoint reviewRequest blockedReview"
+  check "a blocked review cannot become a reviewed checkpoint"
+    ("CheckpointBlocked" `Text.isInfixOf` output blocked)
+  void $ turn owner
+    "(repairReview, _) <- reviewAgain (responseActor reviewer) [label|repair-review|] reviewRequest"
+  void activation
+  void $ turn (checkActor reviewerActor)
+    "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
+  needsRepair <- turn owner "admitReviewedCheckpoint reviewRequest repairReview"
+  check "a review requesting repair cannot become a reviewed checkpoint"
+    ("CheckpointNeedsRepair" `Text.isInfixOf` output needsRepair)
+  void $ turn owner
+    "(dirtyReview, _) <- reviewAgain (responseActor reviewer) [label|dirty-review|] reviewRequest"
+  void activation
+  writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
+  void $ turn (checkActor reviewerActor)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"accepted\")))"
+  dirty <- turn owner "admitReviewedCheckpoint reviewRequest dirtyReview"
+  check "a matching HEAD with uncommitted reviewer edits is refused"
+    ("CheckpointSourceRejected" `Text.isInfixOf` output dirty)
+  void $ git (checkActor reviewerActor) ["clean", "-f", "--", "README.md"]
+  void $ turn owner
+    "Right reviewed <- admitReviewedCheckpoint reviewRequest reviewer"
+  updates <- turn owner
+    "let original = withReviewedCheckpoint reviewed (WorkProgress [] [])\nlet withQuestions = original { workQuestions = [Question \"update\" (DesignQuestion \"plans/component.md\" sourceHead \"owner choice\" [] [] [])] }\nlet withEvidence = original { workEvidence = [checkpointCandidate reviewed] }\nworkReviewed withQuestions == [reviewed] && workReviewed withEvidence == [reviewed]"
+  check "updating questions or evidence preserves the reviewed checkpoint"
+    (lastOutput updates == "True")
+  receipt <- turn owner
+    "executionRequest (responseExecution (checkpointReceipt reviewed)) == requestId reviewer"
+  check "the checkpoint retains the original review response reference"
+    (output receipt == "True")
+  void $ turn owner
+    "(producer, updates) <- unfold (batch campaign \"produce\") (childWithProgress @WorkProgress @Text (coding projectHead (assignment [label|producer|] reviewed)))\ncollection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
+  producerActor <- activation
+  void $ turn (checkActor producerActor)
+    "reportProgress (WorkProgress [checkpointCandidate sessionInput] [])"
+  silent <- turn owner
+    "view <- readWork collection\n(length (workNotices view), length (workHistory view), length (outstandingReviewed view)) == (0,1,0)"
+  check "ordinary candidate progress is retained and silent by default"
+    (lastOutput silent == "True")
+  policy <- turn owner "setWorkNoticePolicy collection IncludeReviewed"
+  check "policy change records its own history cursor without replay"
+    ("Just 1" `Text.isInfixOf` output policy)
+  unchanged <- turn owner "policyEvent <$> setWorkNoticePolicy collection IncludeReviewed"
+  check "setting the same policy does not append another event"
+    (output unchanged == "Nothing")
+  void $ turn (checkActor producerActor)
+    "let newQuestion = Question \"decision\" (DesignQuestion \"plans/component.md\" (candidateCommit (checkpointCandidate sessionInput)) \"owner decision needed\" [] [] [])\nreportProgress (withReviewedCheckpoint sessionInput (WorkProgress [checkpointCandidate sessionInput] [newQuestion]))"
+  reviewed <- turn owner
+    "view <- readWork collection\nlet event = last (workHistory view)\nlet delta = case event of WorkChanged _ change -> change; _ -> error \"missing delta\"\n(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (outstandingReviewed view), length (addedReviewed delta), length (openedQuestions delta))"
+  check ("validated review and simultaneous question share one retained send attempt: " <> lastOutput reviewed)
+    (lastOutput reviewed == "(1,1,1,1)")
+  content <- turn owner
+    "view <- readWork collection\nlet notice = workNoticeMessage IncludeReviewed (workMessage id) (last (workHistory view))\nmaybe False (\\message -> \"owner decision needed\" `Text.isInfixOf` message && \"browser gate remains\" `Text.isInfixOf` message) notice"
+  check "the notice retains the new question and remaining product gate"
+    (lastOutput content == "True")
+  void $ turn (checkActor producerActor)
+    "reportProgress (withReviewedCheckpoint sessionInput (WorkProgress [checkpointCandidate sessionInput] [newQuestion]))"
+  duplicate <- turn owner "length . workNotices <$> readWork collection"
+  check "repeating one exact reviewed checkpoint does not wake again"
+    (output duplicate == "1")
+  changed <- turn owner "setWorkNoticePolicy collection AllCheckpoints"
+  check "a later policy change has a distinct cursor"
+    ("Just 4" `Text.isInfixOf` output changed)
+  void $ turn (checkActor producerActor)
+    "reportProgress (WorkProgress [(checkpointCandidate sessionInput) { checkedCommands = [\"new raw evidence\"] }] [newQuestion])"
+  future <- turn owner
+    "view <- readWork collection\n(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (workHistory view), sourceCursor (head (collectedWork view)), length (outstandingReviewed view)) == (2,6,Just (ProgressCursor 4),1)"
+  check "future-only policy keeps one history and source cursor"
+    (lastOutput future == "True")
+  void $ turn owner
+    "R.send (incorporatedWork (R.client collection)) (\"producer\", [checkpointCandidate reviewed])"
+  handled <- turn owner "length . outstandingReviewed <$> readWork collection"
+  check "explicit incorporation clears the reviewed snapshot"
+    (output handled == "0")
+  void $ turn (checkActor producerActor) "respond (\"done\" :: Text)"
+  void $ turn owner "finishWork collection"
 
 notificationRetention :: Member RecipeCheck effects => Eff effects ()
 notificationRetention = do

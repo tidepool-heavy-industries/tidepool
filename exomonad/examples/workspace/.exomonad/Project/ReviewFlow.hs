@@ -31,12 +31,14 @@ module Project.ReviewFlow
   , defaultReviewFlowPolicy
   , reviewFlow
   , reviewFlowWith
+  , checkedReviewFlow
   , semanticReviewChoice
   ) where
 
 import GHC.Generics (Generic)
-import Control.Monad.Freer (Eff, Member)
-import Data.List (nub)
+import Control.Monad.Freer (Eff, Member, raise)
+import qualified Control.Monad.Freer.State as S
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
@@ -46,9 +48,11 @@ import qualified Jev.Operators as J
 import Jev.Operators (Packet ((:=)), Settled (Settled))
 import Tidepool.Actors.Exomonad
 import Tidepool.Aeson.Value (object, (.=))
-import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..))
+import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands)
 import Tidepool.Actors.Worktree (boundWorktree)
-import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid)
+import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError)
+import Project.CheckResults
+import Project.FocusedGateExample (PlanCheck (..), PlanStart (..), PlanReport (..), startCheckPlanInto, planPassed, planSummary)
 import Project.Types
 import Project.Work (candidateAtSubmission, projectPrompt, reviewContext)
 
@@ -171,6 +175,8 @@ data ReviewStop
   | CandidateReceiptMismatch RequestId RequestId
   | RequiredSiblingMissing GitOid GitOid
   | SourcePreflightUnavailable Text
+  | CandidateChecksRefused Text
+  | CandidateChecksUnknown Text
   | InvalidRepairLimit Int
   | RepairWithoutRequest
   | ReviewerUnavailable ResponseFailure
@@ -190,6 +196,7 @@ data ReviewStop
 
 data ReviewStage
   = AwaitingCandidate
+  | CheckingCandidate Candidate PlanStart
   | ReviewingCandidate Candidate
   | AwaitingReviewCorrection Candidate
   | AwaitingRepair Candidate
@@ -226,6 +233,9 @@ data ReviewFlowState = ReviewFlowState
   , flowNotices :: [Either NotificationError NotificationReceipt]
   , flowCleanupResult :: Maybe ReviewCleanupResult
   , flowReviewRoutes :: [(ReviewContext, ReviewRouteResult)]
+  , flowCheckPlans :: [(Candidate, PlanStart)]
+  , flowCheckReports :: [(Candidate, PlanReport)]
+  , flowCheckCleanup :: [Actor.ActorExit CheckState]
   }
 
 instance Show ReviewFlowState where
@@ -243,6 +253,7 @@ data ReviewFlow mode = ReviewFlow
   , reviewSnapshot :: mode :- Call () (R.Reply ReviewFlowState)
   , reviewCleanup :: mode :- Call ReviewCleanupRequest (R.Reply ReviewCleanupResult)
   , firstCandidate :: mode :- Call (Either ResponseFailure (ResponseResult (Outcome Candidate))) NoReply
+  , checksCompleted :: mode :- Call CheckState NoReply
   , reviewerStarted :: mode :- Call (Candidate, Response (Outcome ReviewDecision), Progress WorkProgress) NoReply
   , reviewerCorrectionStarted :: mode :- Call (Candidate, Response (Outcome ReviewDecision), Progress WorkProgress) NoReply
   , routeReviewer :: mode :- Call (Response (Outcome ReviewDecision)) NoReply
@@ -253,6 +264,7 @@ data ReviewFlow mode = ReviewFlow
   } deriving Generic
 
 type ReviewFlowEffects = R.LocalEffects ReviewFlow ResearchEffects
+type CheckedReviewEffects = R.LocalEffects ReviewFlow (WorktreeIntegration ': ResearchEffects)
 
 -- The caller supplies an unbound managed worktree through R.withWorktree and
 -- retains its handle. Exact-ref reviewer forks need that bound source authority.
@@ -273,9 +285,35 @@ reviewFlowWith
   :: AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
   -> (forall effects. Member Jev effects => ReviewContext -> Eff effects ReviewRouteResult)
   -> ActorSpec ReviewFlow ReviewFlowEffects
-reviewFlowWith owner task policy implementer choose =
-  R.definition "review-flow" (Actor.Selected knownEffects) ReviewFlow
-    { flowStateField = ReviewFlowState AwaitingCandidate 0 False [] [] [] [] [] [] [] [] Nothing []
+reviewFlowWith owner task policy implementer =
+  buildReviewFlow (Actor.Selected knownEffects) (\_ _ -> pure (Right ())) owner task policy implementer Nothing
+
+-- The coordinator holds a dedicated managed checkout, advances it only by
+-- fast-forward, and routes original counted check evidence before review.
+-- Check failures and review findings share flowRepairLimit.
+checkedReviewFlow
+  :: AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  -> [PlanCheck]
+  -> (forall effects. Member Jev effects => ReviewContext -> Eff effects ReviewRouteResult)
+  -> ActorSpec ReviewFlow CheckedReviewEffects
+checkedReviewFlow owner task policy implementer checks =
+  buildReviewFlow (Actor.Selected knownEffects) prepareCheckSource owner task policy implementer (Just checks)
+
+buildReviewFlow
+  :: (Member Replies effects, Member Actor effects, Member Notifications effects
+     , Member Forks effects, Member AgentInspection effects, Member AgentControl effects
+     , Member BoundWorktree effects, Member Commands effects, Member Jev effects
+     , Subset ResearchLeafEffects (S.State ReviewFlowState ': effects)
+     , Member (ActorLocal (R.Message ReviewFlow)) effects)
+  => Actor.EffectProfile (R.Message ReviewFlow) effects
+  -> (Candidate -> WorktreeEvidence -> Eff effects (Either Text ()))
+  -> AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  -> Maybe [PlanCheck]
+  -> (forall selected. Member Jev selected => ReviewContext -> Eff selected ReviewRouteResult)
+  -> ActorSpec ReviewFlow effects
+buildReviewFlow profile prepareSource owner task policy implementer checkPlan choose =
+  R.definition "review-flow" profile ReviewFlow
+    { flowStateField = ReviewFlowState AwaitingCandidate 0 False [] [] [] [] [] [] [] [] Nothing [] [] [] []
     , reviewSnapshot = \() -> R.get
     , reviewCleanup = \request -> do
         origin <- R.sender @ReviewFlow
@@ -290,6 +328,12 @@ reviewFlowWith owner task policy implementer choose =
     , firstCandidate = \result -> do
         own <- R.self @ReviewFlow
         acceptCandidate own implementer result
+    , checksCompleted = \state -> do
+        own <- R.self @ReviewFlow
+        stage <- R.gets flowStage
+        case stage of
+          CheckingCandidate candidate started -> finishCandidateChecks own candidate started state
+          _ -> pure ()
     , reviewerStarted = \(candidate, reviewer, updates) -> do
         own <- R.self @ReviewFlow
         R.modify' (\state -> state
@@ -405,7 +449,9 @@ reviewFlowWith owner task policy implementer choose =
                   preflight <- sourcePreflight exact
                   case preflight of
                     Left reason -> publish (ReviewStopped reason)
-                    Right () -> startReviewer own exact
+                    Right () -> case checkPlan of
+                      Nothing -> startReviewer own exact
+                      Just checks -> startCandidateChecks own exact (responseWorktree receipt) checks
 
     sourcePreflight exact = case flowSourcePlan policy of
       ComponentReview -> pure (Right ())
@@ -426,6 +472,88 @@ reviewFlowWith owner task policy implementer choose =
             (Cmd.CommandExited 1, Cmd.CommandClean) ->
               pure (Left (RequiredSiblingMissing sibling (candidateCommit exact)))
             other -> pure (Left (SourcePreflightUnavailable (Text.pack (show other))))
+
+    startCandidateChecks own exact source checks = do
+      -- Refuse malformed plan source before any check command is submitted.
+      if null checks || any ((/= renderGitOid (candidateCommit exact)) . focusedSource
+          . (\item -> planSpec item (candidateCommit exact))) checks
+        then publish (ReviewStopped (CandidateChecksRefused "checks must name this exact candidate"))
+        else do
+          prepared <- raise (prepareSource exact source)
+          case prepared of
+            Left reason -> publish (ReviewStopped (CandidateChecksRefused reason))
+            Right () -> do
+              started <- startCheckPlanInto (checksCompleted own) (candidateCommit exact) checks
+              case started of
+                Left issue -> publish (ReviewStopped (CandidateChecksRefused (Text.pack (show issue))))
+                Right plan -> do
+                  R.modify' (\state -> state { flowCheckPlans = flowCheckPlans state ++ [(exact, plan)] })
+                  case planWatcher plan of
+                    Just (Right _) -> publish (CheckingCandidate exact plan)
+                    _ -> publish (ReviewStopped (CandidateChecksRefused "no check observer was admitted; inspect flowCheckPlans"))
+
+    finishCandidateChecks own candidate started state = do
+      let report = PlanReport started (Just state)
+          entries = checkEntries state
+          allStarted = all (either (const False) (const True) . snd) (planStarts started)
+          exactJobs = length entries == length (planStarts started) && and
+            [ any (\entry -> checkName entry == name && runJob (checkRun entry) == runJob run
+                  && runSpec (checkRun entry) == runSpec run) entries
+            | (name, Right run) <- planStarts started ]
+          countedSelection entry outcome =
+            let focused = checkFocused outcome
+                expected = focusedExpected (runSpec (checkRun entry))
+            in case focusedEvidence focused of
+              Right record -> case (recordMatched record, recordRunnable record) of
+                (Just matched, Just runnable) ->
+                  length matched == expected && length (nub matched) == expected
+                    && sort matched == sort runnable
+                _ -> False
+              Left _ -> False
+          provenEntry entry = case checkOutcome entry of
+            Just outcome -> case checkVerdict entry outcome of
+              CheckPassed -> countedSelection entry outcome
+              CheckFailed ->
+                let focused = checkFocused outcome
+                    exitMatches = case (focusedEvidence focused,
+                        Cmd.commandOutcome (checkCompletion outcome)) of
+                      (Right record, Cmd.CommandExited exitCode) ->
+                        exitCode /= 0 && recordExitCode record == Just exitCode
+                      _ -> False
+                in checkSourceAssurance entry outcome == SourceVerified
+                  && (case checkExecution entry outcome of
+                      ExecutionFailed _ failed -> failed > 0
+                      _ -> False)
+                  && countedSelection entry outcome
+                  && exitMatches
+                  && focusedPreparation focused `elem` [NoPreparation, PreparationPassed]
+                  && Cmd.commandCleanup (checkCompletion outcome) == Cmd.CommandClean
+              CheckUnknown -> False
+            Nothing -> False
+      R.modify' (\current -> current { flowCheckReports = flowCheckReports current ++ [(candidate, report)] })
+      case planWatcher started of
+        Just (Right watcher) -> do
+          retired <- finishChecks watcher
+          R.modify' (\current -> current { flowCheckCleanup = flowCheckCleanup current ++ [retired] })
+        _ -> pure ()
+      if not allStarted || not exactJobs || null entries
+        then publish (ReviewStopped (CandidateChecksUnknown (planSummary report)))
+        else if not (all provenEntry entries)
+          then publish (ReviewStopped (CandidateChecksUnknown (planSummary report)))
+        else if planPassed report
+          then startReviewer own candidate
+          else do
+            count <- R.gets flowRepairCount
+            let findings = [checkLine entry | entry <- entries,
+                  Just outcome <- [checkOutcome entry], checkVerdict entry outcome /= CheckPassed]
+                context = ReviewContext task candidate (Repair candidate findings) count
+                  (flowRepairLimit policy) (flowEscalationCriteria policy)
+            route <- choose context
+            R.modify' (\current -> current
+              { flowReviewRoutes = flowReviewRoutes current ++ [(context, route)] })
+            case routeChoice route of
+              EscalateReview reason -> publish (ReviewStopped (ReviewEscalated reason))
+              HonorReview -> requestRepair own candidate findings
 
     startReviewer own exact = do
       let request = ReviewRequest (AssignedTask task) exact
@@ -451,7 +579,9 @@ reviewFlowWith owner task policy implementer choose =
 
     acceptReview own selected result = case result of
       Left failure -> publish (ReviewStopped (ReviewerUnavailable failure))
-      Right receipt -> case candidateAtSubmission selected (responseWorktree receipt) of
+      Right receipt -> case (case responseValue receipt of
+          Produced (Accepted _) -> reviewCandidateAtSubmission
+          _ -> candidateAtSubmission) selected (responseWorktree receipt) of
         Left reason -> publish (ReviewStopped (ReviewerSourceRefused reason))
         Right _ -> case responseValue receipt of
           Blocked reason evidence -> publish (ReviewStopped (ReviewerBlocked reason evidence))
@@ -516,3 +646,49 @@ reviewFlowWith owner task policy implementer choose =
               { guidance = Just (projectPrompt "repair"), report = Silent })
             (\(attempt, updates) -> R.send (repairStarted own) (candidate, attempt, updates))
           pure ()
+
+-- Never reset or publish a branch. tryMerge owns checkout mutation; an
+-- ancestry check ensures this is a fast-forward, and HEAD is checked again.
+prepareCheckSource
+  :: (Member BoundWorktree effects, Member WorktreeIntegration effects, Member Commands effects)
+  => Candidate -> WorktreeEvidence -> Eff effects (Either Text ())
+prepareCheckSource exact source = do
+  bound <- boundWorktree
+  case (source, bound) of
+    (NoBoundWorktree, _) -> pure (Left "candidate has no bound-source evidence")
+    (WorktreeObservationFailed failure, _) -> pure (Left (renderWorktreeError failure))
+    (_, Left failure) -> pure (Left (Text.pack (show failure)))
+    (WorktreeObserved sourceReceipt _ _, Right handle) -> do
+      let directory = cwd (handleReceipt handle)
+          git args = Cmd.run (Cmd.inDirectory directory (Cmd.argv ("git" : args)))
+      before <- git ["rev-parse", "HEAD"]
+      clean <- git ["status", "--porcelain"]
+      case (Cmd.stdout before, Cmd.commandCleanup (Cmd.commandResult before),
+            Cmd.stdout clean, Cmd.commandCleanup (Cmd.commandResult clean)) of
+        (Right headText, Cmd.CommandClean, Right dirty, Cmd.CommandClean)
+          | Text.null (Text.strip dirty) -> do
+          ancestor <- git ["merge-base", "--is-ancestor", Text.strip headText, renderGitOid (candidateCommit exact)]
+          case (Cmd.commandOutcome (Cmd.commandResult ancestor), Cmd.commandCleanup (Cmd.commandResult ancestor)) of
+            (Cmd.CommandExited 0, Cmd.CommandClean) -> do
+              merged <- tryMerge MergeRequest
+                { mergeSourceHead = candidateCommit exact
+                , mergeSourceWorktree = treeId sourceReceipt
+                , mergeSourceBranch = Nothing
+                , mergeTargetWorktree = worktreeId handle
+                , mergeMessage = "prepare exact candidate checks", mergeAdvance = Nothing }
+              case merged of
+                Left issue -> pure (Left (Text.pack (show issue)))
+                Right (FastForwarded _ _ _) -> verifyHead git
+                Right (AlreadyContained _ _) -> verifyHead git
+                Right other -> pure (Left ("check checkout did not fast-forward: " <> Text.pack (show other)))
+            (Cmd.CommandExited 1, Cmd.CommandClean) ->
+              pure (Left "check checkout cannot fast-forward to candidate")
+            other -> pure (Left ("source preflight command failed: " <> Text.pack (show other)))
+        _ -> pure (Left "check checkout is dirty or source evidence is unavailable")
+  where
+    verifyHead git = do
+      after <- git ["rev-parse", "HEAD"]
+      pure $ case (Cmd.stdout after, Cmd.commandCleanup (Cmd.commandResult after)) of
+        (Right actual, Cmd.CommandClean)
+          | Text.strip actual == renderGitOid (candidateCommit exact) -> Right ()
+        _ -> Left "check checkout did not reach exact candidate; source retained"

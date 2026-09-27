@@ -13,8 +13,9 @@
 module Project.Routing
   ( WorkActor (workSnapshot, workNotification, incorporatedWork), WorkState (..), WorkSource (..), WorkStatus (..)
   , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink
-  , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence
-  , notifyWork, workMessage, withCheckpoints
+  , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
+  , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
+  , notifyWork, workNoticeMessage, workMessage, withCheckpoints
   , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
   ) where
 
@@ -48,6 +49,7 @@ data WorkSource value = WorkSource
 data WorkDelta = WorkDelta
   { deltaCursor :: ProgressCursor
   , addedEvidence :: [Candidate]
+  , addedReviewed :: [ReviewedCheckpoint]
   , openedQuestions :: Attention
   , resolvedQuestions :: Attention
   } deriving (Show)
@@ -56,6 +58,7 @@ workChange :: Text -> ProgressCursor -> WorkProgress -> WorkProgress -> WorkEven
 workChange name cursor previous current = WorkChanged name WorkDelta
   { deltaCursor = cursor
   , addedEvidence = workEvidence current \\ workEvidence previous
+  , addedReviewed = workReviewed current \\ workReviewed previous
   , openedQuestions = workQuestions current \\ workQuestions previous
   , resolvedQuestions = [q | q <- workQuestions previous,
       not (any (sameQuestion q) (workQuestions current))]
@@ -65,7 +68,17 @@ data WorkEvent value
   = WorkChanged Text WorkDelta
   | WorkEnded Text WorkStatus
   | WorkFinished Text (Either ResponseFailure (ResponseResult value))
+  | WorkPolicyChanged WorkNoticePolicy WorkNoticePolicy
   deriving (Show)
+
+data WorkNoticePolicy = QuestionsAndResults | IncludeReviewed | AllCheckpoints
+  deriving (Show, Eq)
+
+data WorkPolicyReceipt = WorkPolicyReceipt
+  { policyEvent :: Maybe Int
+  , previousPolicy :: WorkNoticePolicy
+  , currentPolicy :: WorkNoticePolicy
+  } deriving (Show, Eq)
 
 -- Successful admission receipts and failures are both retained. Nothing here
 -- automatically retries an uncertain send or claims model incorporation.
@@ -83,6 +96,7 @@ data WorkState value = WorkState
   , workNotices :: [Notice]
   , workHistory :: [WorkEvent value]
   , handledWork :: [(Text, Candidate)]
+  , workNoticePolicy :: WorkNoticePolicy
   }
 
 -- Binding a snapshot should not print whole tasks or accumulated receipts.
@@ -94,12 +108,14 @@ instance Show (WorkState value) where
        case sourceResult source of { Nothing -> False; Just _ -> True })
     | source <- collectedWork state
     ] ++ " notices=" ++ show (length (workNotices state))
+      ++ " policy=" ++ show (workNoticePolicy state)
 
 data WorkActor value mode = WorkActor
   { workState :: mode :- State (WorkState value)
   , workSnapshot :: mode :- Call () (R.Reply (WorkState value))
   , workNotification :: mode :- Call NotificationReceipt (R.Reply (Either NotificationError NotificationState))
   , incorporatedWork :: mode :- Call (Text, [Candidate]) NoReply
+  , workPolicy :: mode :- Call WorkNoticePolicy (R.Reply WorkPolicyReceipt)
   , workUpdates :: mode :- Event (Text, ProgressState WorkProgress)
   , workResults :: mode :- Event (Text, Either ResponseFailure (ResponseResult value))
   } deriving Generic
@@ -121,6 +137,13 @@ followWork inputs sink = R.start (workDefinition inputs sink)
 readWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (WorkState value)
 readWork router = R.call (workSnapshot (R.client router)) ()
 
+-- A policy change is ordered with source events in this actor. It changes
+-- future sends only; callers can inspect 'outstandingReviewed' explicitly.
+setWorkNoticePolicy
+  :: Member Actor effects
+  => ActorHandle (WorkActor value) -> WorkNoticePolicy -> Eff effects WorkPolicyReceipt
+setWorkNoticePolicy router policy = R.call (workPolicy (R.client router)) policy
+
 finishWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (Actor.ActorExit (WorkState value))
 finishWork = R.finish
 
@@ -130,11 +153,19 @@ workDefinition
 workDefinition inputs sink
   | length names /= length (nub names) = error "work source names must be unique"
   | otherwise = coordinationActor "work" WorkActor
-      { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] []
+      { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] [] QuestionsAndResults
       , workSnapshot = \() -> R.get
       , workNotification = pollNotification
       , incorporatedWork = \(name, candidates) -> R.modify' (\state -> state
           { handledWork = nub (handledWork state ++ [(name, candidate) | candidate <- candidates]) })
+      , workPolicy = \policy -> do
+          state <- R.get
+          let before = workNoticePolicy state
+          if before == policy then pure (WorkPolicyReceipt Nothing before policy) else do
+            let index = length (workHistory state)
+            R.put (state { workNoticePolicy = policy
+              , workHistory = workHistory state ++ [WorkPolicyChanged before policy] })
+            pure (WorkPolicyReceipt (Just index) before policy)
       , workUpdates = R.on (mconcat [fmap ((,) name) (R.progress updates) | (name, _, updates) <- inputs]) update
       , workResults = R.on (mconcat [fmap ((,) name) (R.settlement response) | (name, response, _) <- inputs]) settled
       }
@@ -147,8 +178,10 @@ workDefinition inputs sink
         ProgressUpdate cursor progress -> do
           let current = findSource name state
               previous = sourceProgress current
-              next = WorkProgress (nub (workEvidence previous ++ workEvidence progress))
-                (nub (sort (workQuestions progress)))
+              next = foldl (flip withReviewedCheckpoint)
+                (WorkProgress (nub (workEvidence previous ++ workEvidence progress))
+                  (nub (sort (workQuestions progress))))
+                (workReviewed previous ++ workReviewed progress)
           R.put (putSource (current { sourceProgress = next, sourceCursor = Just cursor }) state)
           publish (workChange name cursor previous next)
         ProgressClosed -> ended name WorkClosed
@@ -175,6 +208,14 @@ outstandingEvidence state source =
   [candidate | candidate <- workEvidence (sourceProgress source),
     (sourceName source, candidate) `notElem` handledWork state]
 
+outstandingReviewed :: WorkState value -> [(Text, ReviewedCheckpoint)]
+outstandingReviewed state =
+  [ (sourceName source, checkpoint)
+  | source <- collectedWork state
+  , checkpoint <- workReviewed (sourceProgress source)
+  , (sourceName source, checkpointCandidate checkpoint) `notElem` handledWork state
+  ]
+
 findSource :: Text -> WorkState value -> WorkSource value
 findSource name state = case filter ((== name) . sourceName) (collectedWork state) of
   current : _ -> current
@@ -193,9 +234,42 @@ putSource source state = state { collectedWork =
 -- Use another projection when partial evidence unlocks a known consumer. The
 -- default wakes only for question deltas, source failure and terminal results.
 notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value
-notifyWork owner render event = case render event of
-  Nothing -> pure Nothing
-  Just message -> Just <$> sendMessage owner message
+notifyWork owner render event = do
+  policy <- R.gets workNoticePolicy
+  case workNoticeMessage policy render event of
+    Nothing -> pure Nothing
+    Just message -> Just <$> sendMessage owner message
+
+workNoticeMessage
+  :: WorkNoticePolicy -> (WorkEvent value -> Maybe Text) -> WorkEvent value -> Maybe Text
+workNoticeMessage policy render event =
+  combine (render event) (checkpointMessage policy event)
+
+combine :: Maybe Text -> Maybe Text -> Maybe Text
+combine Nothing other = other
+combine message Nothing = message
+combine (Just message) (Just other) = Just (message <> "; " <> other)
+
+checkpointMessage :: WorkNoticePolicy -> WorkEvent value -> Maybe Text
+checkpointMessage QuestionsAndResults _ = Nothing
+checkpointMessage policy (WorkChanged name delta) = combine reviewed raw
+  where
+    reviewed = case addedReviewed delta of
+      [] -> Nothing
+      checkpoints -> Just (name <> ": reviewed checkpoint " <>
+        Text.intercalate ", " [renderGitOid (candidateCommit (checkpointCandidate checkpoint))
+          <> " (remaining gates: " <> gates (checkpointCandidate checkpoint) <> ")"
+        | checkpoint <- checkpoints])
+    raw = case policy of
+      AllCheckpoints -> case addedEvidence delta of
+        [] -> Nothing
+        fresh -> Just (name <> ": checkpoint " <>
+          Text.intercalate "," (map (renderGitOid . candidateCommit) fresh))
+      _ -> Nothing
+    gates candidate = case remainingGates candidate of
+      [] -> "none reported"
+      remaining -> Text.intercalate "; " remaining
+checkpointMessage _ _ = Nothing
 
 -- A progress candidate is a checkpoint. Only a terminal result carries the
 -- submitted worktree observation needed to identify the exact review source.
@@ -242,6 +316,7 @@ workMessage render event = case event of
   WorkEnded _ _ -> Nothing
   WorkFinished name result -> Just (name <> ": " <> either
     (\failure -> "unavailable " <> shown failure) (render . responseValue) result)
+  WorkPolicyChanged _ _ -> Nothing
   where
     shown :: Show a => a -> Text
     shown = Text.pack . show

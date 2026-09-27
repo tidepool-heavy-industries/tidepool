@@ -8,7 +8,7 @@
 module Project.FocusedGateExample
   ( GateStart (..), startGate, startPreparedGate, reopenGate, readGate, foldGate
   , CheckPreparation (..), PlanCheck (..), PlanStart (..), PlanReport (..)
-  , startCheckPlan, readCheckPlan, planPassed, planSummary
+  , startCheckPlan, startCheckPlanInto, readCheckPlan, planPassed, planSummary
   ) where
 
 import Control.Monad (forM, forM_)
@@ -117,7 +117,21 @@ startCheckPlan
   :: (Member Actor effects, Member Commands effects)
   => AgentRef -> GitOid -> [PlanCheck]
   -> Eff effects (Either CheckSetupIssue PlanStart)
-startCheckPlan owner candidate checks = case checks of
+startCheckPlan owner = startCheckPlanWith (watchChecksWithRefusals owner NotifySummary)
+
+-- Deliver terminal evidence to an actor continuation without a model notice.
+startCheckPlanInto
+  :: (Member Actor effects, Member Commands effects)
+  => R.Send CheckState -> GitOid -> [PlanCheck]
+  -> Eff effects (Either CheckSetupIssue PlanStart)
+startCheckPlanInto destination = startCheckPlanWith (\_ -> watchChecksInto destination)
+
+startCheckPlanWith
+  :: (Member Actor effects, Member Commands effects)
+  => ([(Text, FocusedSetupIssue)] -> [(Text, FocusedRun)]
+      -> Eff effects (Either CheckSetupIssue (R.ActorHandle CheckActor)))
+  -> GitOid -> [PlanCheck] -> Eff effects (Either CheckSetupIssue PlanStart)
+startCheckPlanWith watch candidate checks = case checks of
   [] -> pure (Left NoFocusedChecks)
   _ | Just name <- duplicateName names -> pure (Left (DuplicateCheckName name))
   _ -> do
@@ -131,7 +145,7 @@ startCheckPlan owner candidate checks = case checks of
         refused = [(name, issue) | (name, Left issue) <- launched]
     watcher <- case admitted of
       [] -> pure Nothing
-      _ -> Just <$> watchChecksWithRefusals owner NotifySummary refused admitted
+      _ -> Just <$> watch refused admitted
     pure (Right (PlanStart launched watcher))
   where names = map planName checks
 
@@ -177,7 +191,8 @@ planSummary report =
 
 planStatus :: PlanReport -> (Text, Either FocusedSetupIssue FocusedRun) -> (Text, Maybe CheckVerdict)
 planStatus report (name, result) = (name, case (result, planState report) of
-  (Right _, Just state) -> case [entry | entry <- checkEntries state, checkName entry == name] of
-    entry : _ -> checkVerdict entry <$> checkOutcome entry
-    [] -> Nothing
+  (Right run, Just state) -> case [entry | entry <- checkEntries state, checkName entry == name] of
+    entry : _ | runJob (checkRun entry) == runJob run
+      && runSpec (checkRun entry) == runSpec run -> checkVerdict entry <$> checkOutcome entry
+    _ -> Nothing
   _ -> Nothing)

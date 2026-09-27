@@ -11,7 +11,7 @@ module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
   , lunaTask, lunaTaskFrom, lunaTaskInputFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, reviewAgain, repair
-  , candidateAtSubmission
+  , candidateAtSubmission, reviewCandidateAtSubmission, admitReviewedCheckpoint
   , requestIncorporation, consultDesign
   , settledValue
   , unownedPaths
@@ -23,7 +23,7 @@ import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (AgentInspection, Commands, Forks, GitRef (..))
 import Tidepool.Inspection (WorkbenchDisplay)
-import Tidepool.Worktree (renderGitOid, renderWorktreeError)
+import Tidepool.Worktree (renderGitOid)
 import qualified Tidepool.Command as Cmd
 import Project.Types
 import Project.Evidence (numstatFiles)
@@ -201,16 +201,10 @@ reviewCommit reviewLabel base commit accept owned = unfold (batch (labelCampaign
   coding (atRef (GitRef (renderGitOid commit)))
     (assignment [label|review|] (ReviewRequest (ExactScope base owned accept) (Candidate commit [] []) OwnerRepairs))
 
--- This project's automatic review edge selects the committed submission head.
--- Other authored flows may deliberately select earlier artifacts instead.
-candidateAtSubmission :: Candidate -> WorktreeEvidence -> Either Text Candidate
-candidateAtSubmission candidate evidence = case evidence of
-  WorktreeObserved _ _ observation
-    | actual == candidateCommit candidate -> Right candidate
-    | otherwise -> Left ("candidate " <> renderGitOid (candidateCommit candidate) <> "; submitted " <> renderGitOid actual)
-    where actual = headOid (submittedHead observation)
-  NoBoundWorktree -> Left "candidate has no bound-source evidence"
-  WorktreeObservationFailed failure -> Left (renderWorktreeError failure)
+-- After the original review response settles, a producer can call
+-- 'admitReviewedCheckpoint' with its ReviewRequest and Response handle, then
+-- publish the returned checkpoint through 'withReviewedCheckpoint'. The router
+-- retains it with ordinary progress and decides whether to notify its owner.
 
 -- Ownership gate: which paths a candidate range actually touched outside its
 -- declared ownership. Same numstat parsing as Project.Evidence's pure

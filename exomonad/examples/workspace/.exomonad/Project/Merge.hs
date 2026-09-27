@@ -14,8 +14,8 @@
 -- Publishing a checked revision. `Merge` is the worktree-holding record
 -- actor: one per merge target, called by every review under a parent. It
 -- merges one candidate per `Call`, runs the project check on the merged head, and
--- only then advances the named branch -- a red head is rolled back so the
--- worktree always sits on a green revision between calls. Read by whoever
+-- only then advances the named branch. A failed check leaves the merged head
+-- and its evidence in the integration worktree. Read by whoever
 -- starts a merge target and by Project.Review, which is the only caller of
 -- `publish`.
 --
@@ -26,8 +26,9 @@
 -- created and never bound. Reviews hold no worktree (they resolve to the
 -- research role) and `R.call` the merge actor; its mailbox serialises every
 -- merge-and-check. The merge actor checks before it publishes: the project check
--- runs on the merged head, a green head advances the named branch, a red head
--- is rolled back so the worktree is always on a green revision between calls.
+-- runs on the merged head; only a green head advances the named branch. A red
+-- head remains in the integration worktree for repair. With a named publication
+-- branch, the next request observes branch drift until the owner reconciles it.
 -- The same two actors run from any node: a Sol or Luna node creates its own
 -- integration worktree from its bound head (the coding role may allocate),
 -- starts its own merge actor, and replies to its parent with the same
@@ -49,7 +50,6 @@ module Project.Merge
   , exitCode
   ) where
 
-import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
@@ -72,6 +72,7 @@ newtype MergeTarget = MergeTarget
 
 data PublishRequest = PublishRequest
   { publishTask :: Text
+  , publishSource :: WorktreeId
   , publishCandidate :: GitOid
   , publishMessage :: Text
   } deriving (Show, Eq)
@@ -82,13 +83,12 @@ data PublishRequest = PublishRequest
 data MergeResult
   = Published GitOid GitOid CheckResult
     -- ^ checked head, previous head, the green check; the branch advanced
-  | RedRolledBack GitOid GitOid CheckResult
-    -- ^ checked head, the head the worktree was rolled back to, the red check
+  | RedPreserved GitOid GitOid CheckResult
+    -- ^ previous integration head, checked head left in the worktree, red check
   | Conflict Text [Text]
   | MergeBlocked Text
     -- ^ the merge actor refuses every request until `reconcile` clears the
-    -- reason: publication drift, a rollback that did not restore the head,
-    -- an advance that was refused, or the publication branch checked out
+    -- reason: publication drift, an advance that was refused, or the branch checked out
     -- somewhere `update-ref` would desynchronise
   | MergeFailed Text
   deriving (Show, Eq)
@@ -195,6 +195,7 @@ runPublish request = do
         Nothing -> do
           outcome <- tryMerge MergeRequest
             { mergeSourceHead = publishCandidate request
+            , mergeSourceWorktree = publishSource request
             , mergeSourceBranch = Nothing
             , mergeTargetWorktree = worktreeId handle
             , mergeMessage = publishMessage request
@@ -231,21 +232,9 @@ runPublish request = do
                         ("the checked head was not published to " <> branchText advance
                           <> ": " <> detail)
                 else do
-                  -- The rollback takes the red merge commit off the worktree's
-                  -- ref, so it names the tip it checked: the discard hold
-                  -- refuses it if anything else moved the worktree meanwhile.
-                  let intent = DiscardIntent (GitOid checked) (GitOid before) "red check rollback"
-                  reset <- Cmd.run (withDiscardIntent intent
-                    (Cmd.inDirectory path (Cmd.argv ["git", "reset", "--hard", before])))
-                  restored <- gitIn path ["rev-parse", "HEAD"]
-                  if isNothing (Cmd.failure reset) && restored == before
-                    then do
-                      history "merged_red_rolled_back" (checked <> " -> " <> before <> "; " <> checkDetail check)
-                      pure (RedRolledBack (GitOid checked) (GitOid before) check)
-                    else block "rollback_failed"
-                      ("the worktree is at " <> Text.take 7 restored <> ", expected " <> Text.take 7 before
-                        <> " after a red check at " <> Text.take 7 checked
-                        <> maybe "" ("; git reset " <>) (Cmd.failure reset))
+                  history "merged_red_preserved"
+                    ("previous " <> before <> "; checked " <> checked <> "; " <> checkDetail check)
+                  pure (RedPreserved (GitOid before) (GitOid checked) check)
   where
     history :: Text -> Text -> Handler MergeState MergeEffects ()
     history key detail = R.modify' (\state -> state
