@@ -288,6 +288,14 @@ impl ActorForkWorkspaceAdmission {
             });
         }
         let worktree = WorktreeId::from_raw(worktree);
+        // The sole caller has already verified durable predecessor retirement.
+        // A live Mounted checkout must be sealed from its exact descriptor
+        // before lookup may materialize ordinary host working files.
+        self.manager
+            .seal_orphaned_mounted_view(&worktree)
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
         if self
             .manager
             .lookup(&worktree)

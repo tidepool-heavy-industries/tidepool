@@ -73,7 +73,12 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     )
     .unwrap();
     let handle = manager
-        .finish_inherited_source(prepared, namespace.clone(), &view)
+        .finish_inherited_source(
+            prepared,
+            namespace.clone(),
+            &view,
+            vec![base.clone(), upper.clone()],
+        )
         .unwrap();
     assert_eq!(handle.receipt().status, WorktreeRecordStatus::Mounted);
     let output = namespace

@@ -87,6 +87,10 @@ pub struct RetainedViewManifest {
     pub cwd: PathBuf,
     /// Overlay lower layers in oldest-to-newest order, then the sealed upper.
     pub layers: Vec<PathBuf>,
+    /// Both alternatives remain authoritative while a rotation's mount result
+    /// is unconfirmed. Recovery refuses to choose one by inspecting files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_layers: Option<Vec<PathBuf>>,
 }
 
 /// The durable registry row for one managed worktree.
@@ -217,6 +221,7 @@ impl WorktreeRegistry {
             worktree_id: receipt.worktree_id.clone(),
             cwd: receipt.cwd.clone(),
             layers,
+            pending_layers: None,
         };
         self.validate_retained_manifest(receipt, &manifest)?;
         #[allow(clippy::expect_used, reason = "serialize RetainedViewManifest")]
@@ -225,10 +230,61 @@ impl WorktreeRegistry {
         Ok(manifest)
     }
 
+    /// Replace a live descriptor only while its exact mounted receipt is
+    /// current. Publication owns the gate excluding writes and rotations.
+    pub fn put_mounted_layers(
+        &self,
+        receipt: &WorktreeReceipt,
+        layers: Vec<PathBuf>,
+    ) -> Result<(), WorktreeError> {
+        if receipt.status != WorktreeRecordStatus::Mounted
+            || self.get(&receipt.worktree_id)?.as_ref() != Some(receipt)
+        {
+            return Err(storage_failure(
+                &receipt.cwd,
+                "source descriptor requires the current Mounted receipt",
+            ));
+        }
+        self.put_retained_manifest(receipt, layers).map(|_| ())
+    }
+
+    /// Persist both candidate views before a live source rotation can alter
+    /// its mount. The publication owner later writes the confirmed stable
+    /// descriptor while writers are still excluded.
+    pub fn put_mounted_transition(
+        &self,
+        receipt: &WorktreeReceipt,
+        before: Vec<PathBuf>,
+        after: Vec<PathBuf>,
+    ) -> Result<(), WorktreeError> {
+        if receipt.status != WorktreeRecordStatus::Mounted
+            || self.get(&receipt.worktree_id)?.as_ref() != Some(receipt)
+        {
+            return Err(storage_failure(
+                &receipt.cwd,
+                "source transition requires Mounted",
+            ));
+        }
+        let manifest = RetainedViewManifest {
+            version: 1,
+            worktree_id: receipt.worktree_id.clone(),
+            cwd: receipt.cwd.clone(),
+            layers: before,
+            pending_layers: Some(after),
+        };
+        self.validate_retained_manifest(receipt, &manifest)?;
+        #[allow(clippy::expect_used, reason = "serialize RetainedViewManifest")]
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize RetainedViewManifest");
+        self.retained.write(receipt.worktree_id.as_str(), &bytes)
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn finish_retention(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
+        let manifest = self.retained_manifest(receipt)?;
         if receipt.status != WorktreeRecordStatus::Retained
-            || self.retained_manifest(receipt)?.is_none()
+            || manifest
+                .as_ref()
+                .is_none_or(|manifest| manifest.pending_layers.is_some())
         {
             return Err(storage_failure(
                 &receipt.cwd,
@@ -321,6 +377,9 @@ impl WorktreeRegistry {
                 serde_json::from_slice(&bytes).map_err(|error| storage_failure(&path, error))?;
             self.validate_retained_manifest(receipt, &manifest)?;
             layers.extend(manifest.layers);
+            if let Some(pending) = manifest.pending_layers {
+                layers.extend(pending);
+            }
         }
         Ok(Some(layers))
     }
@@ -345,7 +404,11 @@ impl WorktreeRegistry {
                 "invalid retained-view identity or version",
             ));
         }
-        for layer in &manifest.layers {
+        for layer in manifest
+            .layers
+            .iter()
+            .chain(manifest.pending_layers.iter().flatten())
+        {
             let canonical = layer
                 .canonicalize()
                 .map_err(|error| storage_failure(layer, error))?;
@@ -405,6 +468,16 @@ impl WorktreeRegistry {
             ));
         }
         if receipt.status == WorktreeRecordStatus::Provisional {
+            if self
+                .retained_manifest(receipt)?
+                .as_ref()
+                .is_none_or(|manifest| manifest.pending_layers.is_some())
+            {
+                return Err(storage_failure(
+                    &receipt.cwd,
+                    "mounted view requires a stable durable source descriptor",
+                ));
+            }
             let head = mounted_git.try_run(visible_root, &["rev-parse", "HEAD"])?;
             let branch = mounted_git.try_run(visible_root, &["symbolic-ref", "--short", "HEAD"])?;
             if head.trimmed() != receipt.source_head.as_str()

@@ -382,6 +382,7 @@ impl OverlayResourceLease {
         let work = storage.path.join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
+        std::fs::File::open(&storage.path)?.sync_all()?;
         let empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&upper)?));
         let custody = CustodyGuard {
             dependencies: std::iter::once(storage.clone())
@@ -572,6 +573,17 @@ impl OverlayResourceLease {
         self.layers.iter().map(|layer| layer.path.clone())
     }
 
+    pub(super) fn durable_view_layers(&self) -> io::Result<Vec<PathBuf>> {
+        if !matches!(self.publication, PublicationState::Writable) {
+            return Err(io::Error::other("source rotation remains unsettled"));
+        }
+        sync_compacted_tree(&self.upper)?;
+        Ok(self
+            .layers()
+            .chain(std::iter::once(self.upper.clone()))
+            .collect())
+    }
+
     fn upper(&self) -> &Path {
         &self.upper
     }
@@ -626,6 +638,7 @@ impl OverlayResourceLease {
         namespace: &MountNamespace,
         target: &Path,
         preserved_mounts: &[PathBuf],
+        before_apply: Option<&dyn Fn(Vec<PathBuf>, Vec<PathBuf>) -> io::Result<()>>,
     ) -> io::Result<OverlayRotationOutcome> {
         if let PublicationState::Unconfirmed(pending) = &self.publication {
             let outcome = pending.recovery.reconcile();
@@ -662,6 +675,18 @@ impl OverlayResourceLease {
         )?
         .preserving_mounts(preserved_mounts)?;
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
+        if let Some(record_transition) = before_apply {
+            let before = self
+                .layers()
+                .chain(std::iter::once(self.upper.clone()))
+                .collect();
+            let after = frozen
+                .iter()
+                .map(|layer| layer.path.clone())
+                .chain(std::iter::once(upper.clone()))
+                .collect();
+            record_transition(before, after)?;
+        }
         // Once prepared, a lost receipt must never cause a second publication.
         // Preparation failures reclaim their unused directories. Once a mount
         // can exist, only confirmed transition settlement may release storage.
@@ -1339,7 +1364,7 @@ mod tests {
         let (mut parent_worker, parent_view) = Worker::start(&mut parent, &parent_project);
         parent_worker.exchange("write");
         parent
-            .publish(&parent_view, &parent_project.join("target"), &[])
+            .publish(&parent_view, &parent_project.join("target"), &[], None)
             .unwrap();
         assert!(parent.unchanged_snapshot().unwrap().is_some());
         let mut child =
@@ -1387,7 +1412,7 @@ mod tests {
         let (mut worker, view) = Worker::start(&mut resource, &project);
         worker.exchange("write");
         resource
-            .publish(&view, &project.join("target"), &[])
+            .publish(&view, &project.join("target"), &[], None)
             .unwrap();
         assert!(resource.unchanged_snapshot().unwrap().is_some());
         std::fs::set_permissions(&resource.upper, std::fs::Permissions::from_mode(0o750)).unwrap();
@@ -1402,7 +1427,9 @@ mod tests {
         let mut parent = OverlayResourceLease::allocate_path(parent_path.clone(), None).unwrap();
         let (mut worker, view) = Worker::start(&mut parent, &project);
         worker.exchange("write");
-        parent.publish(&view, &project.join("target"), &[]).unwrap();
+        parent
+            .publish(&view, &project.join("target"), &[], None)
+            .unwrap();
         let mut child = OverlayResourceLease::allocate_path(
             directory.path().join("child"),
             parent.latest_snapshot(),
@@ -1523,19 +1550,23 @@ mod tests {
         assert_eq!(worker.exchange("hold"), "held");
         let preserved = [target.clone()];
         assert!(matches!(
-            source.publish(&namespace, &project, &preserved).unwrap(),
+            source
+                .publish(&namespace, &project, &preserved, None)
+                .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
         assert_eq!(worker.exchange("write"), "wrote");
         assert!(matches!(
-            build.publish(&namespace, &target, &[]).unwrap(),
+            build.publish(&namespace, &target, &[], None).unwrap(),
             OverlayRotationOutcome::Busy
         ));
         assert_eq!(shell(&namespace, "cat file"), b"after");
         assert!(build.latest_snapshot().is_none());
 
         assert!(matches!(
-            source.publish(&namespace, &project, &preserved).unwrap(),
+            source
+                .publish(&namespace, &project, &preserved, None)
+                .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
         assert_eq!(worker.exchange("write"), "wrote");
@@ -1638,7 +1669,7 @@ mod tests {
         assert_eq!(worker.exchange("write"), "wrote");
         assert!(matches!(
             source
-                .publish(&namespace, &project.join("target"), &[])
+                .publish(&namespace, &project.join("target"), &[], None)
                 .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
@@ -1693,7 +1724,7 @@ mod tests {
             assert_eq!(worker.exchange("write"), "wrote");
             assert!(matches!(
                 parent
-                    .publish(&namespace, &project.join("target"), &[])
+                    .publish(&namespace, &project.join("target"), &[], None)
                     .unwrap(),
                 OverlayRotationOutcome::Rotated
             ));
@@ -1728,7 +1759,7 @@ mod tests {
         assert_eq!(worker.exchange("hold"), "held");
         assert!(matches!(
             parent
-                .publish(&namespace, &project.join("target"), &[])
+                .publish(&namespace, &project.join("target"), &[], None)
                 .unwrap(),
             OverlayRotationOutcome::Busy
         ));
@@ -1745,7 +1776,7 @@ mod tests {
         let (mut worker, namespace) = Worker::start(&mut parent, &project);
         assert_eq!(worker.exchange("write"), "wrote");
         let outcome = parent
-            .publish(&namespace, &project.join("target"), &[])
+            .publish(&namespace, &project.join("target"), &[], None)
             .unwrap();
         assert!(
             matches!(outcome, OverlayRotationOutcome::Rotated),
@@ -1759,7 +1790,7 @@ mod tests {
         );
         assert_eq!(worker.exchange("hold"), "held");
         let outcome = parent
-            .publish(&namespace, &project.join("target"), &[])
+            .publish(&namespace, &project.join("target"), &[], None)
             .unwrap();
         assert!(
             matches!(outcome, OverlayRotationOutcome::Busy),
@@ -1789,7 +1820,7 @@ mod tests {
         );
         assert!(matches!(
             parent
-                .publish(&namespace, &project.join("target"), &[])
+                .publish(&namespace, &project.join("target"), &[], None)
                 .unwrap(),
             OverlayRotationOutcome::Rotated
         ));

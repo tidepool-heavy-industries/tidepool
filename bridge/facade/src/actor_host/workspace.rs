@@ -980,6 +980,7 @@ impl NativeForkAdmission {
             };
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
+            let parent_worktree = parent.workspace.worktree.clone();
             let parent_helper_draft = creator_helper_draft.clone();
             let preserved = parent.workspace.source_preserved_mounts.clone();
             let capture_span = tracing::info_span!(
@@ -1022,6 +1023,7 @@ impl NativeForkAdmission {
                     &host_path,
                     &preserved,
                     source,
+                    parent_worktree.as_ref(),
                     parent_helper_draft,
                 );
                 tracing::info!(
@@ -1120,6 +1122,22 @@ impl BoundWorkspace {
             .await
             .map_err(io::Error::other)??;
         }
+        if let (Some(id), Some(source)) = (&self.workspace.worktree, &self.workspace.source) {
+            let source = source.publication.clone().lock_owned().await;
+            let manager = self.workspace.manager.clone();
+            let id = id.clone();
+            tidepool_runtime::spawn_blocking_in_span(move || -> io::Result<()> {
+                let layers = source
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("source workspace retired"))?
+                    .durable_view_layers()?;
+                manager
+                    .record_mounted_layers(&id, layers)
+                    .map_err(io::Error::other)
+            })
+            .await
+            .map_err(io::Error::other)??;
+        }
         publication.finish(backend, &self.thread).await
     }
 }
@@ -1132,6 +1150,7 @@ impl WorkspaceLayout {
         source_path: &Path,
         preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
+        parent_worktree: Option<&WorktreeId>,
         parent_helper_draft: Option<PathBuf>,
     ) -> io::Result<CapturedSource> {
         let files = namespace.retained_view_path(Path::new(ACTOR_PROJECT_ROOT))?;
@@ -1176,6 +1195,19 @@ impl WorkspaceLayout {
                     namespace,
                     Path::new(ACTOR_PROJECT_ROOT),
                     preserved,
+                    parent_worktree
+                        .map(|id| {
+                            let manager = &self.worktrees;
+                            move |before, after| {
+                                manager
+                                    .record_mounted_transition(id, before, after)
+                                    .map_err(io::Error::other)
+                            }
+                        })
+                        .as_ref()
+                        .map(|record| {
+                            record as &dyn Fn(Vec<PathBuf>, Vec<PathBuf>) -> io::Result<()>
+                        }),
                 )? {
                     exomonad_node::OverlayRotationOutcome::Rotated => {
                         Ok(parent_source.latest_snapshot().ok_or_else(|| {
@@ -1287,6 +1319,7 @@ impl WorkspaceLayout {
                     namespace,
                     &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
                     &[],
+                    None,
                 )?;
                 tracing::info!(?outcome, "workspace build snapshot publication");
                 if let exomonad_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
@@ -1309,6 +1342,10 @@ impl WorkspaceLayout {
             source,
             fallback,
         } = captured;
+        let layers = source
+            .as_ref()
+            .map(OverlayResourceLease::durable_view_layers)
+            .transpose()?;
         let id = git.receipt().worktree_id.clone();
         let path = git.receipt().cwd.clone();
         if source.is_none() {
@@ -1346,7 +1383,12 @@ impl WorkspaceLayout {
         )?;
         let handle = self
             .worktrees
-            .finish_inherited_source(git, workspace.view.clone(), Path::new(ACTOR_PROJECT_ROOT))
+            .finish_inherited_source(
+                git,
+                workspace.view.clone(),
+                Path::new(ACTOR_PROJECT_ROOT),
+                layers.ok_or_else(|| io::Error::other("mounted source lacks layers"))?,
+            )
             .map_err(io::Error::other)?;
         Ok(AdmittedWorkspace {
             handle: handle_to_wire(&handle),

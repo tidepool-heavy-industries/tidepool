@@ -5,9 +5,84 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use exomonad_worktree::{
-    BranchName, GitOid, WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
-    WorktreeRegistry,
+    BranchName, GitCli, GitOid, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
+    WorktreeRecordStatus, WorktreeRegistry,
 };
+
+#[test]
+fn mounted_descriptor_requires_exact_stable_rotation_before_recovery() {
+    let storage = tempfile::tempdir().unwrap();
+    let root = storage.path();
+    let base = root.join("worktrees/.resources/run/root/source/base");
+    let old_upper = root.join("worktrees/.resources/run/child/source/upper");
+    let next_upper = root.join("worktrees/.resources/run/child/source/next-upper");
+    for path in [&base, &old_upper, &next_upper] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(old_upper.join("dirty"), "preserved").unwrap();
+    let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let id = WorktreeId::from_raw("wt-live");
+    let cwd = root.join("worktrees/wt-live");
+    fs::create_dir_all(&cwd).unwrap();
+    let receipt = WorktreeReceipt {
+        worktree_id: id.clone(),
+        cwd,
+        branch: BranchName::from_raw("exomonad/worktree/live"),
+        source_head: GitOid::from_raw("a".repeat(40)),
+        snapshot_ref: None,
+        origin: WorktreeOrigin::CurrentRepository,
+        source_repository: root.to_owned(),
+        created_at_ms: 1,
+        status: WorktreeRecordStatus::Mounted,
+    };
+    registry.put(&receipt).unwrap();
+    let manager = WorktreeManager::new(
+        GitCli::new(),
+        registry.clone(),
+        root.join("worktrees"),
+        root,
+    );
+    assert!(manager.seal_orphaned_mounted_view(&id).is_err());
+    assert!(registry.source_layer_references().unwrap().is_none());
+    registry
+        .put_retained_manifest(&receipt, vec![base.clone(), old_upper.clone()])
+        .unwrap();
+    registry
+        .put_mounted_transition(
+            &receipt,
+            vec![base.clone(), old_upper.clone()],
+            vec![base.clone(), old_upper.clone(), next_upper.clone()],
+        )
+        .unwrap();
+    assert!(manager.seal_orphaned_mounted_view(&id).is_err());
+    assert_eq!(
+        registry.source_layer_references().unwrap().unwrap().len(),
+        3
+    );
+    // A restart sees the same ambiguous descriptor and cannot infer the
+    // winner from directory presence.
+    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let manager = WorktreeManager::new(
+        GitCli::new(),
+        reopened.clone(),
+        root.join("worktrees"),
+        root,
+    );
+    assert!(manager.seal_orphaned_mounted_view(&id).is_err());
+    reopened
+        .put_mounted_layers(&receipt, vec![base.clone(), old_upper.clone(), next_upper])
+        .unwrap();
+    manager.seal_orphaned_mounted_view(&id).unwrap();
+    manager.seal_orphaned_mounted_view(&id).unwrap();
+    assert_eq!(
+        reopened.get(&id).unwrap().unwrap().status,
+        WorktreeRecordStatus::Retained
+    );
+    assert_eq!(
+        fs::read_to_string(old_upper.join("dirty")).unwrap(),
+        "preserved"
+    );
+}
 
 fn allocated_bytes(root: &Path) -> u64 {
     let mut pending = vec![root.to_owned()];
@@ -22,6 +97,42 @@ fn allocated_bytes(root: &Path) -> u64 {
         }
     }
     bytes
+}
+
+#[test]
+fn interrupted_admission_keeps_provisional_descriptor_layers() {
+    let storage = tempfile::tempdir().unwrap();
+    let root = storage.path();
+    let base = root.join("worktrees/.resources/run/root/source/base");
+    let upper = root.join("worktrees/.resources/run/child/source/upper");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let receipt = WorktreeReceipt {
+        worktree_id: WorktreeId::from_raw("wt-admission"),
+        cwd: root.join("worktrees/wt-admission"),
+        branch: BranchName::from_raw("exomonad/worktree/admission"),
+        source_head: GitOid::from_raw("a".repeat(40)),
+        snapshot_ref: None,
+        origin: WorktreeOrigin::CurrentRepository,
+        source_repository: root.to_owned(),
+        created_at_ms: 1,
+        status: WorktreeRecordStatus::Provisional,
+    };
+    fs::create_dir_all(&receipt.cwd).unwrap();
+    registry.put(&receipt).unwrap();
+    registry
+        .put_retained_manifest(&receipt, vec![base.clone(), upper.clone()])
+        .unwrap();
+    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    assert_eq!(
+        reopened.source_layer_references().unwrap().unwrap(),
+        [base, upper].into_iter().collect()
+    );
+    assert_eq!(
+        reopened.get(&receipt.worktree_id).unwrap().unwrap().status,
+        WorktreeRecordStatus::Provisional
+    );
 }
 
 #[test]

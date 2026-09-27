@@ -128,7 +128,9 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
     let root = storage.path();
-    let base = root.join("base");
+    let source_root = root.join("worktrees/.resources/run/source");
+    std::fs::create_dir_all(&source_root).unwrap();
+    let base = source_root.join("base");
     git.try_run(
         repository.path(),
         &[
@@ -157,7 +159,12 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         "build-uc",
         "build-wc",
     ] {
-        std::fs::create_dir(root.join(name)).unwrap();
+        std::fs::create_dir(if name.starts_with("source-") {
+            source_root.join(name)
+        } else {
+            root.join(name)
+        })
+        .unwrap();
     }
     std::fs::create_dir(base.join("target")).unwrap();
     let view = root.join("view");
@@ -175,8 +182,8 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             .unwrap()
             .with_overlay_view(
                 source_layers,
-                root.join(source_upper),
-                root.join(source_work),
+                source_root.join(source_upper),
+                source_root.join(source_work),
                 &view,
             )
             .unwrap()
@@ -229,14 +236,14 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         matches!(outcome, OverlayRotationOutcome::Rotated),
         "{outcome:?}"
     );
-    let source_layers = vec![base, root.join("source-u0")];
+    let source_layers = vec![base, source_root.join("source-u0")];
     assert!(matches!(
         parent.rotate_overlay(
             OverlayRotation::prepare(
                 &view,
                 &source_layers,
-                &root.join("source-u1"),
-                &root.join("source-w1")
+                &source_root.join("source-u1"),
+                &source_root.join("source-w1")
             )
             .unwrap()
             .preserving_mounts(std::slice::from_ref(&target))
@@ -268,7 +275,16 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         .unwrap();
     let wrong_id = wrong_view.receipt().worktree_id.clone();
     assert!(matches!(
-        manager.finish_inherited_source(wrong_view, parent.clone(), &view),
+        manager.finish_inherited_source(
+            wrong_view,
+            parent.clone(),
+            &view,
+            vec![
+                source_root.join("base"),
+                source_root.join("source-u0"),
+                source_root.join("source-uc")
+            ]
+        ),
         Err(exomonad_worktree::WorktreeError::WorktreeAuthorityDenied(_))
     ));
     assert_eq!(
@@ -294,9 +310,9 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         std::fs::read(parent_admin.join("index")).unwrap(),
         original_index
     );
-    std::fs::copy(prepared.git_file(), root.join("source-uc/.git")).unwrap();
+    std::fs::copy(prepared.git_file(), source_root.join("source-uc/.git")).unwrap();
     let child = boundary(
-        source_layers,
+        source_layers.clone(),
         "source-uc",
         "source-wc",
         build_layers,
@@ -316,7 +332,15 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         repository.path(),
     );
     let handle = manager
-        .finish_inherited_source(prepared, child.clone(), &view)
+        .finish_inherited_source(
+            prepared,
+            child.clone(),
+            &view,
+            source_layers
+                .into_iter()
+                .chain(std::iter::once(source_root.join("source-uc")))
+                .collect(),
+        )
         .unwrap();
     assert_eq!(handle.receipt().status, WorktreeRecordStatus::Mounted);
     assert!(host_manager.lookup(handle.id()).unwrap().is_some());

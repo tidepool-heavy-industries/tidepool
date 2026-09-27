@@ -361,10 +361,79 @@ impl WorktreeManager {
         if !view.namespace.same_view_as(namespace).map_err(failure)? || view.root != visible {
             return Err(failure(std::io::Error::other("retirement view mismatch")));
         }
-        self.registry.put_retained_manifest(&receipt, layers)?;
+        let descriptor = self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+            failure(std::io::Error::other(
+                "mounted source descriptor is missing",
+            ))
+        })?;
+        if descriptor.pending_layers.is_some() || descriptor.layers != layers {
+            return Err(failure(std::io::Error::other(
+                "retirement source differs from the confirmed mounted descriptor",
+            )));
+        }
         receipt.status = WorktreeRecordStatus::Retained;
         self.registry.finish_retention(&receipt)?;
         Ok(())
+    }
+
+    /// Record the exact live source view while its publication gate excludes
+    /// writers. This descriptor is the recovery authority after host loss.
+    #[cfg(target_os = "linux")]
+    pub fn record_mounted_layers(
+        &self,
+        id: &WorktreeId,
+        layers: Vec<PathBuf>,
+    ) -> Result<(), WorktreeError> {
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        self.registry.put_mounted_layers(&receipt, layers)
+    }
+
+    /// Pin both sides of a source rotation before its mount can change.
+    #[cfg(target_os = "linux")]
+    pub fn record_mounted_transition(
+        &self,
+        id: &WorktreeId,
+        before: Vec<PathBuf>,
+        after: Vec<PathBuf>,
+    ) -> Result<(), WorktreeError> {
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        self.registry
+            .put_mounted_transition(&receipt, before, after)
+    }
+
+    /// Called only after the facade proves the predecessor process retired.
+    /// An ambiguous rotation cannot be resolved from surviving filesystem
+    /// paths, so it remains visibly Mounted and keeps both layer sets pinned.
+    #[cfg(target_os = "linux")]
+    pub fn seal_orphaned_mounted_view(&self, id: &WorktreeId) -> Result<(), WorktreeError> {
+        let mut receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status != WorktreeRecordStatus::Mounted {
+            return Ok(());
+        }
+        let manifest = self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+            crate::storage::storage_failure(&receipt.cwd, "mounted source descriptor is missing")
+        })?;
+        if manifest.pending_layers.is_some() {
+            return Err(crate::storage::storage_failure(
+                &receipt.cwd,
+                "mounted source rotation is ambiguous",
+            ));
+        }
+        let upper = manifest.layers.last().ok_or_else(|| {
+            crate::storage::storage_failure(&receipt.cwd, "mounted source descriptor is empty")
+        })?;
+        sync_restored_tree(upper).map_err(|error| crate::storage::storage_failure(upper, error))?;
+        receipt.status = WorktreeRecordStatus::Retained;
+        self.registry.finish_retention(&receipt)
     }
 
     /// A committed-source fallback already has ordinary host working files.
@@ -922,6 +991,7 @@ impl WorktreeManager {
         prepared: PreparedSourceWorktree,
         namespace: exomonad_node::MountNamespace,
         visible_root: &Path,
+        layers: Vec<PathBuf>,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let receipt = prepared.receipt;
         if self.registry.get(&receipt.worktree_id)?.as_ref() != Some(&receipt) {
@@ -929,6 +999,7 @@ impl WorktreeManager {
                 "source preparation does not match this worktree registry".into(),
             ));
         }
+        self.registry.put_retained_manifest(&receipt, layers)?;
         let finalized = self
             .registry
             .install_view(&receipt, namespace, visible_root)?;

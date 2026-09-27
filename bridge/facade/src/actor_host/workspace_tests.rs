@@ -1258,6 +1258,11 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     std::fs::write(repo.path().join("file"), "working").unwrap();
     std::fs::write(repo.path().join("untracked"), "untracked").unwrap();
     std::fs::write(repo.path().join("ignored"), "ignored").unwrap();
+    std::fs::write(
+        repo.path().join("shared-large.bin"),
+        vec![0x5a; 2 * 1024 * 1024],
+    )
+    .unwrap();
     std::fs::create_dir(repo.path().join("target")).unwrap();
     std::fs::write(repo.path().join("target/source"), "ordinary source").unwrap();
     let source_modified = std::fs::metadata(repo.path().join("file"))
@@ -1350,6 +1355,19 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         child.inheritance_notice
     );
     let child = child.workspace.as_ref().unwrap();
+    let mounted = admission
+        .manager
+        .registry()
+        .get(child.worktree.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    let initial_descriptor = admission
+        .manager
+        .registry()
+        .retained_manifest(&mounted)
+        .unwrap()
+        .unwrap();
+    assert!(initial_descriptor.pending_layers.is_none());
     assert_eq!(
         shell(child, "git -C .exomonad/workspace rev-parse HEAD").trim(),
         root_workspace_head
@@ -1406,6 +1424,58 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         bytes
     };
     let root_bytes = allocated(layout.resource_root("root").join("build"));
+    // Exercise actual admission, inherited mounts, and retirement for several
+    // tiny writers. Their source resources must reference the same large root
+    // base instead of copying its merged view once per retired child.
+    let shared_base_bytes = allocated(
+        layout
+            .resource_root(child.worktree.as_ref().unwrap().as_str())
+            .join("source"),
+    );
+    let mut retired_child_source_bytes = 0;
+    for ordinal in 0..4 {
+        let path = format!("root/tiny-{ordinal}");
+        let admitted = admission
+            .admit(root, path.clone().into(), seed(), CODING)
+            .await
+            .unwrap()
+            .install(ActorRef::first(exomonad_actor::ActorId(40 + ordinal)))
+            .unwrap();
+        let admitted = (admitted.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        let tiny = admitted.workspace.as_ref().unwrap();
+        shell(tiny, &format!("printf {ordinal} > tiny-change"));
+        let id = tiny.worktree.as_ref().unwrap();
+        let head = shell(tiny, "git rev-parse HEAD");
+        tiny.retire(&tiny.view).await.unwrap();
+        let summary = admission
+            .manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|entry| &entry.receipt.worktree_id == id)
+            .unwrap();
+        assert!(summary.present);
+        assert_eq!(
+            summary.receipt.status,
+            exomonad_worktree::WorktreeRecordStatus::Retained
+        );
+        assert_eq!(
+            admission
+                .manager
+                .worktree_head_by_id(id)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            head.trim()
+        );
+        retired_child_source_bytes += allocated(layout.resource_root(id.as_str()).join("source"));
+    }
+    assert!(
+        retired_child_source_bytes < shared_base_bytes,
+        "four retired tiny children copied the shared source: {retired_child_source_bytes} versus {shared_base_bytes} bytes"
+    );
     let child_bytes = allocated(
         layout
             .resource_root(child.worktree.as_ref().unwrap().as_str())
@@ -1739,6 +1809,14 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         grandchild.inheritance_notice
     );
     let grandchild = grandchild.workspace.as_ref().unwrap();
+    let rotated_descriptor = admission
+        .manager
+        .registry()
+        .retained_manifest(&mounted)
+        .unwrap()
+        .unwrap();
+    assert!(rotated_descriptor.pending_layers.is_none());
+    assert!(rotated_descriptor.layers.len() > initial_descriptor.layers.len());
     assert_eq!(
         shell(
             grandchild,
