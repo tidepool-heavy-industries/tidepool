@@ -160,10 +160,11 @@ bindings; `-` reads the cell from standard input and `--actors` prints the actor
 graph. See [the operator interface](operator-http.md).
 
 **Change code without restarting.** Workspace modules are captured at launch.
-After an agent edits one, `reloadSource` typechecks the edited source and
-publishes it for later cells, or refuses and leaves the session as it was.
-`reload_agent_spec` rebuilds the agent's own typed tool record from the
-published source, so later tool calls use the edited body. A reload that would
+The run owner can edit the run workspace and call `reloadSource` to typecheck
+and publish its authored modules for later cells. Child actors use that same
+run tooling; editing a historical module in a child checkout does not reload
+it. The run owner can call `reload_agent_spec` to rebuild its own typed tool
+record from published source. A reload that would
 change a tool's name, description or argument types is refused with the
 difference, and takes effect at the agent's next incarnation. Prompts, and the
 Haskell library Tidepool ships, change only with a new run.

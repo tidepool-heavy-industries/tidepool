@@ -69,9 +69,10 @@ specific uncertainty. Define the observable outcome and stopping condition,
 exercise a failure path, and bring the result back to the design discussion.
 Distinguish proposed behavior, successful compilation and actual execution.
 
-`reloadSource` typechecks and atomically publishes edited workspace modules for
-later cells; `reload_agent_spec` rebuilds your own typed tool record from them
-(a changed tool surface requires a new actor incarnation). `Project.Shell`,
+The run owner can use `reloadSource` to typecheck and publish edited run
+workspace modules, then `reload_agent_spec` to rebuild its own typed tool
+record (a changed tool surface requires a new actor incarnation). Workers use
+the run's tooling; editing a child checkout does not reload it. `Project.Shell`,
 `Project.Lookup` and `Project.Watchdog` are the worked examples of presenters,
 selectors and after-tool monitors.
 

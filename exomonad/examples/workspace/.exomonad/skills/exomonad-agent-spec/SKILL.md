@@ -5,14 +5,15 @@ description: Use when declaring or reloading the typed tools available to an Exo
 
 An agent spec selects one Haskell record of tools. Its fields and their types
 define the hosted tool names, schemas, and typed inputs and outputs. Nested tool
-records compose at the field where they are included. The spec is source in the
-actor's checkout; saving a file does not install it.
+records compose at the field where they are included. The installed spec is
+compiled from the run's current source; saving a file does not install it.
 
 ## Find and check the spec
 
 The conventional module is `AgentSpec`, exporting `agentSpec`. Workspace
 configuration may instead set `[haskell] spec`; `[haskell] tools` names a tools
-record when there is no agent spec. Use `status` with `view: "detailed"` to see
+record when there is no agent spec. The spec comes from the run's current
+tooling graph, not a child's historical checkout. Use `status` with `view: "detailed"` to see
 the selected rule, source file, and installed revision. Run
 `exomonad check --workspace <path>` to typecheck a workspace before launch.
 
@@ -40,9 +41,10 @@ of acceptance or completion. Use a tool's typed seam for result presentation.
 
 ## Reload
 
-Edit the spec with ordinary workspace file tools, then call
-`reload_agent_spec`. It publishes the checkout's source layer and rebuilds
-your own spec. A typecheck failure or changed declared tool name, description,
+The run owner edits the run workspace, calls `reloadSource`, then calls
+`reload_agent_spec` to rebuild its own spec. A child can prepare edits in its
+checkout, but cannot publish them into the active run tooling. A typecheck
+failure or changed declared tool name, description,
 kind, schema, or order refuses the reload and leaves the installed record
 active. A tool call already running keeps its implementation. A changed tool
 surface takes effect in a new actor incarnation; this reload never changes a

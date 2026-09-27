@@ -10,6 +10,7 @@ can continue. `Cmd.run` instead uses foreground handoff when observation expires
 Choose between those execution semantics explicitly when authoring a new tool.
 
 Schemas and dispatch derive from the same Haskell record. The declared surface
-is fixed for an actor incarnation; `reload_agent_spec` can replace implementations
-but refuses changed names, descriptions, argument types, or order. Such changes
-require a new incarnation. `reloadSource` alone only publishes source for cells.
+is fixed for an actor incarnation. The run owner can use `reloadSource` and
+`reload_agent_spec` to replace its implementation; child checkout edits do not
+alter installed run tooling. A reload refuses changed names, descriptions,
+argument types, or order. Such changes require a new incarnation.
