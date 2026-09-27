@@ -164,8 +164,7 @@ const SLEEPS_THEN_ANNOTATES: &str =
 
 /// A slot that runs the tool's own implementation. Its own tool use must not
 /// bring it back round on itself.
-const REENTERS: &str =
-    "Annotated . (T.pack \"the slot ran the tool body and got: \" <>) <$> Tools.probeBody (Tools.Probe (T.pack \"again\"))";
+const REENTERS: &str = "Annotated . (T.pack \"the slot ran the tool body and got: \" <>) <$> Tools.probeBody (Tools.Probe (T.pack \"again\"))";
 
 const CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
                       [haskell]\nsource_roots = ['.']\nmodules = ['Project.Tools']\n\
@@ -407,6 +406,81 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
 
     let after = probe(policy).await;
     assert!(after.contains("two"), "{after}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() {
+    let campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".exomonad");
+            // The authored spec shadows a pinned shared package on a second
+            // source root. The shared tool record still uses Project.Shell
+            // after the root spec drops its Watchdog import.
+            let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.exomonad/workspace");
+            for directory in ["Project", "Jev"] {
+                let destination = authored.join("workspace").join(directory);
+                std::fs::create_dir_all(&destination).unwrap();
+                for entry in std::fs::read_dir(shared.join(directory)).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "hs")
+                    {
+                        std::fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+                    }
+                }
+            }
+            std::fs::write(
+                authored.join("config.toml"),
+                include_str!("fixtures/spec_reload_config.toml"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                include_str!("fixtures/spec_reload_with_slot.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                config.workspace.join("flake.nix"),
+                include_str!("fixtures/spec_reload_flake.nix"),
+            )
+            .unwrap();
+            std::fs::write(
+                config.workspace.join("flake.lock"),
+                include_str!("fixtures/spec_reload_flake.lock"),
+            )
+            .unwrap();
+            commit(&config.workspace, "capture reload fixture inputs");
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
+
+    std::fs::write(
+        workspace.join(".exomonad/AgentSpec.hs"),
+        include_str!("fixtures/spec_reload_without_slot.hs"),
+    )
+    .unwrap();
+    let receipt = reload(policy).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
