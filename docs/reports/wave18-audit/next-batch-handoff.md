@@ -28,9 +28,9 @@ otherwise were retracted. Pending unpaired results are a separate limitation.
 | Cost attribution and RSI pruning policy | Tidepool db9a44341 | Fixed-prefix parser reproduced aggregates. |
 | Shared bounded non-tool context for Lookup/Sift | rsi-jev/context, 51c818b7b; equivalent 330e049 | Five focused assertions passed; configured definitions compiled. No future-wave savings measurement yet. |
 | Remove default blanket watchdog | rsi-wave18/shared-integration, e02e8b3; canonical harness 9f1ace7 | Shared AgentSpec compiled. Shared pin/template not integrated. Live adoption failed; old installed tools remain. |
-| Preserve failed integration source | rsi-wave18/preserve-red, 7f31af0 and 162aa03 | Definitions compiled; focused recipe stopped after about four minutes, exit 130, assertions unverified. Owned daemon torn down. MergeChecks has one uncommitted escaped-quote fix. No hidden reset; publication stays separate. |
-| Reviewed checkpoints and mutable notification policy | rsi-wave18/reviewed-checkpoints | Uncommitted, uncompiled. Types/Work/Routing/RoutingChecks and check fixture. Polls original response, verifies request/source/basis; retains one history. Pattern-synonym compatibility needs checking. |
-| Spec-reload regression | rsi-wave18/spec-reload | Uncommitted Rust test plus five Haskell fixtures; no build or run; no production fix. |
+| Preserve failed integration source | rsi-wave18/preserve-red, 7f31af0, 162aa03, ccc3c5f | Definitions compiled; strengthened recipe includes post-check edits, execution pending. No hidden reset; publication stays separate. |
+| Reviewed checkpoints and mutable notification policy | rsi-wave18/reviewed-checkpoints | Definitions compiled; seven admission assertions passed. Routing checks pending fixture corrections. Polls original response, verifies request/source/basis and clean review source; retains one history. |
+| Spec-reload regression | rsi-wave18/spec-reload | Minimal test passed 1/1. Faithful source/config test unexecuted after interrupted dependency rebuild; no production fix. |
 | Optional generic watchdog packet redesign | rsi-jev/watchdog | Uncommitted. Definitions compiled; two recipe attempts stopped after expensive compilation without completion. Held, not a proposed launch dependency. |
 
 ## Reload blocker
@@ -42,7 +42,7 @@ Whether extraction or compilation/retention caused that absence is unresolved.
 The separate prepared-helper draft/active mismatch has not been causally linked.
 Run the isolated regression before choosing a production fix; no live retry yet.
 
-## Candidate experiments for discussion
+## Approved experiments
 
 1. Extend existing ReviewFlow admission/composition: exact candidate -> supplied
    counted checks -> exact review. One shared repair budget; uncertain semantics
@@ -67,18 +67,19 @@ Run the isolated regression before choosing a production fix; no live retry yet.
   reviewed slices remain inspectable.
 - Test preservation of red integration by observing no destructive command,
   including edits made after a check, not just a returned constructor.
-- Decide whether to drop the optional watchdog redesign entirely or retain it as
-  an opt-in experiment. It should not delay removal of the default hook.
+- Keep the generic-watchdog draft out of integration. Test a bounded declared
+  checkpoint reminder; it does not restore the default after-tool hook.
 - Choose a bounded experiment rather than launching every proposed mechanism.
   Include setup/recovery cost, frontier turns, Jev input, and useful outcomes.
 
-## Wave acceptance at last observation
+## Wave acceptance at the retained audit checkpoint
 
-Root e397e9d includes reviewed Runtime/UI slices. Standalone c9e4186 / owner
-integration 52081e2 was not accepted or root-merged. Repeated call-ID and stale
-reopen-test repairs were assigned to retained actor44, request67. Operator
-request7 still needs repaired-producer browser and staged-release acceptance.
-Component check reports are not product acceptance. Keep the root alive.
+Repaired producer a7d742e8 has typed Accepted review 69 from actor 57; owner
+integration a5409d0d reports seven focused 1/1 checks. Root product acceptance
+remains separate. Request 71 owns missing native async tool-definition/call-item
+metadata; operator request 7 and integrated browser/staged-binary evidence remain
+open at that checkpoint. See `latency-delivery.md` for exact evidence and limits.
+This is retained evidence, not a fresh live poll. Keep the root alive.
 
 ## Source records
 
@@ -119,5 +120,39 @@ Our changes supply verified APIs and examples for reconciliation; do not duplica
 those owners. One expensive compilation slot across our active local lanes;
 external interface checks use their own target and are observed before launching.
 
-The earlier status table is the planning snapshot, not the current verification
-verdict. No implementation described here has been pinned/deployed by this batch.
+No implementation described here has been pinned/deployed by this batch.
+
+## Finding from implementation checks
+
+The preserve-red recipe reached a runtime `RecordConstruction` failure in
+`Project.Merge`: its `MergeRequest` omitted `mergeSourceWorktree`. Definition
+compilation had accepted that partial record. The repair carries the actual
+source worktree from the original response through `Evidence` and `PublishRequest`.
+Focused re-execution is pending. This is an existing publication-path defect,
+not a failure of the new red-retention branch.
+
+Follow-up worth investigating: surface missing-required-record-field diagnostics
+at the authored-source boundary, before runtime. Do not silently impose a global
+Haskell warning-as-error policy without checking intentional partial records and
+which diagnostics the existing compiler owner already retains.
+
+## Completion order and next-wave boundary
+
+The user requests completion of this improvement set, then a discussion of the
+current harness milestone and next product work before launching a Sol-root wave.
+No successor launch is authorized merely by finishing these checks.
+
+Interface A-F are reviewed and applied in dependency order to
+`rsi/w18-interface-integration` at `7ab3f645b`; the original reviewed hashes,
+exclusive ranges and test evidence remain in
+`/home/inanna/dev/exomonad-interface/HANDOFF.md`. This is source integration,
+not combined verification or deployment. The Codex test-only companion remains
+separate. The integration draft corrects stale automatic rollback guidance in
+`exomonad/prompts/docs/tree.md`.
+
+Preserve-red final focused execution passed all seven assertions, including
+source provenance and edits retained after a failed check; branch tip
+`bf2881783ef0d83be309683a0fc040c5360aadfb`, integrated into shared-source batch
+branch at `16b6f51`. This supersedes its earlier pending status above.
+Reviewed-checkpoint final rerun is in progress; checked-review behavioral tests,
+semantic trials and faithful reload regression remain pending.
