@@ -44,6 +44,7 @@ pub enum ActorReq {
     ActorCallWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorTryCallWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorCastWith((i64, i64), tidepool_bridge::HaskellValue),
+    ActorTryCastWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorDrainWith((i64, i64)),
     ActorReplaceWith(
         (i64, i64),

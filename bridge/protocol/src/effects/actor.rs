@@ -427,6 +427,26 @@ pub fn actor() -> Effect {
                 extract: None,
             },
             Verb {
+                ctor: "ActorTryCastWith",
+                method: "actor_try_cast_with",
+                args: vec![
+                    Arg {
+                        name: "actor",
+                        ty: address_type(),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "request",
+                        ty: HsType::app(HsType::Var("protocol"), HsType::Unit),
+                        rust: RustBinding::HaskellValue,
+                    },
+                ],
+                ret: HsType::either(HsType::Text, HsType::Unit),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
                 ctor: "ActorDrainWith",
                 method: "actor_drain_with",
                 args: vec![Arg {

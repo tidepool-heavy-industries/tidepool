@@ -4652,6 +4652,28 @@ async fn record_actor_dispatches_typed_routes_and_commits_state() {
 }
 
 #[tokio::test]
+async fn record_try_send_reports_mailbox_admission_without_waiting_for_handler() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            include_str!("record_actor_try_send.hs"),
+        ),
+    )
+    .await
+    .expect("self admission must not wait on the receiver's handler");
+    assert_eq!(result["status"], "committed", "{result:?}");
+    assert_eq!(
+        result["items"].as_array().unwrap().last().unwrap()["output"],
+        "True",
+        "{result:?}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn root_journal_effect_appends_a_typed_record() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(

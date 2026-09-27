@@ -29,7 +29,7 @@ module Tidepool.Actor.Record
   , Send, Request, EventHandler, EventSource
   , on, progress, settlement, lifecycle, command
   , get, gets, put, modify'
-  , start, client, send, call, finish, replace
+  , start, client, send, trySend, call, finish, replace
   , definition, withWorktree
   , self, sender, ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
@@ -89,13 +89,20 @@ infix 0 :-
 
 -- Endpoints contain only the capability for one route. Their constructors are
 -- private; a client cannot manufacture source events or a dispatch function.
-newtype Send input = Send
-  { runSend :: forall effects. Member Actor effects => input -> Eff effects () }
+data Send input = Send
+  { runSend :: forall effects. Member Actor effects => input -> Eff effects ()
+  , runTrySend :: forall effects. Member Actor effects => input -> Eff effects (Either Text ())
+  }
 newtype Request input output = Request
   { runCall :: forall effects. Member Actor effects => input -> Eff effects output }
 
 send :: Member Actor effects => Send input -> input -> Eff effects ()
 send endpoint input = runSend endpoint input
+
+-- | Report whether the exact target mailbox accepted this message. A Right
+-- value does not wait for the handler or report its result.
+trySend :: Member Actor effects => Send input -> input -> Eff effects (Either Text ())
+trySend endpoint input = runTrySend endpoint input
 
 call :: Member Actor effects => Request input output -> input -> Eff effects output
 call endpoint input = runCall endpoint input
@@ -206,6 +213,9 @@ newtype Address api = Address (Int, Int)
 sendTo :: Member Actor effects => Address api -> Message api () -> Eff effects ()
 sendTo (Address address) = Eff.send . Core.ActorCastWith address
 
+trySendTo :: Member Actor effects => Address api -> Message api () -> Eff effects (Either Text ())
+trySendTo (Address address) = Eff.send . Core.ActorTryCastWith address
+
 callTo :: Member Actor effects => Address api -> Message api result -> Eff effects result
 callTo (Address address) = Eff.send . Core.ActorCallWith address
 
@@ -250,8 +260,12 @@ instance (s ~ OneState (States (Schema api))) => GActor api (K1 i (State s)) whe
   states (View (K1 value)) = [value]
 
 instance GActor api (K1 i (Call input NoReply)) where
-  endpoints ref select = View (K1 (Send (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
-  selfEndpoints ref select = View (K1 (Send (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
+  endpoints ref select = View (K1 (Send
+    (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))
+    (\input -> trySendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
+  selfEndpoints ref select = View (K1 (Send
+    (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))
+    (\input -> trySendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
   sources _ _ = []
   states _ = []
 

@@ -2636,32 +2636,24 @@ where
                 continuation,
                 request,
             } => {
-                let target_ref = kernel.resolve(target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(target).to_string(),
-                    )
-                })?;
-                let target_context = kernel.session_context(target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(target).to_string(),
-                    )
-                })?;
-                let request = self
-                    .environment
-                    .runner
-                    .transfer_mailbox_value(
-                        context.clone(),
-                        request,
-                        target_context.placement.session,
-                        target_context.placement.resource_scope,
-                    )
-                    .await?;
-                target_ref.cast(context.actor, request).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                })?;
+                self.enqueue_cast(kernel, context, target, request).await?;
                 self.environment
                     .runner
                     .resume_unit(context.clone(), continuation)
+                    .await
+            }
+            ResidentOutbound::TryCast {
+                target,
+                continuation,
+                request,
+            } => {
+                let result = self
+                    .enqueue_cast(kernel, context, target, request)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, result)
                     .await
             }
             ResidentOutbound::Call {
@@ -2705,6 +2697,35 @@ where
                     .await
             }
         }
+    }
+
+    async fn enqueue_cast(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        target: ActorRef,
+        request: crate::MailboxValue,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let unavailable = || {
+            ResidentActorWorkbenchError::ActorProtocol(
+                KernelCallFailure::TargetUnavailable(target).to_string(),
+            )
+        };
+        let target_ref = kernel.resolve(target).ok_or_else(&unavailable)?;
+        let target_context = kernel.session_context(target).ok_or_else(&unavailable)?;
+        let request = self
+            .environment
+            .runner
+            .transfer_mailbox_value(
+                context.clone(),
+                request,
+                target_context.placement.session,
+                target_context.placement.resource_scope,
+            )
+            .await?;
+        target_ref
+            .cast(context.actor, request)
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))
     }
 
     /// Byte budget for the reply a settlement notice carries. A reply within

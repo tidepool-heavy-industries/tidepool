@@ -18,6 +18,7 @@ pub fn actor_decl() -> crate::EffectDecl {
             "ActorCallWith :: (Int, Int) -> protocol result -> Actor result",
             "ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus",
             "ActorCastWith :: (Int, Int) -> protocol () -> Actor ()",
+            "ActorTryCastWith :: (Int, Int) -> protocol () -> Actor (Either Text ())",
             "ActorDrainWith :: (Int, Int) -> Actor ()",
             "ActorReplaceWith :: (Int, Int) -> (state -> Eff childEffs ()) -> Text -> ActorEffectProfile -> [Text] -> Actor (Int, Int)",
         ],

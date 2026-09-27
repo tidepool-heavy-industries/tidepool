@@ -1418,6 +1418,7 @@ impl ResidentActorBoundary {
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
+            Self::Outbound(ResidentOutbound::TryCast { .. }) => "tryCast",
             Self::Drain { .. } => "drainActor",
             Self::Wait(_) => "awaitExit",
             Self::Poll(_) => "pollExit",
@@ -1722,6 +1723,7 @@ impl ResidentRequest {
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
             Self::Actor(crate::generated::actor::ActorReq::ActorTryCallWith(..)) => "tryCall",
             Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
+            Self::Actor(crate::generated::actor::ActorReq::ActorTryCastWith(..)) => "tryCast",
             Self::Actor(crate::generated::actor::ActorReq::ActorDrainWith(..)) => "drainActor",
             Self::Actor(crate::generated::actor::ActorReq::ActorReplaceWith(..)) => "replaceActor",
             Self::ActorKernel(
@@ -6560,6 +6562,17 @@ where
                         OutboundKind::Cast,
                         actor_realm,
                     ),
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorTryCastWith(
+                        target,
+                        _,
+                    )) => capture_outbound_boundary(
+                        session,
+                        context,
+                        hole,
+                        target,
+                        OutboundKind::TryCast,
+                        actor_realm,
+                    ),
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorReplaceWith(target, ..)) => {
                         let target = crate::wait::decode_address(target.0, target.1)?;
                         let table = session.data_con_table().clone();
@@ -8480,6 +8493,7 @@ enum OutboundKind {
     Call,
     TryCall,
     Cast,
+    TryCast,
 }
 
 fn capture_outbound_boundary<H, O>(
@@ -8529,6 +8543,11 @@ where
             request,
         },
         OutboundKind::Cast => ResidentOutbound::Cast {
+            target,
+            continuation: hole,
+            request,
+        },
+        OutboundKind::TryCast => ResidentOutbound::TryCast {
             target,
             continuation: hole,
             request,

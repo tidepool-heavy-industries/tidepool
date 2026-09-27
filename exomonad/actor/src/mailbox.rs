@@ -38,6 +38,11 @@ pub(crate) enum ResidentOutbound {
         continuation: ResidentHole,
         request: MailboxValue,
     },
+    TryCast {
+        target: ActorRef,
+        continuation: ResidentHole,
+        request: MailboxValue,
+    },
 }
 
 pub(crate) struct ResidentWaitRequest {
