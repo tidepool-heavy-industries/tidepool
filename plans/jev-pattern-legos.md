@@ -235,3 +235,14 @@ repeated structure that ordinary Haskell does not express cleanly.
 
 Applicability and evidence gathering follow as consumers demand them. Ranking is
 an exploration candidate. None of these designs claims measured savings yet.
+
+## Implemented exemplar pass
+
+Three patterns now have six compiled clients: command triage, typed evidence
+selection and update comparison. The operator exercised exact prepared requests
+against live Jev and replayed the replies through the typed interpreters. Using
+the examples led to shared evidence state, replaceable complete candidate
+renderers, domain-specific failure wording and retained policy types.
+See [the trial report](../docs/reports/wave18-audit/jev-pattern-trials.md) for exact
+revisions, cases, costs, uncertain outcomes and integration limits. The remaining
+catalog entries above are still designs, not implemented APIs.

@@ -1,0 +1,282 @@
+{
+  "fixture_kind": "synthetic; no live worker event or command execution",
+  "cases": [
+    {
+      "case": "fetch-no-repeat",
+      "seconds": 0.136,
+      "request": {
+        "model": "jev-latest",
+        "questions": {
+          "fault": {
+            "criteria": {
+              "assertion": "A downloaded artifact failed an explicit checksum or integrity assertion",
+              "invocation": "The requested package/version, arguments, credentials or local configuration must be corrected",
+              "tooling": "The remote service or transport refused or failed the fetch, including an exhausted account credit balance",
+              "unknown": "The supplied excerpt does not establish a fetch failure cause"
+            },
+            "instructions": "A package artifact fetch failed. Classify the supplied fetch diagnostic; classify only failures established by the excerpt.",
+            "type": "choice"
+          }
+        },
+        "state": {
+          "diagnostic": "HTTP 503 Service Unavailable: artifact service temporarily overloaded; Retry-After: 30",
+          "retainedResult": "synthetic/fetch-no-repeat"
+        }
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "fault": {
+            "type": "choice",
+            "choice": "tooling",
+            "confidence": 0.99,
+            "probabilities": {
+              "invocation": 0.0,
+              "assertion": 0.0,
+              "tooling": 0.99,
+              "unknown": 0.01
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 445,
+          "output_tokens": 51
+        }
+      }
+    },
+    {
+      "case": "fetch-repeat",
+      "seconds": 0.127,
+      "request": {
+        "model": "jev-latest",
+        "questions": {
+          "fault": {
+            "criteria": {
+              "assertion": "A downloaded artifact failed an explicit checksum or integrity assertion",
+              "invocation": "The requested package/version, arguments, credentials or local configuration must be corrected",
+              "tooling": "The remote service or transport refused or failed the fetch, including an exhausted account credit balance",
+              "unknown": "The supplied excerpt does not establish a fetch failure cause"
+            },
+            "instructions": "A package artifact fetch failed. Classify the supplied fetch diagnostic; classify only failures established by the excerpt.",
+            "type": "choice"
+          },
+          "transient": {
+            "instructions": "Does the supplied diagnostic establish this condition? The service explicitly reports temporary overload or a transient transport interruption. Exclusions: Authentication, payment/quota exhaustion, an unknown package/version, and persistent TLS or proxy configuration are not transient. A retry-after delay must be respected by the caller before acting.",
+            "type": "noul"
+          }
+        },
+        "state": {
+          "diagnostic": "HTTP 503 Service Unavailable: artifact service temporarily overloaded; Retry-After: 30",
+          "retainedResult": "synthetic/fetch-repeat"
+        }
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "fault": {
+            "type": "choice",
+            "choice": "tooling",
+            "confidence": 0.99,
+            "probabilities": {
+              "invocation": 0.0,
+              "tooling": 1.0,
+              "unknown": 0.0,
+              "assertion": 0.0
+            }
+          },
+          "transient": {
+            "type": "noul",
+            "noul": 0.94
+          }
+        },
+        "usage": {
+          "input_tokens": 510,
+          "output_tokens": 69
+        }
+      }
+    },
+    {
+      "case": "payment",
+      "seconds": 0.121,
+      "request": {
+        "model": "jev-latest",
+        "questions": {
+          "fault": {
+            "criteria": {
+              "assertion": "A downloaded artifact failed an explicit checksum or integrity assertion",
+              "invocation": "The requested package/version, arguments, credentials or local configuration must be corrected",
+              "tooling": "The remote service or transport refused or failed the fetch, including an exhausted account credit balance",
+              "unknown": "The supplied excerpt does not establish a fetch failure cause"
+            },
+            "instructions": "A package artifact fetch failed. Classify the supplied fetch diagnostic; classify only failures established by the excerpt.",
+            "type": "choice"
+          },
+          "transient": {
+            "instructions": "Does the supplied diagnostic establish this condition? The service explicitly reports temporary overload or a transient transport interruption. Exclusions: Authentication, payment/quota exhaustion, an unknown package/version, and persistent TLS or proxy configuration are not transient. A retry-after delay must be respected by the caller before acting.",
+            "type": "noul"
+          }
+        },
+        "state": {
+          "diagnostic": "HTTP 402 payment required. Account credit balance exhausted; add funds before requesting artifacts.",
+          "retainedResult": "synthetic/payment"
+        }
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "fault": {
+            "type": "choice",
+            "choice": "tooling",
+            "confidence": 1.0,
+            "probabilities": {
+              "tooling": 1.0,
+              "unknown": 0.0,
+              "assertion": 0.0,
+              "invocation": 0.0
+            }
+          },
+          "transient": {
+            "type": "noul",
+            "noul": 0.02
+          }
+        },
+        "usage": {
+          "input_tokens": 504,
+          "output_tokens": 69
+        }
+      }
+    },
+    {
+      "case": "evidence-command",
+      "seconds": 0.104,
+      "request": {
+        "model": "jev-latest",
+        "questions": {
+          "best": {
+            "criteria": {
+              "E0004-site": "Entry E0004-site in `evidence`",
+              "E0061-definition": "Entry E0061-definition in `evidence`",
+              "E0061-site": "Entry E0061-site in `evidence`",
+              "insufficient": "The retained excerpts do not show a usable failing site or the task is underspecified.",
+              "none": "Every supplied diagnostic is unrelated to the E0061 repair."
+            },
+            "instructions": "Which supplied evidence is most useful for identify the best first source span to repair the E0061 failed call? The excerpt identifies the failing call and location needed to begin the repair.",
+            "type": "choice"
+          },
+          "coverage": {
+            "instructions": "Do entries in `evidence` identify the failing call location and a corresponding definition location? Judge only those entries.",
+            "type": "noul"
+          }
+        },
+        "state": {
+          "evidence": {
+            "E0004-site": {
+              "excerpt": "error[E0004]: non-exhaustive patterns: `None` not covered\n --> src/main.rs:136:67\n",
+              "source": "eb73928 Project/JevChecks.hs lines 20-23"
+            },
+            "E0061-definition": {
+              "excerpt": "note: function defined here\n --> src/store.rs:59:1\n",
+              "source": "eb73928 Project/JevChecks.hs lines 41-43"
+            },
+            "E0061-site": {
+              "excerpt": "error[E0061]: this function takes 2 arguments but 1 argument was supplied\n --> src/main.rs:83:9\n",
+              "source": "eb73928 Project/JevChecks.hs lines 37-40"
+            }
+          },
+          "intent": "Find the first source span to inspect for this E0061 repair"
+        }
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "E0061-site",
+            "confidence": 0.97,
+            "probabilities": {
+              "E0004-site": 0.0,
+              "E0061-definition": 0.02,
+              "none": 0.0,
+              "E0061-site": 0.98,
+              "insufficient": 0.0
+            }
+          },
+          "coverage": {
+            "type": "noul",
+            "noul": 0.92
+          }
+        },
+        "usage": {
+          "input_tokens": 731,
+          "output_tokens": 92
+        }
+      }
+    },
+    {
+      "case": "evidence-review",
+      "seconds": 0.106,
+      "request": {
+        "model": "jev-latest",
+        "questions": {
+          "best": {
+            "criteria": {
+              "budget": "Entry budget in `evidence`",
+              "insufficient": "The supplied spans omit the budget or read path needed to judge the bound.",
+              "none": "The supplied spans are sufficiently described but none establishes a byte bound.",
+              "page": "Entry page in `evidence`",
+              "result": "Entry result in `evidence`"
+            },
+            "instructions": "Which supplied evidence is most useful for choose the strongest supplied source evidence that retained command output reads have a byte bound? The source span directly establishes a maximum byte allowance for retained output reads.",
+            "type": "choice"
+          },
+          "coverage": {
+            "instructions": "Do entries in `evidence` show both the accepted maximum budget and how each page request is limited? Judge only those entries.",
+            "type": "noul"
+          }
+        },
+        "state": {
+          "evidence": {
+            "budget": {
+              "excerpt": "evidenceBudget :: Int -> Either EvidenceBudgetIssue EvidenceBudget\nevidenceBudget bytes\n  | bytes > 0 && bytes <= 262144 = Right (EvidenceBudget bytes)\n  | otherwise = Left (InvalidEvidenceBudget bytes)\n",
+              "source": "eb73928 Project/RetainedEvidence.hs lines 19-22"
+            },
+            "page": {
+              "excerpt": "readStream :: Member Commands effects => Cmd.Job -> Cmd.CommandStream -> Int -> Eff effects StreamEvidence\nreadStream job stream limit = go 0 limit []\n  where\n    go offset remaining pages = do\n      let requested = min 65536 remaining\n      response <- Cmd.tryPage job stream (Cmd.OutputSlice offset requested)\n",
+              "source": "eb73928 Project/RetainedEvidence.hs lines 53-58"
+            },
+            "result": {
+              "excerpt": "data RetainedEvidence = RetainedEvidence\n  { retainedJob :: Cmd.Job\n  , retainedStatus :: Cmd.CommandStatus\n  , retainedStdout :: StreamEvidence\n  , retainedStderr :: StreamEvidence\n  } deriving (Show, Eq)\n",
+              "source": "eb73928 Project/RetainedEvidence.hs lines 37-42"
+            }
+          },
+          "review_goal": "Inspect retained-output byte bounds at commit eb73928"
+        }
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "budget",
+            "confidence": 0.58,
+            "probabilities": {
+              "page": 0.32,
+              "insufficient": 0.01,
+              "budget": 0.66,
+              "none": 0.01,
+              "result": 0.0
+            }
+          },
+          "coverage": {
+            "type": "noul",
+            "noul": 0.93
+          }
+        },
+        "usage": {
+          "input_tokens": 829,
+          "output_tokens": 72
+        }
+      }
+    }
+  ]
+}
