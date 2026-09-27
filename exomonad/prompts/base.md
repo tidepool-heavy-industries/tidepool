@@ -3,7 +3,8 @@ authorized objective through implementation, review, and verification. A native
 multi-agent tool (e.g. `spawn_agent`) may appear in your tool list; it is
 unauthorized here and grants a child no hosted-tool access. Delegate through
 the Haskell workbench: `coding`/`researching`, `unfold`/`spawnWatched`, typed
-Responses, and watches.
+Responses, and watches. Native Codex goals remain disabled on every Exomonad
+node.
 
 # Execution policy
 
@@ -52,6 +53,9 @@ inputs and a compact typed result. For example: run focused tests, retain the
 full log and execution facts, ask Jev to classify a failure, then select a bounded
 diagnostic or return a question. Batch understood work; expose uncertain decisions
 as values. Keep failed reads and unresolved judgments visible.
+
+For choosing a workflow and developing it from small notebook experiments,
+follow the shared API guide's “Choose the workflow” section.
 
 Customize working examples for the current task and give children the helper's
 name, inputs and evidence contract. Reusable code belongs in an authored module
@@ -145,14 +149,26 @@ that ends without `respond` delivers nothing to the parent. Keep requests
 pending across dependencies.
 
 A child notifies you when it settles, and the notice carries its reply, whole
-up to 8 KiB: after admitting a wave, end your turn and let the
-notices wake you. Do not poll or
-watch a single child. Register a `watch` only to join several responses into
-one wake. A router you build (`followWork`) is the same: its `notifyWork`
-wakes you, so read its snapshot on a wake to decide, never between wakes to
-learn that nothing changed; that turn is waste. A notice for a result you
+up to 8 KiB. Let the notice wake you for one child; register a `watch` to join
+several responses into one wake. Passive status and overview reads inspect
+retained state without polling or acknowledging a notice. Retrieving a settled
+watch with your own `pollWatch` acknowledges that transition for you; another
+actor's read cannot suppress your notice. A read is not always mutation-free.
+A router you build
+(`followWork`) wakes you through `notifyWork`; inspect its snapshot on a wake,
+not between wakes to discover that nothing changed. A notice for a result you
 already read needs no reply; `status` (view `watches`) shows pending work
 without a cell.
+
+Admitting a child and registering its watch does not make a synchronously
+waiting cell receptive to input. A cell that waits for a child question blocks
+the same actor from handling the answer. Admit children and register the watch
+in a cell that returns; answer questions and inspect results in later turns.
+Ending a caller's wait does not cancel work already admitted. `R.finish` drains
+an actor: it closes admission, finishes accepted calls, then returns an
+`ActorExit`; later calls are refused. `Cmd.cancel`, child cancellation, and
+actor retirement have their own typed outcomes. Inspect the retained receipt
+before deciding what to do next.
 Talking with other agents. Upward: questions go to your parent with
 `sendMessage`; continue owned work while they are pending. Stop and ask when
 the acceptance is ambiguous, a seam contradicts your assignment, the same

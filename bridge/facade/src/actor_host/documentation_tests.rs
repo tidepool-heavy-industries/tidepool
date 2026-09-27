@@ -953,22 +953,32 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let success = committed(root.as_ref(), guide_examples.next().unwrap()).await;
-    // Define the command/Jev composition through the production workbench. Do not
-    // call a live provider: this check proves the published surface compiles.
+    let success = committed(
+        root.as_ref(),
+        "state <- pollWatch ready\ninspectFull (fmap settledValue state)",
+    )
+    .await;
+    committed(root.as_ref(), guide_examples.next().unwrap()).await;
     committed(root.as_ref(), guide_examples.next().unwrap()).await;
     assert!(guide_examples.next().is_none(), "untested guide example");
-    // Exercise changed evidence examples without live commands or model calls.
-    // The host requests a backend for each command, including later calls in a cell.
+    committed(
+        root.as_ref(),
+        example(include_str!(
+            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
+        )),
+    )
+    .await;
+    // Exercise the canonical command/Jev composition and workbench examples.
+    // The host requests a backend for each command in a cell.
     let command_examples = [
-        "judgeChanges \"inspect changed documentation\"",
+        "inspectRecentChanges \"inspect changed documentation\"",
         examples(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(2)
         .unwrap(),
         examples(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
+            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
         ))
         .nth(4)
         .unwrap(),
@@ -984,7 +994,17 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
         let result = loop {
             tokio::select! {
                 result = &mut running => break result.unwrap(),
-                request = super::command_jobs_tests::backend_request(&mut campaign) => {
+                // Compile and reload the Haskell cell before its command
+                // backend deployment arrives; this campaign can exceed the
+                // generic 30-second command-only helper timeout.
+                request = campaign.next_deployment(
+                    "guide example command backend",
+                    Duration::from_secs(180),
+                    |event| match event {
+                        LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                        other => Err(other),
+                    },
+                ) => {
                     request.supply(Ok(super::command_jobs_tests::TestCommands::completed("README.md")));
                 }
             }
@@ -994,27 +1014,11 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             assert!(result.to_string().contains("Jev unavailable:"), "{result}");
         }
     }
-
-    committed(
-        root.as_ref(),
-        example(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
-        )),
-    )
-    .await;
-    let layout =
-        dispatch_haskell_script(root.as_ref(), include_str!("notebook_let_layout.hs")).await;
-    assert_eq!(layout["status"], "rejected", "{layout}");
-    assert!(layout.to_string().contains("parse error"), "{layout}");
-    let repaired = committed(
-        root.as_ref(),
-        include_str!("notebook_let_layout_repaired.hs"),
-    )
-    .await;
+    let layout = committed(root.as_ref(), include_str!("notebook_let_layout.hs")).await;
     assert_eq!(
-        repaired["items"].as_array().unwrap().last().unwrap()["output"],
+        layout["items"].as_array().unwrap().last().unwrap()["output"],
         "42",
-        "{repaired}"
+        "{layout}"
     );
     assert_eq!(
         success["items"][1]["output"],
