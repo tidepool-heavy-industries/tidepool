@@ -1,8 +1,7 @@
 //! Prepare one complete workspace before deferred actor/native startup.
 
 use super::overlay_resource::{
-    selected_inventory, selected_manifest, source_inventory, source_manifest, SourceManifest,
-    SourceSelection, SourceStamp,
+    selected_inventory, selected_manifest, SourceManifest, SourceSelection, SourceStamp,
 };
 use super::workspace_publication::WorkspacePublication;
 use super::*;

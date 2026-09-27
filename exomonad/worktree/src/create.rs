@@ -1325,10 +1325,15 @@ impl WorktreeManager {
             if !self.git.on_host().try_exists(&receipt.cwd.join(".git"))? {
                 return Err(WorktreeError::WorktreeLost(id.clone()));
             }
-            let out = self.git.on_host().try_run(&receipt.cwd, &["rev-parse", "HEAD"])?;
+            let out = self
+                .git
+                .on_host()
+                .try_run(&receipt.cwd, &["rev-parse", "HEAD"])?;
             return Ok(Some(GitOid::from_raw(out.trimmed())));
         }
-        self.lookup(id)?.map(|handle| self.worktree_head(&handle)).transpose()
+        self.lookup(id)?
+            .map(|handle| self.worktree_head(&handle))
+            .transpose()
     }
 
     pub fn worktree_branch_by_id(

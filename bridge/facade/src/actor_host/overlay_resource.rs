@@ -971,30 +971,6 @@ pub(super) fn selected_inventory(
     Ok(inventory)
 }
 
-/// Detect changes made by external writers outside native/host admission.
-/// Do not follow symlinks or let Git ignore rules omit project files.
-pub(super) fn source_inventory(
-    root: &Path,
-    excluded: &[&std::ffi::OsStr],
-) -> io::Result<std::collections::BTreeMap<PathBuf, SourceStamp>> {
-    let mut inventory = std::collections::BTreeMap::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(&path)? {
-                let entry = entry?;
-                if path == root && excluded.iter().any(|name| entry.file_name() == *name) {
-                    continue;
-                }
-                pending.push(entry.path());
-            }
-        }
-        inventory.insert(path, SourceStamp::from(&metadata));
-    }
-    Ok(inventory)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SourceStamp {
     device: u64,

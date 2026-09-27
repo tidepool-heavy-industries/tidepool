@@ -17,6 +17,8 @@ mod journal_uncertainty;
 mod merge;
 #[path = "../mount_namespace.rs"]
 mod mount_namespace;
+#[path = "../retained_storage.rs"]
+mod retained_storage;
 #[path = "../scaffold_smoke.rs"]
 mod scaffold_smoke;
 #[path = "../source_build_fork.rs"]

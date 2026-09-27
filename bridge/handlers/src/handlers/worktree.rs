@@ -9,7 +9,9 @@ use exomonad_worktree::error::{
     DirtySummary, GitFailureReceipt, WorktreeError as DomainWorktreeError,
 };
 use exomonad_worktree::git::GitCli;
-use exomonad_worktree::id::{BranchName, WorktreeId};
+#[cfg(test)]
+use exomonad_worktree::id::BranchName;
+use exomonad_worktree::id::WorktreeId;
 use exomonad_worktree::merge::{try_merge, MergeOutcome};
 #[cfg(test)]
 use exomonad_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};

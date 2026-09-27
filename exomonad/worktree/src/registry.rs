@@ -317,9 +317,7 @@ impl WorktreeRegistry {
             let canonical = layer
                 .canonicalize()
                 .map_err(|error| storage_failure(layer, error))?;
-            if canonical != *layer
-                || !canonical.starts_with(&resource_root)
-                || !canonical.is_dir()
+            if canonical != *layer || !canonical.starts_with(&resource_root) || !canonical.is_dir()
             {
                 return Err(storage_failure(
                     layer,

@@ -122,7 +122,8 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         .git()
         .try_run(&cwd, &["status", "--porcelain=v1"])
         .unwrap()
-        .trimmed();
+        .trimmed()
+        .to_owned();
     let head_before = reopened.worktree_head_by_id(handle.id()).unwrap();
     let branch_before = reopened.worktree_branch_by_id(handle.id()).unwrap();
     assert!(reopened
@@ -143,12 +144,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         WorktreeRecordStatus::Mounted
     );
     reopened
-        .retain_retired_view(
-            handle.id(),
-            &namespace,
-            &view,
-            vec![base, upper],
-        )
+        .retain_retired_view(handle.id(), &namespace, &view, vec![base, upper])
         .unwrap();
     namespace.detach_retired_tree(&view).unwrap();
     assert!(reopened
@@ -159,12 +155,18 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         reopened.list().unwrap()[0].receipt.status,
         WorktreeRecordStatus::Retained
     );
-    assert_eq!(reopened.worktree_head_by_id(handle.id()).unwrap(), head_before);
+    assert_eq!(
+        reopened.worktree_head_by_id(handle.id()).unwrap(),
+        head_before
+    );
     assert_eq!(
         reopened.worktree_branch_by_id(handle.id()).unwrap(),
         branch_before
     );
-    assert_eq!(std::fs::read_to_string(cwd.join("file")).unwrap(), "before\n");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("file")).unwrap(),
+        "before\n"
+    );
     let after_restart = WorktreeManager::new(
         repository.git().clone(),
         WorktreeRegistry::open(root.join("registry")).unwrap(),
