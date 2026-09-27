@@ -365,7 +365,7 @@ impl WorkspaceLayout {
                         collect(git, root, &absolute, &relative, &[], leaves)?;
                     } else {
                         return Err(io::Error::other(format!(
-                            "untracked nested repository {} needs an explicit source exclusion",
+                            "untracked nested repository {} needs a Git ignore rule or source exclusion",
                             relative.display()
                         )));
                     }

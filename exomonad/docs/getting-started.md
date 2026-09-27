@@ -204,8 +204,9 @@ cgroups before granting new work.
 
 Source imports copy tracked working files (including locally edited or ignored
 tracked files) and ordinary untracked files. Ignored files are omitted.
-Untracked nested repositories require an explicit source exclusion so that
-their working files are never silently dropped. Tracked submodules are selected from their own Git
+Untracked nested repositories require an explicit Git ignore rule or source
+exclusion so that their working files are never silently dropped. Tracked
+submodules are selected from their own Git
 index. Source imports preserve symlinks as links and preserve hard links and
 sparse files where supported. Before copying, the host budgets selected logical
 file size or allocated blocks, whichever is larger, and requires free space for
