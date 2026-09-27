@@ -210,6 +210,13 @@ pub fn cleanup(
     let mut report = Vec::new();
     for repository in fs::read_dir(repositories)? {
         let repository = repository?.path();
+        let source_references = if repository.join("registry").is_dir() {
+            exomonad_worktree::WorktreeRegistry::open(repository.join("registry"))
+                .and_then(|registry| registry.source_layer_references())
+                .map_err(|error| error.to_string())
+        } else {
+            Err("worktree registry is missing".to_owned())
+        };
         let resources = repository.join("worktrees/.resources").join(run_id);
         if !resources.is_dir() {
             continue;
@@ -236,10 +243,23 @@ pub fn cleanup(
                     )));
                 }
                 let allocated_bytes = bytes(&path)?;
-                let outcome = if matches!(kind, StorageKind::Source)
-                    && !source_finalized(&repository, &resource)
-                {
-                    Outcome::Retained("working files have no finalized checkout proof".into())
+                let source_reason = if matches!(kind, StorageKind::Source) {
+                    match &source_references {
+                        Err(error) => Some(format!("source references cannot be proved: {error}")),
+                        Ok(None) => Some("a mounted checkout has no durable layer descriptor".into()),
+                        Ok(Some(layers)) if layers.iter().any(|layer| layer.starts_with(&path)) => {
+                            Some("referenced by a retained worktree view".into())
+                        }
+                        Ok(Some(_)) if !source_finalized(&repository, &resource) => {
+                            Some("working files have no finalized checkout proof".into())
+                        }
+                        Ok(Some(_)) => None,
+                    }
+                } else {
+                    None
+                };
+                let outcome = if let Some(reason) = source_reason {
+                    Outcome::Retained(reason)
                 } else {
                     match mounted_reference(&path) {
                         Ok(None) if apply => {

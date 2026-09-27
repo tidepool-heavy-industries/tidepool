@@ -61,6 +61,32 @@ impl SharedOverlayResource {
         self.latest.lock().clone()
     }
 
+    /// Seal the exact source view while the workspace publication gate excludes
+    /// writers. The returned layer paths are handed to the worktree registry,
+    /// which becomes their durable custody record before mounts are detached.
+    pub(super) async fn retain_source_layers(&self) -> io::Result<Option<Vec<PathBuf>>> {
+        let slot = self.publication.lock().await;
+        let Some(resource) = slot.as_ref() else {
+            return Ok(None);
+        };
+        if !matches!(resource.publication, PublicationState::Writable) {
+            return Err(io::Error::other("source publication remains unsettled"));
+        }
+        sync_compacted_tree(&resource.upper)?;
+        let layers = resource
+            .layers
+            .iter()
+            .map(|layer| layer.path.clone())
+            .chain(std::iter::once(resource.upper.clone()))
+            .collect();
+        for storage in std::iter::once(&resource.storage)
+            .chain(resource.layers.iter().map(|layer| &layer.storage))
+        {
+            *storage.state.lock() = OverlayResourceState::RetainedForWorktree;
+        }
+        Ok(Some(layers))
+    }
+
     /// Inspect only the backing paths owned by this live publication. The
     /// result identifies regular backing entries, some of which can be overlay
     /// metadata; it does not prove visible artifact content.
@@ -100,7 +126,11 @@ impl SharedOverlayResource {
             resource.custody.settled = true;
             // An uncertain descendant retains its backing through Arc custody;
             // it vetoes reclamation, not retirement of this owner's view.
-            *resource.storage.state.lock() = if resource
+            let retained = *resource.storage.state.lock()
+                == OverlayResourceState::RetainedForWorktree;
+            *resource.storage.state.lock() = if retained {
+                OverlayResourceState::RetainedForWorktree
+            } else if resource
                 .storage
                 .uncertain
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -121,7 +151,7 @@ impl SharedOverlayResource {
             drop(retired_layers);
             drop(custody);
             if let Ok(mut storage) = Arc::try_unwrap(storage) {
-                if !storage.uncertain.load(std::sync::atomic::Ordering::Acquire) {
+                if !retained && !storage.uncertain.load(std::sync::atomic::Ordering::Acquire) {
                     storage.release()?;
                 }
             }
@@ -239,6 +269,7 @@ pub(super) fn remove_unmounted_storage(path: &Path) -> io::Result<()> {
 enum OverlayResourceState {
     Unsubmitted,
     RetainedUnconfirmed,
+    RetainedForWorktree,
     Reclaimable,
     Released,
 }
@@ -612,6 +643,7 @@ impl OverlayResourceLease {
             path: self.upper.clone(),
             storage: self.storage.clone(),
         });
+        sync_compacted_tree(&self.upper)?;
         let rotation = OverlayRotation::prepare(
             target,
             &frozen

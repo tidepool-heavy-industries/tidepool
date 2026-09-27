@@ -16,6 +16,7 @@ pub(crate) struct MountedView {
 #[derive(Clone, Debug)]
 enum ViewAccess {
     Unavailable,
+    Retained,
     Mounted(MountedView),
 }
 
@@ -45,6 +46,37 @@ impl WorktreeViews {
             .map_err(|_| io::Error::other("worktree view lock poisoned"))?
             .entry(cwd.to_owned())
             .or_insert(ViewAccess::Unavailable);
+        Ok(())
+    }
+
+    pub fn retain(&self, cwd: &Path) -> io::Result<()> {
+        self.0
+            .write()
+            .map_err(|_| io::Error::other("worktree view lock poisoned"))?
+            .insert(cwd.to_owned(), ViewAccess::Retained);
+        Ok(())
+    }
+
+    pub fn restored(&self, cwd: &Path) -> io::Result<()> {
+        let mut views = self
+            .0
+            .write()
+            .map_err(|_| io::Error::other("worktree view lock poisoned"))?;
+        if !matches!(views.get(cwd), Some(ViewAccess::Retained)) {
+            return Err(io::Error::other("restoration requires a retained view"));
+        }
+        views.remove(cwd);
+        Ok(())
+    }
+
+    pub fn clear_restored(&self, cwd: &Path) -> io::Result<()> {
+        let mut views = self
+            .0
+            .write()
+            .map_err(|_| io::Error::other("worktree view lock poisoned"))?;
+        if matches!(views.get(cwd), Some(ViewAccess::Retained)) {
+            views.remove(cwd);
+        }
         Ok(())
     }
 
@@ -104,6 +136,10 @@ impl WorktreeViews {
                 return match access {
                     ViewAccess::Unavailable => Err(io::Error::other(format!(
                         "mounted worktree {} requires filesystem recovery",
+                        ancestor.display()
+                    ))),
+                    ViewAccess::Retained => Err(io::Error::other(format!(
+                        "retained worktree {} requires restoration",
                         ancestor.display()
                     ))),
                     ViewAccess::Mounted(view) => Ok(Some(MountedView {

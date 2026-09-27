@@ -115,13 +115,29 @@ impl PreparedWorkspace {
         }
         let manager = self.manager.clone();
         let worktree = self.worktree.clone();
+        let retained_layers = match (&worktree, &self.source) {
+            (Some(_), Some(source)) => source.retain_source_layers().await?,
+            _ => None,
+        };
         let active = active.clone();
         let prepared = self.view.clone();
         tidepool_runtime::spawn_blocking_in_span(move || -> io::Result<()> {
             if let Some(id) = worktree {
-                manager
-                    .materialize_retired_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT))
-                    .map_err(io::Error::other)?;
+                match retained_layers {
+                    Some(layers) => manager
+                        .retain_retired_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT), layers)
+                        .map_err(io::Error::other)?,
+                    None if manager
+                        .registry()
+                        .get(&id)
+                        .map_err(io::Error::other)?
+                        .is_some_and(|receipt| {
+                            receipt.status == exomonad_worktree::WorktreeRecordStatus::Retained
+                        }) => {}
+                    None => manager
+                        .release_host_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT))
+                        .map_err(io::Error::other)?,
+                }
             }
             active
                 .detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))

@@ -59,6 +59,45 @@ pub enum DirtyPolicy {
 #[cfg(target_os = "linux")]
 const RETIREMENT_GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[cfg(target_os = "linux")]
+fn restoration_budget(layers: &[PathBuf]) -> std::io::Result<u64> {
+    let mut pending = layers.to_vec();
+    let mut bytes = 0_u64;
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        bytes = bytes.saturating_add(4096);
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn sync_restored_tree(root: &Path) -> std::io::Result<()> {
+    let mut pending = vec![root.to_owned()];
+    let mut directories = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            directories.push(path.clone());
+            for entry in fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            fs::File::open(path)?.sync_all()?;
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        fs::File::open(directory)?.sync_all()?;
+    }
+    Ok(())
+}
+
 impl WorktreeSpec {
     pub fn from_current_repository(label: impl Into<String>) -> Self {
         Self {
@@ -265,15 +304,16 @@ impl WorktreeManager {
         Ok(restored)
     }
 
-    /// Preserve working files before the lifecycle owner retires their mounts.
-    /// The caller must have stopped writers and closed hosted-work admission.
-    /// Index, HEAD and objects already live in the shared Git administrative tree.
+    /// Publish durable custody of the sealed source layers before detaching the
+    /// live mount. The caller has stopped writers, settled publication, synced
+    /// the upper, and pinned every layer's resource against reclamation.
     #[cfg(target_os = "linux")]
-    pub fn materialize_retired_view(
+    pub fn retain_retired_view(
         &self,
         id: &WorktreeId,
         namespace: &exomonad_node::MountNamespace,
         visible: &Path,
+        layers: Vec<PathBuf>,
     ) -> Result<(), WorktreeError> {
         let failure = |error: std::io::Error| WorktreeError::StorageFailure {
             path: visible.to_owned(),
@@ -294,9 +334,19 @@ impl WorktreeManager {
             .registry
             .get(id)?
             .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status == WorktreeRecordStatus::Retained {
+            let manifest = self.registry.retained_manifest(&receipt)?
+                .ok_or_else(|| failure(std::io::Error::other("retained view manifest is missing")))?;
+            if manifest.layers == layers {
+                return Ok(());
+            }
+            return Err(failure(std::io::Error::other("retained view layers differ from published custody")));
+        }
+        if receipt.status != WorktreeRecordStatus::Mounted {
+            return Err(failure(std::io::Error::other("worktree has no mounted source view")));
+        }
         let view = match self.registry.views.resolve(&receipt.cwd).map_err(failure)? {
             Some(view) => view,
-            None if receipt.status == WorktreeRecordStatus::Finalized => return Ok(()),
             None => {
                 return Err(failure(std::io::Error::other(
                     "worktree has no installed view",
@@ -306,15 +356,120 @@ impl WorktreeManager {
         if !view.namespace.same_view_as(namespace).map_err(failure)? || view.root != visible {
             return Err(failure(std::io::Error::other("retirement view mismatch")));
         }
-        let stage = tempfile::tempdir_in(
-            receipt
-                .cwd
-                .parent()
-                .ok_or_else(|| failure(std::io::Error::other("worktree lacks parent")))?,
+        self.registry.put_retained_manifest(&receipt, layers)?;
+        receipt.status = WorktreeRecordStatus::Retained;
+        self.registry.finish_retention(&receipt)?;
+        Ok(())
+    }
+
+    /// A committed-source fallback already has ordinary host working files.
+    #[cfg(target_os = "linux")]
+    pub fn release_host_view(
+        &self,
+        id: &WorktreeId,
+        namespace: &exomonad_node::MountNamespace,
+        visible: &Path,
+    ) -> Result<(), WorktreeError> {
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status != WorktreeRecordStatus::Finalized {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "host view release requires a finalized checkout".into(),
+            ));
+        }
+        let view = self
+            .registry
+            .views
+            .resolve(&receipt.cwd)
+            .map_err(|error| crate::storage::storage_failure(&receipt.cwd, error))?;
+        let Some(view) = view else {
+            return Ok(());
+        };
+        if !view.namespace.same_view_as(namespace).map_err(|error| crate::storage::storage_failure(&receipt.cwd, error))?
+            || view.root != visible
+        {
+            return Err(crate::storage::storage_failure(&receipt.cwd, "host view mismatch"));
+        }
+        self.registry
+            .views
+            .remove(&receipt.cwd, namespace)
+            .map_err(|error| crate::storage::storage_failure(&receipt.cwd, error))
+    }
+
+    /// Reconstruct ordinary host files only for a consumer that needs a usable
+    /// checkout path. The manifest remains authoritative until the complete
+    /// copy and directory entries have been flushed.
+    #[cfg(target_os = "linux")]
+    pub fn restore_retained_view(&self, id: &WorktreeId) -> Result<(), WorktreeError> {
+        use exomonad_node::copy_admission::{
+            CopyAdmission, DEFAULT_MAX_COPY_BYTES, DEFAULT_MIN_FREE_BYTES,
+        };
+        use exomonad_node::{ProcessMountBoundary, BUBBLEWRAP_PROGRAM};
+
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status == WorktreeRecordStatus::Finalized {
+            return Ok(());
+        }
+        if receipt.status != WorktreeRecordStatus::Retained {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "worktree does not have a restorable retained view".into(),
+            ));
+        }
+        let manifest = self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+            crate::storage::storage_failure(&receipt.cwd, "retained view manifest is missing")
+        })?;
+        let failure = |error: std::io::Error| crate::storage::storage_failure(&receipt.cwd, error);
+        let planned = restoration_budget(&manifest.layers).map_err(failure)?;
+        let _admission = CopyAdmission::acquire(
+            &receipt.cwd,
+            planned,
+            DEFAULT_MAX_COPY_BYTES,
+            DEFAULT_MIN_FREE_BYTES,
+            RETIREMENT_GIT_WAIT,
         )
         .map_err(failure)?;
+        let _capture = self.git.capture_within(RETIREMENT_GIT_WAIT).ok_or_else(|| {
+            failure(std::io::Error::other("Git operation still active before restoration"))
+        })?;
+        // Another process can finish restoration while this caller waits for
+        // admission. Its finalized receipt is the only authority to return.
+        let mut receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status == WorktreeRecordStatus::Finalized {
+            return Ok(());
+        }
+        if receipt.status != WorktreeRecordStatus::Retained {
+            return Err(failure(std::io::Error::other("retained view changed during admission")));
+        }
+        let parent = receipt
+            .cwd
+            .parent()
+            .ok_or_else(|| failure(std::io::Error::other("worktree lacks parent")))?;
+        let stage = tempfile::tempdir_in(parent).map_err(failure)?;
+        let view = stage.path().join("view");
+        let upper = stage.path().join("upper");
+        let work = stage.path().join("work");
+        let copy = stage.path().join("copy");
+        for path in [&view, &upper, &work, &copy] {
+            fs::create_dir(path).map_err(failure)?;
+        }
+        let boundary = ProcessMountBoundary::new(&view, [view.clone()], [view.clone()])
+            .map_err(|error| failure(std::io::Error::other(error)))?
+            .with_overlay_view(manifest.layers.clone(), &upper, &work, &view)
+            .map_err(|error| failure(std::io::Error::other(error)))?
+            .with_read_only_project();
+        let namespace = boundary
+            .prepare_view(BUBBLEWRAP_PROGRAM, std::time::Instant::now() + RETIREMENT_GIT_WAIT)
+            .map_err(failure)?;
         let mut producer = namespace
-            .host_command(visible, "tar".as_ref())
+            .host_command(&view, "tar".as_ref())
             .map_err(failure)?
             .args([
                 "--acls",
@@ -333,73 +488,46 @@ impl WorktreeManager {
             .stdout
             .take()
             .ok_or_else(|| failure(std::io::Error::other("missing archive pipe")))?;
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "one-shot tar extraction into a tempdir"
-        )]
+        #[allow(clippy::disallowed_methods, reason = "one-shot restoration tar extraction")]
         let consumer = std::process::Command::new("tar")
             .args(["--acls", "--xattrs", "--sparse", "-xf", "-", "-C"])
-            .arg(stage.path())
+            .arg(&copy)
             .stdin(input)
             .status();
         if consumer.is_err() {
-            // best-effort: the pipeline already failed; this only stops the
-            // producer from writing into a closed pipe.
             producer.kill().ok();
         }
         let produced = producer.wait().map_err(failure)?;
         if !consumer.map_err(failure)?.success() || !produced.success() {
-            return Err(failure(std::io::Error::other(
-                "working-file preservation failed",
-            )));
+            return Err(failure(std::io::Error::other("retained view restoration copy failed")));
         }
-        // Flush the independent copy before dropping any mount-backed source.
-        let mut pending = vec![stage.path().to_owned()];
-        let mut directories = Vec::new();
-        while let Some(path) = pending.pop() {
-            let metadata = std::fs::symlink_metadata(&path).map_err(failure)?;
-            if metadata.is_dir() {
-                directories.push(path.clone());
-                for entry in std::fs::read_dir(path).map_err(failure)? {
-                    pending.push(entry.map_err(failure)?.path());
-                }
-            } else if metadata.is_file() {
-                std::fs::File::open(path)
-                    .and_then(|file| file.sync_all())
-                    .map_err(failure)?;
-            }
-        }
-        for directory in directories.into_iter().rev() {
-            std::fs::File::open(directory)
-                .and_then(|file| file.sync_all())
-                .map_err(failure)?;
-        }
-        // Original mounts remain authoritative until all files and the registry
-        // transition succeed. Failure retains them for a retry.
-        for entry in std::fs::read_dir(&receipt.cwd).map_err(failure)? {
+        namespace.detach_retired_tree(&view).map_err(failure)?;
+        drop(namespace);
+        sync_restored_tree(&copy).map_err(failure)?;
+        // A previous interrupted attempt may have left partial ordinary files.
+        // They are inaccessible while Retained is registered and can be removed
+        // only after a complete new stage is safely on disk.
+        for entry in fs::read_dir(&receipt.cwd).map_err(failure)? {
             let entry = entry.map_err(failure)?;
             if entry.file_name() == ".git" || entry.file_name() == ".exomonad" {
                 continue;
             }
             if entry.file_type().map_err(failure)?.is_dir() {
-                std::fs::remove_dir_all(entry.path()).map_err(failure)?;
+                fs::remove_dir_all(entry.path()).map_err(failure)?;
             } else {
-                std::fs::remove_file(entry.path()).map_err(failure)?;
+                fs::remove_file(entry.path()).map_err(failure)?;
             }
         }
-        for entry in std::fs::read_dir(stage.path()).map_err(failure)? {
+        for entry in fs::read_dir(&copy).map_err(failure)? {
             let entry = entry.map_err(failure)?;
-            std::fs::rename(entry.path(), receipt.cwd.join(entry.file_name())).map_err(failure)?;
+            fs::rename(entry.path(), receipt.cwd.join(entry.file_name())).map_err(failure)?;
         }
-        std::fs::File::open(&receipt.cwd)
-            .and_then(|file| file.sync_all())
+        fs::File::open(&receipt.cwd)
+            .and_then(|directory| directory.sync_all())
             .map_err(failure)?;
         receipt.status = WorktreeRecordStatus::Finalized;
         self.registry.put(&receipt)?;
-        self.registry
-            .views
-            .remove(&receipt.cwd, namespace)
-            .map_err(failure)?;
+        self.registry.views.restored(&receipt.cwd).map_err(failure)?;
         Ok(())
     }
 
@@ -1128,7 +1256,19 @@ impl WorktreeManager {
     pub fn lookup(&self, id: &WorktreeId) -> Result<Option<WorktreeHandle>, WorktreeError> {
         match self.registry.get(id)? {
             None => Ok(None),
-            Some(receipt) => {
+            Some(mut receipt) => {
+                if receipt.status == WorktreeRecordStatus::Retained {
+                    #[cfg(target_os = "linux")]
+                    self.restore_retained_view(id)?;
+                    #[cfg(not(target_os = "linux"))]
+                    return Err(WorktreeError::WorktreeAuthorityDenied(
+                        "retained checkout restoration requires Linux".into(),
+                    ));
+                    receipt = self
+                        .registry
+                        .get(id)?
+                        .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+                }
                 if worktree_present(&self.git, &receipt.cwd)? {
                     if receipt.status == WorktreeRecordStatus::Provisional {
                         return Err(WorktreeError::WorktreeAuthorityDenied(format!(

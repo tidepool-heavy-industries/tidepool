@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
@@ -29,6 +30,7 @@ use crate::storage::{storage_failure, DurableJsonDir};
 
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
+const RETAINED_DIR: &str = "retained-views";
 
 /// Whether the recorded `cwd` still holds a real git working tree. A plain
 /// `Path::exists` would be fooled by a directory left behind with its `.git`
@@ -71,6 +73,19 @@ pub enum WorktreeRecordStatus {
     /// Complete checkout whose working files require its retained mount view.
     /// Older readers reject this variant instead of inspecting a Git-only host directory.
     Mounted,
+    /// Working files live in durable overlay layers and are restored on demand.
+    Retained,
+}
+
+/// Durable custody of the exact source view at a retired worktree's boundary.
+/// Paths are validated against the managed storage root on both write and read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedViewManifest {
+    pub version: u32,
+    pub worktree_id: WorktreeId,
+    pub cwd: PathBuf,
+    /// Overlay lower layers in oldest-to-newest order, then the sealed upper.
+    pub layers: Vec<PathBuf>,
 }
 
 /// The durable registry row for one managed worktree.
@@ -129,6 +144,7 @@ pub struct WorktreeSummary {
 pub struct WorktreeRegistry {
     root: PathBuf,
     records: DurableJsonDir,
+    retained: DurableJsonDir,
     #[cfg(target_os = "linux")]
     pub(crate) views: crate::view::WorktreeViews,
 }
@@ -170,10 +186,12 @@ impl WorktreeRegistry {
         }
 
         let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
+        let retained = DurableJsonDir::open(canonical_root.join(RETAINED_DIR))?;
 
         let registry = Self {
             root: canonical_root,
             records,
+            retained,
             #[cfg(target_os = "linux")]
             views: crate::view::WorktreeViews::default(),
         };
@@ -183,6 +201,116 @@ impl WorktreeRegistry {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The manifest is stored before the receipt changes to `Retained`.
+    /// An orphan manifest is safe to keep; a retained receipt without a valid
+    /// manifest never authorizes filesystem access or cleanup.
+    pub fn put_retained_manifest(
+        &self,
+        receipt: &WorktreeReceipt,
+        layers: Vec<PathBuf>,
+    ) -> Result<RetainedViewManifest, WorktreeError> {
+        let manifest = RetainedViewManifest {
+            version: 1,
+            worktree_id: receipt.worktree_id.clone(),
+            cwd: receipt.cwd.clone(),
+            layers,
+        };
+        self.validate_retained_manifest(receipt, &manifest)?;
+        #[allow(clippy::expect_used, reason = "serialize RetainedViewManifest")]
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize RetainedViewManifest");
+        self.retained.write(receipt.worktree_id.as_str(), &bytes)?;
+        Ok(manifest)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finish_retention(
+        &self,
+        receipt: &WorktreeReceipt,
+    ) -> Result<(), WorktreeError> {
+        if receipt.status != WorktreeRecordStatus::Retained
+            || self.retained_manifest(receipt)?.is_none()
+        {
+            return Err(storage_failure(&receipt.cwd, "retained receipt lacks a valid manifest"));
+        }
+        #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
+        let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
+        self.records.write(receipt.worktree_id.as_str(), &bytes)?;
+        self.views
+            .retain(&receipt.cwd)
+            .map_err(|error| storage_failure(&receipt.cwd, error))
+    }
+
+    pub fn retained_manifest(
+        &self,
+        receipt: &WorktreeReceipt,
+    ) -> Result<Option<RetainedViewManifest>, WorktreeError> {
+        let Some(bytes) = self.retained.read(receipt.worktree_id.as_str())? else {
+            return Ok(None);
+        };
+        let manifest: RetainedViewManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| storage_failure(&self.retained.path_for(receipt.worktree_id.as_str()), error))?;
+        self.validate_retained_manifest(receipt, &manifest)?;
+        Ok(Some(manifest))
+    }
+
+    /// Return all source layers that offline cleanup must retain. `None`
+    /// means a mounted checkout lacks a durable descriptor, so ancestry is
+    /// unknown and no source resource in this repository can be reclaimed.
+    /// Orphan manifests pin layers too: they can result from interruption
+    /// between manifest publication and receipt transition.
+    pub fn source_layer_references(&self) -> Result<Option<BTreeSet<PathBuf>>, WorktreeError> {
+        let receipts = self.read_receipts()?;
+        let mut layers = BTreeSet::new();
+        for receipt in &receipts {
+            if receipt.status == WorktreeRecordStatus::Mounted
+                && !self.retained.exists(receipt.worktree_id.as_str())
+            {
+                return Ok(None);
+            }
+            if receipt.status == WorktreeRecordStatus::Retained
+                && !self.retained.exists(receipt.worktree_id.as_str())
+            {
+                return Err(storage_failure(&receipt.cwd, "retained view manifest is missing"));
+            }
+        }
+        for (path, bytes) in self.retained.read_all()? {
+            let manifest: RetainedViewManifest = serde_json::from_slice(&bytes)
+                .map_err(|error| storage_failure(&path, error))?;
+            let receipt = receipts
+                .iter()
+                .find(|receipt| receipt.worktree_id == manifest.worktree_id)
+                .ok_or_else(|| storage_failure(&path, "manifest lacks a worktree receipt"))?;
+            self.validate_retained_manifest(receipt, &manifest)?;
+            layers.extend(manifest.layers);
+        }
+        Ok(Some(layers))
+    }
+
+    fn validate_retained_manifest(
+        &self,
+        receipt: &WorktreeReceipt,
+        manifest: &RetainedViewManifest,
+    ) -> Result<(), WorktreeError> {
+        let storage_root = self.root.parent().ok_or_else(|| storage_failure(&self.root, "registry has no managed storage root"))?;
+        if manifest.version != 1
+            || manifest.worktree_id != receipt.worktree_id
+            || manifest.cwd != receipt.cwd
+            || manifest.layers.is_empty()
+        {
+            return Err(storage_failure(&self.root, "invalid retained-view identity or version"));
+        }
+        for layer in &manifest.layers {
+            let canonical = layer.canonicalize().map_err(|error| storage_failure(layer, error))?;
+            if canonical != *layer
+                || !canonical.starts_with(storage_root)
+                || !canonical.is_dir()
+            {
+                return Err(storage_failure(layer, "retained layer is outside managed storage or is not a directory"));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -337,7 +465,13 @@ impl WorktreeRegistry {
         receipts
             .into_iter()
             .map(|receipt| {
-                let present = worktree_present(git, &receipt.cwd)?;
+                let present = if receipt.status == WorktreeRecordStatus::Retained {
+                    self.retained_manifest(&receipt)?
+                        .ok_or_else(|| storage_failure(&receipt.cwd, "retained view manifest is missing"))?;
+                    true
+                } else {
+                    worktree_present(git, &receipt.cwd)?
+                };
                 Ok(WorktreeSummary { receipt, present })
             })
             .collect()
@@ -373,6 +507,18 @@ impl WorktreeRegistry {
             #[cfg(target_os = "linux")]
             self.views
                 .require(&receipt.cwd)
+                .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        }
+        if receipt.status == WorktreeRecordStatus::Retained {
+            #[cfg(target_os = "linux")]
+            self.views
+                .retain(&receipt.cwd)
+                .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        }
+        if receipt.status == WorktreeRecordStatus::Finalized {
+            #[cfg(target_os = "linux")]
+            self.views
+                .clear_restored(&receipt.cwd)
                 .map_err(|error| storage_failure(&receipt.cwd, error))?;
         }
         Ok(())
