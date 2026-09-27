@@ -186,8 +186,8 @@ pub struct SourceImportPolicy {
 impl Default for SourceImportPolicy {
     fn default() -> Self {
         Self {
-            max_import_bytes: 8 * 1024 * 1024 * 1024,
-            min_free_bytes: 16 * 1024 * 1024 * 1024,
+            max_import_bytes: exomonad_node::copy_admission::DEFAULT_MAX_COPY_BYTES,
+            min_free_bytes: exomonad_node::copy_admission::DEFAULT_MIN_FREE_BYTES,
         }
     }
 }

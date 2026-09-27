@@ -363,6 +363,18 @@ impl WorkspaceLayout {
                     if entry.tracked {
                         // Indexed directories are submodules.
                         collect(git, root, &absolute, &relative, &[], leaves)?;
+                        match std::fs::symlink_metadata(absolute.join(".git")) {
+                            Ok(metadata) if metadata.is_file() => {
+                                leaves.push(relative.join(".git"));
+                            }
+                            Ok(_) => {
+                                return Err(io::Error::other(format!(
+                                    "submodule {} has no regular Git identity file",
+                                    relative.display()
+                                )));
+                            }
+                            Err(error) => return Err(error),
+                        }
                     } else {
                         return Err(io::Error::other(format!(
                             "untracked nested repository {} needs a Git ignore rule or source exclusion",
@@ -1182,8 +1194,36 @@ impl WorkspaceLayout {
             } else {
                 let import_started = std::time::Instant::now();
                 tracing::info!(path = %source_path.display(), exclusions = ?excluded, selected_paths = selection.paths.len(), "selected source import");
+                let base = match source.imported_base() {
+                    Ok((base, _)) => base.to_path_buf(),
+                    Err(error) => {
+                        source.discard_unsubmitted()?;
+                        return Err(error);
+                    }
+                };
+                let budget = match selection.copy_budget_bytes(source_path) {
+                    Ok(budget) => budget,
+                    Err(error) => {
+                        source.discard_unsubmitted()?;
+                        return Err(error);
+                    }
+                };
+                let admission = exomonad_node::copy_admission::CopyAdmission::acquire(
+                    &base,
+                    budget,
+                    self.source_import.max_import_bytes,
+                    self.source_import.min_free_bytes,
+                    std::time::Duration::ZERO,
+                );
+                let admission = match admission {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        source.discard_unsubmitted()?;
+                        return Err(error);
+                    }
+                };
                 let imported = source
-                    .import_source(source_path, &selection, self.source_import)
+                    .import_source(source_path, &selection, &admission)
                     .and_then(|()| {
                         if excluded == self.source_exclusions(source_path, files.as_path())?
                             && selection == self.source_selection(source_path, &excluded)?

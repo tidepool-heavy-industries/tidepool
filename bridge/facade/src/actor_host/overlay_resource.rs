@@ -411,7 +411,7 @@ impl OverlayResourceLease {
         &self,
         source: &Path,
         selected: &SourceSelection,
-        policy: crate::exomonad::SourceImportPolicy,
+        admission: &exomonad_node::copy_admission::CopyAdmission,
     ) -> io::Result<()> {
         if self.layers.len() != 1 || self.layers[0].storage.path != self.storage.path {
             return Err(io::Error::other(
@@ -420,16 +420,7 @@ impl OverlayResourceLease {
         }
         let before = selected_inventory(source, selected)?;
         let selected_bytes = selected.copy_budget_bytes(source)?;
-        let free = rustix::fs::statvfs(&self.layers[0].path).map_err(io::Error::from)?;
-        let free_bytes = free.f_bavail.saturating_mul(free.f_frsize);
-        if selected_bytes > policy.max_import_bytes
-            || free_bytes < selected_bytes.saturating_add(policy.min_free_bytes)
-        {
-            return Err(io::Error::other(format!(
-                "source import refused before copy: selected copy-budget bytes={selected_bytes}, max_import_bytes={}, free bytes={free_bytes}, reserve bytes={}, copy=cp --archive --reflink=auto --sparse=always --preserve=links",
-                policy.max_import_bytes, policy.min_free_bytes
-            )));
-        }
+        admission.covers(&self.layers[0].path, selected_bytes)?;
         let entries = selected.leaves();
         let argument_bytes = entries
             .iter()
@@ -443,9 +434,7 @@ impl OverlayResourceLease {
         }
         tracing::info!(
             selected_bytes,
-            free_bytes,
-            max_import_bytes = policy.max_import_bytes,
-            min_free_bytes = policy.min_free_bytes,
+            free_bytes = admission.free_bytes,
             selected_paths = entries.len(),
             copy = "cp --archive --reflink=auto --sparse=always --preserve=links --parents",
             "source import admitted"
@@ -499,6 +488,7 @@ impl OverlayResourceLease {
         std::fs::File::create_new(self.layers[0].path.join(".git"))?;
         std::fs::create_dir(self.layers[0].path.join(".exomonad"))?;
         exomonad_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
+        sync_compacted_tree(&self.layers[0].path)?;
         *self.latest.lock() = Some(OverlaySnapshot {
             layers: self.layers.clone().into(),
         });
@@ -657,8 +647,22 @@ impl OverlayResourceLease {
     }
 
     fn compact_snapshot(&mut self) -> io::Result<()> {
+        use exomonad_node::copy_admission::{
+            CopyAdmission, DEFAULT_MAX_COPY_BYTES, DEFAULT_MIN_FREE_BYTES,
+        };
+
         let started = std::time::Instant::now();
         let former_depth = self.layers.len();
+        let budget = self.layer_copy_budget_bytes()?;
+        // Admission precedes staging so an early error removes its temporary
+        // files before the lease releases the shared filesystem lock.
+        let _admission = CopyAdmission::acquire(
+            &self.storage.path,
+            budget,
+            DEFAULT_MAX_COPY_BYTES,
+            DEFAULT_MIN_FREE_BYTES,
+            std::time::Duration::ZERO,
+        )?;
         let stage = tempfile::Builder::new()
             .prefix("compact-")
             .tempdir_in(&self.storage.path)?;
@@ -735,6 +739,32 @@ impl OverlayResourceLease {
             "overlay layers compacted"
         );
         Ok(())
+    }
+
+    fn layer_copy_budget_bytes(&self) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let mut seen = BTreeSet::new();
+        let mut bytes = 0u64;
+        for layer in &self.layers {
+            let mut pending = vec![layer.path.clone()];
+            while let Some(path) = pending.pop() {
+                let metadata = std::fs::symlink_metadata(&path)?;
+                if seen.insert((metadata.dev(), metadata.ino())) {
+                    let allocated = metadata.blocks().saturating_mul(512);
+                    bytes = bytes.saturating_add(if metadata.is_file() {
+                        allocated.max(metadata.len())
+                    } else {
+                        allocated
+                    });
+                }
+                if metadata.is_dir() {
+                    for child in std::fs::read_dir(path)? {
+                        pending.push(child?.path());
+                    }
+                }
+            }
+        }
+        Ok(bytes)
     }
 
     fn settle_rotation(
@@ -864,7 +894,7 @@ impl SourceSelection {
         self.leaves.iter().collect()
     }
 
-    fn copy_budget_bytes(&self, root: &Path) -> io::Result<u64> {
+    pub(super) fn copy_budget_bytes(&self, root: &Path) -> io::Result<u64> {
         use std::os::unix::fs::MetadataExt;
         let mut seen = BTreeSet::new();
         let mut bytes = 0u64;

@@ -439,9 +439,18 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
         OverlayResourceLease::allocate_path(layout.resource_root("first").join("source"), None)
             .unwrap();
     let selected = layout.source_selection(repo.path(), &excluded).unwrap();
+    let admitted = exomonad_node::copy_admission::CopyAdmission::acquire(
+        source.imported_base().unwrap().0,
+        selected.copy_budget_bytes(repo.path()).unwrap(),
+        layout.source_import.max_import_bytes,
+        layout.source_import.min_free_bytes,
+        Duration::ZERO,
+    )
+    .unwrap();
     source
-        .import_source(repo.path(), &selected, layout.source_import)
+        .import_source(repo.path(), &selected, &admitted)
         .unwrap();
+    drop(admitted);
     layout
         .remember_import(repo.path(), &excluded, &selected, &source)
         .unwrap();
@@ -545,9 +554,15 @@ fn source_import_selects_git_working_files_and_refuses_over_budget_before_copy()
         max_import_bytes: 1,
         ..Default::default()
     };
-    let error = refused
-        .import_source(repo.path(), &selected, small)
-        .unwrap_err();
+    let error = exomonad_node::copy_admission::CopyAdmission::acquire(
+        refused.imported_base().unwrap().0,
+        selected.copy_budget_bytes(repo.path()).unwrap(),
+        small.max_import_bytes,
+        small.min_free_bytes,
+        Duration::ZERO,
+    )
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("refused before copy"));
     assert!(std::fs::read_dir(refused.imported_base().unwrap().0)
         .unwrap()
@@ -558,9 +573,18 @@ fn source_import_selects_git_working_files_and_refuses_over_budget_before_copy()
     let source =
         OverlayResourceLease::allocate_path(layout.resource_root("selected").join("source"), None)
             .unwrap();
+    let admitted = exomonad_node::copy_admission::CopyAdmission::acquire(
+        source.imported_base().unwrap().0,
+        selected.copy_budget_bytes(repo.path()).unwrap(),
+        layout.source_import.max_import_bytes,
+        layout.source_import.min_free_bytes,
+        Duration::ZERO,
+    )
+    .unwrap();
     source
-        .import_source(repo.path(), &selected, layout.source_import)
+        .import_source(repo.path(), &selected, &admitted)
         .unwrap();
+    drop(admitted);
     let base = source.imported_base().unwrap().0;
     assert_eq!(
         std::fs::read_to_string(base.join("tracked")).unwrap(),
@@ -578,6 +602,7 @@ fn source_import_selects_git_working_files_and_refuses_over_budget_before_copy()
         std::fs::read_to_string(base.join("module/module")).unwrap(),
         "submodule"
     );
+    assert!(base.join("module/.git").is_file());
     assert!(!base.join("ignored/omitted").exists());
     assert!(!base.join(".claude").exists());
     assert_eq!(
