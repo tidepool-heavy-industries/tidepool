@@ -414,6 +414,23 @@ mod tests {
         let resource = source.parent().unwrap();
         let repository = resource.ancestors().nth(4).unwrap();
         let registry = WorktreeRegistry::open(repository.join("registry")).unwrap();
+        let ancestor_id = WorktreeId::from_raw(resource.file_name().unwrap().to_str().unwrap());
+        let ancestor_cwd = repository.join("worktrees").join(ancestor_id.as_str());
+        fs::create_dir_all(&ancestor_cwd).unwrap();
+        fs::write(ancestor_cwd.join(".git"), "gitdir: /tmp/test\n").unwrap();
+        registry
+            .put(&WorktreeReceipt {
+                worktree_id: ancestor_id,
+                cwd: ancestor_cwd,
+                branch: BranchName::from_raw("exomonad/worktree/ancestor"),
+                source_head: GitOid::from_raw("0".repeat(40)),
+                snapshot_ref: None,
+                origin: WorktreeOrigin::CurrentRepository,
+                source_repository: root.path().to_owned(),
+                created_at_ms: 0,
+                status: WorktreeRecordStatus::Finalized,
+            })
+            .unwrap();
         let id = WorktreeId::from_raw("wt-retained-child");
         let cwd = repository.join("worktrees").join(id.as_str());
         fs::create_dir_all(&cwd).unwrap();
@@ -439,6 +456,15 @@ mod tests {
             Outcome::Retained(reason) if reason.contains("retained worktree view")
         ));
         assert!(source_file.exists());
+        let mut finalized = receipt;
+        finalized.status = WorktreeRecordStatus::Finalized;
+        registry.put(&finalized).unwrap();
+        // The manifest is deliberately still present: this is the crash gap
+        // between durable Finalized and its best-effort unlink.
+        let released = cleanup(&run, true, true).unwrap();
+        let ancestor = released.iter().find(|entry| entry.path == source).unwrap();
+        assert!(matches!(ancestor.outcome, Outcome::Removed), "{released:?}");
+        assert!(!source_file.exists());
     }
 
     #[test]

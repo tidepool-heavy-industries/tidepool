@@ -257,11 +257,36 @@ impl WorktreeRegistry {
         Ok(Some(manifest))
     }
 
+    /// A fully materialized, fsynced checkout no longer needs its layer
+    /// custody. The Finalized receipt is written first; a crash before this
+    /// unlink leaves a harmless stale manifest that cleanup ignores.
+    pub fn release_finalized_manifest(
+        &self,
+        receipt: &WorktreeReceipt,
+    ) -> Result<(), WorktreeError> {
+        if receipt.status != WorktreeRecordStatus::Finalized
+            || self.get(&receipt.worktree_id)?.as_ref() != Some(receipt)
+        {
+            return Err(storage_failure(
+                &receipt.cwd,
+                "manifest release requires the exact finalized receipt",
+            ));
+        }
+        let path = self.retained.path_for(receipt.worktree_id.as_str());
+        match fs::remove_file(&path) {
+            Ok(()) => tidepool_atomic_write::sync_parent_directory(&path)
+                .map_err(|error| storage_failure(&error.path, error.source)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(storage_failure(&path, error)),
+        }
+    }
+
     /// Return all source layers that offline cleanup must retain. `None`
     /// means a mounted checkout lacks a durable descriptor, so ancestry is
     /// unknown and no source resource in this repository can be reclaimed.
-    /// Orphan manifests pin layers too: they can result from interruption
-    /// between manifest publication and receipt transition.
+    /// Orphan manifests on Mounted receipts pin layers too: they can result
+    /// from interruption between manifest publication and receipt transition.
+    /// A stale manifest on a Finalized receipt is no longer a live reference.
     pub fn source_layer_references(&self) -> Result<Option<BTreeSet<PathBuf>>, WorktreeError> {
         let receipts = self.read_receipts()?;
         let mut layers = BTreeSet::new();
@@ -281,12 +306,19 @@ impl WorktreeRegistry {
             }
         }
         for (path, bytes) in self.retained.read_all()? {
-            let manifest: RetainedViewManifest =
-                serde_json::from_slice(&bytes).map_err(|error| storage_failure(&path, error))?;
+            let id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| storage_failure(&path, "invalid retained manifest filename"))?;
             let receipt = receipts
                 .iter()
-                .find(|receipt| receipt.worktree_id == manifest.worktree_id)
+                .find(|receipt| receipt.worktree_id.as_str() == id)
                 .ok_or_else(|| storage_failure(&path, "manifest lacks a worktree receipt"))?;
+            if receipt.status == WorktreeRecordStatus::Finalized {
+                continue;
+            }
+            let manifest: RetainedViewManifest =
+                serde_json::from_slice(&bytes).map_err(|error| storage_failure(&path, error))?;
             self.validate_retained_manifest(receipt, &manifest)?;
             layers.extend(manifest.layers);
         }

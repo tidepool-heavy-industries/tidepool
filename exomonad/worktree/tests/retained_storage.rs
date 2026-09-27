@@ -32,6 +32,7 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("large"), vec![b'x'; 1024 * 1024]).unwrap();
     let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let mut receipts = Vec::new();
     for number in 0..16 {
         let id = WorktreeId::from_raw(format!("wt-tiny-{number}"));
         let upper = root.join(format!("worktrees/.resources/run/{id}/source/upper"));
@@ -54,6 +55,7 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
             .put_retained_manifest(&receipt, vec![base.clone(), upper])
             .unwrap();
         registry.put(&receipt).unwrap();
+        receipts.push(receipt);
     }
     assert_eq!(registry.list().unwrap().len(), 16);
     assert!(registry
@@ -64,4 +66,26 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
     let references = registry.source_layer_references().unwrap().unwrap();
     assert_eq!(references.len(), 17);
     assert!(allocated_bytes(root) < 4 * 1024 * 1024);
+
+    // Simulate interruption after each Finalized receipt is durable but
+    // before its obsolete manifest is unlinked. A restart must release the
+    // references even if the layer files have since been reclaimed.
+    for receipt in &mut receipts {
+        receipt.status = WorktreeRecordStatus::Finalized;
+        registry.put(receipt).unwrap();
+    }
+    fs::remove_dir_all(&base).unwrap();
+    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    assert!(reopened
+        .source_layer_references()
+        .unwrap()
+        .unwrap()
+        .is_empty());
+    reopened.release_finalized_manifest(&receipts[0]).unwrap();
+    assert!(!root
+        .join(format!(
+            "registry/retained-views/{}.json",
+            receipts[0].worktree_id
+        ))
+        .exists());
 }

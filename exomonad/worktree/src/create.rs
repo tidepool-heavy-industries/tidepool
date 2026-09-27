@@ -553,6 +553,7 @@ impl WorktreeManager {
             .map_err(failure)?;
         receipt.status = WorktreeRecordStatus::Finalized;
         self.registry.put(&receipt)?;
+        self.registry.release_finalized_manifest(&receipt)?;
         Ok(())
     }
 
