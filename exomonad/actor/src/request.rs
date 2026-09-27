@@ -1842,7 +1842,7 @@ impl RequestRegistry {
 
     pub(crate) fn observe_watch(
         &self,
-        _owner: ActorRef,
+        owner: ActorRef,
         watch: WatchId,
     ) -> Result<WatchObservation, ReplyError> {
         let mut state = self.state.lock();
@@ -1892,7 +1892,11 @@ impl RequestRegistry {
             observation,
             WatchObservation::Ready(_) | WatchObservation::Unavailable { .. }
         ) {
-            if let Some(record) = state.watches.get_mut(&watch) {
+            if let Some(record) = state
+                .watches
+                .get_mut(&watch)
+                .filter(|record| record.owner == owner)
+            {
                 record.observed_ready_at = Some(unix_time_ms());
             }
         }
@@ -3673,6 +3677,91 @@ mod tests {
             registry.forget_response(intruder, request),
             Err(ReplyError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn foreign_observation_does_not_acknowledge_owner_watch_transition() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let foreign = actor(3);
+        let other_incarnation = ActorRef {
+            id: owner.id,
+            incarnation: Incarnation(2),
+        };
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        registry.begin_reply(target, request).unwrap();
+        let notifications = registry.finish_reply(request, None);
+        let transition_time = notifications
+            .iter()
+            .find(|notification| notification.watch == watch)
+            .expect("owner watch transition")
+            .occurred_at_unix_ms;
+
+        assert_eq!(
+            registry.observe_watch(foreign, watch),
+            Ok(WatchObservation::Ready(vec![]))
+        );
+        assert_eq!(
+            registry.observe_watch(other_incarnation, watch),
+            Ok(WatchObservation::Ready(vec![]))
+        );
+        assert!(!registry.watch_observed_since(owner, watch, transition_time));
+
+        let _ = registry.status_for(owner);
+        let _ = registry.watches_overview(owner);
+        assert!(!registry.watch_observed_since(owner, watch, transition_time));
+
+        registry.observe_watch(owner, watch).unwrap();
+        assert!(registry.watch_observed_since(owner, watch, transition_time));
+        // Repeated foreign inspection cannot clear the owner's acknowledgment.
+        registry.observe_watch(foreign, watch).unwrap();
+        assert!(registry.watch_observed_since(owner, watch, transition_time));
+
+        let unavailable_registry = RequestRegistry::default();
+        let unavailable_request = unavailable_registry.reserve(owner, target);
+        unavailable_registry
+            .mark_queued(owner, target, unavailable_request)
+            .unwrap();
+        unavailable_registry
+            .present(target, unavailable_request)
+            .unwrap();
+        let (unavailable_watch, _) = unavailable_registry
+            .register_watch(owner, vec![unavailable_request])
+            .unwrap();
+        unavailable_registry
+            .begin_reply(target, unavailable_request)
+            .unwrap();
+        unavailable_registry.finish_reply(unavailable_request, None);
+        let (_, notifications) = unavailable_registry
+            .forget_response(owner, unavailable_request)
+            .unwrap();
+        let unavailable_transition_time = notifications
+            .iter()
+            .find(|notification| notification.watch == unavailable_watch)
+            .expect("owner watch release transition")
+            .occurred_at_unix_ms;
+        assert!(matches!(
+            unavailable_registry.observe_watch(foreign, unavailable_watch),
+            Ok(WatchObservation::Unavailable { .. })
+        ));
+        assert!(!unavailable_registry.watch_observed_since(
+            owner,
+            unavailable_watch,
+            unavailable_transition_time
+        ));
+        unavailable_registry
+            .observe_watch(owner, unavailable_watch)
+            .unwrap();
+        assert!(unavailable_registry.watch_observed_since(
+            owner,
+            unavailable_watch,
+            unavailable_transition_time
+        ));
     }
 
     #[test]

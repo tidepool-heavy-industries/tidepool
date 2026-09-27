@@ -31,6 +31,9 @@ steering into a silent queued replacement assignment. Preserve unavailable
 outcomes through `Await`/`Watch`: a wake is a reason to inspect the retained
 handle, not proof of successful work or acceptance.
 
+Status and retained-output inspection contracts are summarized in
+[inspection-contract.md](inspection-contract.md).
+
 ## Request update ownership
 
 `request.rs` owns typed request lifecycle and retained observation metadata.
