@@ -17,7 +17,8 @@
 //!    Closure: [`WorktreeId`], `PathBuf` (×2), [`BranchName`], [`GitOid`],
 //!    `Option<`[`GitRef`]`>`, [`WorktreeOrigin`] (`CurrentRepository` |
 //!    `Ref(GitRef)` | `Worktree(WorktreeId)`), `i64`,
-//!    [`WorktreeRecordStatus`] (`Provisional` | `Finalized` | `Mounted`).
+//!    [`WorktreeRecordStatus`] (`Provisional` | `Finalized` | `Mounted` |
+//!    `Retained`).
 //!
 //! 2. **`Vec<`[`Binding`]`>`** — `exomonad/worktree/src/binding.rs`. One JSON
 //!    file per worktree id at `<binding_root>/<worktree_id>.json`, holding
@@ -426,6 +427,19 @@ fn mounted_worktree_receipt_golden_round_trips() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["status"],
         "Mounted"
+    );
+}
+
+#[test]
+fn retained_worktree_receipt_golden_round_trips() {
+    let sample = WorktreeReceipt {
+        status: WorktreeRecordStatus::Retained,
+        ..receipt_finalized_worktree_origin()
+    };
+    let json = assert_golden("worktree_receipt_retained.json", &sample);
+    assert_eq!(
+        serde_json::from_str::<WorktreeReceipt>(&json).unwrap(),
+        sample
     );
 }
 

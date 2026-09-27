@@ -1992,9 +1992,12 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         exomonad_worktree::WorktreeRecordStatus::Retained
     );
     assert!(!receipt.cwd.join("retirement-untracked").exists());
-    assert!(admission.manager.list().unwrap().iter().any(|summary| {
-        summary.receipt.worktree_id == receipt.worktree_id && summary.present
-    }));
+    assert!(admission
+        .manager
+        .list()
+        .unwrap()
+        .iter()
+        .any(|summary| { summary.receipt.worktree_id == receipt.worktree_id && summary.present }));
     admission
         .manager
         .lookup(&receipt.worktree_id)

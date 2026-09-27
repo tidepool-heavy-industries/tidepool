@@ -72,7 +72,10 @@ impl SharedOverlayResource {
         if !matches!(resource.publication, PublicationState::Writable) {
             return Err(io::Error::other("source publication remains unsettled"));
         }
-        sync_compacted_tree(&resource.upper)?;
+        let upper = resource.upper.clone();
+        tidepool_runtime::spawn_blocking_in_span(move || sync_compacted_tree(&upper))
+            .await
+            .map_err(io::Error::other)??;
         let layers = resource
             .layers
             .iter()
@@ -82,7 +85,9 @@ impl SharedOverlayResource {
         for storage in std::iter::once(&resource.storage)
             .chain(resource.layers.iter().map(|layer| &layer.storage))
         {
-            *storage.state.lock() = OverlayResourceState::RetainedForWorktree;
+            storage
+                .retained_for_worktree
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         Ok(Some(layers))
     }
@@ -126,11 +131,11 @@ impl SharedOverlayResource {
             resource.custody.settled = true;
             // An uncertain descendant retains its backing through Arc custody;
             // it vetoes reclamation, not retirement of this owner's view.
-            let retained = *resource.storage.state.lock()
-                == OverlayResourceState::RetainedForWorktree;
-            *resource.storage.state.lock() = if retained {
-                OverlayResourceState::RetainedForWorktree
-            } else if resource
+            let retained = resource
+                .storage
+                .retained_for_worktree
+                .load(std::sync::atomic::Ordering::Acquire);
+            *resource.storage.state.lock() = if resource
                 .storage
                 .uncertain
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -230,6 +235,7 @@ struct OverlayStorage {
     root: PathBuf,
     state: Mutex<OverlayResourceState>,
     uncertain: std::sync::atomic::AtomicBool,
+    retained_for_worktree: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug)]
@@ -261,6 +267,7 @@ pub(super) fn remove_unmounted_storage(path: &Path) -> io::Result<()> {
             .to_owned(),
         state: Mutex::new(OverlayResourceState::RetainedUnconfirmed),
         uncertain: std::sync::atomic::AtomicBool::new(false),
+        retained_for_worktree: std::sync::atomic::AtomicBool::new(false),
     };
     storage.release()
 }
@@ -269,7 +276,6 @@ pub(super) fn remove_unmounted_storage(path: &Path) -> io::Result<()> {
 enum OverlayResourceState {
     Unsubmitted,
     RetainedUnconfirmed,
-    RetainedForWorktree,
     Reclaimable,
     Released,
 }
@@ -358,6 +364,7 @@ impl OverlayResourceLease {
             path,
             state: Mutex::new(OverlayResourceState::Unsubmitted),
             uncertain: std::sync::atomic::AtomicBool::new(false),
+            retained_for_worktree: std::sync::atomic::AtomicBool::new(false),
         });
         let latest = inherited.clone();
         let layers = match inherited {
@@ -1204,6 +1211,14 @@ impl From<&std::fs::Metadata> for SourceStamp {
 
 impl OverlayStorage {
     fn release(&mut self) -> io::Result<()> {
+        if self
+            .retained_for_worktree
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(io::Error::other(
+                "overlay storage is referenced by a retained worktree",
+            ));
+        }
         *self.state.get_mut() = OverlayResourceState::RetainedUnconfirmed;
         // Detached OverlayFS work/work directories have mode 000. Only walk
         // this exclusively owned tree; never follow source symlinks.

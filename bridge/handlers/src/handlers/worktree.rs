@@ -1025,19 +1025,12 @@ impl WorktreeHandler {
         tree_id: WtWorktreeId,
     ) -> Result<WtBranchName, WorktreeError> {
         let id = worktree_id_from_wire(&tree_id)?;
-        let handle = self
+        let branch = self
             .manager
-            .lookup(&id)
+            .worktree_branch_by_id(&id)
             .map_err(error_to_wire)?
             .ok_or_else(|| never_registered(&tree_id))?;
-        let out = self
-            .manager
-            .git()
-            .try_run(handle.cwd(), &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map_err(error_to_wire)?;
-        Ok(branch_name_to_wire(&BranchName::from_raw(
-            out.trimmed().to_string(),
-        )))
+        Ok(branch_name_to_wire(&branch))
     }
 
     /// A FRESH git read of this worktree's current HEAD. Specifically NOT the
@@ -1050,23 +1043,18 @@ impl WorktreeHandler {
     /// silently open. Reads through the same substrate as
     /// `worktree_branch_of` — never spawns git itself, never caches.
     ///
-    /// A thin delegation to `WorktreeManager::worktree_head`, a fresh
-    /// `rev-parse HEAD` on every call. That method takes a `&WorktreeHandle`,
-    /// not a `&WorktreeId`, so — same as `worktree_branch_of` — the id is
-    /// resolved to a handle first; a lookup failure (never-registered or
-    /// lost) surfaces as the typed error rather than being swallowed. No
-    /// local `rev-parse`, no `source_head` shortcut.
+    /// A fresh manager read of Git administration on every call. A retained
+    /// view needs no full working-file restoration for this observation.
     pub(crate) fn worktree_head_of(
         &mut self,
         tree_id: WtWorktreeId,
     ) -> Result<WtGitOid, WorktreeError> {
         let id = worktree_id_from_wire(&tree_id)?;
-        let handle = self
+        let head = self
             .manager
-            .lookup(&id)
+            .worktree_head_by_id(&id)
             .map_err(error_to_wire)?
             .ok_or_else(|| never_registered(&tree_id))?;
-        let head = self.manager.worktree_head(&handle).map_err(error_to_wire)?;
         Ok(git_oid_to_wire(&head))
     }
 

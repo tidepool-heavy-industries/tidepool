@@ -46,9 +46,15 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         .unwrap();
     let cwd = prepared.receipt().cwd.clone();
     std::fs::write(cwd.join("file"), "before\n").unwrap();
-    for name in ["upper", "work", "view"] {
-        std::fs::create_dir(root.join(name)).unwrap();
-    }
+    let base = root.join("worktrees/.resources/run/source/base");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::copy(cwd.join("file"), base.join("file")).unwrap();
+    std::fs::copy(cwd.join(".git"), base.join(".git")).unwrap();
+    let upper = base.parent().unwrap().join("upper");
+    let work = base.parent().unwrap().join("work");
+    std::fs::create_dir(&upper).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    std::fs::create_dir(root.join("view")).unwrap();
     let view = root.join("view");
     let common = inspect::git_common_dir(repository.git(), repository.path()).unwrap();
     let namespace = exomonad_node::ProcessMountBoundary::new(
@@ -59,7 +65,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     .unwrap()
     .with_project_root(&view)
     .unwrap()
-    .with_overlay_view([cwd.clone()], root.join("upper"), root.join("work"), &view)
+    .with_overlay_view([base.clone()], &upper, &work, &view)
     .unwrap()
     .prepare_view(
         "bwrap",
@@ -99,9 +105,90 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     );
     assert!(reopened.lookup(handle.id()).is_err());
     reopened
-        .mount_worktree(handle.id(), namespace, &view)
+        .mount_worktree(handle.id(), namespace.clone(), &view)
         .unwrap();
     assert_eq!(reopened.observe_submission(&handle).unwrap(), observed);
+    let changed = namespace
+        .host_command(&view, "/bin/sh".as_ref())
+        .unwrap()
+        .args([
+            "-ec",
+            "printf staged > file; git add file; printf dirty >> file; printf untracked > untracked",
+        ])
+        .output()
+        .unwrap();
+    assert!(changed.status.success());
+    let before = reopened
+        .git()
+        .try_run(&cwd, &["status", "--porcelain=v1"])
+        .unwrap()
+        .trimmed();
+    let head_before = reopened.worktree_head_by_id(handle.id()).unwrap();
+    let branch_before = reopened.worktree_branch_by_id(handle.id()).unwrap();
+    assert!(reopened
+        .retain_retired_view(
+            handle.id(),
+            &namespace,
+            &view,
+            vec![root.join("missing-layer")],
+        )
+        .is_err());
+    assert_eq!(
+        reopened
+            .registry()
+            .get(handle.id())
+            .unwrap()
+            .unwrap()
+            .status,
+        WorktreeRecordStatus::Mounted
+    );
+    reopened
+        .retain_retired_view(
+            handle.id(),
+            &namespace,
+            &view,
+            vec![base, upper],
+        )
+        .unwrap();
+    namespace.detach_retired_tree(&view).unwrap();
+    assert!(reopened
+        .git()
+        .try_run(&cwd, &["status", "--porcelain=v1"])
+        .is_err());
+    assert_eq!(
+        reopened.list().unwrap()[0].receipt.status,
+        WorktreeRecordStatus::Retained
+    );
+    assert_eq!(reopened.worktree_head_by_id(handle.id()).unwrap(), head_before);
+    assert_eq!(
+        reopened.worktree_branch_by_id(handle.id()).unwrap(),
+        branch_before
+    );
+    assert_eq!(std::fs::read_to_string(cwd.join("file")).unwrap(), "before\n");
+    let after_restart = WorktreeManager::new(
+        repository.git().clone(),
+        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        root.join("managed"),
+        repository.path(),
+    );
+    let restored = after_restart.lookup(handle.id()).unwrap().unwrap();
+    assert_eq!(restored.receipt().status, WorktreeRecordStatus::Finalized);
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("file")).unwrap(),
+        "stageddirty"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("untracked")).unwrap(),
+        "untracked"
+    );
+    assert_eq!(
+        after_restart
+            .git()
+            .try_run(&cwd, &["status", "--porcelain=v1"])
+            .unwrap()
+            .trimmed(),
+        before
+    );
 }
 
 #[test]

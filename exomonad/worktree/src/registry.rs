@@ -19,8 +19,8 @@
 //!   exact retained view to be recovered before filesystem operations can resume.
 
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
@@ -65,6 +65,7 @@ pub enum WorktreeOrigin {
 /// Checkout readiness and the filesystem required to access its working files.
 /// Preparation records `Provisional` before Git creation; completion records
 /// `Finalized` for ordinary host files or `Mounted` for an inherited source view.
+/// Retirement seals the source view as `Retained` until demand restores it.
 /// Provisional storage remains discoverable but cannot grant a usable handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeRecordStatus {
@@ -98,8 +99,8 @@ pub struct WorktreeReceipt {
     /// through the shared Git namespace (`git show <oid>`) and through typed
     /// observation, not through this path: a running child's working files live
     /// behind its own retained mount view, and they become readable at `cwd` to
-    /// anyone else only once [`crate::WorktreeManager::materialize_retired_view`]
-    /// has finalized the record at the child's retirement.
+    /// anyone else only after [`crate::WorktreeManager::restore_retained_view`]
+    /// has materialized the sealed source layers on demand.
     pub cwd: PathBuf,
     pub branch: BranchName,
     /// The commit the managed branch was rooted at. For a snapshot creation
@@ -129,9 +130,9 @@ pub struct WorktreeReceipt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeSummary {
     pub receipt: WorktreeReceipt,
-    /// `false` when the recorded `cwd` no longer holds a git worktree — the
-    /// [`WorktreeError::WorktreeLost`] condition, surfaced without erroring so
-    /// a listing can show lost trees rather than failing on the first one.
+    /// For an ordinary checkout, whether the recorded `cwd` still holds a Git
+    /// worktree. For `Retained`, whether its durable layer manifest is valid;
+    /// the sparse `cwd` is restored only by lookup.
     pub present: bool,
 }
 
@@ -225,14 +226,14 @@ impl WorktreeRegistry {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn finish_retention(
-        &self,
-        receipt: &WorktreeReceipt,
-    ) -> Result<(), WorktreeError> {
+    pub(crate) fn finish_retention(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
         if receipt.status != WorktreeRecordStatus::Retained
             || self.retained_manifest(receipt)?.is_none()
         {
-            return Err(storage_failure(&receipt.cwd, "retained receipt lacks a valid manifest"));
+            return Err(storage_failure(
+                &receipt.cwd,
+                "retained receipt lacks a valid manifest",
+            ));
         }
         #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
@@ -249,8 +250,9 @@ impl WorktreeRegistry {
         let Some(bytes) = self.retained.read(receipt.worktree_id.as_str())? else {
             return Ok(None);
         };
-        let manifest: RetainedViewManifest = serde_json::from_slice(&bytes)
-            .map_err(|error| storage_failure(&self.retained.path_for(receipt.worktree_id.as_str()), error))?;
+        let manifest: RetainedViewManifest = serde_json::from_slice(&bytes).map_err(|error| {
+            storage_failure(&self.retained.path_for(receipt.worktree_id.as_str()), error)
+        })?;
         self.validate_retained_manifest(receipt, &manifest)?;
         Ok(Some(manifest))
     }
@@ -272,12 +274,15 @@ impl WorktreeRegistry {
             if receipt.status == WorktreeRecordStatus::Retained
                 && !self.retained.exists(receipt.worktree_id.as_str())
             {
-                return Err(storage_failure(&receipt.cwd, "retained view manifest is missing"));
+                return Err(storage_failure(
+                    &receipt.cwd,
+                    "retained view manifest is missing",
+                ));
             }
         }
         for (path, bytes) in self.retained.read_all()? {
-            let manifest: RetainedViewManifest = serde_json::from_slice(&bytes)
-                .map_err(|error| storage_failure(&path, error))?;
+            let manifest: RetainedViewManifest =
+                serde_json::from_slice(&bytes).map_err(|error| storage_failure(&path, error))?;
             let receipt = receipts
                 .iter()
                 .find(|receipt| receipt.worktree_id == manifest.worktree_id)
@@ -293,21 +298,33 @@ impl WorktreeRegistry {
         receipt: &WorktreeReceipt,
         manifest: &RetainedViewManifest,
     ) -> Result<(), WorktreeError> {
-        let storage_root = self.root.parent().ok_or_else(|| storage_failure(&self.root, "registry has no managed storage root"))?;
+        let storage_root = self
+            .root
+            .parent()
+            .ok_or_else(|| storage_failure(&self.root, "registry has no managed storage root"))?;
+        let resource_root = storage_root.join("worktrees/.resources");
         if manifest.version != 1
             || manifest.worktree_id != receipt.worktree_id
             || manifest.cwd != receipt.cwd
             || manifest.layers.is_empty()
         {
-            return Err(storage_failure(&self.root, "invalid retained-view identity or version"));
+            return Err(storage_failure(
+                &self.root,
+                "invalid retained-view identity or version",
+            ));
         }
         for layer in &manifest.layers {
-            let canonical = layer.canonicalize().map_err(|error| storage_failure(layer, error))?;
+            let canonical = layer
+                .canonicalize()
+                .map_err(|error| storage_failure(layer, error))?;
             if canonical != *layer
-                || !canonical.starts_with(storage_root)
+                || !canonical.starts_with(&resource_root)
                 || !canonical.is_dir()
             {
-                return Err(storage_failure(layer, "retained layer is outside managed storage or is not a directory"));
+                return Err(storage_failure(
+                    layer,
+                    "retained layer is outside managed source resources or is not a directory",
+                ));
             }
         }
         Ok(())
@@ -398,10 +415,16 @@ impl WorktreeRegistry {
     /// Durably record a receipt. Overwrites an existing row for the same id
     /// (the snapshot lane writes `snapshot_ref` after creation).
     pub fn put(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
-        self.require_view_if_needed(receipt)?;
+        if receipt.status != WorktreeRecordStatus::Finalized {
+            self.require_view_if_needed(receipt)?;
+        }
         #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
-        self.records.write(receipt.worktree_id.as_str(), &bytes)
+        self.records.write(receipt.worktree_id.as_str(), &bytes)?;
+        if receipt.status == WorktreeRecordStatus::Finalized {
+            self.require_view_if_needed(receipt)?;
+        }
+        Ok(())
     }
 
     /// Read one row back. `Ok(None)` when the id was never registered — which
@@ -466,8 +489,9 @@ impl WorktreeRegistry {
             .into_iter()
             .map(|receipt| {
                 let present = if receipt.status == WorktreeRecordStatus::Retained {
-                    self.retained_manifest(&receipt)?
-                        .ok_or_else(|| storage_failure(&receipt.cwd, "retained view manifest is missing"))?;
+                    self.retained_manifest(&receipt)?.ok_or_else(|| {
+                        storage_failure(&receipt.cwd, "retained view manifest is missing")
+                    })?;
                     true
                 } else {
                     worktree_present(git, &receipt.cwd)?

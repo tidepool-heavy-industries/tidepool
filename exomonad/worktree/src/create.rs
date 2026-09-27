@@ -335,15 +335,20 @@ impl WorktreeManager {
             .get(id)?
             .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
         if receipt.status == WorktreeRecordStatus::Retained {
-            let manifest = self.registry.retained_manifest(&receipt)?
-                .ok_or_else(|| failure(std::io::Error::other("retained view manifest is missing")))?;
+            let manifest = self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+                failure(std::io::Error::other("retained view manifest is missing"))
+            })?;
             if manifest.layers == layers {
                 return Ok(());
             }
-            return Err(failure(std::io::Error::other("retained view layers differ from published custody")));
+            return Err(failure(std::io::Error::other(
+                "retained view layers differ from published custody",
+            )));
         }
         if receipt.status != WorktreeRecordStatus::Mounted {
-            return Err(failure(std::io::Error::other("worktree has no mounted source view")));
+            return Err(failure(std::io::Error::other(
+                "worktree has no mounted source view",
+            )));
         }
         let view = match self.registry.views.resolve(&receipt.cwd).map_err(failure)? {
             Some(view) => view,
@@ -387,10 +392,16 @@ impl WorktreeManager {
         let Some(view) = view else {
             return Ok(());
         };
-        if !view.namespace.same_view_as(namespace).map_err(|error| crate::storage::storage_failure(&receipt.cwd, error))?
+        if !view
+            .namespace
+            .same_view_as(namespace)
+            .map_err(|error| crate::storage::storage_failure(&receipt.cwd, error))?
             || view.root != visible
         {
-            return Err(crate::storage::storage_failure(&receipt.cwd, "host view mismatch"));
+            return Err(crate::storage::storage_failure(
+                &receipt.cwd,
+                "host view mismatch",
+            ));
         }
         self.registry
             .views
@@ -433,9 +444,14 @@ impl WorktreeManager {
             RETIREMENT_GIT_WAIT,
         )
         .map_err(failure)?;
-        let _capture = self.git.capture_within(RETIREMENT_GIT_WAIT).ok_or_else(|| {
-            failure(std::io::Error::other("Git operation still active before restoration"))
-        })?;
+        let _capture = self
+            .git
+            .capture_within(RETIREMENT_GIT_WAIT)
+            .ok_or_else(|| {
+                failure(std::io::Error::other(
+                    "Git operation still active before restoration",
+                ))
+            })?;
         // Another process can finish restoration while this caller waits for
         // admission. Its finalized receipt is the only authority to return.
         let mut receipt = self
@@ -446,7 +462,9 @@ impl WorktreeManager {
             return Ok(());
         }
         if receipt.status != WorktreeRecordStatus::Retained {
-            return Err(failure(std::io::Error::other("retained view changed during admission")));
+            return Err(failure(std::io::Error::other(
+                "retained view changed during admission",
+            )));
         }
         let parent = receipt
             .cwd
@@ -466,7 +484,10 @@ impl WorktreeManager {
             .map_err(|error| failure(std::io::Error::other(error)))?
             .with_read_only_project();
         let namespace = boundary
-            .prepare_view(BUBBLEWRAP_PROGRAM, std::time::Instant::now() + RETIREMENT_GIT_WAIT)
+            .prepare_view(
+                BUBBLEWRAP_PROGRAM,
+                std::time::Instant::now() + RETIREMENT_GIT_WAIT,
+            )
             .map_err(failure)?;
         let mut producer = namespace
             .host_command(&view, "tar".as_ref())
@@ -488,7 +509,10 @@ impl WorktreeManager {
             .stdout
             .take()
             .ok_or_else(|| failure(std::io::Error::other("missing archive pipe")))?;
-        #[allow(clippy::disallowed_methods, reason = "one-shot restoration tar extraction")]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "one-shot restoration tar extraction"
+        )]
         let consumer = std::process::Command::new("tar")
             .args(["--acls", "--xattrs", "--sparse", "-xf", "-", "-C"])
             .arg(&copy)
@@ -499,7 +523,9 @@ impl WorktreeManager {
         }
         let produced = producer.wait().map_err(failure)?;
         if !consumer.map_err(failure)?.success() || !produced.success() {
-            return Err(failure(std::io::Error::other("retained view restoration copy failed")));
+            return Err(failure(std::io::Error::other(
+                "retained view restoration copy failed",
+            )));
         }
         namespace.detach_retired_tree(&view).map_err(failure)?;
         drop(namespace);
@@ -527,7 +553,6 @@ impl WorktreeManager {
             .map_err(failure)?;
         receipt.status = WorktreeRecordStatus::Finalized;
         self.registry.put(&receipt)?;
-        self.registry.views.restored(&receipt.cwd).map_err(failure)?;
         Ok(())
     }
 
@@ -1285,6 +1310,54 @@ impl WorktreeManager {
 
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         self.registry.list_with_git(&self.git)
+    }
+
+    /// Git administration remains host-owned when working files are retained
+    /// in layers. These two read-only observations need no full checkout copy.
+    pub fn worktree_head_by_id(&self, id: &WorktreeId) -> Result<Option<GitOid>, WorktreeError> {
+        let Some(receipt) = self.registry.get(id)? else {
+            return Ok(None);
+        };
+        if receipt.status == WorktreeRecordStatus::Retained {
+            self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+                crate::storage::storage_failure(&receipt.cwd, "retained view manifest is missing")
+            })?;
+            if !self.git.on_host().try_exists(&receipt.cwd.join(".git"))? {
+                return Err(WorktreeError::WorktreeLost(id.clone()));
+            }
+            let out = self.git.on_host().try_run(&receipt.cwd, &["rev-parse", "HEAD"])?;
+            return Ok(Some(GitOid::from_raw(out.trimmed())));
+        }
+        self.lookup(id)?.map(|handle| self.worktree_head(&handle)).transpose()
+    }
+
+    pub fn worktree_branch_by_id(
+        &self,
+        id: &WorktreeId,
+    ) -> Result<Option<BranchName>, WorktreeError> {
+        let Some(receipt) = self.registry.get(id)? else {
+            return Ok(None);
+        };
+        if receipt.status == WorktreeRecordStatus::Retained {
+            self.registry.retained_manifest(&receipt)?.ok_or_else(|| {
+                crate::storage::storage_failure(&receipt.cwd, "retained view manifest is missing")
+            })?;
+            if !self.git.on_host().try_exists(&receipt.cwd.join(".git"))? {
+                return Err(WorktreeError::WorktreeLost(id.clone()));
+            }
+            let out = self
+                .git
+                .on_host()
+                .try_run(&receipt.cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+            return Ok(Some(BranchName::from_raw(out.trimmed())));
+        }
+        self.lookup(id)?
+            .map(|handle| {
+                self.git
+                    .try_run(handle.cwd(), &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .map(|out| BranchName::from_raw(out.trimmed()))
+            })
+            .transpose()
     }
 
     /// Fresh read of `handle`'s CURRENT git `HEAD`, performed at call time.

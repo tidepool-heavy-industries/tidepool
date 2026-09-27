@@ -246,7 +246,9 @@ pub fn cleanup(
                 let source_reason = if matches!(kind, StorageKind::Source) {
                     match &source_references {
                         Err(error) => Some(format!("source references cannot be proved: {error}")),
-                        Ok(None) => Some("a mounted checkout has no durable layer descriptor".into()),
+                        Ok(None) => {
+                            Some("a mounted checkout has no durable layer descriptor".into())
+                        }
                         Ok(Some(layers)) if layers.iter().any(|layer| layer.starts_with(&path)) => {
                             Some("referenced by a retained worktree view".into())
                         }
@@ -397,6 +399,46 @@ mod tests {
             matches!(entry.kind, StorageKind::Source)
                 && !matches!(&entry.outcome, Outcome::Retained(reason) if reason.contains("finalized checkout"))
         }), "{report:?}");
+    }
+
+    #[test]
+    fn retained_child_manifest_pins_ancestor_source() {
+        use exomonad_worktree::{
+            BranchName, GitOid, WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
+            WorktreeRegistry,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let (run, _, source_file) = fixture(root.path());
+        let source = source_file.parent().unwrap();
+        let resource = source.parent().unwrap();
+        let repository = resource.ancestors().nth(4).unwrap();
+        let registry = WorktreeRegistry::open(repository.join("registry")).unwrap();
+        let id = WorktreeId::from_raw("wt-retained-child");
+        let cwd = repository.join("worktrees").join(id.as_str());
+        fs::create_dir_all(&cwd).unwrap();
+        let receipt = WorktreeReceipt {
+            worktree_id: id,
+            cwd,
+            branch: BranchName::from_raw("exomonad/worktree/retained-child"),
+            source_head: GitOid::from_raw("0".repeat(40)),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            source_repository: root.path().to_owned(),
+            created_at_ms: 0,
+            status: WorktreeRecordStatus::Retained,
+        };
+        registry
+            .put_retained_manifest(&receipt, vec![source.to_owned()])
+            .unwrap();
+        registry.put(&receipt).unwrap();
+        let report = cleanup(&run, true, true).unwrap();
+        let ancestor = report.iter().find(|entry| entry.path == source).unwrap();
+        assert!(matches!(
+            &ancestor.outcome,
+            Outcome::Retained(reason) if reason.contains("retained worktree view")
+        ));
+        assert!(source_file.exists());
     }
 
     #[test]

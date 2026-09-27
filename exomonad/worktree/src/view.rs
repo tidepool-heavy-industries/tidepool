@@ -57,18 +57,6 @@ impl WorktreeViews {
         Ok(())
     }
 
-    pub fn restored(&self, cwd: &Path) -> io::Result<()> {
-        let mut views = self
-            .0
-            .write()
-            .map_err(|_| io::Error::other("worktree view lock poisoned"))?;
-        if !matches!(views.get(cwd), Some(ViewAccess::Retained)) {
-            return Err(io::Error::other("restoration requires a retained view"));
-        }
-        views.remove(cwd);
-        Ok(())
-    }
-
     pub fn clear_restored(&self, cwd: &Path) -> io::Result<()> {
         let mut views = self
             .0
