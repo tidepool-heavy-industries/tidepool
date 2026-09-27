@@ -33,6 +33,8 @@ handle, not proof of successful work or acceptance.
 
 Status and retained-output inspection contracts are summarized in
 [inspection-contract.md](inspection-contract.md).
+Wait and cancellation boundaries are summarized in
+[waits-cancellation-contract.md](waits-cancellation-contract.md).
 
 ## Request update ownership
 
