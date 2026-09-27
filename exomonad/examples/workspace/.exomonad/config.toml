@@ -22,6 +22,7 @@ modules = [
   "Project.PrepareContinue", "Project.RetainedEvidence",
   "Project.AssumptionWatch", "Project.ParallelInvestigate", "Project.SlowCommandWatch",
   "Project.BackgroundInvestigator",
+  "Project.BackgroundCommandExample", "Project.BackgroundCommandExampleChecks",
   "Project.WorkflowReminders", "Project.WorkflowReminderExamples", "Project.WorkflowReminderRoutingChecks",
   "Project.Interview", "Project.WorkflowExamples", "Project.ReviewFlow",
 ]
@@ -36,6 +37,7 @@ checks = [
   "Project.CheckResultsChecks.retainedRecovery",
   "Project.BackgroundInvestigatorChecks.terminalFailure",
   "Project.BackgroundInvestigatorChecks.pendingProbe",
+  "Project.BackgroundCommandExampleChecks.completion",
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",
   "Project.RoutingChecks.notificationRetention",

@@ -12,6 +12,8 @@ mod call_timing_tests;
 mod cell_compile_cost_tests;
 #[cfg(test)]
 mod command_jobs_tests;
+#[cfg(test)]
+mod background_command_example_tests;
 mod commands;
 #[cfg(test)]
 mod custody_tests;

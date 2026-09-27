@@ -75,6 +75,14 @@ impl TestCommands {
         self.finish.send_replace(true);
     }
 
+    pub(super) fn set_exit_code(&self, exit_code: i64) {
+        self.exit_code.store(exit_code, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn set_output_unavailable(&self) {
+        self.output_unavailable.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             specs: Mutex::new(Vec::new()),
@@ -312,7 +320,7 @@ fn test_page(text: &str) -> CommandPage {
     }
 }
 
-async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
+pub(super) async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
     let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), source).await;
     assert_eq!(result["status"], "committed", "{result}");
     for item in result["items"].as_array().unwrap() {
