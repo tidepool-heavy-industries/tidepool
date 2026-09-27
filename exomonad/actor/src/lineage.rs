@@ -259,6 +259,8 @@ struct ForkGroupsState {
     active: HashSet<ActorRef>,
     cleaning: HashSet<ActorRef>,
     checkpoints: HashMap<String, CheckpointLease>,
+    // A token keeps only its session after release, for idempotency and typed refusal.
+    released_checkpoints: HashMap<String, SessionId>,
 }
 
 /// Admission ledger for one applicative context-unfold layer.
@@ -278,6 +280,8 @@ pub enum CheckpointRefusal {
     #[haskell(module = "Tidepool.Effects.Core")]
     UnavailableCheckpoint,
     #[haskell(module = "Tidepool.Effects.Core")]
+    ReleasedCheckpoint,
+    #[haskell(module = "Tidepool.Effects.Core")]
     CaptureFailed,
     #[haskell(module = "Tidepool.Effects.Core")]
     ProcessRestartUnsupported,
@@ -288,6 +292,9 @@ pub enum CheckpointPhase {
     Pending,
     Published,
     Failed,
+    Released,
+    // A branch admitted before release may still finish provider binding.
+    ReleasedAfterPublication,
 }
 
 #[derive(Clone)]
@@ -311,7 +318,9 @@ impl CheckpointLease {
         loop {
             match *phase.borrow_and_update() {
                 CheckpointPhase::Published => return Ok(()),
+                CheckpointPhase::ReleasedAfterPublication => return Ok(()),
                 CheckpointPhase::Failed => return Err(CheckpointRefusal::CaptureFailed),
+                CheckpointPhase::Released => return Err(CheckpointRefusal::ReleasedCheckpoint),
                 CheckpointPhase::Pending => {}
             }
             if phase.changed().await.is_err() {
@@ -398,14 +407,14 @@ impl ForkGroupRegistry {
                 active: HashSet::new(),
                 cleaning: HashSet::new(),
                 checkpoints: HashMap::new(),
+                released_checkpoints: HashMap::new(),
             })),
             checkpoint_namespace: uuid::Uuid::new_v4(),
         }
     }
 
     /// Keep the captured scope under the existing fork custody ledger until
-    /// the resident machine goes away. The opaque token carries no authority
-    /// to move it to another machine.
+    /// explicit release or failure. The opaque token cannot move it to another machine.
     pub fn capture_checkpoint(
         &self,
         name: String,
@@ -464,20 +473,80 @@ impl ForkGroupRegistry {
         if namespace != self.checkpoint_namespace.to_string() {
             return Err(CheckpointRefusal::ProcessRestartUnsupported);
         }
-        let lease = self
-            .state
-            .lock()
+        let state = self.state.lock();
+        let lease = match state.checkpoints.get(token) {
+            Some(lease) => lease.clone(),
+            None => {
+                return match state.released_checkpoints.get(token) {
+                    Some(released_session) if *released_session == session => {
+                        Err(CheckpointRefusal::ReleasedCheckpoint)
+                    }
+                    Some(_) => Err(CheckpointRefusal::WrongSession),
+                    None => Err(CheckpointRefusal::UnavailableCheckpoint),
+                };
+            }
+        };
+        if lease.session != session {
+            return Err(CheckpointRefusal::WrongSession);
+        }
+        match *lease.phase.borrow() {
+            CheckpointPhase::Failed => return Err(CheckpointRefusal::CaptureFailed),
+            CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => {
+                return Err(CheckpointRefusal::ReleasedCheckpoint)
+            }
+            CheckpointPhase::Pending | CheckpointPhase::Published => {}
+        }
+        Ok(lease)
+    }
+
+    /// Revoke future admissions and return the captured root for retirement.
+    /// Repeating release does not retire a root twice. Admitted children own
+    /// independent detached scopes, so their environment is unaffected.
+    pub fn release_checkpoint(
+        &self,
+        token: &str,
+        session: SessionId,
+    ) -> Result<Option<ScopeId>, CheckpointRefusal> {
+        let (namespace, _) = token
+            .split_once(':')
+            .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
+        if namespace != self.checkpoint_namespace.to_string() {
+            return Err(CheckpointRefusal::ProcessRestartUnsupported);
+        }
+        let mut state = self.state.lock();
+        if let Some(released_session) = state.released_checkpoints.get(token) {
+            return if *released_session == session {
+                Ok(None)
+            } else {
+                Err(CheckpointRefusal::WrongSession)
+            };
+        }
+        let lease = state
             .checkpoints
             .get(token)
-            .cloned()
             .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
         if lease.session != session {
             return Err(CheckpointRefusal::WrongSession);
         }
-        if *lease.phase.borrow() == CheckpointPhase::Failed {
-            return Err(CheckpointRefusal::CaptureFailed);
-        }
-        Ok(lease)
+        let lease = state.checkpoints.remove(token).expect("checked checkpoint");
+        let phase = *lease.phase.borrow();
+        let scope = match phase {
+            CheckpointPhase::Pending => {
+                lease.phase.send_replace(CheckpointPhase::Released);
+                Some(lease.scope)
+            }
+            CheckpointPhase::Published => {
+                lease
+                    .phase
+                    .send_replace(CheckpointPhase::ReleasedAfterPublication);
+                Some(lease.scope)
+            }
+            CheckpointPhase::Failed
+            | CheckpointPhase::Released
+            | CheckpointPhase::ReleasedAfterPublication => None,
+        };
+        state.released_checkpoints.insert(token.to_owned(), session);
+        Ok(scope)
     }
 
     pub fn settle_checkpoints(
@@ -1456,6 +1525,72 @@ mod tests {
             restarted.checkpoint(&token, SessionId(7)),
             Err(CheckpointRefusal::ProcessRestartUnsupported)
         ));
+    }
+
+    #[tokio::test]
+    async fn release_is_idempotent_and_revokes_pending_or_published_lease() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "call".into(),
+        };
+        let capture = || {
+            groups.capture_checkpoint(
+                "seed".into(),
+                issuer,
+                crate::EffectiveRole::root(),
+                None,
+                None,
+                crate::CheckpointSourceLayer::default(),
+                SessionId(7),
+                ScopeId(3),
+                boundary.clone(),
+            )
+        };
+        let pending = capture();
+        let pending_lease = groups.checkpoint(&pending, SessionId(7)).unwrap();
+        assert_eq!(
+            groups.release_checkpoint(&pending, SessionId(8)),
+            Err(CheckpointRefusal::WrongSession)
+        );
+        assert_eq!(
+            groups.release_checkpoint(&pending, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        assert_eq!(groups.release_checkpoint(&pending, SessionId(7)), Ok(None));
+        groups.settle_checkpoints(issuer, &boundary, true);
+        assert_eq!(
+            pending_lease.wait_published().await,
+            Err(CheckpointRefusal::ReleasedCheckpoint)
+        );
+        assert!(matches!(
+            groups.checkpoint(&pending, SessionId(7)),
+            Err(CheckpointRefusal::ReleasedCheckpoint)
+        ));
+        assert_eq!(
+            groups.release_checkpoint(&pending, SessionId(8)),
+            Err(CheckpointRefusal::WrongSession)
+        );
+        let published = capture();
+        let published_lease = groups.checkpoint(&published, SessionId(7)).unwrap();
+        groups.settle_checkpoints(issuer, &boundary, true);
+        assert!(groups.retains_session(SessionId(7)));
+        assert_eq!(
+            groups.release_checkpoint(&published, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        assert!(!groups.retains_session(SessionId(7)));
+        published_lease.wait_published().await.unwrap();
+        assert_eq!(
+            groups.release_checkpoint(&published, SessionId(7)),
+            Ok(None)
+        );
+        let restarted = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        assert_eq!(
+            restarted.release_checkpoint(&published, SessionId(7)),
+            Err(CheckpointRefusal::ProcessRestartUnsupported)
+        );
     }
 
     #[test]

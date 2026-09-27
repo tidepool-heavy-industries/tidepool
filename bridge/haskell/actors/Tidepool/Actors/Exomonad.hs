@@ -94,6 +94,10 @@ module Tidepool.Actors.Exomonad
   , withReport
   , withModel
   , WorkerContext
+  , ContextCheckpoint
+  , checkpoint
+  , releaseCheckpoint
+  , fromCheckpoint
   , inherited
   , selected
   , withContext
@@ -107,6 +111,7 @@ module Tidepool.Actors.Exomonad
   , ForkAllowance (..)
   , WorkerLaunchPreview (..)
   , ForkContext (..)
+  , CheckpointRefusal (..)
   , BranchPreview (..)
   , DelegationAuthority (..)
   , withForkBudget

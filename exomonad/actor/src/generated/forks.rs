@@ -43,6 +43,7 @@ pub enum ForksReq {
     ),
     ForksCheckpointWith(String),
     ForksCheckCheckpointWith(String),
+    ForksReleaseCheckpointWith(String),
     ForksPreviewWith(
         crate::ActorLaunchRoleWire,
         Vec<crate::ActorEffectKeyWire>,

@@ -40,6 +40,7 @@ module Tidepool.Actors.Unfold
   , WorkerContext
   , ContextCheckpoint
   , checkpoint
+  , releaseCheckpoint
   , fromCheckpoint
   , inherited
   , selected
@@ -354,6 +355,11 @@ newtype ContextCheckpoint = ContextCheckpoint Text
 -- A returned token becomes usable only after this hosted call succeeds.
 checkpoint :: Member Forks es => Text -> Eff es (Either CheckpointRefusal ContextCheckpoint)
 checkpoint name = fmap ContextCheckpoint <$> send (ForksCheckpointWith name)
+
+-- | End future use of a checkpoint. Children already admitted from it keep
+-- their independent inherited context. Releasing twice succeeds.
+releaseCheckpoint :: Member Forks es => ContextCheckpoint -> Eff es (Either CheckpointRefusal ())
+releaseCheckpoint (ContextCheckpoint token) = send (ForksReleaseCheckpointWith token)
 
 data WorkerContext input = Inherited | Selected (input -> Text) | FromCheckpoint ContextCheckpoint
 

@@ -1568,9 +1568,10 @@ mod checkpoint_scope_tests {
         assert_eq!(session.scope_tree().parent_of(capture), None);
         session.retire_scope(issuer);
         assert!(session.scope_tree().is_live(capture));
-        let deferred = session.mint_scope(capture).unwrap();
-        assert_eq!(session.scope_tree().parent_of(deferred), Some(capture));
+        let deferred = session.mint_detached_scope(capture).unwrap();
+        assert_eq!(session.scope_tree().parent_of(deferred), None);
         session.retire_scope(capture);
-        assert!(!session.scope_tree().is_live(deferred));
+        assert!(session.scope_tree().is_live(deferred));
+        session.retire_scope(deferred);
     }
 }

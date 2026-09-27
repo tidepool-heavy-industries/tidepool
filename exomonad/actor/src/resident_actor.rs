@@ -3634,6 +3634,29 @@ where
                     .resume_value(context.clone(), continuation, result)
                     .await
             }),
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint {
+                continuation,
+                token,
+            }) => Box::pin(async move {
+                let result = self
+                    .environment
+                    .fork_groups
+                    .release_checkpoint(&token, context.placement.session);
+                let result: Result<(), crate::CheckpointRefusal> = match result {
+                    Ok(Some(scope)) => self
+                        .environment
+                        .runner
+                        .retire_checkpoint_scopes(context.placement.session, vec![scope])
+                        .await
+                        .map_err(|_| crate::CheckpointRefusal::CaptureFailed),
+                    Ok(None) => Ok(()),
+                    Err(refusal) => Err(refusal),
+                };
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, result)
+                    .await
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview {
                 continuation,
                 role,
@@ -7807,7 +7830,10 @@ where
                     let actors = self.environment.actors.lock();
                     children.iter().all(|child| {
                         actors.get(child).is_some_and(|record| {
+                            // The group closes on this coordinator call. A checkpoint
+                            // child's provider ancestry names the earlier capture call.
                             record.descriptor.fork_boundary() == Some(&boundary)
+                                || record.descriptor.checkpoint_token().is_some()
                         })
                     })
                 })

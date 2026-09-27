@@ -472,6 +472,146 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
 }
 
 #[tokio::test]
+async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
+    let mut campaign =
+        test_campaign::TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
+            maximum_depth: 1,
+            maximum_active_children: Some(2),
+            default_depth: 1,
+        })
+        .await;
+    let root = campaign.root_installation.policy.clone();
+    let root_for_setup = root.clone();
+    let setup = tokio::spawn(async move {
+        dispatch_haskell_script(
+            root_for_setup.as_ref(),
+            include_str!("checkpoint_issuer_setup.hs"),
+        )
+        .await
+    });
+    let issuer = campaign
+        .next_deployment(
+            "checkpoint issuer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.authority.install_grant(
+        issuer.actor.identity().into(),
+        worktree_grant(issuer.effective_role.role()),
+    );
+    issuer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    assert_eq!(setup.await.unwrap()["status"], "committed");
+
+    let capture_call_id = uuid::Uuid::new_v4().simple().to_string();
+    let capture = issuer
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext {
+                context_call_id: Some(capture_call_id.clone()),
+                thread_id: "actor-host-vertical".into(),
+                turn_id: capture_call_id.clone(),
+                call_id: capture_call_id.clone(),
+                namespace: Some("haskell".into()),
+            }),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw(include_str!("checkpoint_issuer_capture.hs").into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(capture["status"], "committed", "{capture:?}");
+    issuer
+        .policy
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "actor-host-vertical".into(),
+            call_id: capture_call_id.clone(),
+        })
+        .await
+        .unwrap();
+    issuer
+        .actor
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "checkpoint issuer retired".into(),
+        })
+        .await
+        .unwrap();
+
+    let root_for_branch = root.clone();
+    let mut branch = tokio::spawn(async move {
+        dispatch_haskell_script(
+            root_for_branch.as_ref(),
+            include_str!("checkpoint_deferred_branch.hs"),
+        )
+        .await
+    });
+    let mut branch_finished = false;
+    let observer = tokio::select! {
+        result = &mut branch => {
+            let result = result.unwrap();
+            assert_eq!(result["status"], "committed", "{result:?}");
+            branch_finished = true;
+            campaign.next_deployment(
+                "checkpoint observer after completed branch",
+                Duration::from_secs(5),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                    other => Err(other),
+                },
+            ).await
+        },
+        installation = campaign.next_deployment(
+            "checkpoint observer",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                other => Err(other),
+            },
+        ) => installation,
+    };
+    assert_eq!(observer.context_parent, Some(issuer.actor.identity()));
+    let checkpoint = observer.checkpoint.as_ref().expect("delegated checkpoint");
+    assert_eq!(checkpoint.boundary.thread_id, "actor-host-vertical");
+    assert_eq!(checkpoint.boundary.call_id, capture_call_id);
+    campaign.authority.install_grant(
+        observer.actor.identity().into(),
+        worktree_grant(observer.effective_role.role()),
+    );
+    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    if !branch_finished {
+        assert_eq!(branch.await.unwrap()["status"], "committed");
+    }
+
+    let release =
+        dispatch_haskell_script(root.as_ref(), include_str!("checkpoint_release_twice.hs")).await;
+    assert_eq!(release["status"], "committed", "{release:?}");
+    assert_eq!(
+        release["items"].as_array().unwrap().last().unwrap()["output"],
+        "True"
+    );
+    let refused = dispatch_haskell_script(
+        root.as_ref(),
+        include_str!("checkpoint_released_refusal.hs"),
+    )
+    .await;
+    assert_eq!(refused["status"], "committed", "{refused:?}");
+    assert_eq!(
+        refused["items"].as_array().unwrap().last().unwrap()["output"],
+        "True"
+    );
+
+    let inherited = dispatch_haskell_script(observer.policy.as_ref(), "(x, getX)").await;
+    assert_eq!(inherited["status"], "committed", "{inherited:?}");
+    assert_eq!(inherited["items"][0]["output"], "(41, 42)", "{inherited:?}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
     use exomonad_actor::ResidentToolEndpoint as _;
 
@@ -2582,7 +2722,10 @@ async fn settlement_notice_queued_behind_a_stuck_native_delivery_is_still_delive
     .render(None);
     let pushes = backend.pushes.lock().unwrap();
     assert_eq!(
-        pushes.iter().filter(|message| message.contains("request 20")).count(),
+        pushes
+            .iter()
+            .filter(|message| message.contains("request 20"))
+            .count(),
         1,
         "settlement notice for request 20 must reach the backend exactly once despite the stuck row ahead of it: {pushes:?}"
     );
@@ -4936,7 +5079,10 @@ async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
         for ty in expected_types {
             assert!(diagnostic.contains(ty), "{diagnostic}");
         }
-        assert!(!diagnostic.contains("Variable not in scope"), "{diagnostic}");
+        assert!(
+            !diagnostic.contains("Variable not in scope"),
+            "{diagnostic}"
+        );
     }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -6113,7 +6259,7 @@ async fn typed_reply_settles_response_and_wakes_registered_watch() {
                 Some(LocalResidentDeployment::SessionReady { activation })
                     if activation.id.actor() == implementation.actor.identity() =>
                 {
-                    break
+                    break;
                 }
                 Some(_) => {}
                 None => panic!("deployment channel closed before peer repair"),
@@ -6135,7 +6281,7 @@ async fn typed_reply_settles_response_and_wakes_registered_watch() {
                     if notification.owner == verification.actor.identity()
                         && notification.transition == exomonad_actor::WatchTransition::Ready =>
                 {
-                    break
+                    break;
                 }
                 Some(_) => {}
                 None => panic!("deployment channel closed before peer review wake"),
@@ -6200,7 +6346,7 @@ async fn typed_reply_settles_response_and_wakes_registered_watch() {
                 Some(LocalResidentDeployment::WatchChanged { notification })
                     if notification.owner == actor.identity() =>
                 {
-                    break notification
+                    break notification;
                 }
                 Some(_) => {}
                 None => panic!("deployment channel closed before scaffold watch wake"),

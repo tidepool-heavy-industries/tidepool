@@ -1342,6 +1342,10 @@ pub(crate) enum ForkGroupBoundary {
         continuation: ResidentHole,
         token: String,
     },
+    ReleaseCheckpoint {
+        continuation: ResidentHole,
+        token: String,
+    },
     Checkpoint {
         continuation: ResidentHole,
         name: String,
@@ -1408,6 +1412,9 @@ impl ResidentActorBoundary {
             Self::ForkGroup(ForkGroupBoundary::Checkpoint { .. }) => "capture context checkpoint",
             Self::ForkGroup(ForkGroupBoundary::CheckCheckpoint { .. }) => {
                 "check context checkpoint"
+            }
+            Self::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { .. }) => {
+                "release context checkpoint"
             }
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
@@ -1697,6 +1704,9 @@ impl ResidentRequest {
             Self::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(..)) => "checkpoint",
             Self::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(..)) => {
                 "checkCheckpoint"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(..)) => {
+                "releaseCheckpoint"
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(..)) => {
                 "preview context-fork policy"
@@ -6118,11 +6128,13 @@ where
         let source_scope = context.placement.lexical_scope;
         self.access
             .with_machine(context, move |session, _, _| {
-                let scope = session.mint_scope(checkpoint_scope).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "checkpoint scope is no longer live".into(),
-                    )
-                })?;
+                let scope = session
+                    .mint_detached_scope(checkpoint_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "checkpoint scope is no longer live".into(),
+                        )
+                    })?;
                 if !session.retain_scope_dependencies(source_scope, scope) {
                     session.retire_scope(scope);
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -6322,6 +6334,7 @@ where
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget, model, effort, context, instructions, lifetime)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget, model, effort, context, instructions, lifetime })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(name)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint { continuation: hole, name })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint { continuation: hole, token })),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { continuation: hole, token })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
                         relative,
                         group,

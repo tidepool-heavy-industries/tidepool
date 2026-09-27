@@ -98,7 +98,7 @@ pub fn forks() -> Effect {
                 wire_rust: None,
                 haskell_module: None,
                 shape: TypeShape::Sum {
-                    variants: ["NoHostedBoundary", "WrongSession", "UnavailableCheckpoint", "CaptureFailed", "ProcessRestartUnsupported"]
+                    variants: ["NoHostedBoundary", "WrongSession", "UnavailableCheckpoint", "ReleasedCheckpoint", "CaptureFailed", "ProcessRestartUnsupported"]
                         .into_iter()
                         .map(|ctor| SumVariant { ctor, fields: VariantFields::Positional(Vec::new()), doc: &[] })
                         .collect(),
@@ -318,6 +318,15 @@ pub fn forks() -> Effect {
             Verb {
                 ctor: "ForksCheckCheckpointWith",
                 method: "forks_check_checkpoint_with",
+                args: vec![Arg { name: "checkpoint", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ForksReleaseCheckpointWith",
+                method: "forks_release_checkpoint_with",
                 args: vec![Arg { name: "checkpoint", ty: HsType::Text, rust: RustBinding::Path("String") }],
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
                 errors: None,
