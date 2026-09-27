@@ -29,8 +29,36 @@ to `bridge/facade/CLAUDE.md`; its old guide does not establish a supported adapt
 | Offline readiness precedes integration | Standalone `tests/adapter_readiness.rs` drives production Engine/Store with `FakeResidentCell` and `ReplayTransport` | Retain this deterministic test foundation, then substitute real resident execution; fake-cell evidence is not live-provider evidence |
 | Delete watch/wake and related mechanisms | Current authored programs use retained responses, watches and non-model actors | Decide each deletion from its consumers after the replacement flow works; asynchronous provider calls alone do not prove all those semantics redundant |
 
-Two source audits are checking production consumers and standalone seams. Their
-findings must resolve ownership and admission details before implementation.
+### Findings from the production-consumer audits
+
+- `InteractiveAgentBackend` (`exomonad/agent/src/interactive.rs:481`) is a
+  process/input-control boundary, including rollout observation and queue-ready
+  threads. An in-process model driver should not emulate tmux and socket control
+  simply to implement that trait. Start with a separate experimental composition
+  path and reuse the actual actor workbench boundary.
+- `exomonad/actor/src/resident_actor.rs` owns workbench admission and execution;
+  `resident_workbench.rs` owns compilation against a captured source view.
+  `mount.rs` binds exact actor placement/source, and the runtime session registry
+  owns fenced machine checkout. Preserve these owners in the first experiment.
+  Cancelling compilation, cancelling execution and settling a model call are
+  distinct obligations; a dropped adapter future is insufficient evidence.
+- `CellJobProvider` currently has test consumers, including the offline readiness
+  test, but the audit found no production consumer. The readiness test exercises
+  a pending fake cell across three boundary envelopes, finalization and durable
+  reopening. It does not exercise GHC or live provider traffic.
+- The standalone canonical `Provider` has no proposed `JobVerbs` interface.
+  Agent verbs pass through `call_agent_verb`; the concrete tree driver lives in
+  `crates/harness-demo/src/tree.rs`. Its provider refuses inherited/checkpoint
+  starts, and the CLI browser-serving path does not expose tree mode. These are
+  explicit small-worker-tree gaps, not details an adapter may silently fill in.
+- The old plan's wholesale actor/mailbox deletion and shared subtree checkout
+  proposals are architectural migrations. Current exact-incarnation identities,
+  typed requests, source isolation and owned machine handles have real consumers.
+  Decide their eventual ownership separately; retain them for the first slice.
+
+The audits inspected source without running tests. The canonical harness and
+live wave19 checkout differ; bounded progress/cancellation candidates remain
+pending integration. Recheck these seams on the frozen post-wave19 revision.
 
 ## Experimental progression
 
