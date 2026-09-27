@@ -88,7 +88,10 @@ async fn background_command_example_retains_success_failure_and_unavailable_capt
     let success = completion_case(&mut campaign, 0, false).await;
     assert!(success.contains("CommandExited 0"), "{success}");
     assert!(success.contains("CaptureComplete"), "{success}");
-    assert!(success.contains("fixture"), "{success}");
+    assert!(
+        success.contains(r#"CaptureComplete \"result\""#),
+        "{success}"
+    );
 
     let failure = completion_case(&mut campaign, 7, false).await;
     assert!(failure.contains("CommandExited 7"), "{failure}");
