@@ -4,6 +4,25 @@ Updated 2026-09-27 at the authorized one-shot supervision check.
 User authorizes launch once the inter-wave work is complete. No launch has
 occurred. The timer is one-shot, not permission to skip gates or recur.
 
+## Latest integration check
+
+Main `44f418d98` integrates storage retirement/recovery, checkpoint capture and
+release, fallible record sends, and durable run paths. The combined facade
+target compiled; six selected tests passed (535 skipped, 52.088 seconds): four
+durable-path/discovery checks, the hosted deferred-checkpoint scenario, and the
+fallible mailbox scenario. This supersedes the integration status below.
+
+Post-integration review found checkpoint release removes sponsor metadata used
+to charge already-admitted descendants. The checkpoint owner is repairing the
+budget ledger independently of capability lifetime. This remains a launch gate
+despite the six passing tests.
+
+The coordinator owner now has the compiler slot for authored helper checks.
+The source owner is removing automatic checkout-tooling shadowing: ordinary
+product work uses coherent run tooling and branch-local notebook helpers.
+Explicit per-actor checkout-tooling selection is a documented follow-up rather
+than an implicit incomplete module overlay.
+
 ## Current evidence
 
 - Wave19 root and worker tmux panes are dead; the compiler pane remains alive.
