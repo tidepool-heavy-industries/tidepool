@@ -81,3 +81,15 @@ Project.WorkflowReminderRoutingChecks.snapshotTrial: 3 assertions passed.
 Exact logs: target/tidepool-test-runs/recipes-20260927T072944Z-212906.
 These are deterministic mechanism tests, not live Jev semantic-quality evidence.
 Full harness source/AgentSpec preflight is in progress.
+
+## Launch completed
+
+Full workspace/AgentSpec check passed with definitions
+9fc1c6cb06e4ef0bf1cc12d503c6d0ee47e568f0f2f9cba04968b5cd4fbc7db2.
+Strict admission checks passed; run c4bd1f22-bf26-4a27-9f12-3ffc7cc29be2,
+session wave19, root1@1 model gpt-6-sol effort medium. Root ready at
+2026-09-27T07:36:27Z; start notification accepted and first provider round/tool
+observed. Harness launch source0765e14, branch rsi/wave19. See the harness
+`docs/wave19-launch.md` for exact identities. No wave18 resources were resumed;
+no shared daemon restarted. Subagent implementation work is finished; isolated
+capture-reference compiler draft remains unverified and excluded from launch.
