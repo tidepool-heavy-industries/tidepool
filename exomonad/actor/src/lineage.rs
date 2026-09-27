@@ -207,7 +207,8 @@ struct ForkGroup {
     owner: ActorRef,
     completion_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     reservations: Vec<ActorPathReservation>,
-    checkpoint_tokens: Vec<Option<String>>,
+    // Admission retains budget provenance after the capability is released.
+    checkpoint_sponsors: Vec<Option<Vec<ActorRef>>>,
     claimed: usize,
     children: Vec<ActorRef>,
     commit_requested: bool,
@@ -695,7 +696,7 @@ impl ForkGroupRegistry {
                 owner,
                 completion_boundary,
                 reservations: reservations.clone(),
-                checkpoint_tokens: vec![None; reservations.len()],
+                checkpoint_sponsors: vec![None; reservations.len()],
                 claimed: 0,
                 children: Vec::with_capacity(reservations.len()),
                 commit_requested: false,
@@ -723,7 +724,7 @@ impl ForkGroupRegistry {
         token: Option<&str>,
     ) -> Result<ActorPath, ForkGroupError> {
         let mut state = self.state.lock();
-        if let Some(token) = token {
+        let sponsors = if let Some(token) = token {
             let lease = state
                 .checkpoints
                 .get(token)
@@ -745,7 +746,10 @@ impl ForkGroupRegistry {
                     }
                 }
             }
-        }
+            Some(lease.budget_sponsors.clone())
+        } else {
+            None
+        };
         let group = state
             .groups
             .get_mut(&id)
@@ -770,7 +774,7 @@ impl ForkGroupRegistry {
                 actual: path.clone(),
             });
         }
-        group.checkpoint_tokens[group.claimed] = token.map(str::to_owned);
+        group.checkpoint_sponsors[group.claimed] = sponsors;
         group.claimed += 1;
         Ok(reservation.allocated.clone())
     }
@@ -1192,7 +1196,13 @@ impl ForkGroupRegistry {
         };
         for child in group.children {
             state.parents.remove(&child);
-            if !state
+            if !state.groups.values().any(|group| {
+                group
+                    .checkpoint_sponsors
+                    .iter()
+                    .flatten()
+                    .any(|sponsors| sponsors.contains(&child))
+            }) && !state
                 .checkpoints
                 .values()
                 .any(|lease| lease.budget_sponsors.contains(&child))
@@ -1350,12 +1360,11 @@ fn sponsored_descendants(state: &ForkGroupsState, ancestor: ActorRef) -> usize {
         .values()
         .map(|group| {
             group
-                .checkpoint_tokens
+                .checkpoint_sponsors
                 .iter()
                 .enumerate()
-                .filter_map(|(index, token)| {
-                    let lease = state.checkpoints.get(token.as_ref()?)?;
-                    if !lease.budget_sponsors.contains(&ancestor) {
+                .filter_map(|(index, sponsors)| {
+                    if !sponsors.as_ref()?.contains(&ancestor) {
                         return None;
                     }
                     if group.owner == ancestor
@@ -1384,12 +1393,11 @@ fn sponsored_owner(state: &ForkGroupsState, sponsor: ActorRef, owner: ActorRef) 
     state.groups.values().any(|group| {
         group.children.iter().enumerate().any(|(index, child)| {
             group
-                .checkpoint_tokens
+                .checkpoint_sponsors
                 .get(index)
                 .and_then(Option::as_ref)
-                .and_then(|token| state.checkpoints.get(token))
-                .is_some_and(|lease| {
-                    lease.budget_sponsors.contains(&sponsor)
+                .is_some_and(|sponsors| {
+                    sponsors.contains(&sponsor)
                         && (owner == *child || is_descendant_of(&state.parents, owner, *child))
                 })
         })
@@ -1649,6 +1657,142 @@ mod tests {
             ),
             Err(ForkGroupError::DescendantBudgetExceeded { maximum: 1, .. })
         ));
+    }
+
+    #[test]
+    fn released_checkpoint_keeps_issuer_budget_charged_until_child_cleanup() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let root = ActorRef::first(ActorId(5));
+        let issuer = ActorRef::first(ActorId(1));
+        let coordinator = ActorRef::first(ActorId(2));
+        let first_child = ActorRef::first(ActorId(3));
+        let second_child = ActorRef::first(ActorId(4));
+        let (issuer_group, paths) = groups
+            .begin(
+                root,
+                ActorPath::parse("root/issuer").unwrap(),
+                vec![segment("worker")],
+                None,
+            )
+            .unwrap();
+        groups
+            .claim(issuer_group, root, &paths[0].allocated)
+            .unwrap();
+        groups.attach_child(issuer_group, root, issuer).unwrap();
+        groups.request_commit(issuer_group, root).unwrap();
+        groups
+            .gate(issuer_group, issuer)
+            .unwrap()
+            .mark_ready()
+            .unwrap();
+        groups.publish_groups(&[issuer_group], root).unwrap();
+        let role = crate::EffectiveRole::root().with_descendant_budget(crate::DescendantBudget {
+            maximum_depth: 3,
+            maximum_active_children: Some(2),
+        });
+        let capture = |name: &str| {
+            groups.capture_checkpoint(
+                name.into(),
+                issuer,
+                role.clone(),
+                None,
+                None,
+                crate::CheckpointSourceLayer::default(),
+                SessionId(7),
+                ScopeId(if name == "first" { 3 } else { 4 }),
+                WorkbenchForkBoundary {
+                    thread_id: "thread".into(),
+                    call_id: name.into(),
+                },
+            )
+        };
+        let first = capture("first");
+        let second = capture("second");
+        groups.settle_checkpoints(
+            issuer,
+            &WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "first".into(),
+            },
+            true,
+        );
+        groups.settle_checkpoints(
+            issuer,
+            &WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "second".into(),
+            },
+            true,
+        );
+        let admit = |token: &str, label: &str, child: ActorRef| {
+            let (group, paths) = groups
+                .begin(
+                    coordinator,
+                    ActorPath::parse(label).unwrap(),
+                    vec![segment("child")],
+                    None,
+                )
+                .unwrap();
+            groups
+                .claim_with_checkpoint(group, coordinator, &paths[0].allocated, Some(token))
+                .unwrap();
+            groups.attach_child(group, coordinator, child).unwrap();
+            groups.request_commit(group, coordinator).unwrap();
+            groups.gate(group, child).unwrap().mark_ready().unwrap();
+            groups.publish_groups(&[group], coordinator).unwrap();
+            group
+        };
+        let first_group = admit(&first, "coordinator/first", first_child);
+        let _second_group = admit(&second, "coordinator/second", second_child);
+        assert_eq!(
+            groups.release_checkpoint(&first, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        groups.retire_actor(issuer);
+        assert_eq!(
+            groups.cleanup_committed(issuer_group, root).unwrap(),
+            ForkGroupCleanupOutcome::Cleaned
+        );
+
+        assert!(matches!(
+            groups.begin(
+                first_child,
+                ActorPath::parse("coordinator/first/child/work").unwrap(),
+                vec![segment("nested")],
+                None,
+            ),
+            Err(ForkGroupError::DescendantBudgetExceeded { coordinator, maximum: 2, .. }) if coordinator == issuer
+        ));
+        let (extra, paths) = groups
+            .begin(
+                coordinator,
+                ActorPath::parse("coordinator/extra").unwrap(),
+                vec![segment("child")],
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            groups.claim_with_checkpoint(extra, coordinator, &paths[0].allocated, Some(&second)),
+            Err(ForkGroupError::DescendantBudgetExceeded { coordinator, maximum: 2, .. }) if coordinator == issuer
+        ));
+        groups.abort(extra, coordinator).unwrap();
+
+        groups.retire_actor(first_child);
+        assert_eq!(
+            groups.cleanup_committed(first_group, coordinator).unwrap(),
+            ForkGroupCleanupOutcome::Cleaned
+        );
+        let (freed, paths) = groups
+            .begin(
+                coordinator,
+                ActorPath::parse("coordinator/freed").unwrap(),
+                vec![segment("child")],
+                None,
+            )
+            .unwrap();
+        groups
+            .claim_with_checkpoint(freed, coordinator, &paths[0].allocated, Some(&second))
+            .unwrap();
     }
 
     #[tokio::test]
