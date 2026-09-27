@@ -7,6 +7,11 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Jev pattern building blocks](jev-pattern-legos.md): opinionated composable
+  judgment patterns and decision trees; proposed interfaces and evaluation plan.
+- [Haskell authoring improvements](haskell-authoring-improvements.md): bounded
+  diagnostics/assertion work and the intermediate Jev layer.
+
 - [Post-wave17 improvements](post-wave17-improvements.md): planned worktree batch
   for helper/mount integrity, recoverable checks, coordinator cleanup, executable
   release evidence and measured coordination/launch costs.
