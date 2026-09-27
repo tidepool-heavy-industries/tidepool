@@ -34,17 +34,13 @@ ref; `projectHead` and `currentCheckout` seed it from live source. A commit you 
 resolve means the child has not checkpointed it yet, not that the work is gone.
 Load `exomonad-unfold` for the worked cells.
 
-`tryMerge` is the primitive, not the whole job. Merging a candidate means
-merging it, running the check, and putting the worktree back if the check goes
-red. Before writing that sequence by hand, find out whether an installed actor
-already fits: `doc topics` ends by naming this workspace's own compiled modules,
-and `lookup` on one of those names browses its declarations and the outcomes it
-can return. Many workspaces author none, in which case writing the sequence is
-the right answer — the point is to know which case you are in before you spend
-turns. One lead browsed a module, saw its red-rollback outcome in the answer,
-and still spent nine model turns rebuilding it in shell; starting that actor was
-four calls, and the hand-rolled version proved nothing about the mechanism it
-replaced.
+`tryMerge` integrates a candidate; checks and publication are separate steps.
+If a check fails, retain the failed candidate, local edits and check evidence.
+The integration owner repairs or reconciles that state before publishing; a red
+check is not permission to reset or discard work. Before composing this flow,
+use targeted `doc` or `lookup` discovery to find an installed integration actor
+whose outcomes match the task. Keep its original receipt so the next action
+uses the exact checked source and evidence.
 
 One shared interface can support four branches: a pure test implementation,
 integration tests exercising the real implementation, the real implementation,

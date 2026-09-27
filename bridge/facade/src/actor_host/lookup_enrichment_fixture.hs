@@ -5,6 +5,7 @@ module LookupFixture where
 
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as T
+import qualified Tidepool.Command as Cmd
 import Tidepool.Effects (lookupRaw)
 import Tidepool.Effects.Core
 import qualified Tidepool.Lookup.Tools as Tools
@@ -64,6 +65,26 @@ rawLookupCheck = do
     && case lookupResults result of
       [LookupResult _ (LookupFound _ _)] -> True
       _ -> False)
+
+exampleIdentityCheck :: Member Lookup effects => Eff effects Bool
+exampleIdentityCheck = do
+  result <- lookupRaw (LookupRequest ["Cmd.start"] False Nothing 0 [])
+  pure (case lookupResults result of
+    [LookupResult _ (LookupFound [entry] False)] ->
+      lookupModule entry == Just "Tidepool.Command"
+        && lookupOrigin entry == LookupModuleExport
+        && maybe False ((== ".exomonad/checks/background-command-example.hs") . exampleLocator)
+             (lookupExample entry)
+    _ -> False)
+
+renderedExampleCheck :: Member Lookup effects => Eff effects Bool
+renderedExampleCheck = do
+  rendered <- Tools.executeWith (\_ _ -> pure [])
+    (Tools.LookupArguments ["Cmd.start", "Cmd.start"])
+  pure (T.count "```haskell" rendered == 1
+    && "import qualified Tidepool.Command as Cmd" `T.isInfixOf` rendered
+    && "finishCommandWatcher watcher" `T.isInfixOf` rendered
+    && "Project/BackgroundCommandExample.hs" `T.isInfixOf` rendered)
 
 emptySelectionCheck :: (Member Jev effects, Member Reflect effects) => Eff effects Bool
 emptySelectionCheck = null <$> Project.select [] []

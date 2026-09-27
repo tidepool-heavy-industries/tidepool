@@ -1,0 +1,12 @@
+{
+  "examples": [
+    {
+      "module": "Tidepool.Command",
+      "name": "start",
+      "namespace": "value",
+      "source": "checks/background-command-example.hs",
+      "prerequisites": ["Project/BackgroundCommandExample.hs"],
+      "requirements": "Run each marked stage in a separate resident workbench cell, in order. The Project.BackgroundCommandExample source must be on the selected source path. Query evidence after completion, then finish the watcher."
+    }
+  ]
+}

@@ -6,6 +6,22 @@ text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in 
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 `OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
 
+## Choose the workflow
+
+Use a pure function for a deterministic transform, Haskell effects for a known
+sequence of commands and evidence reads, Jev for a bounded semantic judgment,
+and a record actor for ongoing sources or stateful joins that do not need a
+model round. Use a model actor when open-ended investigation or adaptation
+needs model reasoning. These choices compose: code gathers authoritative facts;
+Jev judges supplied evidence and never grants resource authority.
+
+When the workflow is uncertain, try it in small notebook cells and retain the
+values. Once the repeated sequence is proven and a real consumer needs it,
+compose it into a named function or authored module. Keep full evidence or a
+recoverable reference, show a compact typed projection, and page omitted display
+with `cellDisplay.more`. Display truncation is not evidence selection and does
+not justify replaying a command.
+
 ## Delegate and inspect
 
 ```haskell
@@ -22,6 +38,9 @@ one `unfold` with `<$>` and `<*>` over every independent child; dependent work
 waits for a later cell:
 
 ```haskell
+let parserTask = "Implement the parser." :: Text
+let consumerTask = "Update its consumer." :: Text
+let reviewTask = "Review the interface." :: Text
 (parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
   <$> child @Text (coding currentCheckout (assignment [label|parser|] parserTask))
   <*> child @Text (coding currentCheckout (assignment [label|consumer|] consumerTask))
@@ -115,6 +134,19 @@ stderr. `J.ask` batches semantic questions over supplied evidence; load
 `parentAgent` is your supervising actor, which receives `sendMessage` and
 settles your request, or `Nothing` for a root.
 
+For a long known command, start it once and keep its `Cmd.Job`. The updated
+workspace package includes this compiled staged example at
+`.exomonad/workspace/checks/background-command-example.hs` (repository source:
+[`checks/background-command-example.hs`](../examples/workspace/.exomonad/checks/background-command-example.hs)).
+It starts one job, attaches a record actor to its completion source, reads a
+compact projection or the full evidence later, then finishes the observer. The
+later reads do not execute the command again. Starting or watching this job
+does not itself wake the model; the example source does not add a wake route.
+Use a completion route already available to your assignment, or keep doing
+useful work and return to retained state later. Do not repeatedly poll for
+completion. Its compiled tests also cover failed and unavailable
+output capture; an unavailable read stays unavailable.
+
 ## Discover missing information
 
 Start from this guide and the assignment; no startup inventory ritual.
@@ -125,6 +157,16 @@ information. Use `doc topics` for guides and workspace modules; inspect their
 exports/source where needed. `status` offers `summary`, `detailed`, `watches`,
 `recovery`, `lineage`, `trace`, and `bindings` for runtime uncertainty without
 compiling a cell.
+
+A direct successful lookup may include one complete registered example in a
+batch. Identity is the resolved module, declaration, and namespace; an
+alias can resolve to that same identity. Ambiguous results, unavailable
+declarations, and live bindings have no example. A complete example may be
+omitted when the complete UTF-8 block exceeds 2 KiB; follow its exact locator
+and requirements rather than treating cut code as executable. Registration
+points to a tested fixture and prerequisite paths; it does not prove the
+current workspace was compiled. Related declarations and Jev selection retain
+their existing behavior, and original lookup failures remain failures.
 
 Before hand-building a review, merge, or triage loop, `lookup`/`doc` installed
 modules and skills: an existing actor is often four calls away, reimplementing

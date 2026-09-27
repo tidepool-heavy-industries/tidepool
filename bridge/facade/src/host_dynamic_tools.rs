@@ -932,7 +932,7 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
 enum HostToolFailure {
     #[error("tool host is quiescing")]
     Quiescing,
-    #[error("tool completion boundary was already settled")]
+    #[error("this submission was rejected before execution because its completion boundary was already settled; earlier calls may have executed—inspect retained results before new intent")]
     SettledBoundary,
     #[error("tool completion boundary already has an active call")]
     ActiveBoundary,
@@ -1628,7 +1628,9 @@ pub(crate) mod tests {
         let response = call(State(state), Json(delayed)).await.0;
         assert!(!response.success);
         let CallContent::InputText { text } = &response.content_items[0];
-        assert!(text.contains("completion boundary was already settled"));
+        assert!(text.contains("this submission was rejected before execution"));
+        assert!(text.contains("earlier calls may have executed"));
+        assert!(text.contains("inspect retained results before new intent"));
         assert_eq!(
             calls.lock().unwrap().len(),
             4,
@@ -2765,6 +2767,124 @@ pub(crate) mod tests {
         server.abort();
         // best-effort: task is aborted; the join result is expected to be Cancelled.
         server.await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TIDEPOOL_RESULT_PRESENTATION_FIXTURE for the pinned Codex consumer"]
+    async fn export_hosted_result_presentation_fixture() {
+        fn case(
+            name: &str,
+            source: &str,
+            response: CallResponse,
+            facts: &[&str],
+            expected_success: Option<bool>,
+            retained_recovery: bool,
+        ) -> serde_json::Value {
+            let CallContent::InputText { text } = &response.content_items[0];
+            if let Some(expected) = expected_success {
+                assert_eq!(
+                    response.success, expected,
+                    "{name}: unexpected success flag"
+                );
+            }
+            assert!(
+                text.len() <= MODEL_OUTPUT_LIMIT,
+                "{name}: {} bytes",
+                text.len()
+            );
+            let mut facts: Vec<String> = facts.iter().map(|fact| (*fact).to_owned()).collect();
+            if retained_recovery {
+                for prefix in ["retained as ", "next: read_output session_id="] {
+                    let line = text
+                        .lines()
+                        .find(|line| line.starts_with(prefix))
+                        .unwrap_or_else(|| {
+                            panic!("{name}: missing production recovery line {prefix:?}: {text}")
+                        });
+                    facts.push(line.to_owned());
+                }
+            }
+            for fact in &facts {
+                assert!(
+                    text.contains(fact),
+                    "{name}: renderer lost {fact:?}: {text}"
+                );
+            }
+            serde_json::json!({
+                "name": name,
+                "source": source,
+                "hostedResponse": response,
+                "requiredModelFacts": facts,
+                "historyByteBudgets": [1024, 4096]
+            })
+        }
+
+        let mut cases = vec![
+            case(
+                "rejected-before-execution",
+                "CallResponse::failure(HostToolFailure::SettledBoundary)",
+                CallResponse::failure(&HostToolFailure::SettledBoundary),
+                &[
+                    "this submission was rejected before execution",
+                    "earlier calls may have executed",
+                    "inspect retained results before new intent",
+                ],
+                Some(false),
+                false,
+            ),
+            case(
+                "uncertain-external-execution",
+                "CallResponse::failure(HostToolFailure::OperationUncertain)",
+                CallResponse::failure(&HostToolFailure::OperationUncertain),
+                &["outcome is uncertain", "it was not rerun"],
+                Some(false),
+                false,
+            ),
+        ];
+        for (name, source, result, facts, expected_success, retained_recovery) in
+            crate::actor_host::command_jobs_tests::result_presentation_cases().await
+        {
+            let response = match result {
+                Ok(value) => CallResponse::workbench(value),
+                Err(error) => CallResponse::failure(&HostToolFailure::Dispatch(error)),
+            };
+            cases.push(case(
+                name,
+                source,
+                response,
+                &facts,
+                expected_success,
+                retained_recovery,
+            ));
+        }
+
+        let path = std::env::var_os("TIDEPOOL_RESULT_PRESENTATION_FIXTURE")
+            .expect("set TIDEPOOL_RESULT_PRESENTATION_FIXTURE to a writable fixture path");
+        let source_path = format!("{}/src/host_dynamic_tools.rs", env!("CARGO_MANIFEST_DIR"));
+        let source_hash = std::process::Command::new("sha256sum")
+            .arg(&source_path)
+            .output()
+            .expect("sha256sum Tidepool presenter source");
+        assert!(source_hash.status.success(), "sha256sum failed");
+        let source_hash = String::from_utf8(source_hash.stdout).unwrap();
+        let source_hash = source_hash.split_whitespace().next().unwrap();
+        let source_revision = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("read Tidepool source revision");
+        assert!(source_revision.status.success(), "git rev-parse failed");
+        let source_revision = String::from_utf8(source_revision.stdout).unwrap();
+        let fixture = serde_json::json!({
+            "schemaVersion": 1,
+            "tidepoolRevision": source_revision.trim(),
+            "tidepoolPresenterSourceSha256": source_hash,
+            "codexRevision": "f84db4db036355a79e5d8aac2aa5121e17f60a02",
+            "codexTruncatorSourceSha256": "e2e23cc1b3c9153bef0855cb3c7c91c68e6e43117647c3e97feefda92026a38e",
+            "codexHistoryCallerSourceSha256": "d5db513d30bb4044636ba2db4fbb3d46fa59e7a23df7d858e6185ce57e621c26",
+            "cases": cases
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
     }
 }
 

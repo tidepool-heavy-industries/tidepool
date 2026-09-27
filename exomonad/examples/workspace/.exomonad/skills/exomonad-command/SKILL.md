@@ -58,6 +58,17 @@ owned. Do useful independent work or route completion rather than repeatedly
 polling through model turns. `Cmd.completion` is an actor EventSource, not an Await
 value for `watch`; see the routing example linked below.
 
+The updated workspace package includes this compiled staged background example
+at `.exomonad/workspace/checks/background-command-example.hs` (template source:
+`exomonad/examples/workspace/.exomonad/checks/background-command-example.hs`):
+start one command, attach a record actor, read a compact projection or complete
+evidence later, and finish the observer. Its owning tests also cover nonzero
+exit and unavailable capture. An unavailable read remains an explicit issue.
+The completion event does not itself wake the model; only an installed
+completion route does. Do other useful work while waiting, and return to the
+retained job when a wake or later task turn makes that useful. Do not repeatedly
+poll for completion.
+
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 

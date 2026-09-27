@@ -10,7 +10,9 @@ module Main where
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, run)
 import Control.Monad.Freer.Internal (handleRelay)
+import qualified Data.ByteString as BS
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Tidepool.Agent.Contract (AsServerT, Tool (handler))
 import Tidepool.Lookup
 import Tidepool.Effects.Core (Lookup (..))
@@ -22,7 +24,7 @@ candidates = [LookupCandidate ("Fixture.Type" <> T.pack (show n)) ["root"]
 
 entry :: T.Text -> LookupEntry
 entry name = LookupEntry name (Just "Fixture") ("data " <> name)
-  LookupType LookupAvailable LookupModuleExport LookupExact Nothing
+  LookupType LookupAvailable LookupModuleExport LookupExact Nothing Nothing
 
 original :: LookupBatch
 original = LookupBatch [LookupResult "root" (LookupMissing ["root"] [])]
@@ -91,4 +93,61 @@ main = do
   check "oversized additions leave bounded recovery names"
     ("Fixture.Type2" `T.isInfixOf` bounded
       && "lookupRaw (LookupRequest" `T.isInfixOf` bounded && T.length bounded < 8192)
-  putStrLn "lookup policy oracle passed (8 checks)"
+  let example source = LookupExample "checks/example.hs" "Import Cmd"
+        ["Project/Helper.hs"] source
+      exampleAnswer source request = LookupBatch
+        [LookupResult query (LookupFound
+          [(entry query) {lookupExample = Just (example source)}] False)
+        | query <- lookupQueries request] [] "frozen-view" Nothing
+      (_, twoExamples) = observeWith (exampleAnswer "Cmd.start command\n")
+        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first", "second"]))
+  check "only first direct hit carries one complete example"
+    (T.count "```haskell" twoExamples == 1
+      && T.count "Prerequisites: Project/Helper.hs" twoExamples == 1
+      && "Cmd.start command" `T.isInfixOf` twoExamples)
+  let relatedExample request
+        | lookupDiscover request = original
+        | otherwise = LookupBatch
+            [LookupResult query (LookupFound
+              [(entry query) {lookupExample = Just (example "Cmd.start command\n")}] False)
+            | query <- lookupQueries request] [] "frozen-view" Nothing
+      (_, relatedOutput) = observeWith relatedExample
+        (Tools.executeWith select (Tools.LookupArguments ["root"]))
+  check "related declarations do not display examples"
+    ("Related declarations" `T.isInfixOf` relatedOutput
+      && not ("```haskell" `T.isInfixOf` relatedOutput))
+  let unicodeSource = T.replicate 700 "😀"
+      (_, omittedExample) = observeWith (exampleAnswer unicodeSource)
+        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+  check "oversized UTF-8 example keeps locator and requirements without cut code"
+    ("Code omitted" `T.isInfixOf` omittedExample
+      && "checks/example.hs" `T.isInfixOf` omittedExample
+      && "Import Cmd" `T.isInfixOf` omittedExample
+      && not ("😀" `T.isInfixOf` omittedExample))
+  let unicodeRequirements = T.replicate 120 "😀"
+      longExample = (example unicodeSource) {exampleRequirements = unicodeRequirements}
+      withLongMetadata request = LookupBatch
+        [LookupResult query (LookupFound
+          [(entry query) {lookupExample = Just longExample}] False)
+        | query <- lookupQueries request] [] "frozen-view" Nothing
+      (_, boundedMetadata) = observeWith withLongMetadata
+        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+  check "multibyte requirements survive whole-source fallback"
+    (unicodeRequirements `T.isInfixOf` boundedMetadata
+      && "Project/Helper.hs" `T.isInfixOf` boundedMetadata
+      && not ("```haskell" `T.isInfixOf` boundedMetadata))
+  let maximal = (example unicodeSource)
+        { exampleLocator = T.replicate 256 "x"
+        , exampleRequirements = T.replicate 256 "😀"
+        , examplePrerequisites = [T.replicate 250 "p", T.replicate 250 "q"] }
+      maximalAnswer request = LookupBatch
+        [LookupResult query (LookupFound
+          [(entry query) {lookupExample = Just maximal}] False)
+        | query <- lookupQueries request] [] "frozen-view" Nothing
+      (_, maximalOutput) = observeWith maximalAnswer
+        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+      (_, maximalBlock) = T.breakOn "\n  Example: " maximalOutput
+  check "worst-case valid metadata fallback stays within 2 KiB UTF-8"
+    (BS.length (TE.encodeUtf8 maximalBlock) <= 2048
+      && "Code omitted" `T.isInfixOf` maximalBlock)
+  putStrLn "lookup policy oracle passed (13 checks)"

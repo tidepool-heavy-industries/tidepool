@@ -71,7 +71,7 @@ computed at runtime needs `labelFromText`; handle its `Either` before launch.
 Campaign, fork-group and watch labels have their own constructors and validators.
 
 ```haskell
-let laneLabel = [label|consumer-tests|]
+let laneLabel = ([label|consumer-tests|] :: Label)
 let dynamic = labelFromText ("work-" <> T.pack (show (2 :: Int)))
 (laneLabel, dynamic)
 ```
@@ -106,11 +106,10 @@ suppresses routine presentation for unbound commands when only data matters.
 
 ## Multi-line chains
 
-Notebook workaround: put separate statement-level value bindings in separate
-`let` statements. The current notebook rejects a second value binding in one
-multiline layout group, although ordinary Haskell permits it. A helper's signature
-and equation can share one explicit `let f :: T; f = ...` statement. This is a
-notebook limitation, not a language rule; whole-cell rejection still runs nothing.
+The notebook supports ordinary multi-line `let` layout, including multiple
+value bindings in one group. A helper's signature and equation can also share
+one explicit `let f :: T; f = ...` statement. Whole-cell rejection still runs
+nothing.
 
 A continuation line of a multi-line `let` must be indented past the bound name.
 An operator continuation at the name's column is invalid layout.

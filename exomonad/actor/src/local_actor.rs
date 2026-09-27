@@ -1869,6 +1869,7 @@ async fn shutdown_children(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::ActorLifecycle;
@@ -2509,16 +2510,17 @@ mod tests {
             .unwrap();
         let caller = ActorRef::first(crate::ActorId(99));
         let dropped = Arc::new(AtomicUsize::new(0));
-        let (reply, receive) = oneshot::channel();
-        actor
-            .address()
-            .send_message(KernelMessage::Call {
-                caller,
-                ancestry: crate::CallAncestry::begin(caller),
-                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
-                reply: reply.into(),
+        let mut accepted_call = Box::pin(actor.call(
+            caller,
+            crate::CallAncestry::begin(caller),
+            MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+        ));
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(accepted_call.as_mut().poll(context).is_pending())
             })
-            .unwrap();
+            .await
+        );
         actor.drain().await.unwrap();
         assert!(actor.terminal().get().is_none());
         assert_eq!(
@@ -2528,6 +2530,16 @@ mod tests {
             ),
             Err(KernelCallFailure::MailboxClosed(actor.identity()))
         );
+        assert!(matches!(
+            actor
+                .call(
+                    caller,
+                    crate::CallAncestry::begin(caller),
+                    MailboxValue::probe(SessionId(2), Arc::clone(&dropped)),
+                )
+                .await,
+            Err(KernelCallFailure::MailboxClosed(target)) if target == actor.identity()
+        ));
         actor
             .address()
             .call(
@@ -2541,7 +2553,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        drop(receive.await.unwrap().unwrap());
+        drop(accepted_call.await.unwrap());
         assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Completed);
         task.await.unwrap();
         assert_eq!(
@@ -2554,7 +2566,63 @@ mod tests {
                 "shutdown"
             ]
         );
-        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_mailbox_waiter_does_not_cancel_accepted_work() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("park-mailbox"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let caller = ActorRef::first(crate::ActorId(99));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut waiter = Box::pin(actor.call(
+            caller,
+            crate::CallAncestry::begin(caller),
+            MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+        ));
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(waiter.as_mut().poll(context).is_pending())
+            })
+            .await
+        );
+        drop(waiter);
+
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("unpark-mailbox"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        actor.drain().await.unwrap();
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Completed);
+        assert_eq!(
+            &fixture.calls.lock()[..3],
+            &["park-mailbox", "unpark-mailbox", "call"]
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        task.await.unwrap();
     }
 
     #[tokio::test]

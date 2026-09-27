@@ -17,6 +17,8 @@ import Control.Monad.Freer (Eff, Member)
 import Data.List (nubBy, sortBy)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
@@ -98,8 +100,31 @@ rankCandidates = take 4 . map fst . sortBy (\(_, a) (_, b) -> compare b a)
   . filter (\(_, score) -> score >= 2 && score <= 3)
 
 renderBatch :: LookupBatch -> Text
-renderBatch batch = T.intercalate "\n\n" (map renderResult (lookupResults batch))
+renderBatch batch = T.intercalate "\n\n" (go False (lookupResults batch))
   <> maybe "" ("\nLookup unavailable: " <>) (lookupIssue batch)
+  where
+    go _ [] = []
+    go used (result : rest) =
+      let example = if used then Nothing else case lookupOutcome result of
+            LookupFound [entry] False -> lookupExample entry
+            _ -> Nothing
+          rendered = renderResult result <> maybe "" renderExample example
+      in rendered : go (used || maybe False (const True) example) rest
+
+-- Keep the complete executable source or give its exact locator. The 2 KiB
+-- allowance includes every label, locator, prerequisite, and UTF-8 byte.
+renderExample :: LookupExample -> Text
+renderExample example =
+  let heading = "\n  Example: " <> exampleLocator example
+        <> "\n  Requirements: " <> exampleRequirements example
+      prerequisites = if null (examplePrerequisites example) then ""
+        else "\n  Prerequisites: " <> T.intercalate ", " (examplePrerequisites example)
+      source = exampleSource example
+      full = heading <> prerequisites <> "\n```haskell\n" <> source
+        <> (if T.isSuffixOf "\n" source then "" else "\n") <> "```"
+  in if BS.length (TE.encodeUtf8 full) <= 2048 then full
+     else heading <> prerequisites
+       <> "\n  Code omitted (example exceeds 2 KiB); open the locator for the complete source."
 
 renderResult :: LookupResult -> Text
 renderResult result = lookupQuery result <> "\n" <> case lookupOutcome result of
