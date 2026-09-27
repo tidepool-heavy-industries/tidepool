@@ -6630,7 +6630,7 @@ async fn run_delivery_pump(
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let mut usage_poll = tokio::time::interval(PROVIDER_POLL_INTERVAL);
-    let mut reminded_idle_since = None;
+    let mut reminded_request = None;
     let hosted_cell_computing = move || local_actor.hosted_cell_computing();
     let without_evidence = Mutex::new(BTreeMap::new());
     let mut pending: Option<PendingDeliveryWarning> = None;
@@ -6691,7 +6691,7 @@ async fn run_delivery_pump(
                             &workspace.to_string_lossy(),
                             &runtime_observation.snapshot(),
                             || open_request(actor),
-                            &mut reminded_idle_since,
+                            &mut reminded_request,
                             now,
                         ).await {
                             tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
@@ -6727,8 +6727,8 @@ const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// request was activated and the request is still open. The idle age is the status line's
 /// `provider_idle_since_unix_ms`; the reminder waits one poll interval of
 /// idleness so a model about to call `respond` is not interrupted, and fires
-/// once per idle period (`reminded_idle_since` holds the period reminded;
-/// a new turn publishes a new `provider_idle_since_unix_ms`).
+/// once per request in this actor pump. A later turn for the same request does
+/// not make waiting for a dependency a new failure to respond.
 #[allow(clippy::too_many_arguments)]
 async fn remind_turn_ended_without_respond(
     actor: ActorRef,
@@ -6737,7 +6737,7 @@ async fn remind_turn_ended_without_respond(
     cwd: &str,
     observation: &exomonad_actor::ActorRuntimeObservation,
     open_request: impl FnOnce() -> Option<exomonad_actor::RequestId>,
-    reminded_idle_since: &mut Option<u64>,
+    reminded_request: &mut Option<exomonad_actor::RequestId>,
     now_unix_ms: u64,
 ) -> Result<(), String> {
     if observation.provider_observation_stale {
@@ -6765,8 +6765,7 @@ async fn remind_turn_ended_without_respond(
         return Ok(());
     }
     let poll_ms = u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap_or(u64::MAX);
-    if *reminded_idle_since == Some(idle_since) || now_unix_ms.saturating_sub(idle_since) < poll_ms
-    {
+    if now_unix_ms.saturating_sub(idle_since) < poll_ms {
         return Ok(());
     }
     let Some(request) = open_request() else {
@@ -6775,11 +6774,14 @@ async fn remind_turn_ended_without_respond(
     if activation.request != request {
         return Ok(());
     }
+    if *reminded_request == Some(request) {
+        return Ok(());
+    }
     backend
         .push(cwd, thread, &turn_end_reminder(request))
         .await
         .map_err(|error| error.to_string())?;
-    *reminded_idle_since = Some(idle_since);
+    *reminded_request = Some(request);
     tracing::info!(
         actor = ?actor,
         request = request.0,
@@ -6791,7 +6793,7 @@ async fn remind_turn_ended_without_respond(
 
 fn turn_end_reminder(request: exomonad_actor::RequestId) -> String {
     format!(
-        "Request {} appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. Otherwise, finish it with respond using its assigned reply type.",
+        "Request {} appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. If the work is finished, use respond with the assigned reply type. If you are waiting for a prerequisite, keep the request open; inform the requester of the specific prerequisite and its owner if you have not already done so, then resume when an update arrives.",
         request.0
     )
 }

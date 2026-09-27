@@ -2768,7 +2768,7 @@ async fn newer_watch_revision_still_queues_after_an_observed_transition() {
 }
 
 #[tokio::test]
-async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
+async fn request_reminder_is_sent_once_per_request_across_idle_turns() {
     use exomonad_agent::{
         BackendThreadId, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
     };
@@ -2820,7 +2820,11 @@ async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
             .unwrap()
         };
     }
-    let expected = "Request 4 appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. Otherwise, finish it with respond using its assigned reply type.";
+    let expected = turn_end_reminder(request);
+    assert!(expected.contains("If the work is finished"));
+    assert!(expected.contains("keep the request open"));
+    assert!(expected.contains("specific prerequisite and its owner"));
+    assert!(!expected.contains("Blocked"));
 
     runtime.publish_request_activation(request, 1);
     runtime.publish_provider_observation(turn("t1", 1, ProviderTurnState::Active));
@@ -2831,7 +2835,7 @@ async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
     remind!(Some(request), idle);
     assert!(backend.messages.lock().unwrap().is_empty());
     remind!(Some(request), idle + poll);
-    assert_eq!(*backend.messages.lock().unwrap(), vec![expected.to_owned()]);
+    assert_eq!(*backend.messages.lock().unwrap(), vec![expected.clone()]);
     remind!(Some(request), idle + 2 * poll);
     assert_eq!(backend.messages.lock().unwrap().len(), 1);
 
@@ -2843,15 +2847,87 @@ async fn idle_turn_with_open_request_is_reminded_once_per_idle_period() {
     let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
     remind!(Some(request), idle + poll);
     remind!(Some(request), idle + 2 * poll);
-    assert_eq!(
-        *backend.messages.lock().unwrap(),
-        vec![expected.to_owned(), expected.to_owned()]
-    );
+    assert_eq!(*backend.messages.lock().unwrap(), vec![expected]);
 
     tokio::time::sleep(Duration::from_millis(2)).await;
-    runtime.publish_provider_observation(turn("t3", 5, ProviderTurnState::Succeeded));
+    let next_request = exomonad_actor::RequestId(5);
+    runtime.publish_request_activation(next_request, 2);
+    runtime.publish_provider_observation(turn("t3", 5, ProviderTurnState::Active));
+    runtime.publish_provider_observation(turn("t3", 6, ProviderTurnState::Succeeded));
     let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
     remind!(None, idle + poll);
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+    remind!(Some(request), idle + poll);
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+    remind!(Some(next_request), idle + poll);
+    assert_eq!(
+        *backend.messages.lock().unwrap(),
+        vec![turn_end_reminder(request), turn_end_reminder(next_request)]
+    );
+}
+
+#[tokio::test]
+async fn request_reminder_retries_after_failed_push() {
+    use exomonad_agent::{
+        BackendThreadId, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let binding = root.path().join("binding.json");
+    exomonad_agent::accept_interactive_session_binding(
+        &binding,
+        exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+        BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba3".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = exomonad_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let backend = ScriptedPush {
+        fail: std::sync::atomic::AtomicBool::new(true),
+        messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let request = exomonad_actor::RequestId(4);
+    let runtime = exomonad_actor::ActorRuntimeObservationHandle::default();
+    runtime.publish_request_activation(request, 1);
+    runtime.publish_provider_observation(ProviderObservation {
+        turn: Some(ProviderTurnObservation {
+            thread: "thread".into(),
+            turn: "t1".into(),
+            revision: 1,
+            state: ProviderTurnState::Succeeded,
+        }),
+        ..Default::default()
+    });
+    let idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    let now = idle + u64::try_from(PROVIDER_POLL_INTERVAL.as_millis()).unwrap();
+    let mut reminded = None;
+    macro_rules! attempt {
+        () => {
+            remind_turn_ended_without_respond(
+                actor,
+                &thread,
+                &backend,
+                "/",
+                &runtime.snapshot(),
+                || Some(request),
+                &mut reminded,
+                now,
+            )
+            .await
+        };
+    }
+    assert!(attempt!().is_err());
+    assert_eq!(reminded, None);
+    backend
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    attempt!().unwrap();
+    attempt!().unwrap();
+    assert_eq!(reminded, Some(request));
     assert_eq!(backend.messages.lock().unwrap().len(), 2);
 }
 
@@ -2932,6 +3008,34 @@ async fn request_reminder_ignores_the_turn_visible_at_activation() {
     runtime.publish_provider_observation(turn("new", 4, ProviderTurnState::Active));
     runtime.publish_provider_observation(turn("new", 5, ProviderTurnState::Succeeded));
     let new_idle = runtime.snapshot().provider_idle_since_unix_ms.unwrap();
+    runtime.mark_provider_observation_stale();
+    remind_turn_ended_without_respond(
+        actor,
+        &thread,
+        &backend,
+        "/",
+        &runtime.snapshot(),
+        || Some(request),
+        &mut reminded,
+        new_idle + poll,
+    )
+    .await
+    .unwrap();
+    assert!(backend.messages.lock().unwrap().is_empty());
+    runtime.publish_provider_observation(turn("new", 5, ProviderTurnState::Succeeded));
+    remind_turn_ended_without_respond(
+        actor,
+        &thread,
+        &backend,
+        "/",
+        &runtime.snapshot(),
+        || Some(exomonad_actor::RequestId(99)),
+        &mut reminded,
+        new_idle + poll,
+    )
+    .await
+    .unwrap();
+    assert!(backend.messages.lock().unwrap().is_empty());
     remind_turn_ended_without_respond(
         actor,
         &thread,
