@@ -100,6 +100,7 @@ pub(crate) struct LookupEntry {
     origin: LookupOrigin,
     quality: LookupQuality,
     usage: Option<String>,
+    example: Option<crate::usage_pointer::LookupExample>,
 }
 #[derive(ToHaskell)]
 enum LookupKind {
@@ -184,6 +185,7 @@ impl From<lookup_tool::LookupEntry> for LookupEntry {
                 lookup_tool::MatchQuality::Usable => LookupQuality::Usable,
             },
             usage: e.usage_pointer,
+            example: None,
         }
     }
 }
@@ -763,6 +765,34 @@ pub(crate) fn execute(
         }
     }
     batch.results = response.results.into_iter().map(Into::into).collect();
+    // Only original direct queries can carry examples. Related references are
+    // resolved separately and remain declaration-only, even on a raw batch.
+    for result in batch.results.iter_mut().take(prepared.len()) {
+        let LookupOutcome::Found(entries, false) = &mut result.outcome else {
+            continue;
+        };
+        let [entry] = entries.as_mut_slice() else {
+            continue;
+        };
+        if !matches!(&entry.origin, LookupOrigin::ModuleExport)
+            || matches!(&entry.availability, LookupAvailability::Unavailable)
+        {
+            continue;
+        }
+        let Some(module) = entry.module.as_deref() else {
+            continue;
+        };
+        let namespace = match &entry.kind {
+            LookupKind::Value | LookupKind::ClassMethod => {
+                crate::usage_pointer::ExampleNamespace::Value
+            }
+            LookupKind::Type => crate::usage_pointer::ExampleNamespace::Type,
+            LookupKind::Constructor => crate::usage_pointer::ExampleNamespace::Constructor,
+            LookupKind::RecordSelector => crate::usage_pointer::ExampleNamespace::Field,
+            LookupKind::Coercion | LookupKind::Documentation => continue,
+        };
+        entry.example = crate::usage_pointer::example_for(&usage, module, &entry.name, namespace);
+    }
     batch
 }
 
@@ -884,6 +914,155 @@ mod tests {
         assert!(matches!(
             result.results[0].outcome,
             LookupOutcome::Found(_, false)
+        ));
+    }
+    #[test]
+    fn examples_follow_resolved_identity_and_exclude_live_ambiguous_unavailable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let checks = workspace.path().join(".exomonad/workspace/checks");
+        std::fs::create_dir_all(&checks).unwrap();
+        std::fs::write(checks.join("example.hs"), "Cmd.start command\n").unwrap();
+        std::fs::write(
+            checks.join("usage-examples.json"),
+            r#"{"examples":[{
+            "module":"Tidepool.Command","name":"start","namespace":"value",
+            "source":"checks/example.hs","prerequisites":[],"requirements":"Import Cmd"
+        }]}"#,
+        )
+        .unwrap();
+        let usage = crate::UsagePointerTable::discover(workspace.path()).unwrap();
+        let make_entry = |module: &str, availability| InfoEntry {
+            name: "start".into(),
+            module: Some(module.into()),
+            kind: "value".into(),
+            display: "start :: Command -> Eff effects Job".into(),
+            availability,
+            references: vec![],
+        };
+        let available = InspectionAvailability::Available;
+        let found = execute(
+            request(&["Cmd.start", "Alias.start"], false),
+            "view".into(),
+            "qualified Tidepool.Command as Cmd\nqualified Tidepool.Command as Alias",
+            &[],
+            &[],
+            usage.clone(),
+            |queries| {
+                Ok(queries
+                    .iter()
+                    .map(|query| match query {
+                        InspectionQuery::Info(name) => InspectionResult::Info {
+                            query: name.clone(),
+                            entries: vec![make_entry("Tidepool.Command", available)],
+                        },
+                        InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
+                            module: module.clone(),
+                            expanded: *expanded,
+                            entries: vec![],
+                        },
+                        _ => panic!("unexpected query"),
+                    })
+                    .collect())
+            },
+        );
+        for result in &found.results {
+            let LookupOutcome::Found(entries, false) = &result.outcome else {
+                panic!("expected one hit")
+            };
+            let [entry] = entries.as_slice() else {
+                panic!("expected one entry")
+            };
+            assert_eq!(
+                entry.example.as_ref().unwrap().source,
+                "Cmd.start command\n"
+            );
+        }
+        let excluded = execute(
+            request(&["start"], false),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            usage.clone(),
+            |_| {
+                Ok(vec![InspectionResult::Info {
+                    query: "start".into(),
+                    entries: vec![make_entry("Other.Command", available)],
+                }])
+            },
+        );
+        let LookupOutcome::Found(entries, false) = &excluded.results[0].outcome else {
+            panic!()
+        };
+        let [entry] = entries.as_slice() else {
+            panic!()
+        };
+        assert!(entry.example.is_none());
+        let live = execute(
+            request(&["start"], false),
+            "view".into(),
+            "",
+            &["Tidepool.Command".into()],
+            &[],
+            usage.clone(),
+            |_| {
+                Ok(vec![InspectionResult::Info {
+                    query: "start".into(),
+                    entries: vec![make_entry("Tidepool.Command", available)],
+                }])
+            },
+        );
+        let LookupOutcome::Found(entries, false) = &live.results[0].outcome else {
+            panic!()
+        };
+        let [entry] = entries.as_slice() else {
+            panic!()
+        };
+        assert!(entry.example.is_none());
+        let unavailable = execute(
+            request(&["start"], false),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            usage.clone(),
+            |_| {
+                Ok(vec![InspectionResult::Info {
+                    query: "start".into(),
+                    entries: vec![make_entry(
+                        "Tidepool.Command",
+                        InspectionAvailability::Unavailable,
+                    )],
+                }])
+            },
+        );
+        let LookupOutcome::Found(entries, false) = &unavailable.results[0].outcome else {
+            panic!()
+        };
+        let [entry] = entries.as_slice() else {
+            panic!()
+        };
+        assert!(entry.example.is_none());
+        let ambiguous = execute(
+            request(&["start"], false),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            usage,
+            |_| {
+                Ok(vec![InspectionResult::Ambiguous {
+                    query: "start".into(),
+                    entries: vec![
+                        make_entry("Tidepool.Command", available),
+                        make_entry("Other.Command", available),
+                    ],
+                }])
+            },
+        );
+        assert!(matches!(
+            ambiguous.results[0].outcome,
+            LookupOutcome::Ambiguous(_, _)
         ));
     }
     #[test]

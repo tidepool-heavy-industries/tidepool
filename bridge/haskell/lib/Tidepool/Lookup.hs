@@ -2,7 +2,7 @@
 -- tool composes it with its own selection and presentation policy.
 module Tidepool.Lookup
   ( Lookup, LookupRequest (..), LookupBatch (..), LookupResult (..),
-    LookupOutcome (..), LookupEntry (..), LookupKind (..),
+    LookupOutcome (..), LookupEntry (..), LookupExample (..), LookupKind (..),
     LookupAvailability (..), LookupOrigin (..), LookupQuality (..),
     LookupCandidate (..), LookupReference (..), LookupNamespace (..),
     lookupRaw, lookupRequest,

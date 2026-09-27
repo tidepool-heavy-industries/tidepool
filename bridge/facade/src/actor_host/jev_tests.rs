@@ -259,6 +259,15 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
         include_str!("lookup_enrichment_fixture.hs"),
     )
     .unwrap();
+    std::fs::create_dir_all(authored.join("checks")).unwrap();
+    std::fs::create_dir_all(authored.join("Project")).unwrap();
+    for path in [
+        "checks/background-command-example.hs",
+        "checks/usage-examples.json",
+        "Project/BackgroundCommandExample.hs",
+    ] {
+        std::fs::copy(package.join(".exomonad").join(path), authored.join(path)).unwrap();
+    }
     std::fs::write(authored.join("config.toml"), format!(
         "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['.', '{}']\nmodules = ['LookupFixture', 'Project.Lookup']\nspec = 'AgentSpec.agentSpec'\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
         package.join(".exomonad").display()
@@ -296,7 +305,7 @@ fn lookup_tool_policy_matches_native_ghc_oracle() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        "lookup policy oracle passed (8 checks)"
+        "lookup policy oracle passed (13 checks)"
     );
 }
 
@@ -339,6 +348,13 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
         .await
         .to_string();
     assert!(raw.contains("True"), "raw lookup failed: {raw}");
+    let example = dispatch_haskell_script(policy, "LookupFixture.exampleIdentityCheck")
+        .await
+        .to_string();
+    assert!(
+        example.contains("True"),
+        "resolved example identity lost: {example}"
+    );
     let namespaces = dispatch_haskell_script(policy, "LookupFixture.namespaceCheck")
         .await
         .to_string();
