@@ -201,6 +201,20 @@ A stopped run's live heap and handles are gone. Durable command ownership,
 cleanup failures, accepted source, and process evidence remain until retirement
 is confirmed. The resource service reconciles its journal with delegated
 cgroups before granting new work.
+
+Source imports copy tracked working files (including locally edited or ignored
+tracked files) and ordinary untracked files. Ignored files are omitted.
+Untracked nested repositories require an explicit source exclusion so that
+their working files are never silently dropped. Tracked submodules are selected from their own Git
+index. Source imports preserve symlinks as links and preserve hard links and
+sparse files where supported. Before copying, the host budgets selected logical
+file size or allocated blocks, whichever is larger, and requires free space for
+that budget plus a reserve. The defaults are 8 GiB per import and 16 GiB free
+after import; `[launch.source]` can set `max_import_bytes` and `min_free_bytes`
+for a workspace. These are conservative admission policies, not a disk quota
+for later actor writes. The host reports the selected budget, free space, and
+copy method when admitting or refusing an import. Large build artifacts should
+live outside source or in the separately mounted build directory.
 `exomonad cleanup` inspects a stopped run's build storage and never touches source
 or Git state. `exomonad run-map` reads a run's recorded artifacts without starting
 or attaching to anything.

@@ -486,6 +486,7 @@ fn fork_workspace_admission(
 pub struct ActorHostConfig {
     pub systemd_slice: Option<exomonad_node::systemd_slice::SystemdSlice>,
     pub source_exclude: Vec<String>,
+    pub source_import: crate::exomonad::SourceImportPolicy,
     pub command_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
     /// This Exomonad installation provides the internal namespace-entry executable.
     pub exomonad_executable: PathBuf,
@@ -2219,6 +2220,7 @@ pub(crate) async fn run(
                 run_namespace: runtime_namespace(&run_root),
                 source_root: config.workspace.clone(),
                 source_exclude: config.source_exclude.clone(),
+                source_import: config.source_import,
                 root_imports: Arc::default(),
                 worktrees: worktrees.clone(),
                 backend: backend.clone(),
@@ -4911,6 +4913,7 @@ async fn launch_prepared_interactive_application(
                 run_namespace: runtime_namespace(&run_root),
                 source_root: config.workspace.clone(),
                 source_exclude: config.source_exclude.clone(),
+                source_import: config.source_import,
                 root_imports: Arc::default(),
                 worktrees: worktrees.clone(),
                 base_prompt: base_prompt.clone(),

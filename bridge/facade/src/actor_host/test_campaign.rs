@@ -237,6 +237,7 @@ impl TestCampaign {
         let mut config = ActorHostConfig {
             systemd_slice: None,
             source_exclude: Vec::new(),
+            source_import: Default::default(),
             command_resources: None,
             exomonad_executable: std::env::current_exe().unwrap(),
             workspace_inputs: None,

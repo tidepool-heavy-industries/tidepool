@@ -171,10 +171,34 @@ pub(crate) struct ExomonadConfig {
 pub(crate) struct LaunchConfig {
     pub(crate) systemd_slice: exomonad_node::systemd_slice::SystemdSlice,
     pub(crate) source_exclude: Vec<String>,
+    pub(crate) source: SourceImportPolicy,
+}
+
+/// Disk admission for a private source import. Values are conservative
+/// operational defaults, not measurements of a particular filesystem.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourceImportPolicy {
+    pub max_import_bytes: u64,
+    pub min_free_bytes: u64,
+}
+
+impl Default for SourceImportPolicy {
+    fn default() -> Self {
+        Self {
+            max_import_bytes: 8 * 1024 * 1024 * 1024,
+            min_free_bytes: 16 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 impl LaunchConfig {
     pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if self.source.max_import_bytes == 0 || self.source.min_free_bytes == 0 {
+            return Err(std::io::Error::other(
+                "[launch.source] import limits must be positive",
+            ));
+        }
         let mut seen = std::collections::BTreeSet::new();
         for name in &self.source_exclude {
             if name.is_empty()
@@ -1328,6 +1352,7 @@ async fn run_host(
         crate::actor_host::ActorHostConfig {
             systemd_slice: Some(slice),
             source_exclude: configuration.launch.source_exclude,
+            source_import: configuration.launch.source,
             command_resources: Some(std::sync::Arc::clone(&command_resources)),
             exomonad_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),

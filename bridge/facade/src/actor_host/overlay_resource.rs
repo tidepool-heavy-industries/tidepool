@@ -1,5 +1,6 @@
 //! Shared overlay publication and storage custody for source and build views.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -376,31 +377,94 @@ impl OverlayResourceLease {
         ))
     }
 
+    /// An import that failed before any mount existed owns no published view.
+    /// Remove its partial private copy immediately so a refused import cannot
+    /// strand the very bytes it was meant to protect.
+    pub(super) fn discard_unsubmitted(mut self) -> io::Result<()> {
+        if *self.storage.state.lock() != OverlayResourceState::Unsubmitted {
+            return Err(io::Error::other("cannot discard submitted overlay storage"));
+        }
+        self.latest.lock().take();
+        self.custody.settled = true;
+        let Self {
+            storage,
+            layers,
+            retired_layers,
+            custody,
+            ..
+        } = self;
+        drop(layers);
+        drop(retired_layers);
+        drop(custody);
+        if let Ok(mut storage) = Arc::try_unwrap(storage) {
+            storage.release()
+        } else {
+            Err(io::Error::other(
+                "unsubmitted overlay storage still has an owner",
+            ))
+        }
+    }
+
     /// Import ordinary host source into a private base before any mount exists.
     /// Exclusions are separately owned mount roots, never Git ignore patterns.
     pub(super) fn import_source(
         &self,
         source: &Path,
-        excluded: &[&std::ffi::OsStr],
+        selected: &SourceSelection,
+        policy: crate::exomonad::SourceImportPolicy,
     ) -> io::Result<()> {
         if self.layers.len() != 1 || self.layers[0].storage.path != self.storage.path {
             return Err(io::Error::other(
                 "source import requires a fresh private base",
             ));
         }
-        let before = source_inventory(source, excluded)?;
-        let mut entries = std::fs::read_dir(source)?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<io::Result<Vec<_>>>()?;
-        entries.retain(|entry| !excluded.iter().any(|name| entry.file_name() == Some(*name)));
-        entries.sort();
+        let before = selected_inventory(source, selected)?;
+        let selected_bytes = selected.copy_budget_bytes(source)?;
+        let free = rustix::fs::statvfs(&self.layers[0].path).map_err(io::Error::from)?;
+        let free_bytes = free.f_bavail.saturating_mul(free.f_frsize);
+        if selected_bytes > policy.max_import_bytes
+            || free_bytes < selected_bytes.saturating_add(policy.min_free_bytes)
+        {
+            return Err(io::Error::other(format!(
+                "source import refused before copy: selected copy-budget bytes={selected_bytes}, max_import_bytes={}, free bytes={free_bytes}, reserve bytes={}, copy=cp --archive --reflink=auto --sparse=always --preserve=links",
+                policy.max_import_bytes, policy.min_free_bytes
+            )));
+        }
+        let entries = selected.leaves();
+        let argument_bytes = entries
+            .iter()
+            .map(|path| path.as_os_str().len() + 1)
+            .sum::<usize>();
+        if argument_bytes > 1024 * 1024 {
+            return Err(io::Error::other(format!(
+                "source import refused before copy: {} selected path argument bytes exceed 1 MiB",
+                argument_bytes
+            )));
+        }
+        tracing::info!(
+            selected_bytes,
+            free_bytes,
+            max_import_bytes = policy.max_import_bytes,
+            min_free_bytes = policy.min_free_bytes,
+            selected_paths = entries.len(),
+            copy = "cp --archive --reflink=auto --sparse=always --preserve=links --parents",
+            "source import admitted"
+        );
         if !entries.is_empty() {
             #[allow(
                 clippy::disallowed_methods,
                 reason = "short synchronous probe: reflink copy runs to completion via .output(), not a long-lived child"
             )]
             let output = std::process::Command::new("cp")
-                .args(["--archive", "--reflink=auto", "--target-directory"])
+                .current_dir(source)
+                .args([
+                    "--archive",
+                    "--reflink=auto",
+                    "--sparse=always",
+                    "--preserve=links",
+                    "--parents",
+                    "--target-directory",
+                ])
                 .arg(&self.layers[0].path)
                 .arg("--")
                 .args(entries)
@@ -412,11 +476,23 @@ impl OverlayResourceLease {
                 )));
             }
         }
-        if before != source_inventory(source, excluded)? {
+        if before != selected_inventory(source, selected)? {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "source changed during import",
             ));
+        }
+        // `cp --parents` creates ancestor directories but does not restore
+        // their timestamps after later file copies. Restore selected metadata
+        // from deepest directory upward without traversing omitted siblings.
+        for relative in selected.paths.iter().rev() {
+            let original = source.join(relative);
+            if std::fs::symlink_metadata(&original)?.is_dir() {
+                exomonad_node::copy_overlay_root_metadata(
+                    &original,
+                    &self.layers[0].path.join(relative),
+                )?;
+            }
         }
         // Mount targets live in the immutable base so Bubblewrap does not
         // create them in the writable upper during view setup.
@@ -739,6 +815,93 @@ impl OverlayResourceLease {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceSelection {
+    /// Repository-relative selected leaves and their ancestor directories.
+    pub paths: BTreeSet<PathBuf>,
+    leaves: BTreeSet<PathBuf>,
+}
+
+impl SourceSelection {
+    pub(super) fn from_leaves(
+        root: &Path,
+        leaves: impl IntoIterator<Item = PathBuf>,
+    ) -> io::Result<Self> {
+        let mut paths = BTreeSet::new();
+        let mut selected_leaves = BTreeSet::new();
+        for leaf in leaves {
+            if leaf.as_os_str().is_empty()
+                || !leaf
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err(io::Error::other(format!(
+                    "invalid selected source path {:?}",
+                    leaf
+                )));
+            }
+            selected_leaves.insert(leaf.clone());
+            let mut current = PathBuf::new();
+            for part in leaf.components() {
+                current.push(part.as_os_str());
+                let metadata = std::fs::symlink_metadata(root.join(&current))?;
+                if current != leaf && !metadata.is_dir() {
+                    return Err(io::Error::other(format!(
+                        "selected source parent is not a directory: {}",
+                        current.display()
+                    )));
+                }
+                paths.insert(current.clone());
+            }
+        }
+        Ok(Self {
+            paths,
+            leaves: selected_leaves,
+        })
+    }
+
+    fn leaves(&self) -> Vec<&PathBuf> {
+        self.leaves.iter().collect()
+    }
+
+    fn copy_budget_bytes(&self, root: &Path) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let mut seen = BTreeSet::new();
+        let mut bytes = 0u64;
+        for path in &self.paths {
+            let metadata = std::fs::symlink_metadata(root.join(path))?;
+            if seen.insert((metadata.dev(), metadata.ino())) {
+                let allocated = metadata.blocks().saturating_mul(512);
+                bytes = bytes.saturating_add(if metadata.is_file() {
+                    allocated.max(metadata.len())
+                } else {
+                    allocated
+                });
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+pub(super) fn selected_inventory(
+    root: &Path,
+    selected: &SourceSelection,
+) -> io::Result<std::collections::BTreeMap<PathBuf, SourceStamp>> {
+    let mut inventory = std::collections::BTreeMap::new();
+    inventory.insert(
+        root.to_path_buf(),
+        SourceStamp::from(&std::fs::symlink_metadata(root)?),
+    );
+    for path in &selected.paths {
+        let absolute = root.join(path);
+        inventory.insert(
+            absolute.clone(),
+            SourceStamp::from(&std::fs::symlink_metadata(absolute)?),
+        );
+    }
+    Ok(inventory)
+}
+
 /// Detect changes made by external writers outside native/host admission.
 /// Do not follow symlinks or let Git ignore rules omit project files.
 pub(super) fn source_inventory(
@@ -801,6 +964,21 @@ pub(super) fn source_manifest(
     root: &Path,
     excluded: &[&std::ffi::OsStr],
 ) -> io::Result<SourceManifest> {
+    source_manifest_inner(root, excluded, None)
+}
+
+pub(super) fn selected_manifest(
+    root: &Path,
+    selected: &SourceSelection,
+) -> io::Result<SourceManifest> {
+    source_manifest_inner(root, &[], Some(&selected.paths))
+}
+
+fn source_manifest_inner(
+    root: &Path,
+    excluded: &[&std::ffi::OsStr],
+    selected: Option<&BTreeSet<PathBuf>>,
+) -> io::Result<SourceManifest> {
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
 
@@ -858,6 +1036,17 @@ pub(super) fn source_manifest(
             for child in std::fs::read_dir(&path)? {
                 let child = child?;
                 if path == root && excluded.iter().any(|name| child.file_name() == *name) {
+                    continue;
+                }
+                if selected.is_some_and(|selected| {
+                    !selected.contains(
+                        &child
+                            .path()
+                            .strip_prefix(root)
+                            .expect("child is under root")
+                            .to_path_buf(),
+                    )
+                }) {
                     continue;
                 }
                 pending.push(child.path());

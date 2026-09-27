@@ -44,6 +44,12 @@ pub struct GitOutput {
     pub stderr: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceWorkingPath {
+    pub path: PathBuf,
+    pub tracked: bool,
+}
+
 impl GitOutput {
     /// stdout with the single trailing newline git appends removed. Use for
     /// single-value queries (`rev-parse`, `symbolic-ref`).
@@ -316,6 +322,40 @@ impl GitCli {
         self.run_output(cwd, args)
             .map(|output| output.stdout)
             .map_err(WorktreeError::GitFailure)
+    }
+
+    /// Working files eligible for a source snapshot: indexed paths, including
+    /// tracked files matched by ignore rules, and ordinary untracked paths.
+    /// Keep Git's NUL-delimited path bytes so unusual names remain exact.
+    pub fn source_working_paths(
+        &self,
+        repo: &Path,
+    ) -> Result<Vec<SourceWorkingPath>, WorktreeError> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut selected = std::collections::BTreeMap::new();
+        for (tracked, arguments) in [
+            (true, &["ls-files", "--cached", "-z"][..]),
+            (
+                false,
+                &["ls-files", "--others", "--exclude-standard", "-z"][..],
+            ),
+        ] {
+            let bytes = self.stdout_bytes(repo, arguments)?;
+            for path in bytes
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+            {
+                let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+                selected
+                    .entry(path)
+                    .and_modify(|old| *old |= tracked)
+                    .or_insert(tracked);
+            }
+        }
+        Ok(selected
+            .into_iter()
+            .map(|(path, tracked)| SourceWorkingPath { path, tracked })
+            .collect())
     }
 
     /// [`Self::run`], with the failure already lifted into [`WorktreeError`].

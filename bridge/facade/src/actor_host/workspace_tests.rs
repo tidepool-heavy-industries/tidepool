@@ -90,6 +90,7 @@ fn prepared_fork_inherits_the_published_helper_revision() {
         run_namespace: "published-helper-fork".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -383,6 +384,7 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
         run_namespace: "source-exclusion-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -426,6 +428,7 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
         run_namespace: "root-import-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -435,13 +438,12 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
     let source =
         OverlayResourceLease::allocate_path(layout.resource_root("first").join("source"), None)
             .unwrap();
-    let excluded_refs = excluded
-        .iter()
-        .map(std::ffi::OsString::as_os_str)
-        .collect::<Vec<_>>();
-    source.import_source(repo.path(), &excluded_refs).unwrap();
+    let selected = layout.source_selection(repo.path(), &excluded).unwrap();
+    source
+        .import_source(repo.path(), &selected, layout.source_import)
+        .unwrap();
     layout
-        .remember_import(repo.path(), &excluded, &source)
+        .remember_import(repo.path(), &excluded, &selected, &source)
         .unwrap();
     drop(source);
     assert!(layout.reusable_import(repo.path(), &excluded).is_some());
@@ -454,8 +456,9 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
     layout.root_imports.lock().insert(
         repo.path().to_path_buf(),
         Arc::new(RootImport {
-            inventory: source_inventory(repo.path(), &excluded_refs).unwrap(),
+            inventory: selected_inventory(repo.path(), &selected).unwrap(),
             exclusions: original.exclusions.clone(),
+            selection: selected.clone(),
             manifest: original.manifest.clone(),
             snapshot: original.snapshot.clone(),
         }),
@@ -466,6 +469,122 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
     assert!(layout
         .reusable_import(repo.path(), &changed_exclusions)
         .is_none());
+}
+
+#[test]
+fn source_import_selects_git_working_files_and_refuses_over_budget_before_copy() {
+    let repo = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let nested = exomonad_worktree::testing::TestRepo::init().unwrap();
+    nested
+        .writer()
+        .commit_file("module", "submodule", "seed")
+        .unwrap();
+    repo.writer()
+        .commit_file("tracked", "tracked", "seed")
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                nested.path().to_str().unwrap(),
+                "module",
+            ],
+        )
+        .unwrap();
+    repo.git()
+        .try_run(repo.path(), &["commit", "-qm", "record submodule"])
+        .unwrap();
+    repo.writer()
+        .commit_file("ignored/kept", "tracked despite ignore", "seed")
+        .unwrap();
+    repo.writer()
+        .commit_file(".gitignore", "ignored/\n", "ignore")
+        .unwrap();
+    std::fs::write(repo.path().join("ignored/omitted"), "ignored").unwrap();
+    std::fs::write(repo.path().join("ordinary"), "untracked").unwrap();
+    std::fs::write(repo.path().join("tracked"), "local edit").unwrap();
+    let nested_scratch = repo.path().join(".claude/worktrees/child");
+    std::fs::create_dir_all(&nested_scratch).unwrap();
+    repo.git()
+        .try_run(&nested_scratch, &["init", "-q"])
+        .unwrap();
+    std::fs::write(nested_scratch.join("scratch"), "not source").unwrap();
+    let external = tempfile::tempdir().unwrap();
+    std::fs::write(external.path().join("outside"), "outside content").unwrap();
+    std::os::unix::fs::symlink(external.path().join("outside"), repo.path().join("link")).unwrap();
+
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "selective-import".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        source_import: Default::default(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let excluded = layout.source_exclusions(repo.path(), repo.path()).unwrap();
+    assert!(layout
+        .source_selection(repo.path(), &excluded)
+        .unwrap_err()
+        .to_string()
+        .contains("untracked nested repository"));
+    layout.source_exclude.push(".claude".into());
+    let excluded = layout.source_exclusions(repo.path(), repo.path()).unwrap();
+    let selected = layout.source_selection(repo.path(), &excluded).unwrap();
+    let refused =
+        OverlayResourceLease::allocate_path(layout.resource_root("refused").join("source"), None)
+            .unwrap();
+    let small = crate::exomonad::SourceImportPolicy {
+        max_import_bytes: 1,
+        ..Default::default()
+    };
+    let error = refused
+        .import_source(repo.path(), &selected, small)
+        .unwrap_err();
+    assert!(error.to_string().contains("refused before copy"));
+    assert!(std::fs::read_dir(refused.imported_base().unwrap().0)
+        .unwrap()
+        .next()
+        .is_none());
+    refused.discard_unsubmitted().unwrap();
+
+    let source =
+        OverlayResourceLease::allocate_path(layout.resource_root("selected").join("source"), None)
+            .unwrap();
+    source
+        .import_source(repo.path(), &selected, layout.source_import)
+        .unwrap();
+    let base = source.imported_base().unwrap().0;
+    assert_eq!(
+        std::fs::read_to_string(base.join("tracked")).unwrap(),
+        "local edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("ignored/kept")).unwrap(),
+        "tracked despite ignore"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("ordinary")).unwrap(),
+        "untracked"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("module/module")).unwrap(),
+        "submodule"
+    );
+    assert!(!base.join("ignored/omitted").exists());
+    assert!(!base.join(".claude").exists());
+    assert_eq!(
+        std::fs::read_link(base.join("link")).unwrap(),
+        external.path().join("outside")
+    );
+    source.discard_unsubmitted().unwrap();
 }
 
 #[test]
@@ -481,6 +600,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
         run_namespace: "first-run".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -558,6 +678,7 @@ fn root_mount_starts_with_the_pinned_workspace_helper_seed() {
         run_namespace: "helper-seed-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -618,6 +739,7 @@ fn root_mount_keeps_authored_helpers_clean_and_preserves_host_bytes() {
         run_namespace: "authored-helper-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -758,6 +880,7 @@ fn root_mount_resolves_relative_workspace_and_nested_gitfiles() {
         run_namespace: "nested-gitfile-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -819,6 +942,7 @@ fn root_mount_refuses_broken_workspace_gitfile_before_launch() {
         run_namespace: "broken-gitfile-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -849,6 +973,7 @@ fn actors_sharing_a_checkout_mount_distinct_helper_drafts() {
         run_namespace: "helper-mount-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -916,6 +1041,7 @@ async fn live_capture_inherits_dirty_source_after_host_git_activity() {
         run_namespace: "queued-capture-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -1128,6 +1254,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         run_namespace: "workspace-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        source_import: Default::default(),
         root_imports: Arc::default(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
@@ -1286,9 +1413,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             child,
-            "cat file; git show :file; cat untracked ignored .exomonad/config"
+            "cat file; git show :file; cat untracked .exomonad/config; test ! -e ignored"
         ),
-        "workingworkinguntrackedignoredchild-config"
+        "workingworkinguntrackedchild-config"
     );
     assert_eq!(
         shell(child, "stat -c '%y' file"),

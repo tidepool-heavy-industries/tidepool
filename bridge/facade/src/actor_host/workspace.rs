@@ -1,6 +1,9 @@
 //! Prepare one complete workspace before deferred actor/native startup.
 
-use super::overlay_resource::{source_inventory, source_manifest, SourceManifest, SourceStamp};
+use super::overlay_resource::{
+    selected_inventory, selected_manifest, source_inventory, source_manifest, SourceManifest,
+    SourceSelection, SourceStamp,
+};
 use super::workspace_publication::WorkspacePublication;
 use super::*;
 use exomonad_node::MountNamespace;
@@ -51,6 +54,7 @@ struct CapturedSource {
 pub(super) struct RootImport {
     inventory: std::collections::BTreeMap<PathBuf, SourceStamp>,
     exclusions: Vec<OsString>,
+    selection: SourceSelection,
     manifest: SourceManifest,
     snapshot: OverlaySnapshot,
 }
@@ -60,6 +64,7 @@ pub(super) struct WorkspaceLayout {
     pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
     pub(super) source_exclude: Vec<String>,
+    pub(super) source_import: crate::exomonad::SourceImportPolicy,
     pub(super) root_imports: Arc<Mutex<std::collections::BTreeMap<PathBuf, Arc<RootImport>>>>,
     pub(super) worktrees: WorktreeManager,
     pub(super) base_prompt: FrozenBasePrompt,
@@ -223,13 +228,16 @@ impl WorkspaceLayout {
         if candidate.exclusions != excluded {
             return None;
         }
-        let excluded = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-        let before = source_inventory(source, &excluded).ok()?;
+        let selection = self.source_selection(source, excluded).ok()?;
+        if selection != candidate.selection {
+            return None;
+        }
+        let before = selected_inventory(source, &selection).ok()?;
         if before != candidate.inventory {
             return None;
         }
-        let manifest = source_manifest(source, &excluded).ok()?;
-        let after = source_inventory(source, &excluded).ok()?;
+        let manifest = selected_manifest(source, &selection).ok()?;
+        let after = selected_inventory(source, &selection).ok()?;
         (before == after && manifest == candidate.manifest).then(|| candidate.snapshot.clone())
     }
 
@@ -237,18 +245,18 @@ impl WorkspaceLayout {
         &self,
         source_path: &Path,
         excluded: &[OsString],
+        selection: &SourceSelection,
         source: &OverlayResourceLease,
     ) -> io::Result<()> {
-        let excluded_refs = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-        let before = source_inventory(source_path, &excluded_refs)?;
-        let original = match source_manifest(source_path, &excluded_refs) {
+        let before = selected_inventory(source_path, selection)?;
+        let original = match selected_manifest(source_path, selection) {
             Ok(manifest) => manifest,
             Err(error) => {
                 tracing::debug!(%error, "source manifest unavailable; import will not be reused");
                 return Ok(());
             }
         };
-        let after = source_inventory(source_path, &excluded_refs)?;
+        let after = selected_inventory(source_path, selection)?;
         if before != after {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -256,13 +264,7 @@ impl WorkspaceLayout {
             ));
         }
         let (base, snapshot) = source.imported_base()?;
-        let copied = match source_manifest(
-            base,
-            &[
-                std::ffi::OsStr::new(".git"),
-                std::ffi::OsStr::new(".exomonad"),
-            ],
-        ) {
+        let copied = match selected_manifest(base, selection) {
             Ok(manifest) => manifest,
             Err(error) => {
                 tracing::debug!(%error, "imported-base manifest unavailable; import will not be reused");
@@ -280,6 +282,7 @@ impl WorkspaceLayout {
             Arc::new(RootImport {
                 inventory: after,
                 exclusions: excluded.to_vec(),
+                selection: selection.clone(),
                 manifest: original,
                 snapshot,
             }),
@@ -323,6 +326,70 @@ impl WorkspaceLayout {
         }
         excluded.sort();
         Ok(excluded)
+    }
+
+    fn source_selection(
+        &self,
+        source: &Path,
+        excluded: &[OsString],
+    ) -> io::Result<SourceSelection> {
+        fn collect(
+            git: &exomonad_worktree::GitCli,
+            root: &Path,
+            repo: &Path,
+            prefix: &Path,
+            excluded: &[OsString],
+            leaves: &mut Vec<PathBuf>,
+        ) -> io::Result<()> {
+            for entry in git.source_working_paths(repo).map_err(io::Error::other)? {
+                let path = entry.path;
+                if prefix.as_os_str().is_empty()
+                    && excluded.iter().any(|name| {
+                        path.components()
+                            .next()
+                            .is_some_and(|part| part.as_os_str() == name)
+                    })
+                {
+                    continue;
+                }
+                let relative = prefix.join(&path);
+                let absolute = root.join(&relative);
+                let metadata = match std::fs::symlink_metadata(&absolute) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if metadata.is_dir() {
+                    if entry.tracked {
+                        // Indexed directories are submodules.
+                        collect(git, root, &absolute, &relative, &[], leaves)?;
+                    } else {
+                        return Err(io::Error::other(format!(
+                            "untracked nested repository {} needs an explicit source exclusion",
+                            relative.display()
+                        )));
+                    }
+                } else if metadata.is_file() || metadata.file_type().is_symlink() {
+                    leaves.push(relative);
+                } else {
+                    return Err(io::Error::other(format!(
+                        "unsupported source entry {}",
+                        absolute.display()
+                    )));
+                }
+            }
+            Ok(())
+        }
+        let mut leaves = Vec::new();
+        collect(
+            self.worktrees.git(),
+            source,
+            source,
+            Path::new(""),
+            excluded,
+            &mut leaves,
+        )?;
+        SourceSelection::from_leaves(source, leaves)
     }
 
     pub(super) fn resource_root(&self, key: &str) -> PathBuf {
@@ -1106,6 +1173,7 @@ impl WorkspaceLayout {
                 Err(fallback) => (None, Some(fallback)),
             }
         } else {
+            let selection = self.source_selection(source_path, &excluded)?;
             let inherited = self.reusable_import(source_path, &excluded);
             let source = OverlayResourceLease::allocate_path(source_pathname, inherited.clone())?;
             if inherited.is_some() {
@@ -1113,15 +1181,14 @@ impl WorkspaceLayout {
                 (Some(source), None)
             } else {
                 let import_started = std::time::Instant::now();
-                let excluded_refs = excluded
-                    .iter()
-                    .map(std::ffi::OsString::as_os_str)
-                    .collect::<Vec<_>>();
+                tracing::info!(path = %source_path.display(), exclusions = ?excluded, selected_paths = selection.paths.len(), "selected source import");
                 let imported = source
-                    .import_source(source_path, &excluded_refs)
+                    .import_source(source_path, &selection, self.source_import)
                     .and_then(|()| {
-                        if excluded == self.source_exclusions(source_path, files.as_path())? {
-                            self.remember_import(source_path, &excluded, &source)
+                        if excluded == self.source_exclusions(source_path, files.as_path())?
+                            && selection == self.source_selection(source_path, &excluded)?
+                        {
+                            self.remember_import(source_path, &excluded, &selection, &source)
                         } else {
                             Err(io::Error::new(
                                 io::ErrorKind::WouldBlock,
@@ -1138,7 +1205,10 @@ impl WorkspaceLayout {
                         );
                         (Some(source), None)
                     }
-                    Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
+                    Err(error) => {
+                        source.discard_unsubmitted()?;
+                        (None, Some(SourceFallback::ImportFailed(error.to_string())))
+                    }
                 }
             }
         };

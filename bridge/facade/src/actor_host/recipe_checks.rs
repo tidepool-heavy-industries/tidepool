@@ -149,6 +149,7 @@ impl Driver {
         let config = ActorHostConfig {
             systemd_slice: None,
             source_exclude: defaults.launch.source_exclude,
+            source_import: defaults.launch.source,
             command_resources: None,
             exomonad_executable: std::env::current_exe()?,
             workspace_inputs: Some(selected),
