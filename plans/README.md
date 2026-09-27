@@ -42,6 +42,9 @@ unconsumed proposals are removed; Git retains their history.
 - [Harness adoption](harness-adoption.md): how Exomonad moves from the forked
   Codex backend to the standalone model harness (`~/dev/exomonad-harness`):
   adapter, `spawnAgent`, hook placement, compaction, deletions, order.
+- [Harness adoption reconciliation](harness-adoption-reconciliation.md): current
+  source audit and experimental gates for a real resident cell and small worker
+  tree; production migration remains a later decision.
 - [Dogfooding sweep](dogfood-sweep.md): the accepted decisions and open
   checklist from the 2026-09-23 run audit (latency attribution, run-map
   provenance, delivery and input-acknowledgement friction).
