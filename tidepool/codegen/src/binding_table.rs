@@ -549,6 +549,58 @@ impl BindingTable {
         id
     }
 
+    /// Freeze an environment that can outlive `parent` and every ancestor.
+    /// Inherited declaration modules may refer to older shadowed value
+    /// generations, so retain the ancestors' complete live value set as well
+    /// as the names in the ordinary visible tip.
+    pub fn seed_detached_scope(
+        &mut self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        child: ScopeId,
+    ) -> BindingTipId {
+        let id = self.seed_scope(tree, parent, child);
+        let ancestors = tree.lookup_chain(parent);
+        let already = &self.tips[&child].retained;
+        let additional: Vec<_> = self
+            .live
+            .values()
+            .filter(|entry| ancestors.contains(&entry.scope) && !already.contains(&entry.id))
+            .map(|entry| entry.id)
+            .collect();
+        let retained = self.acquire_leases(additional);
+        self.tips.get_mut(&child).unwrap().retained.extend(retained);
+        id
+    }
+
+    /// Retain all value generations an exact external facade from `source`
+    /// could import, without making its names visible in `target`.
+    pub fn retain_scope_dependencies(
+        &mut self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+    ) -> bool {
+        if !tree.is_live(source) || !tree.is_live(target) || !self.tips.contains_key(&target) {
+            return false;
+        }
+        let ancestors = tree.lookup_chain(source);
+        let already = &self.tips[&target].retained;
+        let additional: Vec<_> = self
+            .live
+            .values()
+            .filter(|entry| ancestors.contains(&entry.scope) && !already.contains(&entry.id))
+            .map(|entry| entry.id)
+            .collect();
+        let retained = self.acquire_leases(additional);
+        self.tips
+            .get_mut(&target)
+            .unwrap()
+            .retained
+            .extend(retained);
+        true
+    }
+
     /// The immutable inherited-view identity for `scope`, when it has one.
     #[must_use]
     pub fn tip_id(&self, scope: ScopeId) -> Option<BindingTipId> {

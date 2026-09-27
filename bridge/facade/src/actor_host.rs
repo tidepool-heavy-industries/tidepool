@@ -1230,6 +1230,7 @@ struct InteractiveDeployment {
     last_activation_sequence: u64,
     thread: Option<QueueReadyThread>,
     fork_gate: Option<exomonad_actor::ForkGroupGate>,
+    checkpoint: Option<exomonad_actor::CheckpointLease>,
     runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
 }
@@ -3832,11 +3833,13 @@ async fn run_interactive_applications(
                         );
                         let fork_parent_thread = match (
                             recovered_threads.contains_key(&installation.actor.identity()),
+                            installation.checkpoint.as_ref(),
                             installation.context_parent,
                         ) {
-                            (true, _) => None,
-                            (false, None) => None,
-                            (false, Some(parent)) => {
+                            (true, _, _) => None,
+                            (false, Some(checkpoint), _) => Some(BackendThreadId(checkpoint.boundary.thread_id.clone())),
+                            (false, None, None) => None,
+                            (false, None, Some(parent)) => {
                                 let Some(thread) = deployments
                                     .iter()
                                     .find(|deployment| deployment.actor == parent)
@@ -4275,6 +4278,7 @@ async fn run_interactive_applications(
                         }
                         let pane = deployment.pane.clone();
                         let fork_gate = deployment.fork_gate.clone();
+                        let checkpoint = deployment.checkpoint.clone();
                         let runtime_observation = deployment.runtime_observation.clone();
                         let fork_parent_thread = deployment.fork_parent_thread.clone();
                         let tmux = tmux.clone();
@@ -4320,6 +4324,14 @@ async fn run_interactive_applications(
                                 }
                                 (result, None) => result,
                                 (Err(error), Some(_)) => Err(error),
+                            };
+                            let result = match (result, checkpoint) {
+                                (Ok(thread), Some(checkpoint)) => match checkpoint.wait_published().await {
+                                    Ok(()) => Ok(thread),
+                                    Err(refusal) => Err(application_error(actor, InteractiveOperation::DiscoverBinding,
+                                        format!("checkpoint publication refused: {refusal:?}"))),
+                                },
+                                (result, _) => result,
                             };
                             (actor, result)
                         });
@@ -5561,6 +5573,7 @@ async fn launch_prepared_interactive_application(
             last_activation_sequence: 0,
             thread: None,
             fork_gate,
+            checkpoint: installation.checkpoint.clone(),
             runtime_observation,
             fork_parent_thread,
         },

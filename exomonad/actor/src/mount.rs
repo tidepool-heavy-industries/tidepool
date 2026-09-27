@@ -33,6 +33,15 @@ pub struct ActorSourceImports {
     imports: SourceImports,
 }
 
+/// Immutable source revisions selected for a captured context. Paths point
+/// directly into revision directories, never through an actor's mutable
+/// `active` link.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckpointSourceLayer {
+    pub identities: Vec<String>,
+    pub include_paths: Vec<PathBuf>,
+}
+
 impl ActorSourceImports {
     #[must_use]
     pub fn from_exact_facades<'a>(
@@ -57,6 +66,36 @@ impl ActorSourceImports {
 /// service the host hands out for that principal is bound to the same layer,
 /// so an actor cannot reach another actor's source by asking differently.
 pub trait ActorSourceLayers: Send + Sync {
+    fn freeze_checkpoint_layer(
+        &self,
+        _issuer: PrincipalId,
+    ) -> Result<CheckpointSourceLayer, String> {
+        Ok(CheckpointSourceLayer::default())
+    }
+
+    fn admit_checkpoint_layer(
+        &self,
+        checkpoint: &CheckpointSourceLayer,
+        _creator: PrincipalId,
+        helper_branch: &str,
+        worktrees: &[String],
+    ) -> Result<Vec<PathBuf>, String> {
+        let selected = self.layer_include_for(helper_branch, worktrees);
+        if checkpoint.identities.is_empty() {
+            Ok(selected)
+        } else {
+            Err("host cannot compare checkpoint source revisions".into())
+        }
+    }
+
+    fn bind_checkpoint_for(
+        &self,
+        actor: PrincipalId,
+        _helper_branch: &str,
+        _checkpoint: &CheckpointSourceLayer,
+    ) {
+        let _ = actor;
+    }
     /// Reserve one actor-private helper branch before the actor has an ID.
     /// A prepared fork workspace may already have copied its branch.
     fn prepare_helpers(

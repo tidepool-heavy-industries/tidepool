@@ -94,6 +94,21 @@ pub fn forks() -> Effect {
                 doc: &["Whether a child inherits the completed provider and Haskell context."],
             },
             TypeDef {
+                name: "CheckpointRefusal",
+                wire_rust: None,
+                haskell_module: None,
+                shape: TypeShape::Sum {
+                    variants: ["NoHostedBoundary", "WrongSession", "UnavailableCheckpoint", "CaptureFailed", "ProcessRestartUnsupported"]
+                        .into_iter()
+                        .map(|ctor| SumVariant { ctor, fields: VariantFields::Positional(Vec::new()), doc: &[] })
+                        .collect(),
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["Why an exact hosted context checkpoint cannot be captured or used."],
+            },
+            TypeDef {
                 name: "ForkEffort",
                 wire_rust: None,
                 haskell_module: None,
@@ -264,6 +279,11 @@ pub fn forks() -> Effect {
                     rust: RustBinding::Path("crate::ForkContext"),
                 });
                 args.push(Arg {
+                    name: "checkpoint",
+                    ty: HsType::maybe(HsType::Text),
+                    rust: RustBinding::Path("Option<String>"),
+                });
+                args.push(Arg {
                     name: "instructions",
                     ty: HsType::maybe(HsType::Text),
                     rust: RustBinding::Path("Option<String>"),
@@ -285,6 +305,24 @@ pub fn forks() -> Effect {
                     handling: HandlingClass::Actor,
                     extract: None,
                 }
+            },
+            Verb {
+                ctor: "ForksCheckpointWith",
+                method: "forks_checkpoint_with",
+                args: vec![Arg { name: "name", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Text),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ForksCheckCheckpointWith",
+                method: "forks_check_checkpoint_with",
+                args: vec![Arg { name: "checkpoint", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
             },
             Verb {
                 ctor: "ForksPreviewWith",

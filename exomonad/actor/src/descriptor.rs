@@ -25,6 +25,7 @@ pub struct ActorDescriptor {
     instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    checkpoint_token: Option<String>,
     source_layer: std::sync::Arc<[std::path::PathBuf]>,
 }
 
@@ -49,6 +50,7 @@ impl ActorDescriptor {
             instructions: None,
             fork_budget: None,
             fork_boundary: None,
+            checkpoint_token: None,
             source_layer: std::sync::Arc::from([]),
         }
     }
@@ -103,6 +105,15 @@ impl ActorDescriptor {
     #[must_use]
     pub fn fork_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
         self.fork_boundary.as_ref()
+    }
+
+    pub fn checkpoint_token(&self) -> Option<&str> {
+        self.checkpoint_token.as_deref()
+    }
+
+    pub(crate) fn with_checkpoint_token(mut self, token: Option<String>) -> Self {
+        self.checkpoint_token = token;
+        self
     }
 
     #[must_use]

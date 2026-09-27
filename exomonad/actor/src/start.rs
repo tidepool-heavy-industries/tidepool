@@ -82,6 +82,7 @@ pub(crate) struct ActorStartRequest {
     pub model: Option<Model>,
     pub instructions: Option<String>,
     pub context: ForkContext,
+    pub checkpoint: Option<String>,
     pub lifetime: WorkerLifetime,
     pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
@@ -259,6 +260,8 @@ pub enum ActorStartCaptureError {
     UnexpectedRequest,
     #[error("actor start suspended without its child entry live payload")]
     MissingEntry,
+    #[error("a checkpoint requires an inherited fork group")]
+    InvalidCheckpointContext,
     #[error(transparent)]
     ExactExports(#[from] tidepool_runtime::session::ExactExportError),
     #[error(transparent)]
@@ -342,6 +345,7 @@ impl ResidentActorStart {
                 model: None,
                 instructions: None,
                 context: ForkContext::SelectedContext,
+                checkpoint: None,
                 lifetime: ActorStartRequest::FRESH_LAUNCH_LIFETIME,
                 fork_budget: None,
                 session_id,
@@ -378,6 +382,7 @@ impl ResidentActorStart {
             model,
             instructions,
             context,
+            checkpoint,
             lifetime,
             fork_budget,
             session_id,
@@ -390,6 +395,11 @@ impl ResidentActorStart {
             return Err(ActorStartCaptureError::InvalidModel);
         }
         let (profile, effect_keys) = profile.resolve(effect_keys)?;
+        if checkpoint.is_some()
+            && (fork_group.is_none() || context != ForkContext::InheritedContext)
+        {
+            return Err(ActorStartCaptureError::InvalidCheckpointContext);
+        }
         let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
         let entry = session
@@ -485,6 +495,7 @@ impl ResidentActorStart {
         .with_instructions(instructions)
         .with_fork_budget(fork_budget)
         .with_creator(parent_actor)
+        .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         if lifetime == WorkerLifetime::ParentOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);

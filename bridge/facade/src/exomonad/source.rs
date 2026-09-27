@@ -133,6 +133,17 @@ pub(crate) struct SourceLayer {
 }
 
 impl SourceLayer {
+    /// Resolve one active publication to its immutable revision directory.
+    fn checkpoint_revision(&self, kind: &str) -> Result<(String, Vec<PathBuf>)> {
+        let record = self
+            .read_record()?
+            .ok_or("checkpoint source layer has no active revision")?;
+        let path = self.revisions().join(&record.identity);
+        Ok((
+            format!("{kind}:{}", record.identity),
+            revision_include_paths(&path, record.roots),
+        ))
+    }
     /// The run's own layer, shared by every actor that has no checkout layer
     /// of its own.
     pub(crate) fn new(run_root: &Path) -> Self {
@@ -596,6 +607,9 @@ enum ActorSourceScope {
     /// against it — that is what `sourceStatus` reports — and has no source of
     /// its own to publish.
     RunReadOnly,
+    /// The child compiles against immutable revisions from a delegated
+    /// checkpoint. Reload must not switch its source graph behind that view.
+    Checkpoint(exomonad_actor::CheckpointSourceLayer),
 }
 
 /// The run's answer to the `Source` effect, for every actor in it.
@@ -710,6 +724,31 @@ impl ExomonadSourceReload {
             .entry(branch.to_owned())
             .or_insert_with(|| SourceLayer::helpers(&self.helper_root, branch))
             .clone()
+    }
+
+    fn pinned_checkpoint_graph(
+        &self,
+        helper_branch: &str,
+        checkout: Option<&CheckoutSource>,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer> {
+        self.layer.ensure_active(&self.frozen)?;
+        let mut identities = Vec::new();
+        let mut include_paths = Vec::new();
+        let mut add = |layer: &SourceLayer, kind: &str| -> Result<()> {
+            let (identity, paths) = layer.checkpoint_revision(kind)?;
+            identities.push(identity);
+            include_paths.extend(paths);
+            Ok(())
+        };
+        add(&self.helper_layer(helper_branch), "helpers")?;
+        if let Some(checkout) = checkout {
+            add(&checkout.layer, "checkout")?;
+        }
+        add(&self.layer, "run")?;
+        Ok(exomonad_actor::CheckpointSourceLayer {
+            identities,
+            include_paths,
+        })
     }
 
     fn helper_draft(&self, branch: &str) -> PathBuf {
@@ -1091,6 +1130,11 @@ impl ExomonadSourceReload {
         let scope = self.scope(caller);
         // What the copy below would read, signed without reading it.
         let (layer_key, roots) = match &scope {
+            ActorSourceScope::Checkpoint(_) => {
+                return Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "checkpoint source is frozen; drift is unavailable".into(),
+                ))
+            }
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 let config = self.frozen.config().map_err(unreadable)?;
                 let roots =
@@ -1111,6 +1155,7 @@ impl ExomonadSourceReload {
         };
         let signature = super::workspace::sources_signature(&roots).map_err(unreadable)?;
         let active_now = match &scope {
+            ActorSourceScope::Checkpoint(_) => unreachable!("handled before reading drift"),
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 self.layer.ensure_active(&self.frozen).map_err(unreadable)?
             }
@@ -1125,6 +1170,7 @@ impl ExomonadSourceReload {
             }
         }
         let (active, disk) = match scope {
+            ActorSourceScope::Checkpoint(_) => unreachable!("handled before reading drift"),
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
                 let disk = self
@@ -1571,6 +1617,11 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
     {
         let _one_at_a_time = self.gate.lock();
         match self.scope(caller) {
+            ActorSourceScope::Checkpoint(_) => {
+                Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "checkpoint source is frozen; this actor cannot republish it".into(),
+                ))
+            }
             ActorSourceScope::Run => self.reload_run(also_check, intent),
             ActorSourceScope::Checkout(checkout) => {
                 self.reload_checkout(&checkout, also_check, intent)
@@ -1592,6 +1643,11 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
     {
         let _one_at_a_time = self.gate.lock();
         match self.scope(caller) {
+            ActorSourceScope::Checkpoint(_) => {
+                Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "checkpoint source is frozen; status compares no mutable draft".into(),
+                ))
+            }
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
                 let disk = self
@@ -1616,6 +1672,66 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
 }
 
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
+    fn freeze_checkpoint_layer(
+        &self,
+        issuer: PrincipalId,
+    ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
+        let _one_at_a_time = self.gate.lock();
+        let helper = self
+            .helper_branch_for(issuer)
+            .unwrap_or_else(|| "run".to_owned());
+        self.ensure_helper_active(&helper)
+            .map_err(|error| error.to_string())?;
+        let checkout = match self.scope(issuer) {
+            ActorSourceScope::Checkpoint(layer) => return Ok(layer),
+            ActorSourceScope::Checkout(checkout) => Some(checkout),
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => None,
+        };
+        self.pinned_checkpoint_graph(&helper, checkout.as_ref())
+            .map_err(|error| error.to_string())
+    }
+
+    fn admit_checkpoint_layer(
+        &self,
+        checkpoint: &exomonad_actor::CheckpointSourceLayer,
+        creator: PrincipalId,
+        helper_branch: &str,
+        worktrees: &[String],
+    ) -> std::result::Result<Vec<PathBuf>, String> {
+        let _one_at_a_time = self.gate.lock();
+        let candidate = match self.scope(creator) {
+            ActorSourceScope::Checkpoint(layer) => layer,
+            _ => {
+                self.ensure_helper_active(helper_branch)
+                    .map_err(|error| error.to_string())?;
+                let checkout = self.checkout(worktrees);
+                self.pinned_checkpoint_graph(helper_branch, checkout.as_ref())
+                    .map_err(|error| error.to_string())?
+            }
+        };
+        if candidate.identities != checkpoint.identities {
+            return Err(format!(
+                "checkpoint source revisions differ from authored entry source: captured {:?}, entry {:?}",
+                checkpoint.identities, candidate.identities,
+            ));
+        }
+        Ok(checkpoint.include_paths.clone())
+    }
+
+    fn bind_checkpoint_for(
+        &self,
+        actor: PrincipalId,
+        helper_branch: &str,
+        checkpoint: &exomonad_actor::CheckpointSourceLayer,
+    ) {
+        self.helper_scopes
+            .write()
+            .insert(actor, helper_branch.to_owned());
+        self.scopes
+            .write()
+            .insert(actor, ActorSourceScope::Checkpoint(checkpoint.clone()));
+    }
+
     fn prepare_helpers(
         &self,
         creator: PrincipalId,
@@ -1747,6 +1863,11 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         actor: PrincipalId,
         also_check: &[String],
     ) -> exomonad_actor::SourceLayerReload {
+        if matches!(self.scope(actor), ActorSourceScope::Checkpoint(_)) {
+            return exomonad_actor::SourceLayerReload::Unavailable(
+                "checkpoint source is frozen; session helpers cannot be republished".into(),
+            );
+        }
         let _one_at_a_time = self.gate.lock();
         let Some(branch) = self.helper_scopes.read().get(&actor).cloned() else {
             return exomonad_actor::SourceLayerReload::Unavailable(
@@ -1849,6 +1970,48 @@ fn revision_module(identity: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_paths_pin_revision_and_admission_refuses_source_drift() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+        let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        assert!(!captured.include_paths.is_empty());
+        assert!(captured
+            .include_paths
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("/active/")));
+        assert_eq!(
+            reload
+                .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+                .unwrap(),
+            captured.include_paths
+        );
+
+        let alternate = tempfile::tempdir().unwrap();
+        std::fs::write(
+            alternate.path().join("Work.hs"),
+            "module Work where\nwork = 2\n",
+        )
+        .unwrap();
+        let pending = reload
+            .layer
+            .capture_from_roots(reload.frozen.identity(), &[alternate.path().to_path_buf()])
+            .unwrap();
+        reload.layer.publish(pending).unwrap();
+        let refusal = reload
+            .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+            .unwrap_err();
+        assert!(refusal.contains("source revisions differ"));
+        assert!(captured.include_paths[0].exists());
+    }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
         let project = tempfile::tempdir().unwrap();

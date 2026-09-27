@@ -3306,6 +3306,15 @@ where
         self.state.mint_scope(parent)
     }
 
+    /// Freeze an actor's lexical environment into an independent retained root.
+    pub fn mint_detached_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        self.state.mint_detached_scope(parent)
+    }
+
+    pub fn retain_scope_dependencies(&mut self, source: ScopeId, target: ScopeId) -> bool {
+        self.state.retain_scope_dependencies(source, target)
+    }
+
     /// Immutable value-binding snapshot captured when `scope` was minted.
     #[must_use]
     pub fn binding_tip_id(

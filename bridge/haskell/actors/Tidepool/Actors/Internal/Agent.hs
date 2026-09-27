@@ -304,9 +304,10 @@ startForkedAgent
   -> Maybe Model
   -> ForkContext
   -> Maybe Text
+  -> Maybe Text
   -> WorkerLifetime
   -> Eff effs (Either Text (AgentRef, Text, WorktreeHandle))
-startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime = do
+startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget model context checkpoint instructions lifetime = do
   launched <- launchForkedActor
     launchRole
     forkGroup
@@ -319,6 +320,7 @@ startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effect
     budget
     model
     context
+    checkpoint
     instructions
     lifetime
     (Just actorLabel)
@@ -583,6 +585,7 @@ launchForkedActor
   -> Maybe Model
   -> ForkContext
   -> Maybe Text
+  -> Maybe Text
   -> WorkerLifetime
   -- | 'Just' exactly when 'definition' is 'agentDefinitionUnbound' applied to
   -- this same label and 'startup' is '()' — i.e. this call is
@@ -598,7 +601,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   , Actor.initialization = startupAction
   , Actor.behavior = install
   , Actor.onShutdown = shutdownAction
-  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime unboundLabel = do
+  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context checkpoint instructions lifetime unboundLabel = do
   let cell = newExitCell startup
       shutdownEntry reasonCode =
         raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
@@ -626,6 +629,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
       budget
       model
       context
+      checkpoint
       instructions
       lifetime)
   pure $ case launched of

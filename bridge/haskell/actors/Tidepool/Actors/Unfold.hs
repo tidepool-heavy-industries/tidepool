@@ -38,6 +38,9 @@ module Tidepool.Actors.Unfold
   , withReport
   , withModel
   , WorkerContext
+  , ContextCheckpoint
+  , checkpoint
+  , fromCheckpoint
   , inherited
   , selected
   , withContext
@@ -51,6 +54,7 @@ module Tidepool.Actors.Unfold
   , ForkAllowance (..)
   , WorkerLaunchPreview (..)
   , ForkContext (..)
+  , CheckpointRefusal (..)
   , BranchPreview (..)
   , DelegationAuthority (..)
   , withForkBudget
@@ -146,6 +150,7 @@ import Tidepool.Effects.Core
   , Forks (..)
   , ForkContext (..)
   , WorkerLifetime (..)
+  , CheckpointRefusal (..)
   , ForkEffort (..)
   , Model (..)
   , AgentInspection (..)
@@ -235,12 +240,13 @@ data BranchOptions = BranchOptions
   , branchEffort :: Maybe ForkEffort
   , branchModel :: Maybe Model
   , branchContext :: ForkContext
+  , branchCheckpoint :: Maybe Text
   , branchLifetime :: WorkerLifetime
   , branchBudget :: Maybe ForkBudget
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing InheritedContext ParentOwned Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing InheritedContext Nothing ParentOwned Nothing
 
 -- | Requested descendant generations and active descendants across the subtree.
 -- The runtime clamps these to configured ceilings and remaining parent authority.
@@ -342,7 +348,14 @@ withModel :: Model -> Branch child input result -> Branch child input result
 withModel model (Branch role seed effects options assigned) =
   Branch role seed effects (options { branchModel = Just model }) assigned
 
-data WorkerContext input = Inherited | Selected (input -> Text)
+newtype ContextCheckpoint = ContextCheckpoint Text
+
+-- | Capture the current Haskell environment and exact hosted provider call.
+-- A returned token becomes usable only after this hosted call succeeds.
+checkpoint :: Member Forks es => Text -> Eff es (Either CheckpointRefusal ContextCheckpoint)
+checkpoint name = fmap ContextCheckpoint <$> send (ForksCheckpointWith name)
+
+data WorkerContext input = Inherited | Selected (input -> Text) | FromCheckpoint ContextCheckpoint
 
 inherited :: WorkerContext input
 inherited = Inherited
@@ -350,14 +363,19 @@ inherited = Inherited
 selected :: (input -> Text) -> WorkerContext input
 selected = Selected
 
+fromCheckpoint :: ContextCheckpoint -> WorkerContext input
+fromCheckpoint = FromCheckpoint
+
 -- | Selected contexts receive the typed input and authored guidance in an
 -- isolated Haskell scope and fresh TUI conversation. Imported project modules
 -- remain available from the swarm's fixed source selection.
 withContext :: WorkerContext input -> Branch child input result -> Branch child input result
 withContext context (Branch role seed effects options assigned) = case context of
-  Inherited -> Branch role seed effects (options { branchContext = InheritedContext }) assigned
-  Selected render -> Branch role seed effects (options { branchContext = SelectedContext })
+  Inherited -> Branch role seed effects (options { branchContext = InheritedContext, branchCheckpoint = Nothing }) assigned
+  Selected render -> Branch role seed effects (options { branchContext = SelectedContext, branchCheckpoint = Nothing })
     (assigned { guidance = Just (render (input assigned)) })
+  FromCheckpoint (ContextCheckpoint token) ->
+    Branch role seed effects (options { branchContext = InheritedContext, branchCheckpoint = Just token }) assigned
 
 -- | Persistent behavioral instructions, independent of task context and authority.
 withInstructions :: Text -> Branch child input result -> Branch child input result
@@ -566,6 +584,7 @@ childWithProgressSited site branch =
 
 data UnfoldError
   = UnfoldBeginRejected Text
+  | UnfoldCheckpointRefused CheckpointRefusal
   | UnfoldBranchRejected Text Text
   | UnfoldShapeMismatch Text
   | UnfoldCommitRejected Text
@@ -581,7 +600,28 @@ attemptUnfold
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfold (ForkGroupPath relative groupName) plan = do
+attemptUnfold path plan = do
+  checked <- traverse (send . ForksCheckCheckpointWith) (checkpointTokens plan)
+  case [refusal | Left refusal <- checked] of
+    refusal : _ -> pure (Left (UnfoldCheckpointRefused refusal))
+    [] -> attemptUnfoldUnchecked path plan
+
+checkpointTokens :: Unfold parent result -> [Text]
+checkpointTokens (PureU _) = []
+checkpointTokens (BranchU _ (Branch _ _ _ options _)) =
+  case branchCheckpoint options of
+    Nothing -> []
+    Just token -> [token]
+checkpointTokens (ApU functions arguments) =
+  checkpointTokens functions ++ checkpointTokens arguments
+
+attemptUnfoldUnchecked
+  :: forall parent result
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
+  => ForkGroupPath
+  -> Unfold parent result
+  -> Eff parent (Either UnfoldError result)
+attemptUnfoldUnchecked (ForkGroupPath relative groupName) plan = do
   let names = branchNames plan
   -- Validated literals can otherwise remain thunks across the effect bridge.
   -- Force the whole launch shape before admission so an invalid later branch
@@ -688,6 +728,7 @@ unfold path plan = do
 renderUnfoldError :: UnfoldError -> Text
 renderUnfoldError failure = case failure of
   UnfoldBeginRejected detail -> detail
+  UnfoldCheckpointRefused refusal -> Text.pack (show refusal)
   UnfoldBranchRejected label detail -> label <> ": " <> detail
   UnfoldShapeMismatch detail -> detail
   UnfoldCommitRejected detail -> detail
@@ -767,6 +808,7 @@ startBranch groupId allocated (Branch role seed effects options _) = do
     (budgetPair <$> branchBudget options)
     (branchModel options)
     (branchContext options)
+    (branchCheckpoint options)
     (branchInstructions options)
     (branchLifetime options)
   pure $ case launched of

@@ -1045,6 +1045,31 @@ impl PersistentSession {
         Some(child)
     }
 
+    /// Capture the exact declaration and value environment in an independent
+    /// lexical root. It may outlive the actor whose scope supplied the view.
+    /// Value leases include shadowed ancestor generations used by inherited
+    /// declaration modules; no heap objects are copied or forced.
+    pub fn mint_detached_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        if !self.scopes.is_live(parent) {
+            return None;
+        }
+        let root = self.scopes.mint_isolated();
+        if let Some(lib) = self.lib.as_mut() {
+            let inherited = lib.scope_tip(parent);
+            lib.seed_scope(root, inherited);
+        }
+        self.bindings
+            .seed_detached_scope(&self.scopes, parent, root);
+        Some(root)
+    }
+
+    /// Keep closure dependencies from an explicitly imported authored entry
+    /// while its branch runs in another captured environment.
+    pub fn retain_scope_dependencies(&mut self, source: ScopeId, target: ScopeId) -> bool {
+        self.bindings
+            .retain_scope_dependencies(&self.scopes, source, target)
+    }
+
     /// The immutable inherited value-binding tip captured for `scope`.
     #[must_use]
     pub fn binding_tip_id(&self, scope: ScopeId) -> Option<BindingTipId> {
@@ -1529,4 +1554,23 @@ pub struct ScopeRetirement {
     pub bindings_retired: usize,
     /// Persistent GC roots deregistered — the sole-owner subset of the above.
     pub roots_released: usize,
+}
+
+#[cfg(test)]
+mod checkpoint_scope_tests {
+    use super::*;
+
+    #[test]
+    fn detached_capture_survives_issuer_retirement_and_can_seed_later_child() {
+        let mut session = PersistentSession::new(None, 1024);
+        let issuer = session.mint_isolated_scope();
+        let capture = session.mint_detached_scope(issuer).unwrap();
+        assert_eq!(session.scope_tree().parent_of(capture), None);
+        session.retire_scope(issuer);
+        assert!(session.scope_tree().is_live(capture));
+        let deferred = session.mint_scope(capture).unwrap();
+        assert_eq!(session.scope_tree().parent_of(deferred), Some(capture));
+        session.retire_scope(capture);
+        assert!(!session.scope_tree().is_live(deferred));
+    }
 }

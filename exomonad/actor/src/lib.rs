@@ -94,8 +94,9 @@ pub use kernel::{
     LocalActorRef,
 };
 pub use lineage::{
-    ActorLineageRegistry, ActorPathReservation, ForkGroupCleanupOutcome, ForkGroupError,
-    ForkGroupGate, ForkGroupId, ForkGroupPhase, ForkGroupRegistry,
+    ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
+    ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
+    ForkGroupRegistry,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
@@ -105,7 +106,8 @@ pub use local_actor::{
 pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
-    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, SourceLayerReload,
+    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
+    SourceLayerReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,

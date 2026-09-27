@@ -1338,6 +1338,14 @@ pub(crate) enum ResidentActorBoundary {
 }
 
 pub(crate) enum ForkGroupBoundary {
+    CheckCheckpoint {
+        continuation: ResidentHole,
+        token: String,
+    },
+    Checkpoint {
+        continuation: ResidentHole,
+        name: String,
+    },
     Preview {
         continuation: ResidentHole,
         role: crate::ActorLaunchRoleWire,
@@ -1397,6 +1405,10 @@ impl ResidentActorBoundary {
             Self::ActorContext(_) => "actorContext",
             Self::ActorLocalContext(_) => "actor local context",
             Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
+            Self::ForkGroup(ForkGroupBoundary::Checkpoint { .. }) => "capture context checkpoint",
+            Self::ForkGroup(ForkGroupBoundary::CheckCheckpoint { .. }) => {
+                "check context checkpoint"
+            }
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
@@ -6074,6 +6086,48 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn capture_context_scope(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .mint_detached_scope(context.placement.lexical_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "checkpoint source scope was retired".into(),
+                        )
+                    })
+            })
+            .await
+    }
+
+    pub(crate) async fn remint_checkpoint_child_scope(
+        &self,
+        context: crate::ActorSessionContext,
+        checkpoint_scope: tidepool_codegen::scope::ScopeId,
+        provisional_scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let scope = session.mint_scope(checkpoint_scope).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "checkpoint scope is no longer live".into(),
+                    )
+                })?;
+                if !session.retain_scope_dependencies(context.placement.lexical_scope, scope) {
+                    session.retire_scope(scope);
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "authored entry dependencies were unavailable".into(),
+                    ));
+                }
+                session.retire_scope(provisional_scope);
+                Ok(scope)
+            })
+            .await
+    }
+
     pub(crate) async fn retire_fork_scopes(
         &self,
         context: crate::ActorSessionContext,
@@ -6081,6 +6135,21 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
+                for scope in scopes {
+                    session.retire_scope(scope);
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    pub(crate) async fn retire_checkpoint_scopes(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        scopes: Vec<tidepool_codegen::scope::ScopeId>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine("checkpoint", session_id, None, move |session, _| {
                 for scope in scopes {
                     session.retire_scope(scope);
                 }
@@ -6197,6 +6266,7 @@ where
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
+                            checkpoint: None,
                             lifetime: crate::start::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
                             session_id: context.placement.session, parent_actor: context.actor,
                             unbound_label,
@@ -6217,7 +6287,7 @@ where
                         effect_keys,
                         effort,
                         budget,
-                        model, fork_context, instructions, lifetime,
+                        model, fork_context, checkpoint, instructions, lifetime,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -6234,7 +6304,7 @@ where
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
                                     None => crate::ForkWorkspaceSeed::CurrentCheckout(bound_dirty_policy),
                                 }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, lifetime,
+                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, checkpoint, lifetime,
                                 session_id: context.placement.session, parent_actor: context.actor,
                                 unbound_label,
                             },
@@ -6243,6 +6313,8 @@ where
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget, model, effort, context, instructions, lifetime)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget, model, effort, context, instructions, lifetime })),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(name)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint { continuation: hole, name })),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint { continuation: hole, token })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
                         relative,
                         group,

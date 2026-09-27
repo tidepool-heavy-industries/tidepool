@@ -88,6 +88,7 @@ pub struct LocalResidentInstallation {
     pub instructions: Option<String>,
     pub creator: Option<crate::ActorRef>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    pub checkpoint: Option<crate::CheckpointLease>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
@@ -1275,6 +1276,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        self.environment.fork_groups.fail_issuer_checkpoints(actor);
         if let Some(recovery) = &self.environment.recovery {
             if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
                 // The actor is already terminal. Retain the earlier admission
@@ -2177,11 +2179,21 @@ where
         // member of `child_sessions`, so discarding it here is always safe,
         // whether or not provisioning ever actually happened.
         let launch_session = child.descriptor.placement().session;
+        let launch_scope = child.descriptor.placement().lexical_scope;
         let started = self.try_start_child(kernel, context, child).await;
         if started.is_err() && launch_session != context.placement.session {
             self.environment
                 .runner
                 .discard_child_session(launch_session);
+        } else if started.is_err() {
+            if let Err(cleanup) = self
+                .environment
+                .runner
+                .retire_fork_scopes(context.clone(), vec![launch_scope])
+                .await
+            {
+                tracing::warn!(%cleanup, "failed launch scope cleanup was retained");
+            }
         }
         let (child, allocated_label, admitted_worktree) = match started {
             Ok(started) => started,
@@ -2280,11 +2292,32 @@ where
             fork_workspace,
             seed,
         } = child;
+        let checkpoint_lease = descriptor
+            .checkpoint_token()
+            .map(|token| {
+                self.environment
+                    .fork_groups
+                    .checkpoint(token, context.placement.session)
+            })
+            .transpose()
+            .map_err(|refusal| {
+                ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "checkpoint refusal: {refusal:?}"
+                ))
+            })?;
         if descriptor.model().is_none() {
-            descriptor = descriptor.with_model(self.descriptor.model().cloned());
+            let checkpoint_model = checkpoint_lease
+                .as_ref()
+                .and_then(|lease| lease.issuer_model.clone());
+            descriptor = descriptor
+                .with_model(checkpoint_model.or_else(|| self.descriptor.model().cloned()));
         }
         if descriptor.fork_effort().is_none() {
-            descriptor = descriptor.with_fork_effort(self.descriptor.fork_effort());
+            let checkpoint_effort = checkpoint_lease
+                .as_ref()
+                .and_then(|lease| lease.issuer_effort);
+            descriptor =
+                descriptor.with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
         }
         let fork_group = descriptor.fork_group();
         let root_admission = self.environment.root_admission_closed.clone();
@@ -2312,7 +2345,8 @@ where
         self.validate_worker_context(lifetime, fork_context)
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         if descriptor.fork_group().is_some() {
-            if self.policy_installed
+            if checkpoint_lease.is_none()
+                && self.policy_installed
                 && self.fork_publication.boundary().is_none_or(|boundary| {
                     boundary.thread_id.is_empty() || boundary.call_id.is_empty()
                 })
@@ -2321,7 +2355,15 @@ where
                     "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
                 ));
             }
-            descriptor = descriptor.with_fork_boundary(self.fork_publication.boundary().cloned());
+            descriptor = descriptor.with_fork_boundary(
+                checkpoint_lease
+                    .as_ref()
+                    .map(|lease| lease.boundary.clone())
+                    .or_else(|| self.fork_publication.boundary().cloned()),
+            );
+            if let Some(lease) = &checkpoint_lease {
+                descriptor = descriptor.with_context_parent(lease.issuer);
+            }
         }
         if !self
             .descriptor
@@ -2352,6 +2394,14 @@ where
                 .effective_role()
                 .attenuate_child(descriptor.effective_role().clone())
         };
+        let role = if let Some(lease) = &checkpoint_lease {
+            lease
+                .issuer_role
+                .preview_child(role, descriptor.fork_budget())
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+        } else {
+            role
+        };
         descriptor = descriptor.with_effective_role(role);
         if let Some(group) = fork_group {
             let requested = crate::ActorPath::parse(descriptor.label())
@@ -2359,8 +2409,15 @@ where
             let allocated = self
                 .environment
                 .fork_groups
-                .claim(group, context.actor, &requested)
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                .claim_with_checkpoint(
+                    group,
+                    context.actor,
+                    &requested,
+                    descriptor.checkpoint_token(),
+                )
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(self.name_coordinator(error))
+                })?;
             descriptor = descriptor.with_actor_path(allocated);
         } else if descriptor.context_parent().is_some() {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -2416,10 +2473,33 @@ where
             None
         };
         if let Some(layers) = &source_layers {
-            descriptor = descriptor.with_source_layer(layers.layer_include_for(
-                helper_branch.as_deref().unwrap_or_default(),
-                &launch_worktrees,
-            ));
+            let layer = match &checkpoint_lease {
+                Some(lease) => layers
+                    .admit_checkpoint_layer(
+                        &lease.issuer_source_layer,
+                        context.actor.into(),
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &launch_worktrees,
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                None => layers.layer_include_for(
+                    helper_branch.as_deref().unwrap_or_default(),
+                    &launch_worktrees,
+                ),
+            };
+            descriptor = descriptor.with_source_layer(layer);
+        }
+        if let Some(lease) = &checkpoint_lease {
+            let scope = self
+                .environment
+                .runner
+                .remint_checkpoint_child_scope(
+                    context.clone(),
+                    lease.scope,
+                    descriptor.placement().lexical_scope,
+                )
+                .await?;
+            descriptor = descriptor.with_lexical_scope(scope);
         }
         // A launch whose descriptor still names the launching session (the
         // common case: ineligible, or `InheritedContext`) needs nothing
@@ -2487,6 +2567,7 @@ where
             .as_ref()
             .map(|prepared| prepared.handle().clone());
         let bound_worktrees = launch_worktrees.clone();
+        let descriptor_scope = descriptor.placement().lexical_scope;
         let mut behavior = Self::child(
             descriptor,
             self.environment.clone(),
@@ -2494,19 +2575,41 @@ where
             launch_worktrees,
         );
         behavior.prepared_workspace = prepared_workspace;
-        let child = kernel
-            .spawn_worker(None, behavior, lifetime)
-            .await
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let child = match kernel.spawn_worker(None, behavior, lifetime).await {
+            Ok(child) => child,
+            Err(error) => {
+                if checkpoint_lease.is_some() {
+                    if let Err(cleanup) = self
+                        .environment
+                        .runner
+                        .retire_checkpoint_scopes(context.placement.session, vec![descriptor_scope])
+                        .await
+                    {
+                        tracing::warn!(%cleanup, "failed checkpoint child scope cleanup was retained");
+                    }
+                }
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    error.to_string(),
+                ));
+            }
+        };
         // The child now has a principal, so the layer its descriptor carries
         // can be named as its own. This happens before the child runs, so its
         // first cell already reaches its own layer and no other.
         if let Some(layers) = &source_layers {
-            layers.bind_for(
-                child.identity().into(),
-                helper_branch.as_deref().unwrap_or_default(),
-                &bound_worktrees,
-            );
+            if let Some(lease) = &checkpoint_lease {
+                layers.bind_checkpoint_for(
+                    child.identity().into(),
+                    helper_branch.as_deref().unwrap_or_default(),
+                    &lease.issuer_source_layer,
+                );
+            } else {
+                layers.bind_for(
+                    child.identity().into(),
+                    helper_branch.as_deref().unwrap_or_default(),
+                    &bound_worktrees,
+                );
+            }
         }
         Ok((child, allocated_label, admitted_worktree))
     }
@@ -3427,6 +3530,78 @@ where
                             complete,
                         },
                     )
+                    .await
+            }),
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint {
+                continuation,
+                name,
+            }) => Box::pin(async move {
+                let result: Result<String, crate::CheckpointRefusal> = async {
+                    let boundary = self
+                        .fork_publication
+                        .boundary()
+                        .cloned()
+                        .filter(|boundary| {
+                            !boundary.thread_id.is_empty()
+                                && !boundary.call_id.is_empty()
+                                && !name.is_empty()
+                        })
+                        .ok_or(crate::CheckpointRefusal::NoHostedBoundary)?;
+                    let freeze_source = || {
+                        self.environment
+                            .source_layers
+                            .as_ref()
+                            .map(|layers| layers.freeze_checkpoint_layer(context.actor.into()))
+                            .transpose()
+                            .map(|layer| layer.unwrap_or_default())
+                    };
+                    let before =
+                        freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                    let scope = self
+                        .environment
+                        .runner
+                        .capture_context_scope(context.clone())
+                        .await
+                        .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                    let after = freeze_source();
+                    if !matches!(after, Ok(ref layer) if layer.identities == before.identities) {
+                        self.environment
+                            .runner
+                            .retire_fork_scopes(context.clone(), vec![scope])
+                            .await
+                            .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                        return Err(crate::CheckpointRefusal::CaptureFailed);
+                    }
+                    Ok(self.environment.fork_groups.capture_checkpoint(
+                        name,
+                        context.actor,
+                        self.descriptor.effective_role().clone(),
+                        self.descriptor.model().cloned(),
+                        self.descriptor.fork_effort(),
+                        before,
+                        context.placement.session,
+                        scope,
+                        boundary,
+                    ))
+                }
+                .await;
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, result)
+                    .await
+            }),
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint {
+                continuation,
+                token,
+            }) => Box::pin(async move {
+                let result: Result<(), crate::CheckpointRefusal> = self
+                    .environment
+                    .fork_groups
+                    .checkpoint(&token, context.placement.session)
+                    .map(|_| ());
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, result)
                     .await
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview {
@@ -4448,6 +4623,20 @@ where
                             instructions: self.descriptor.instructions().map(str::to_owned),
                             creator: self.descriptor.creator(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
+                            checkpoint: self
+                                .descriptor
+                                .checkpoint_token()
+                                .map(|token| {
+                                    self.environment
+                                        .fork_groups
+                                        .checkpoint(token, context.placement.session)
+                                })
+                                .transpose()
+                                .map_err(|refusal| {
+                                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                                        "checkpoint refusal: {refusal:?}"
+                                    ))
+                                })?,
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
@@ -4848,6 +5037,20 @@ where
             instructions: self.descriptor.instructions().map(str::to_owned),
             creator: self.descriptor.creator(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
+            checkpoint: self
+                .descriptor
+                .checkpoint_token()
+                .map(|token| {
+                    self.environment
+                        .fork_groups
+                        .checkpoint(token, context.placement.session)
+                })
+                .transpose()
+                .map_err(|refusal| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "checkpoint refusal: {refusal:?}"
+                    ))
+                })?,
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
@@ -7503,6 +7706,23 @@ where
             {
                 return Ok(crate::WorkbenchBoundaryReconciliation::Pending);
             }
+            let retired =
+                self.environment
+                    .fork_groups
+                    .settle_checkpoints(context.actor, &boundary, false);
+            self.environment
+                .runner
+                .retire_fork_scopes(
+                    context.clone(),
+                    retired
+                        .into_iter()
+                        .filter_map(|(session, scope)| {
+                            (session == context.placement.session).then_some(scope)
+                        })
+                        .collect(),
+                )
+                .await
+                .map_err(Self::failure)?;
             self.settled_fork_boundaries.push(boundary);
             Ok(crate::WorkbenchBoundaryReconciliation::Settled)
         })
@@ -7515,6 +7735,9 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            self.environment
+                .fork_groups
+                .settle_checkpoints(context.actor, &boundary, true);
             if self
                 .finish_pending_fork_publication(kernel, &context, &boundary)
                 .await?
@@ -7587,7 +7810,9 @@ where
                     .map(|child| {
                         (
                             actors[child].descriptor.placement().lexical_scope,
-                            if actors[child].descriptor.context_parent().is_some() {
+                            if actors[child].descriptor.context_parent().is_some()
+                                && actors[child].descriptor.checkpoint_token().is_none()
+                            {
                                 crate::ForkContext::InheritedContext
                             } else {
                                 crate::ForkContext::SelectedContext
@@ -7851,6 +8076,7 @@ where
                 }
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
+            let checkpoint_boundary = request.fork_boundary().cloned();
             if let Some(execution) = &execution {
                 // Persist the fence in the forest-retained journal before effects
                 // can run; actor termination cannot turn uncertainty into replay.
@@ -7930,6 +8156,46 @@ where
                     output.status == WorkbenchRunStatus::Rejected
                 }
             };
+            let checkpoint_failed = match &result {
+                Err(_) => true,
+                Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
+                    matches!(
+                        response.status,
+                        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
+                    )
+                }
+                Ok(KernelStep::Stop { output, .. }) => {
+                    matches!(
+                        output.status,
+                        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
+                    )
+                }
+            };
+            if checkpoint_failed {
+                if let Some(boundary) = checkpoint_boundary.as_ref() {
+                    let retired = self.environment.fork_groups.settle_checkpoints(
+                        context.actor,
+                        boundary,
+                        false,
+                    );
+                    self.environment
+                        .runner
+                        .retire_fork_scopes(
+                            context.clone(),
+                            retired
+                                .into_iter()
+                                .filter_map(|(session, scope)| {
+                                    (session == context.placement.session).then_some(scope)
+                                })
+                                .collect(),
+                        )
+                        .await
+                        .map_err(|failure| KernelInvocationFailure::Rejected {
+                            actor: context.actor,
+                            detail: format!("failed checkpoint cleanup: {failure}"),
+                        })?;
+                }
+            }
             if rejected {
                 let (aborted, notifications) =
                     self.environment.requests.abort_unsubmitted(context.actor);
@@ -8384,13 +8650,31 @@ where
                 .actor_stopped(kernel.identity(), terminal);
             self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
+            let session = self.descriptor.placement().session;
+            let failed_scopes = self
+                .environment
+                .fork_groups
+                .failed_checkpoint_scopes(kernel.identity());
+            if let Err(error) = self
+                .environment
+                .runner
+                .retire_checkpoint_scopes(
+                    session,
+                    failed_scopes
+                        .into_iter()
+                        .filter_map(|(owner, scope)| (owner == session).then_some(scope))
+                        .collect(),
+                )
+                .await
+            {
+                tracing::warn!(actor = ?kernel.identity(), %error, "failed checkpoint scope cleanup was retained");
+            }
             self.release_session_state();
             // `publish_retired` (above) already marked THIS actor terminal
             // in the directory, so this scan cannot find itself: any other
             // entry placed on the same session and still live means an
             // inherited-context descendant (sharing this session rather
             // than a dedicated one of its own) is still using it.
-            let session = self.descriptor.placement().session;
             let other_actor_still_on_session =
                 self.environment.actors.lock().values().any(|record| {
                     record.descriptor.placement().session == session && record.terminal.is_none()
