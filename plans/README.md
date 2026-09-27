@@ -7,6 +7,8 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Wave19 coordination rethink](wave19-coordination-rethink.md): prerequisite
+  ownership, retained execution requests, bounded reminders and continuation.
 - [Jev pattern building blocks](jev-pattern-legos.md): opinionated composable
   judgment patterns and decision trees; proposed interfaces and evaluation plan.
 - [Haskell authoring improvements](haskell-authoring-improvements.md): bounded
