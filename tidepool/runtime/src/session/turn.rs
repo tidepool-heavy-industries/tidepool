@@ -4255,6 +4255,15 @@ mod tests {
             "warnings: {:?}",
             checked.warnings
         );
+        assert!(
+            checked.warnings.iter().all(|warning| warning
+                .span
+                .as_ref()
+                .is_some_and(|span| span.file == "<cell>")
+                && !warning.message.contains("oldTail")),
+            "dependency warnings leaked into the cell: {:?}",
+            checked.warnings
+        );
 
         let complete = format!(
             "{declaration}request = MergeRequest {{ mergeSourceHead = 1, mergeSourceWorktree = 2 }}\n"

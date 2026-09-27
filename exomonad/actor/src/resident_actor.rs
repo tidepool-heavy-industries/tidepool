@@ -6630,27 +6630,11 @@ where
                     installed_bindings,
                 } => {
                     let mut warnings = warnings;
-                    let mut diagnostics = Vec::new();
-                    if let Some(checked) = &cell_check {
-                        if checked.items[index].verdict.kind
-                            == tidepool_runtime::session::TurnKind::Decl
-                        {
-                            for warning in &checked.warnings {
-                                if cell_diagnostic_item_index(warning, &checked.items) != index {
-                                    continue;
-                                }
-                                let rendered =
-                                    tidepool_runtime::session::render_cell_compile_rejection(
-                                        &tidepool_runtime::CompileError::Diagnostics(vec![
-                                            warning.clone()
-                                        ]),
-                                        &checked.checked_cell_text,
-                                    );
-                                warnings.push(rendered.output);
-                                diagnostics.extend(rendered.diagnostics);
-                            }
-                        }
-                    }
+                    let (checked_warnings, diagnostics) = cell_check
+                        .as_ref()
+                        .map(|checked| committed_declaration_warnings(checked, index))
+                        .unwrap_or_default();
+                    warnings.extend(checked_warnings);
                     let output = crate::workbench_display::resolve_job_binding_placeholder(
                         output,
                         &installed_bindings,
@@ -9312,6 +9296,32 @@ fn cell_diagnostic_item_index(
         .unwrap_or(0)
 }
 
+fn committed_declaration_warnings(
+    checked: &tidepool_runtime::session::CellCheck,
+    index: usize,
+) -> (
+    Vec<String>,
+    Vec<tidepool_toolchain::diag::StructuredDiagnostic>,
+) {
+    if checked.items[index].verdict.kind != TurnKind::Decl {
+        return (Vec::new(), Vec::new());
+    }
+    let mut warnings = Vec::new();
+    let mut diagnostics = Vec::new();
+    for warning in &checked.warnings {
+        if cell_diagnostic_item_index(warning, &checked.items) != index {
+            continue;
+        }
+        let rendered = tidepool_runtime::session::render_cell_compile_rejection(
+            &tidepool_runtime::CompileError::Diagnostics(vec![warning.clone()]),
+            &checked.checked_cell_text,
+        );
+        warnings.push(rendered.output);
+        diagnostics.extend(rendered.diagnostics);
+    }
+    (warnings, diagnostics)
+}
+
 fn workbench_response(
     status: WorkbenchRunStatus,
     mut items: Vec<WorkbenchItemReceipt>,
@@ -10628,6 +10638,90 @@ mod tests {
         assert!(response.items[2..]
             .iter()
             .all(|item| item.installed_bindings.is_empty()));
+    }
+
+    #[test]
+    fn committed_declaration_receipt_keeps_authored_warning_as_diagnostic() {
+        use tidepool_toolchain::diag::{
+            DiagSpan, DiagnosticLevel, DiagnosticLocation, DiagnosticSeverity, ExtractDiag,
+        };
+
+        let span = CellSourceSpan {
+            start_line: 2,
+            start_column: 1,
+            end_line: 2,
+            end_column: 45,
+        };
+        let checked = CellCheck {
+            prologue: Default::default(),
+            items: vec![CellAnalysisItem {
+                span,
+                source: "request = MergeRequest { mergeSourceHead = 1 }".into(),
+                prologue_only: false,
+                verdict: TurnClassification {
+                    kind: TurnKind::Decl,
+                    binders: vec!["request".into()],
+                    items: Vec::new(),
+                },
+                source_items: vec![CellAnalysisSourceItem {
+                    ordinal: 0,
+                    span,
+                    kind: TurnKind::Decl,
+                }],
+            }],
+            pins: Vec::new(),
+            checked_source: String::new(),
+            checked_cell_text: "data MergeRequest = MergeRequest { mergeSourceHead :: Int, mergeSourceWorktree :: Int }\nrequest = MergeRequest { mergeSourceHead = 1 }\n".into(),
+            compile_generation: 0,
+            compile_view_evidence: String::new(),
+            expression_plans: Vec::new(),
+            warnings: vec![ExtractDiag {
+                span: Some(DiagSpan {
+                    file: "<cell>".into(),
+                    start_line: 2,
+                    start_col: 11,
+                    end_line: 2,
+                    end_col: 23,
+                }),
+                severity: DiagnosticSeverity::Warning,
+                message: "Fields of ‘MergeRequest’ not initialised: mergeSourceWorktree".into(),
+            }],
+        };
+        let (warnings, diagnostics) = committed_declaration_warnings(&checked, 0);
+        let response = workbench_response(
+            WorkbenchRunStatus::Committed,
+            vec![WorkbenchItemReceipt {
+                diagnostics,
+                index: 0,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: WorkbenchItemStatus::Committed,
+                output: "[bound request]".into(),
+                warnings,
+                installed_bindings: vec!["request".into()],
+                operations: Vec::new(),
+                terminal_transfer: None,
+                failure_layer: None,
+            }],
+            1,
+            1,
+            Some(&checked.items),
+        );
+        assert_eq!(response.status, WorkbenchRunStatus::Committed);
+        let receipt = &response.items[0];
+        assert_eq!(receipt.kind, Some(WorkbenchCellItemKind::Declaration));
+        assert_eq!(receipt.status, WorkbenchItemStatus::Committed);
+        assert_eq!(receipt.output, "[bound request]");
+        assert_eq!(receipt.installed_bindings, vec!["request".to_owned()]);
+        assert_eq!(receipt.warnings.len(), 1);
+        assert!(receipt.warnings[0].contains("mergeSourceWorktree"));
+        assert_eq!(receipt.diagnostics.len(), 1);
+        assert_eq!(receipt.diagnostics[0].severity, DiagnosticLevel::Warning);
+        assert!(matches!(
+            &receipt.diagnostics[0].location,
+            DiagnosticLocation::Authored { label, start_line: 2, .. } if label == "<cell>"
+        ));
     }
 
     #[test]
