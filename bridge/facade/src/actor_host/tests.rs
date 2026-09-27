@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn recovery_refuses_the_old_implicit_checkout_source_graph() {
+    let run = Path::new("/state/exomonad/runs/old-run");
+    let helper = run.join("helpers/layers/branch/active/0");
+    let checkout = run.join("workspace/checkouts/tree/revisions/old/0");
+    assert!(!has_legacy_checkout_source_layer(run, &[helper.clone()]));
+    assert!(has_legacy_checkout_source_layer(run, &[helper, checkout]));
+}
+
+#[test]
 fn recorded_run_root_selects_its_own_managed_worktree_family() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("project");

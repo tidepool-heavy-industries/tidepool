@@ -899,6 +899,11 @@ async fn recover_prior_actors(
                     "durable actor accepted-source identity cannot be verified");
                 continue;
             }
+            if has_legacy_checkout_source_layer(run_root, &durable.source_layer) {
+                tracing::warn!(actor = %durable.actor,
+                    "legacy checkout tooling layer cannot be adopted by the coherent run-source host");
+                continue;
+            }
             let Some(role) = recovery_role(durable, research_policy) else {
                 tracing::warn!(actor = %durable.actor, role = %durable.role,
                     "durable actor role cannot be reconstructed");
@@ -1009,6 +1014,11 @@ async fn recover_prior_actors(
         pending = remaining;
     }
     recovered
+}
+
+fn has_legacy_checkout_source_layer(run_root: &Path, source_layer: &[PathBuf]) -> bool {
+    let legacy = run_root.join("workspace/checkouts");
+    source_layer.iter().any(|path| path.starts_with(&legacy))
 }
 
 impl ActorHostConfig {
