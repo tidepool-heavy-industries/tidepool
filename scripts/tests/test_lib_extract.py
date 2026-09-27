@@ -3,12 +3,14 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 
 
 LIBRARY = Path(__file__).resolve().parents[1] / "lib-extract.sh"
+EXOMONAD_SCRIPTS = Path(__file__).resolve().parents[2] / "exomonad" / "scripts"
 FRONTEND = r'''#!/usr/bin/env python3
 import os, signal, socket, sys, time
 from pathlib import Path
@@ -44,6 +46,8 @@ if sys.argv[1] == "--stop-daemon":
 assert sys.argv[1] == "--daemon"
 Path(os.environ["DAEMON_PID_FILE"]).write_text(str(os.getpid()))
 Path(os.environ["DAEMON_PID_FILE"] + ".argv").write_text("\n".join(sys.argv[1:]))
+if "--log-path" in sys.argv:
+    Path(sys.argv[sys.argv.index("--log-path") + 1]).write_text("compile timing fixture\n")
 mode = os.environ.get("DAEMON_MODE", "ready")
 if mode == "exit":
     print("daemon startup failure", file=sys.stderr)
@@ -168,6 +172,96 @@ class ExtractHelpers(unittest.TestCase):
         self.run_shell("resolve_tidepool_extract", success=False,
                        TIDEPOOL_EXTRACT=str(self.frontend), TIDEPOOL_EXTRACT_WORKER="/missing")
         self.run_shell("resolve_tidepool_extract", success=False, TIDEPOOL_EXTRACT=str(self.worker))
+
+    def test_exomonad_check_preserves_explicit_local_producer_and_starts_daemon(self):
+        frontend, worker = self.exomonad_script_fixtures()
+        result = self.run_exomonad_script(
+            "exomonad-run.sh", "check", "--recipe", "Project.Checks.run",
+            TIDEPOOL_EXTRACT=str(frontend), TIDEPOOL_EXTRACT_WORKER=str(worker),
+            TIDEPOOL_KEEP_TEST_LOGS="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
+                         ["build -p tidepool --bin exomonad"])
+        self.assertIn("starting per-run resident compile daemon", result.stderr)
+        self.assertIn("check --recipe Project.Checks.run", (self.root / "exomonad-call").read_text())
+        self.assertIn("extract.sock", (self.root / "exomonad-call").read_text())
+        retained = list((self.root / "target/tidepool-test-runs").glob("*/compiler.log"))
+        self.assertEqual(len(retained), 1)
+        self.assertIn("compile timing fixture", retained[0].read_text())
+        self.assert_daemon_reaped()
+
+    def test_exomonad_build_defaults_to_fresh_producer_and_rejects_partial_or_foreign_pair(self):
+        frontend, worker = self.exomonad_script_fixtures()
+        result = self.run_exomonad_script("exomonad-build.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
+                         ["build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics",
+                          "build -p tidepool --bin exomonad"])
+        (self.root / "cargo-calls").unlink()
+        partial = self.run_exomonad_script("exomonad-build.sh", TIDEPOOL_EXTRACT=str(frontend))
+        self.assertNotEqual(partial.returncode, 0)
+        self.assertIn("set both TIDEPOOL_EXTRACT", partial.stderr)
+        foreign = self.run_exomonad_script(
+            "exomonad-build.sh", TIDEPOOL_EXTRACT=str(self.frontend),
+            TIDEPOOL_EXTRACT_WORKER=str(worker))
+        self.assertNotEqual(foreign.returncode, 0)
+        self.assertIn("outside this checkout's target tree", foreign.stderr)
+        self.assertFalse((self.root / "cargo-calls").exists())
+
+    def test_exomonad_explicit_stale_pair_needs_deliberate_override(self):
+        frontend, worker = self.exomonad_script_fixtures()
+        source = self.root / "tidepool/extract-cmd/src/new.rs"
+        source.touch()
+        os.utime(frontend, (1_700_000_000, 1_700_000_000))
+        os.utime(source, (1_700_000_100, 1_700_000_100))
+        stale = self.run_exomonad_script(
+            "exomonad-build.sh", TIDEPOOL_EXTRACT=str(frontend),
+            TIDEPOOL_EXTRACT_WORKER=str(worker))
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("older than tidepool-extract-cmd sources", stale.stderr)
+        allowed = self.run_exomonad_script(
+            "exomonad-build.sh", TIDEPOOL_EXTRACT=str(frontend),
+            TIDEPOOL_EXTRACT_WORKER=str(worker), TIDEPOOL_ALLOW_STALE_EXTRACT="1")
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
+                         ["build -p tidepool --bin exomonad"])
+
+    def exomonad_script_fixtures(self):
+        scripts = self.root / "exomonad/scripts"
+        scripts.mkdir(parents=True)
+        (self.root / "scripts").mkdir()
+        for name in ("exomonad-build.sh", "exomonad-run.sh"):
+            shutil.copyfile(EXOMONAD_SCRIPTS / name, scripts / name)
+        shutil.copyfile(LIBRARY, self.root / "scripts/lib-extract.sh")
+        frontend = self.root / "target/debug/tidepool-extract"
+        frontend.parent.mkdir(parents=True)
+        shutil.copyfile(self.frontend, frontend)
+        frontend.chmod(0o755)
+        worker = self.root / "bridge/haskell/dist-newstyle/worker"
+        worker.parent.mkdir(parents=True)
+        shutil.copyfile(self.worker, worker)
+        worker.chmod(0o755)
+        exomonad = self.root / "target/debug/exomonad"
+        exomonad.write_text('#!/bin/sh\nprintf "%s %s\\n" "$*" "$TIDEPOOL_EXTRACT_DAEMON_SOCKET" > "$TEST_ROOT/exomonad-call"\n')
+        exomonad.chmod(0o755)
+        self.executable("cargo", '''#!/bin/sh
+printf "%s\\n" "$*" >> "$TEST_ROOT/cargo-calls"
+if [ "$*" = "build -p tidepool --bin exomonad" ]; then exit 0; fi
+if [ "$*" = "build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics" ]; then
+  printf '{"reason":"compiler-artifact","target":{"name":"tidepool-extract"},"executable":"%s/target/debug/tidepool-extract","fresh":true}\\n' "$TEST_ROOT"
+  exit 0
+fi
+exit 9
+''')
+        return frontend, worker
+
+    def run_exomonad_script(self, script, *args, **env):
+        selected = self.env | {"TEST_ROOT": str(self.root)} | env
+        if "TIDEPOOL_ALLOW_STALE_EXTRACT" not in env:
+            selected.pop("TIDEPOOL_ALLOW_STALE_EXTRACT", None)
+        return subprocess.run(["bash", f"exomonad/scripts/{script}", *args],
+                              env=selected, cwd=self.root, text=True, capture_output=True,
+                              timeout=20)
 
     def test_preset_worker_rejects_newer_embedded_authority_source(self):
         authority = self.root / "bridge/haskell/lib/Tidepool/Aeson/Value.hs"

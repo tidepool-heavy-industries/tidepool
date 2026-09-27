@@ -15,9 +15,8 @@ fi
 subcommand="${1:?usage: exomonad-run.sh <subcommand> [args...]}"
 shift
 
-# exomonad-build.sh drops any inherited compile-daemon socket so a run never
-# compiles through another checkout's daemon; a `check` is the one subcommand
-# that should reuse a warm one, exactly as the test battery does.
+# exomonad-build.sh drops any inherited compile-daemon socket while resolving
+# the selected producer; a `check` may reuse the caller's resident daemon.
 inherited_daemon_socket="${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}"
 source exomonad/scripts/exomonad-build.sh
 
@@ -29,8 +28,15 @@ if [ "$subcommand" = "check" ]; then
   if [ -n "$inherited_daemon_socket" ]; then
     export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$inherited_daemon_socket"
   fi
+  prepare_battery_artifacts exomonad-check exomonad/scripts/exomonad-run.sh check "$@"
+  cleanup_check() {
+    local status=$?
+    finalize_battery_artifacts "$status"
+    teardown_battery_daemon
+    return "$status"
+  }
+  trap cleanup_check EXIT
   start_battery_daemon
-  trap teardown_battery_daemon EXIT
   "$PWD/target/debug/exomonad" "$subcommand" "$@"
   exit $?
 fi
