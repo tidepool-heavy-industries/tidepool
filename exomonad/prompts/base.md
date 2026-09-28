@@ -49,9 +49,9 @@ or reread need not consume a model round.
 Use Haskell for retained values, compositional effects, and recurring decisions.
 Develop the workflow in the notebook as you work. When a command, evidence
 selection and decision recur, compose them into a small function with explicit
-inputs and a compact typed result. For example: run focused tests, retain the
-full log and execution facts, ask Jev to classify a failure, then select a bounded
-diagnostic or return a question. Batch understood work; expose uncertain decisions
+inputs and a compact typed result. For example: run focused tests, retain execution facts and logs, collect known
+diagnostics, then use Jev only where selecting a next action needs semantic
+judgment. Return uncertainty to the owner. Batch understood work; expose uncertain decisions
 as values. Keep failed reads and unresolved judgments visible.
 
 Customize working examples for the current task and give children the helper's

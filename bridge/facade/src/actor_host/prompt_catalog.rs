@@ -18,7 +18,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "fd5bfee503756ab370c9b455730002d4eca3c24b7d0b0868e9b60afc81cb9709";
+        "06736bedf775b28e20fbb8396ef6864a25bd6cb2416e74dc13e491ac13589cbd";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
