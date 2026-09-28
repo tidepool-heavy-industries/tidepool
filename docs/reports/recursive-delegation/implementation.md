@@ -237,9 +237,34 @@ The legacy retained-review fixture remains red: after a valid candidate receipt,
   with source guards, conservative escalation and retained send receipts. Five
   live synthetic Jev probes are evidence for those probes only.
 - Final pins, catalog checks, matched build and native admission are recorded
-  below when completed. Native adoption, actual depth and delivery speed belong
+  below. Native adoption, actual depth and delivery speed belong
   to wave21's observations, not to scripted recipe results.
 
 Final routing: `Project.RoutingChecks.routing` passed 35 assertions, including cancellation, lost execution, retained progress, independent sources and two-lane Delivery integration. The facade catalog selection passed all seven tests. Formatting with the pinned Rust toolchain passed after formatting the changed catalog and three pre-existing test-layout lines.
 
 The actor catalog selection passed all four tests, including discovery of only existing shipped skills. Final shared workspace pin: `6f548d7b3e1f432af8311a3c75e09e1035c8ada5`, published to its existing main. Template files match that shared source.
+
+## Release and native launch
+
+The implementation and final review are complete. Main integrated the compiler
+repairs and recursive surface through `bf29949a3baba57c5c066e7ccb341e0137e371b2`.
+`just exomonad-build` passed on main with its matched local worker/frontend.
+The exact default-workspace pin test passed (one executed), and the actual
+wave21 package compiled with child-role effect preflight. Template and shared
+source match pin `6f548d7b3e1f432af8311a3c75e09e1035c8ada5`; catalog is v45.
+
+Wave21 launched from harness `744f09a82cb80c20f7f4a1200fd60e467cd18ded`,
+based on accepted wave20 product `4d8e11c`. Session: `wave21`.
+Run: `a091048d-3c51-4686-b49e-c7d917807dd5`.
+Log: `/home/inanna/dev/exomonad-harness-runs/wave21/.exomonad/logs/a091048d-3c51-4686-b49e-c7d917807dd5.log`.
+Root `1@1` is Sol Medium; its provider turn is observed active, and the native
+transcript shows successful initial reads of NEXT.md and project guidance.
+The brief assigns four Luna component trees and one bounded decision-answer
+trial for the standalone raw custom-tool/browser milestone. Initial execution
+is confirmed; delegation depth and product acceptance remain wave observations.
+
+Wave20 is stopped; wave19 has no live host. Unrelated sessions, dirty worktrees,
+commits and the stale shared daemon were preserved. Wave21 has an isolated
+one-worker compiler (7 GiB recycling ceiling). The older retained-reviewer
+activation regression remains explicitly red, as recorded above; no release
+claim includes it as a passing check.

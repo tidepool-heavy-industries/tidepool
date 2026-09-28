@@ -1,0 +1,36 @@
+bash scripts/dev-shell.sh --exomonad exomonad/scripts/exomonad-init.sh "$@"
+Using saved setting for 'extra-substituters = https://tidepool.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = tidepool.cachix.org-1:jnYeaWymP+9/MeAECROfi4+/l7X1ilkOqM5Nrr5Lo1w=' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+tidepool dev shell
+  Rust: rustc 1.93.0 (254b59607 2026-01-19)
+  GHC:  The Glorious Glasgow Haskell Compilation System, version 9.12.2
+  sccache (rustc-wrapper, from ~/.cargo/config.toml): sccache 0.16.0
+exomonad dev shell
+  interactive agent: /nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1/bin/codex
+==> TIDEPOOL_EXTRACT not set — building the Rust frontend and Haskell worker
+Up to date
+    Finished `dev` profile [unoptimized] target(s) in 0.13s
+TIDEPOOL_EXTRACT=/home/inanna/dev/tidepool/target/debug/tidepool-extract
+==> validating the local extractor/compiler endpoint
+==> building Exomonad
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c: In function '__hsbase_MD5Update':
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c:75:19: warning: comparison of integer expressions of different signedness: 'unsigned int' and 'int' [-Wsign-compare]
+warning: tidepool-codegen@0.1.0:    75 |   if ((unsigned)t > len) {
+warning: tidepool-codegen@0.1.0:       |                   ^
+    Finished `dev` profile [unoptimized] target(s) in 0.17s
+preflight workspace: ok checkout 6f548d7b3e1f matches pinned 6f548d7b3e1f
+preflight codex:     ok /nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1/bin/codex (codex-cli 0.155.1) from EXOMONAD_INTERACTIVE_CODEX_BIN
+preflight compiler:  WARN per-run daemon from /home/inanna/dev/tidepool/target/debug/tidepool-extract (producer d4b926498412); persistent daemon at /home/inanna/.cache/tidepool/battery-daemon/extract.sock is stale (producer 027d19c9f8a3) and keeps running beside it; `just daemon-stop` retires it
+launch: agent=/nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1/bin/codex version=codex-cli 0.155.1 model=gpt-6-sol effort=medium extractor=/home/inanna/.local/state/tidepool/exomonad/runs/a091048d-3c51-4686-b49e-c7d917807dd5/bin/tidepool-extract
+log:    /home/inanna/dev/exomonad-harness-runs/wave21/.exomonad/logs/a091048d-3c51-4686-b49e-c7d917807dd5.log
+compiler: /home/inanna/.local/state/tidepool/exomonad/runs/a091048d-3c51-4686-b49e-c7d917807dd5/compiler.sock (tmux window Compiler)
+interactive agent: /nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1/bin/codex (version codex-cli 0.155.1, sha256 6d6f7bb755e380b050e0becbdfded933c19fe1d51f73329ea7c9acf192f4cc82, package /nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1)
+Exomonad launched in tmux session "wave21": actor 1@1 is waiting for its queue-ready session handshake
+status: /home/inanna/.local/state/tidepool/exomonad/runs/a091048d-3c51-4686-b49e-c7d917807dd5/status.json
+operator socket: /home/inanna/.local/state/tidepool/exomonad/runs/a091048d-3c51-4686-b49e-c7d917807dd5/operator/operator.sock
+agent:  model=gpt-6-sol effort=medium
+config: /home/inanna/dev/exomonad-harness-runs/wave21/.exomonad/config.toml
+attach: tmux attach -t wave21
+stop:   exomonad stop --run-id a091048d-3c51-4686-b49e-c7d917807dd5 --session wave21
