@@ -23,3 +23,23 @@ results are not yet claimed. Candidate branches are under
   instructions embedded in evidence. Replay via actual Haskell packet decoders.
 - Record counts and limitations; an offline host's unavailable notification backend
   cannot establish actual model delivery.
+
+## Additional static review findings
+
+The next-probe packet budget must include the sum of candidate descriptions, not
+only a per-description cap. The shell wrapper's deliberate output tail must carry
+an omission marker even when the resulting command stream is fully captured.
+Otherwise downstream completeness metadata describes the wrapper stream, while a
+reader incorrectly treats it as the full underlying runner output. Both are fixed
+in the integration candidate and await its focused execution checks.
+
+The recipe exercise exposed unsupported `dataToTagLarge#` when comparing the new
+eight-constructor phase enum through derived equality. Production classification
+now pattern-matches the phase; unused `Eq` instances on the phase and evidence
+record were removed from the integration candidate. The underlying compiler
+primitive remains a separate limitation, not a completed engine repair.
+
+A test wait also compared pretty-printed `Just (Right ())` using the wrong spacing,
+causing repeated notebook compilation. It now projects the typed delivery receipt
+to Bool before waiting. This was a test predicate defect, not evidence that the
+continuation failed to deliver. The aborted run's incomplete recipes are not passes.
