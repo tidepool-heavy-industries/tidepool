@@ -1,0 +1,1286 @@
+{
+  "run_id": "a091048d-3c51-4686-b49e-c7d917807dd5",
+  "repo_key": "c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4",
+  "source_repository": "/home/inanna/dev/exomonad-harness-runs/wave21",
+  "source_head_at_audit": "c04fd1025168650da32c01376d4929bf3b113a6b",
+  "note": "Host git status for Mounted records is not a valid dirty-worktree observation without the retained source view. Upper comparisons are candidates only; lower layers and overlay metadata were not reconstructed.",
+  "worktrees": [
+    {
+      "actor": "19@1",
+      "worktree_id": "wt-05401da6-18e3-4669-8bd5-f740a03fbca5",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-05401da6-18e3-4669-8bd5-f740a03fbca5",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/browser-fixture",
+      "head": "c1b6e76fd6a9da5b4160c2512b323d0e04703722",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "fd964a31b607f8af5421a9203908915675a0c50b",
+        "6f6ad03586e62bb76d0073bb784df11b18bebf9e",
+        "c1b6e76fd6a9da5b4160c2512b323d0e04703722"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-05401da6-18e3-4669-8bd5-f740a03fbca5.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-05401da6-18e3-4669-8bd5-f740a03fbca5.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-05401da6-18e3-4669-8bd5-f740a03fbca5/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-05401da6-18e3-4669-8bd5-f740a03fbca5/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 3,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "fd964a31b607f8af5421a9203908915675a0c50b",
+        "6f6ad03586e62bb76d0073bb784df11b18bebf9e",
+        "c1b6e76fd6a9da5b4160c2512b323d0e04703722"
+      ]
+    },
+    {
+      "actor": "9@1",
+      "worktree_id": "wt-1438dfcc-3415-4db4-8004-e74e444c0313",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-1438dfcc-3415-4db4-8004-e74e444c0313",
+      "branch": "refs/heads/exomonad/store-replay/durable/branches/durable-recognition",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-1438dfcc-3415-4db4-8004-e74e444c0313.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-1438dfcc-3415-4db4-8004-e74e444c0313.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-1438dfcc-3415-4db4-8004-e74e444c0313/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-1438dfcc-3415-4db4-8004-e74e444c0313/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "41@1",
+      "worktree_id": "wt-1c404871-a689-4fbe-a6ba-9f1564d98489",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-1c404871-a689-4fbe-a6ba-9f1564d98489",
+      "branch": "refs/heads/exomonad/store-replay/fixtures/replay-fixtures/wave-1/fixture-boundaries/fixture-boundaries/branches/review",
+      "head": "880a5e62421ac4569caf29344dbe1ca27894f0d7",
+      "head_object_exists": true,
+      "source_head": "880a5e62421ac4569caf29344dbe1ca27894f0d7",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-1c404871-a689-4fbe-a6ba-9f1564d98489.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "880a5e62421ac4569caf29344dbe1ca27894f0d7"
+      ]
+    },
+    {
+      "actor": "8@1",
+      "worktree_id": "wt-24c16128-5b36-4d3f-87a6-2d9a02e02b1b",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-24c16128-5b36-4d3f-87a6-2d9a02e02b1b",
+      "branch": "refs/heads/exomonad/wave21-scaffold-review/review/branches/review",
+      "head": "c7f2ca9bbce537e6c493b819f6243af1e776441b",
+      "head_object_exists": true,
+      "source_head": "c7f2ca9bbce537e6c493b819f6243af1e776441b",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-24c16128-5b36-4d3f-87a6-2d9a02e02b1b.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "6@1",
+      "worktree_id": "wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a",
+      "branch": "refs/heads/exomonad/wave21/components/branches/demo-browser",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-24dbd3c7-c768-4e5d-b5b5-2e6c6b4a5d7a/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "53@1",
+      "worktree_id": "wt-29179072-bd33-4b3e-a520-1e18d3b92c15",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-29179072-bd33-4b3e-a520-1e18d3b92c15",
+      "branch": "refs/heads/exomonad/app-presentation-review-v2/review/branches/review",
+      "head": "3d9560f6db60335965a8ed0ef6e476473f1e5486",
+      "head_object_exists": true,
+      "source_head": "3d9560f6db60335965a8ed0ef6e476473f1e5486",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-29179072-bd33-4b3e-a520-1e18d3b92c15.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "356d36fab81bfb23dedb3fba7a49c55e42f26766",
+        "3d9560f6db60335965a8ed0ef6e476473f1e5486"
+      ]
+    },
+    {
+      "actor": "13@1",
+      "worktree_id": "wt-2a955aeb-c758-4907-9096-85941eda6d71",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-2a955aeb-c758-4907-9096-85941eda6d71",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/demo-transport",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-2a955aeb-c758-4907-9096-85941eda6d71.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-2a955aeb-c758-4907-9096-85941eda6d71.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-2a955aeb-c758-4907-9096-85941eda6d71/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-2a955aeb-c758-4907-9096-85941eda6d71/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "4@1",
+      "worktree_id": "wt-30d8689e-31f6-48fa-9063-ce9cef119b63",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-30d8689e-31f6-48fa-9063-ce9cef119b63",
+      "branch": "refs/heads/exomonad/wave21/components/branches/engine-lifecycle",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-30d8689e-31f6-48fa-9063-ce9cef119b63.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-30d8689e-31f6-48fa-9063-ce9cef119b63.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-30d8689e-31f6-48fa-9063-ce9cef119b63/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-30d8689e-31f6-48fa-9063-ce9cef119b63/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "47@1",
+      "worktree_id": "wt-3408b707-ac82-4f13-86ce-1f0f3cd8495d",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-3408b707-ac82-4f13-86ce-1f0f3cd8495d",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/review-1",
+      "head": "6f6ad03586e62bb76d0073bb784df11b18bebf9e",
+      "head_object_exists": true,
+      "source_head": "6f6ad03586e62bb76d0073bb784df11b18bebf9e",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-3408b707-ac82-4f13-86ce-1f0f3cd8495d.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "fd964a31b607f8af5421a9203908915675a0c50b",
+        "6f6ad03586e62bb76d0073bb784df11b18bebf9e"
+      ]
+    },
+    {
+      "actor": "17@1",
+      "worktree_id": "wt-3633ad54-0186-4d02-ab25-791058cc89f1",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-3633ad54-0186-4d02-ab25-791058cc89f1",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/app-presentation",
+      "head": "3d9560f6db60335965a8ed0ef6e476473f1e5486",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "356d36fab81bfb23dedb3fba7a49c55e42f26766",
+        "3d9560f6db60335965a8ed0ef6e476473f1e5486"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-3633ad54-0186-4d02-ab25-791058cc89f1.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-3633ad54-0186-4d02-ab25-791058cc89f1.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-3633ad54-0186-4d02-ab25-791058cc89f1/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-3633ad54-0186-4d02-ab25-791058cc89f1/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 4957,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 4937,
+      "upper_untracked_sample": [
+        "web/node_modules/.package-lock.json",
+        "web/node_modules/mime-db/HISTORY.md",
+        "web/node_modules/mime-db/README.md",
+        "web/node_modules/mime-db/index.js",
+        "web/node_modules/mime-db/package.json",
+        "web/node_modules/mime-db/LICENSE",
+        "web/node_modules/mime-db/db.json",
+        "web/node_modules/ws/README.md",
+        "web/node_modules/ws/index.js",
+        "web/node_modules/ws/browser.js",
+        "web/node_modules/ws/package.json",
+        "web/node_modules/ws/LICENSE",
+        "web/node_modules/ws/wrapper.mjs",
+        "web/node_modules/ws/lib/websocket-server.js",
+        "web/node_modules/ws/lib/validation.js",
+        "web/node_modules/ws/lib/receiver.js",
+        "web/node_modules/ws/lib/permessage-deflate.js",
+        "web/node_modules/ws/lib/event-target.js",
+        "web/node_modules/ws/lib/extension.js",
+        "web/node_modules/ws/lib/websocket.js"
+      ],
+      "upper_generated_counts": {
+        "web/node_modules": 4937,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "356d36fab81bfb23dedb3fba7a49c55e42f26766",
+        "3d9560f6db60335965a8ed0ef6e476473f1e5486"
+      ]
+    },
+    {
+      "actor": "43@1",
+      "worktree_id": "wt-38865e94-e3aa-4f9d-a17b-3a370c0cdfde",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-38865e94-e3aa-4f9d-a17b-3a370c0cdfde",
+      "branch": "refs/heads/exomonad/wave21/components/branches/review",
+      "head": "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030",
+      "head_object_exists": true,
+      "source_head": "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-38865e94-e3aa-4f9d-a17b-3a370c0cdfde.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030"
+      ]
+    },
+    {
+      "actor": "27@1",
+      "worktree_id": "wt-422202cd-8b73-4605-b320-ba6e6e20f126",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-422202cd-8b73-4605-b320-ba6e6e20f126",
+      "branch": "refs/heads/exomonad/store-replay/fixtures/replay-fixtures/wave-1/branches/fixture-boundaries",
+      "head": "f63d2a725b93d01040c0aad54e660c627fecc449",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "880a5e62421ac4569caf29344dbe1ca27894f0d7",
+        "f63d2a725b93d01040c0aad54e660c627fecc449"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-422202cd-8b73-4605-b320-ba6e6e20f126.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-422202cd-8b73-4605-b320-ba6e6e20f126.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-422202cd-8b73-4605-b320-ba6e6e20f126/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-422202cd-8b73-4605-b320-ba6e6e20f126/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "880a5e62421ac4569caf29344dbe1ca27894f0d7",
+        "f63d2a725b93d01040c0aad54e660c627fecc449"
+      ]
+    },
+    {
+      "actor": "10@1",
+      "worktree_id": "wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc",
+      "branch": "refs/heads/exomonad/store-replay/fixtures/branches/replay-fixtures",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-4a86a344-bcbf-42e9-9cf4-9b273e3cc0fc/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "45@1",
+      "worktree_id": "wt-62f0be44-b365-431c-9991-f68eef37fbb5",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-62f0be44-b365-431c-9991-f68eef37fbb5",
+      "branch": "refs/heads/exomonad/wave21/components/branches/review-1",
+      "head": "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f",
+      "head_object_exists": true,
+      "source_head": "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-62f0be44-b365-431c-9991-f68eef37fbb5.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f"
+      ]
+    },
+    {
+      "actor": "28@1",
+      "worktree_id": "wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab",
+      "branch": "refs/heads/exomonad/store-replay/durable/durable-recognition/store-api-wave-1/branches/durable-store-owner",
+      "head": "6e772ab42d47afb9057444eb72d24e421793f819",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "e5158ae3965d149704de8459cadf74297548d028",
+        "6e772ab42d47afb9057444eb72d24e421793f819"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab/source/upper",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab/source/generation-wD4rmv/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab/source/generation-wD4rmv/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "e5158ae3965d149704de8459cadf74297548d028",
+        "6e772ab42d47afb9057444eb72d24e421793f819"
+      ]
+    },
+    {
+      "actor": "31@1",
+      "worktree_id": "wt-66daaea0-19fe-48e3-bdf5-12a425501f26",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-66daaea0-19fe-48e3-bdf5-12a425501f26",
+      "branch": "refs/heads/exomonad/wave21/transport-fixtures/branches/standalone-cancel",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-66daaea0-19fe-48e3-bdf5-12a425501f26.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-66daaea0-19fe-48e3-bdf5-12a425501f26.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-66daaea0-19fe-48e3-bdf5-12a425501f26/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-66daaea0-19fe-48e3-bdf5-12a425501f26/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "21@1",
+      "worktree_id": "wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148",
+      "branch": "refs/heads/exomonad/wave21/components/provider-cell/provider-cell-wave1/branches/scheduler-wiring",
+      "head": "c7db0f265ba34c57dbfbd28460c74c0bbb083b20",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030",
+        "c7db0f265ba34c57dbfbd28460c74c0bbb083b20"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6a2b7493-8c15-48e9-a11c-e282fc1e7148/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 2,
+      "upper_tracked_modifications": [
+        {
+          "path": "crates/harness/src/turn.rs",
+          "upper_oid": "5bdcac7740f3412db4d7505984233974825e57ea",
+          "head_oid": "0250355d7df5a5fc755b94f4b2e0cc4b0c9fbc29"
+        }
+      ],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030",
+        "c7db0f265ba34c57dbfbd28460c74c0bbb083b20"
+      ]
+    },
+    {
+      "actor": "34@1",
+      "worktree_id": "wt-863104b2-8e3a-4eef-8bc6-78ce8e8ab225",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-863104b2-8e3a-4eef-8bc6-78ce8e8ab225",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/review",
+      "head": "fd964a31b607f8af5421a9203908915675a0c50b",
+      "head_object_exists": true,
+      "source_head": "fd964a31b607f8af5421a9203908915675a0c50b",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-863104b2-8e3a-4eef-8bc6-78ce8e8ab225.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "fd964a31b607f8af5421a9203908915675a0c50b"
+      ]
+    },
+    {
+      "actor": "32@1",
+      "worktree_id": "wt-87fe018f-938d-4be4-91ae-31460671f68b",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-87fe018f-938d-4be4-91ae-31460671f68b",
+      "branch": "refs/heads/exomonad/wave21/transport-fixtures/branches/server-journey",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-87fe018f-938d-4be4-91ae-31460671f68b.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-87fe018f-938d-4be4-91ae-31460671f68b.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-87fe018f-938d-4be4-91ae-31460671f68b/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-87fe018f-938d-4be4-91ae-31460671f68b/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 2,
+      "upper_tracked_modifications": [
+        {
+          "path": "crates/harness-demo/tests/browser_journey.rs",
+          "upper_oid": "0e4b6cf9c18f915aab702c2fc1930e40ccbb6395",
+          "head_oid": "dcc58aa19525e09f67d2bb9bb449a6bee9ecb168"
+        }
+      ],
+      "upper_untracked_count": 1,
+      "upper_untracked_sample": [
+        "web/dist/index.html"
+      ],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 1
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "3@1",
+      "worktree_id": "wt-93b852c1-5c56-44f5-9ad5-80b0323ad379",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379",
+      "branch": "refs/heads/exomonad/wave21/components/branches/provider-cell",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [
+        {
+          "path": "crates/harness/src/cell_job.rs",
+          "upper_oid": "b95f89441d1acfcb848dba2b61db7cea6103656d",
+          "head_oid": "24d33a859247963b7747f3ada233f67eb50a0168"
+        }
+      ],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "44@1",
+      "worktree_id": "wt-975e3c80-9daa-46dd-b60c-1a224ee00d24",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-975e3c80-9daa-46dd-b60c-1a224ee00d24",
+      "branch": "refs/heads/exomonad/review-e6e0047/review/branches/review",
+      "head": "e6e00477e467b3effbf2d4604ec53bdaa42b736c",
+      "head_object_exists": true,
+      "source_head": "e6e00477e467b3effbf2d4604ec53bdaa42b736c",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-975e3c80-9daa-46dd-b60c-1a224ee00d24.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "e6e00477e467b3effbf2d4604ec53bdaa42b736c"
+      ]
+    },
+    {
+      "actor": "38@1",
+      "worktree_id": "wt-9d42b76d-c3ef-4b80-aa35-c88420c5d049",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-9d42b76d-c3ef-4b80-aa35-c88420c5d049",
+      "branch": "refs/heads/exomonad/app-presentation-review/review/branches/review",
+      "head": "356d36fab81bfb23dedb3fba7a49c55e42f26766",
+      "head_object_exists": true,
+      "source_head": "356d36fab81bfb23dedb3fba7a49c55e42f26766",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-9d42b76d-c3ef-4b80-aa35-c88420c5d049.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "356d36fab81bfb23dedb3fba7a49c55e42f26766"
+      ]
+    },
+    {
+      "actor": "36@1",
+      "worktree_id": "wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f",
+      "branch": "refs/heads/exomonad/wave21/demo-transport/branches/driver-scenario",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-9f2bcf1e-8188-40f8-9b96-7b3ddacab90f/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "15@1",
+      "worktree_id": "wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e",
+      "branch": "refs/heads/exomonad/wave21/demo-browser/branches/browser-view",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-a2b53a5b-fcfd-48dd-baef-3bfc7030411e/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "50@1",
+      "worktree_id": "wt-a45b01d2-1b1d-4d07-86cd-9a27b9e464e9",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-a45b01d2-1b1d-4d07-86cd-9a27b9e464e9",
+      "branch": "refs/heads/exomonad/wave21/components/branches/review-2",
+      "head": "c7db0f265ba34c57dbfbd28460c74c0bbb083b20",
+      "head_object_exists": true,
+      "source_head": "c7db0f265ba34c57dbfbd28460c74c0bbb083b20",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-a45b01d2-1b1d-4d07-86cd-9a27b9e464e9.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "13ad70ad074c5186e8fd1bd6c8dd79b06bf4d030",
+        "c7db0f265ba34c57dbfbd28460c74c0bbb083b20"
+      ]
+    },
+    {
+      "actor": "26@1",
+      "worktree_id": "wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1",
+      "branch": "refs/heads/exomonad/store-replay/fixtures/replay-fixtures/wave-1/branches/provider-replay",
+      "head": "e6e00477e467b3effbf2d4604ec53bdaa42b736c",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "e6e00477e467b3effbf2d4604ec53bdaa42b736c"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-a9dd69f2-908a-44b5-954b-1bbe37f5d7b1/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "e6e00477e467b3effbf2d4604ec53bdaa42b736c"
+      ]
+    },
+    {
+      "actor": "5@1",
+      "worktree_id": "wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5",
+      "branch": "refs/heads/exomonad/wave21/components/branches/store-replay",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-b79fa902-809d-4f50-bca5-69bc0fffbbb5/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "24@1",
+      "worktree_id": "wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f",
+      "branch": "refs/heads/exomonad/wave21/demo-transport/branches/transport-fixture",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-bb1add9c-f5c3-4314-8817-bc20b8aa541f/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "12@1",
+      "worktree_id": "wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697",
+      "branch": "refs/heads/exomonad/wave21/components/engine-lifecycle/engine-wave-1/branches/recovery-fixtures",
+      "head": "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-bc5d9066-b3cb-4f4b-b14c-e444abf72697/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [
+        {
+          "path": "crates/harness/src/engine/recovery_tests.rs",
+          "upper_oid": "32992185bf95419f3bd68311bccc0e5c2a06febc",
+          "head_oid": "791c9c613c5433d5129e19e4c50c80627357d5dc"
+        }
+      ],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f"
+      ]
+    },
+    {
+      "actor": "51@1",
+      "worktree_id": "wt-cb8e7625-b1ca-4999-8a43-27352ecb4863",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-cb8e7625-b1ca-4999-8a43-27352ecb4863",
+      "branch": "refs/heads/exomonad/store-replay/durable/durable-recognition/store-api-wave-1/durable-store-owner/recovery-test-wave/branches/durable-recovery-tests",
+      "head": "5bf027f9dcf5c87829909afc20ba998f2e2e750d",
+      "head_object_exists": true,
+      "source_head": "e5158ae3965d149704de8459cadf74297548d028",
+      "commits_since_source_head": [
+        "5bf027f9dcf5c87829909afc20ba998f2e2e750d"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-cb8e7625-b1ca-4999-8a43-27352ecb4863.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-cb8e7625-b1ca-4999-8a43-27352ecb4863.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-6590abac-770c-4c8f-ac5b-0e2a3d5630ab/source/upper",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-cb8e7625-b1ca-4999-8a43-27352ecb4863/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-cb8e7625-b1ca-4999-8a43-27352ecb4863/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "e5158ae3965d149704de8459cadf74297548d028",
+        "5bf027f9dcf5c87829909afc20ba998f2e2e750d"
+      ]
+    },
+    {
+      "actor": "18@1",
+      "worktree_id": "wt-d3688569-08fa-4931-a723-9be7b7a4109f",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-d3688569-08fa-4931-a723-9be7b7a4109f",
+      "branch": "refs/heads/exomonad/wave21/components/provider-cell/provider-cell-wave1/branches/adapter-fixtures",
+      "head": "257a6d77de863316f90e69fbfa9ce0358da598f2",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "257a6d77de863316f90e69fbfa9ce0358da598f2"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-d3688569-08fa-4931-a723-9be7b7a4109f.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-d3688569-08fa-4931-a723-9be7b7a4109f.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-d3688569-08fa-4931-a723-9be7b7a4109f/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-d3688569-08fa-4931-a723-9be7b7a4109f/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "257a6d77de863316f90e69fbfa9ce0358da598f2"
+      ]
+    },
+    {
+      "actor": "23@1",
+      "worktree_id": "wt-dc4e77b1-0401-47ea-9206-5c7c99a53751",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-dc4e77b1-0401-47ea-9206-5c7c99a53751",
+      "branch": "refs/heads/exomonad/wave21/demo-transport/branches/cli-provider",
+      "head": "7fd9fff8dbaef5de9ea4d0252300013fa148a441",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [
+        "7fd9fff8dbaef5de9ea4d0252300013fa148a441"
+      ],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-dc4e77b1-0401-47ea-9206-5c7c99a53751.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-dc4e77b1-0401-47ea-9206-5c7c99a53751.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-dc4e77b1-0401-47ea-9206-5c7c99a53751/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-dc4e77b1-0401-47ea-9206-5c7c99a53751/source/upper",
+      "host_status": null,
+      "head_in_root": false,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": [
+        "7fd9fff8dbaef5de9ea4d0252300013fa148a441"
+      ]
+    },
+    {
+      "actor": "11@1",
+      "worktree_id": "wt-ef359f03-3704-4284-a7bc-25208bb6f29d",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-ef359f03-3704-4284-a7bc-25208bb6f29d",
+      "branch": "refs/heads/exomonad/wave21/components/engine-lifecycle/engine-wave-1/branches/dispatch-lifecycle",
+      "head": "842125da6af10500bffee47849b1334673d30790",
+      "head_object_exists": true,
+      "source_head": "842125da6af10500bffee47849b1334673d30790",
+      "commits_since_source_head": [],
+      "record_status": "Mounted",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-ef359f03-3704-4284-a7bc-25208bb6f29d.json",
+      "manifest_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/retained-views/wt-ef359f03-3704-4284-a7bc-25208bb6f29d.json",
+      "layers": [
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-93b852c1-5c56-44f5-9ad5-80b0323ad379/source/base",
+        "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-ef359f03-3704-4284-a7bc-25208bb6f29d/source/upper"
+      ],
+      "pending_layers": null,
+      "all_layers_exist": true,
+      "upper_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/.resources/a091048d-3c51-4686-b49e-c7d917807dd5/wt-ef359f03-3704-4284-a7bc-25208bb6f29d/source/upper",
+      "host_status": null,
+      "head_in_root": true,
+      "upper_entry_count": 1,
+      "upper_tracked_modifications": [
+        {
+          "path": "crates/harness/src/engine.rs",
+          "upper_oid": "587b90babae3ada9900af97e04a80ab04e0dc23e",
+          "head_oid": "afd8208bb4ff23297b4b11fa75994f973db709c7"
+        }
+      ],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": false,
+      "commits_not_in_root": []
+    },
+    {
+      "actor": "48@1",
+      "worktree_id": "wt-f227c4a7-f5e3-4b1a-aa9d-fe6a1b9f736b",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-f227c4a7-f5e3-4b1a-aa9d-fe6a1b9f736b",
+      "branch": "refs/heads/exomonad/cli-provider-review/review/branches/review",
+      "head": "7fd9fff8dbaef5de9ea4d0252300013fa148a441",
+      "head_object_exists": true,
+      "source_head": "7fd9fff8dbaef5de9ea4d0252300013fa148a441",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-f227c4a7-f5e3-4b1a-aa9d-fe6a1b9f736b.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "7fd9fff8dbaef5de9ea4d0252300013fa148a441"
+      ]
+    },
+    {
+      "actor": "35@1",
+      "worktree_id": "wt-f86f5e04-a70e-457e-814d-e97195bfc403",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-f86f5e04-a70e-457e-814d-e97195bfc403",
+      "branch": "refs/heads/exomonad/engine-recovery-fixture-review/review/branches/review",
+      "head": "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f",
+      "head_object_exists": true,
+      "source_head": "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-f86f5e04-a70e-457e-814d-e97195bfc403.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "9fd8f6af7c8259bb08131e7fd29a3b3b60db2b3f"
+      ]
+    },
+    {
+      "actor": "42@1",
+      "worktree_id": "wt-fa03893f-12f7-40f5-bb07-df2c527d4e53",
+      "cwd": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/worktrees/wt-fa03893f-12f7-40f5-bb07-df2c527d4e53",
+      "branch": "refs/heads/exomonad/store-replay/durable/branches/review",
+      "head": "e5158ae3965d149704de8459cadf74297548d028",
+      "head_object_exists": true,
+      "source_head": "e5158ae3965d149704de8459cadf74297548d028",
+      "commits_since_source_head": [],
+      "record_status": "Finalized",
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wt-fa03893f-12f7-40f5-bb07-df2c527d4e53.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": false,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": [
+        "e5158ae3965d149704de8459cadf74297548d028"
+      ]
+    },
+    {
+      "actor": "1@1",
+      "worktree_id": "wave21",
+      "cwd": "/home/inanna/dev/exomonad-harness-runs/wave21",
+      "branch": "refs/heads/rsi/wave21",
+      "head": "c04fd1025168650da32c01376d4929bf3b113a6b",
+      "head_object_exists": true,
+      "source_head": null,
+      "commits_since_source_head": [],
+      "record_status": null,
+      "record_path": "/home/inanna/.local/state/tidepool/exomonad/actor-worktrees/c18b295dc69c28aee4540566b8a58a497472ff9c0751c0566fae987be70aa6b4/registry/records/wave21.json",
+      "manifest_path": null,
+      "layers": [],
+      "pending_layers": null,
+      "all_layers_exist": null,
+      "upper_path": null,
+      "host_status": "",
+      "head_in_root": true,
+      "upper_entry_count": 0,
+      "upper_tracked_modifications": [],
+      "upper_untracked_count": 0,
+      "upper_untracked_sample": [],
+      "upper_generated_counts": {
+        "web/node_modules": 0,
+        "web/dist": 0
+      },
+      "host_status_is_source_evidence": true,
+      "commits_not_in_root": []
+    }
+  ]
+}

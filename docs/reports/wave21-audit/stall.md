@@ -87,7 +87,37 @@ underlying expensive operation.
 4. Make supervision detect stale progress plus pressure/unresponsive inspection.
    A live process and pane are insufficient evidence of a healthy run.
 
-No actors, daemons, dirty worktrees, or run resources were retired. No limits
-were changed and no successor launched. Recovery requires an explicit resource
+At the initial inspection, no actors, daemons, dirty worktrees, or run resources
+were retired; no limits were changed and no successor had launched. Recovery requires an explicit resource
 plan; blindly increasing this slice's allowance could move the failure to the
 whole machine. Preserve source and evidence before any teardown.
+
+
+## Authorized retirement and successor preparation — 2026-09-28
+
+After retaining the evidence, stopped run `a091048d-3c51-4686-b49e-c7d917807dd5`
+through `exomonad stop`. The host service, its compiler and 37 native clients
+exited; the tmux session is absent. Live interview was unavailable while host
+inspection timed out; no fresh kaizen answer is claimed. The old shared compiler
+was preserved without restart. Host MemAvailable rose from roughly 8 to 22 GiB.
+
+Two executing run-owned commands drained after pressure was released. One
+admitted but unstarted command remained; the resource owner returned
+`cancelled_before_start` (command-stop.json). Its subsequent observation was
+active=0, retained_allocations=0, process_count=0, cleanup_failures=0. Only at that
+drained boundary was the command-resource service stopped for the new admission
+binary to be installed on successor launch. Historical command evidence remains.
+
+`preserved-worktrees.json` corrects an initial host-only inventory. Of 37 entries,
+23 have valid retained source manifests with all layers present, 13 are finalized,
+and one is the root checkout. Missing host files in an unmounted view are **not**
+author deletions. There are 16 distinct child HEADs outside root `c04fd1025`, all
+readable, and five positive tracked-file differences in upper layers. Complete
+dirty status remains unknown without reconstructing each composite view. Original
+branches, worktrees, layer files and generated artifacts were not discarded.
+
+The selected batch adds local retirement guidance, external resource observation,
+and admission bounded by the most restrictive ancestor memory.high/max headroom.
+The startup reservation still does not constrain subsequent actor growth, and
+pressure is observed rather than added as a second admission policy. Compiler,
+JIT and native-client memory changes remain measured follow-ups.
