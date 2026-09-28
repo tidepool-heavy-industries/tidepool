@@ -43,3 +43,16 @@ A test wait also compared pretty-printed `Just (Right ())` using the wrong spaci
 causing repeated notebook compilation. It now projects the typed delivery receipt
 to Bool before waiting. This was a test predicate defect, not evidence that the
 continuation failed to deliver. The aborted run's incomplete recipes are not passes.
+
+Dependency verification also exposed a test-environment cost: the default private
+daemon selected a 3152 MiB ceiling while individual requests retained 3.8–5.8 GiB.
+Its log showed worker replacement after each request and 30–70 second compiles.
+The owned test run was restarted with one worker and an explicit 7168 MiB ceiling;
+the live wave daemon was left alone. This is measured cold-compile churn, not a
+measured performance gain from the new continuations.
+
+The dependency recipe subsequently verified production Git evidence from admission
+base to candidate, including path and added-line content. A declared task or
+injected positive decision alone would not prove this; the recipe now asserts the
+retained evidence itself. Actor processing is asynchronous, so it waits for a
+processing marker before checking decisions separately.
