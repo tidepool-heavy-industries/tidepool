@@ -27,6 +27,7 @@ pub(super) struct RetainedHandler {
 
 pub(super) struct ReplacementCustody {
     sources: Option<crate::request::sources::ActorSourceConnections>,
+    dynamic_sources: Vec<crate::request::sources::SourceBinding>,
     worktree: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
     _admissions: Vec<tokio::sync::OwnedRwLockReadGuard<bool>>,
@@ -168,6 +169,7 @@ where
                 "replacement transfer requested before a prepared replacement was admitted".into(),
             )
         })?;
+        let dynamic_sources = self.sources[self.static_source_count..].to_vec();
         let retained = RetainedHandler {
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),
@@ -178,6 +180,7 @@ where
         self.retained_replacements.push(retained);
         let custody = ReplacementCustody {
             sources: self.source_connections.take(),
+            dynamic_sources,
             worktree: self.worktree_custody.take(),
             retained: std::mem::take(&mut self.retained_replacements),
             _admissions: transfer.admissions,
@@ -231,7 +234,9 @@ where
         self.standing = ResidentStanding::Receiving(staged.receiver);
         self.checkpoint = Some(staged.checkpoint);
         self.shutdown_hook = staged.shutdown_hook;
+        self.static_source_count = staged.sources.len();
         self.sources = staged.sources;
+        self.sources.extend(custody.dynamic_sources);
         Ok(KernelStep::Continue(()))
     }
 
@@ -385,11 +390,13 @@ where
                     continuation,
                     source,
                 } => {
-                    let original = self.sources.get(sources.len()).ok_or_else(|| {
-                        reject("replacement added a source; create a new actor to change sources")
-                    })?;
+                    let original = self
+                        .sources
+                        .get(sources.len())
+                        .filter(|_| sources.len() < self.static_source_count)
+                        .ok_or_else(|| reject("replacement added a startup source"))?;
                     if original.target != source.target {
-                        return Err(reject("replacement changed its fixed source graph"));
+                        return Err(reject("replacement changed a startup source"));
                     }
                     sources.push(source);
                     outcome = runner.resume_unit(context.clone(), continuation).await?;
@@ -403,10 +410,8 @@ where
                     outcome = runner.resume_unit(context.clone(), continuation).await?;
                 }
                 ResidentActorStartupStep::Ready(readiness) => {
-                    if sources.len() != self.sources.len() {
-                        return Err(reject(
-                            "replacement removed a source; create a new actor to change sources",
-                        ));
+                    if sources.len() != self.static_source_count {
+                        return Err(reject("replacement removed a startup source"));
                     }
                     outcome = runner.resume_readiness(context.clone(), readiness).await?;
                     break;

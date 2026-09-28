@@ -11,6 +11,7 @@ module Tidepool.Actor.Source
   , commandSource
   , lifecycleSource
   , installSource
+  , attachSource
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -27,7 +28,7 @@ import Tidepool.Agent.Reply.Internal
   , ResponseResult
   , readResponse
   )
-import Tidepool.Effects.Core (ActorKernel (..), ActorLifecycle (..), CommandResult)
+import Tidepool.Effects.Core (ActorKernel (..), ActorLocal (..), ActorLifecycle (..), CommandResult)
 import Tidepool.Command.Types (Job (..))
 import Tidepool.Internal.ActorRef (ActorRef (..))
 
@@ -86,6 +87,21 @@ installSource (SettlementSource response@(Response (RequestId request) _ _ _) pr
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 installSource (LifecycleSource (ActorRef actor incarnation _) project) =
   send (ActorInstallLifecycleSourceWith (actor, incarnation)
+    (sourceEntry ActorLifecycleInputWith project))
+
+attachSource
+  :: Member (ActorLocal protocol) effs
+  => (Int, Int) -> Source protocol -> Eff effs (Either Text ())
+attachSource owner (CommandSource (Job job) project) =
+  send (ActorLocalAttachCommandSourceWith owner job (sourceEntry ActorCommandInputWith project))
+attachSource owner (ProgressSource (Progress (RequestId request)) project) =
+  send (ActorLocalAttachProgressSourceWith owner request
+    (sourceEntry (ObserveProgressWith request) project))
+attachSource owner (SettlementSource response@(Response (RequestId request) _ _ _) project) =
+  send (ActorLocalAttachSettlementSourceWith owner request
+    (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
+attachSource owner (LifecycleSource (ActorRef actor incarnation _) project) =
+  send (ActorLocalAttachLifecycleSourceWith owner (actor, incarnation)
     (sourceEntry ActorLifecycleInputWith project))
 
 sourceEntry

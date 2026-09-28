@@ -19,6 +19,7 @@ pub(crate) enum SourceTarget {
     Command(u128),
 }
 
+#[derive(Clone)]
 pub(crate) struct SourceBinding {
     pub target: SourceTarget,
     pub entry: Arc<tidepool_runtime::session::RootCustody>,
@@ -43,7 +44,7 @@ pub struct SourceDelivery {
     pub(crate) event: SourceEvent,
 }
 
-/// One destination shared by a fixed set of source connections. The guard owns
+/// One destination shared by an actor's source connections. The guard owns
 /// the set independently of the actor identity currently receiving its events.
 #[derive(Clone)]
 struct SourceDestination(Arc<parking_lot::Mutex<LocalActorRef>>);
@@ -95,6 +96,46 @@ pub(crate) struct ActorSourceConnections {
 }
 
 impl ActorSourceConnections {
+    pub(crate) fn attach_request(
+        &mut self,
+        slot: usize,
+        request: RequestId,
+        kind: RequestSourceKind,
+        owner: ActorRef,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.registry.state.lock();
+        if state.cleaning.contains(&owner) || state.cleaning.contains(&self.recipient.identity()) {
+            return Err(ReplyError::Stale);
+        }
+        let target = state
+            .requests
+            .get(&request)
+            .ok_or(ReplyError::Stale)?
+            .target;
+        if state.cleaning.contains(&target) {
+            return Err(ReplyError::CancellationRequested);
+        }
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(ReplyError::Stale);
+        }
+        let mut connection = RequestSourceConnection {
+            recipient: self.recipient.clone(),
+            slot,
+            request,
+            kind,
+            closed: false,
+        };
+        if kind == RequestSourceKind::Progress {
+            if let Some(current) = &record.progress {
+                connection.send(SourceEvent::Progress(current.clone()));
+            }
+        }
+        record.sources.push(connection);
+        record.publish_source_closure();
+        Ok(())
+    }
+
     pub(crate) fn attach_command(
         &mut self,
         slot: usize,
@@ -677,5 +718,58 @@ mod tests {
         address.stop(None);
         task.await.unwrap();
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_attachment_reports_partial_admission_and_keeps_retained_event_once() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let owner = actor(100);
+        let target = actor(101);
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let settled = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, settled).unwrap();
+        registry.present(target, settled).unwrap();
+        registry.begin_reply(target, settled).unwrap();
+        registry.finish_reply(settled, None);
+        let mut sources = registry.attach_sources(owner, recipient, &[]).unwrap();
+        sources
+            .attach_request(0, settled, RequestSourceKind::Settlement, owner)
+            .unwrap();
+        assert!(matches!(
+            sources.attach_request(1, RequestId(u64::MAX), RequestSourceKind::Progress, owner),
+            Err(ReplyError::Stale)
+        ));
+        let first = receive(&mut events).await;
+        assert_eq!(first.slot, 0);
+        assert!(matches!(first.event, SourceEvent::Settled(Ok(()))));
+        assert!(events.try_recv().is_err());
+        assert_eq!(registry.state.lock().requests[&settled].sources.len(), 1);
+        drop(sources);
+        assert!(registry.state.lock().requests[&settled].sources.is_empty());
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dynamic_request_source_refuses_a_different_owner_without_delivery() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let owner = actor(100);
+        let impostor = actor(102);
+        let request = registry.reserve(owner, actor(101));
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let mut sources = registry.attach_sources(impostor, recipient, &[]).unwrap();
+        assert!(matches!(
+            sources.attach_request(0, request, RequestSourceKind::Settlement, impostor),
+            Err(ReplyError::Stale)
+        ));
+        assert!(events.try_recv().is_err());
+        assert!(registry.state.lock().requests[&request].sources.is_empty());
+        drop(sources);
+        address.stop(None);
+        task.await.unwrap();
     }
 }

@@ -26,8 +26,8 @@ module Tidepool.Actor.Record
     -- incarnation it names — which is how one actor compares a handle it holds
     -- against a reference it was sent — but it cannot be forged from parts.
   , ActorState, Handler, ActorSpec, ActorHandle (actorRef)
-  , Send, Request, EventHandler, EventSource
-  , on, progress, settlement, lifecycle, command
+  , Send, Request, EventHandler, EventSource, EventSink, AttachmentError (..)
+  , on, progress, settlement, lifecycle, command, attach
   , get, gets, put, modify'
   , start, client, send, trySend, call, finish, replace
   , definition, withWorktree
@@ -68,7 +68,7 @@ data Event (input :: Type)
 data Shape
 data Definition (m :: Type -> Type)
 data Client
-data Self
+data Self (api :: Type -> Type)
 data Private = Private
 
 type family mode :- field :: Type where
@@ -81,10 +81,10 @@ type family mode :- field :: Type where
   Client :- Call input NoReply = Send input
   Client :- Call input (Reply output) = Request input output
   Client :- Event input = Private
-  Self :- State s = Private
-  Self :- Call input NoReply = Send input
-  Self :- Call input (Reply output) = Private
-  Self :- Event input = Private
+  Self api :- State s = Private
+  Self api :- Call input NoReply = Send input
+  Self api :- Call input (Reply output) = Private
+  Self api :- Event input = EventSink api input
 infix 0 :-
 
 -- Endpoints contain only the capability for one route. Their constructors are
@@ -109,6 +109,30 @@ call endpoint input = runCall endpoint input
 
 newtype EventSource event = EventSource
   { connect :: forall protocol. (event -> protocol ()) -> [Source protocol] }
+
+-- | An actor-local route to one declared event handler. Only 'self' can
+-- produce this value; attachment also checks the executing incarnation.
+data EventSink (api :: Type -> Type) event = EventSink (Address api) (event -> Message api ())
+
+data AttachmentError
+  = AttachmentRefused Text
+  | AttachmentPartial Int Text
+  deriving (Show, Eq)
+
+-- | Each successful connection remains installed through handler failure and
+-- actor replacement. A composite source reports how many connections were
+-- installed if a later component is refused.
+attach
+  :: Member (ActorLocal (Message api)) effects
+  => EventSink api event -> EventSource event -> Eff effects (Either AttachmentError ())
+attach (EventSink (Address address) project) source = go 0 (connect source project)
+  where
+    go _ [] = pure (Right ())
+    go count (next : rest) = do
+      result <- Source.attachSource address next
+      case result of
+        Right () -> go (count + 1) rest
+        Left reason -> pure (Left (if count == 0 then AttachmentRefused reason else AttachmentPartial count reason))
 
 instance Functor EventSource where
   fmap f source = EventSource (\receive -> connect source (receive . f))
@@ -224,7 +248,7 @@ class GActor api part where
     :: Address api
     -> Select api part
     -> View part Client
-  selfEndpoints :: Address api -> Select api part -> View part Self
+  selfEndpoints :: Address api -> Select api part -> View part (Self api)
   sources
     :: View (Schema api) (Definition m)
     -> Select api part
@@ -277,7 +301,8 @@ instance GActor api (K1 i (Call input (Reply output))) where
 
 instance GActor api (K1 i (Event event)) where
   endpoints _ _ = View (K1 Private)
-  selfEndpoints _ _ = View (K1 Private)
+  selfEndpoints ref select = View (K1 (EventSink ref
+    (\event -> Message (\current -> eventHandler (unK1 (unView (select current))) event))))
   sources spec select =
     connect (eventSource (unK1 (unView (select spec))))
       (\event -> Message (\current -> eventHandler (unK1 (unView (select current))) event))
@@ -356,10 +381,10 @@ client ActorHandle { actorRef = Internal.ActorRef actor incarnation _ } =
 
 self
   :: forall api effects.
-     ( Generic (api Self), Rep (api Self) ~ Fields (Schema api) Self
+     ( Generic (api (Self api)), Rep (api (Self api)) ~ Fields (Schema api) (Self api)
      , GActor api (Schema api)
      , Member (ActorLocal (Message api)) effects )
-  => Eff effects (api Self)
+  => Eff effects (api (Self api))
 self = do
   (address, _) <- Eff.send @(ActorLocal (Message api)) Core.ActorLocalContextWith
   pure (to (unView (selfEndpoints @api @(Schema api) (Address address) id)))

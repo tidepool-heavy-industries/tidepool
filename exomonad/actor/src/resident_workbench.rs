@@ -1235,6 +1235,11 @@ pub(crate) enum ResidentActorBoundary {
     Completed,
     ActorContext(ResidentHole),
     ActorLocalContext(ResidentHole),
+    AttachSource {
+        continuation: ResidentHole,
+        owner: crate::ActorRef,
+        source: crate::request::sources::SourceBinding,
+    },
     ForkGroup(ForkGroupBoundary),
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
@@ -6252,6 +6257,23 @@ where
                         "replacement staging cannot execute `{}`", decoded.operation()
                     )));
                 }
+                if let ResidentRequest::ActorLocal(local) = &decoded {
+                    if let Some((owner, target)) = attached_source_target(local)? {
+                        let entry = session.live_payload_handle_owned_by(
+                            hole.cont_id(), context.placement.resource_scope,
+                        )?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol(
+                            "attached source has no live mapping closure".into(),
+                        ))?;
+                        return Ok(ResidentActorBoundary::AttachSource {
+                            continuation: hole,
+                            owner,
+                            source: crate::request::sources::SourceBinding {
+                                target,
+                                entry: Arc::new(entry),
+                            },
+                        });
+                    }
+                }
                 match decoded {
                     ResidentRequest::Sleep(crate::generated::sleep::SleepReq::SleepWith(
                         duration,
@@ -6656,6 +6678,12 @@ where
                             value,
                         })
                     }
+                    ResidentRequest::ActorLocal(
+                        crate::generated::actor_local::ActorLocalReq::ActorLocalAttachProgressSourceWith(..)
+                        | crate::generated::actor_local::ActorLocalReq::ActorLocalAttachSettlementSourceWith(..)
+                        | crate::generated::actor_local::ActorLocalReq::ActorLocalAttachCommandSourceWith(..)
+                        | crate::generated::actor_local::ActorLocalReq::ActorLocalAttachLifecycleSourceWith(..)
+                    ) => unreachable!("attachment captured above"),
                     ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(
                             declarations,
@@ -8499,6 +8527,47 @@ fn source_request_id(value: i64) -> Result<crate::RequestId, ResidentActorWorkbe
     u64::try_from(value)
         .map(crate::RequestId)
         .map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))
+}
+
+fn attached_source_target(
+    request: &crate::generated::actor_local::ActorLocalReq,
+) -> Result<
+    Option<(crate::ActorRef, crate::request::sources::SourceTarget)>,
+    ResidentActorWorkbenchError,
+> {
+    use crate::generated::actor_local::ActorLocalReq;
+    use crate::request::sources::{RequestSourceKind, SourceTarget};
+    let (owner, target) = match request {
+        ActorLocalReq::ActorLocalAttachProgressSourceWith(owner, request, _) => (
+            *owner,
+            SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Progress),
+        ),
+        ActorLocalReq::ActorLocalAttachSettlementSourceWith(owner, request, _) => (
+            *owner,
+            SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Settlement),
+        ),
+        ActorLocalReq::ActorLocalAttachCommandSourceWith(owner, job, _) => (
+            *owner,
+            SourceTarget::Command(
+                uuid::Uuid::parse_str(job)
+                    .map_err(|_| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "invalid command job handle".into(),
+                        )
+                    })?
+                    .as_u128(),
+            ),
+        ),
+        ActorLocalReq::ActorLocalAttachLifecycleSourceWith(owner, target, _) => (
+            *owner,
+            SourceTarget::Lifecycle(crate::wait::decode_address(target.0, target.1)?),
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some((
+        crate::wait::decode_address(owner.0, owner.1)?,
+        target,
+    )))
 }
 
 #[derive(Clone, Copy)]

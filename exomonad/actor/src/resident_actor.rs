@@ -980,6 +980,7 @@ pub struct ResidentKernelBehavior<H, O> {
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
     sources: Vec<crate::request::sources::SourceBinding>,
+    static_source_count: usize,
     source_connections: Option<crate::request::sources::ActorSourceConnections>,
     launch_worktrees: Vec<String>,
     prepared_workspace: Option<crate::PreparedForkWorkspace>,
@@ -1172,6 +1173,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             input_origin: ActorInputOrigin::ActorStartup,
             sources: Vec::new(),
             source_connections: None,
+            static_source_count: 0,
             launch_worktrees,
             prepared_workspace: None,
             worktree_custody: None,
@@ -1886,9 +1888,36 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let binding_lines = render_bindings_section(bindings, &executions);
         let source_drift =
             render_source_drift_section(&self.runtime_observation.snapshot().source_drift);
+        let attachments = self
+            .sources
+            .iter()
+            .enumerate()
+            .skip(self.static_source_count)
+            .map(|(slot, source)| {
+                use crate::request::sources::{RequestSourceKind, SourceTarget};
+                let target = match source.target {
+                    SourceTarget::Request(request, RequestSourceKind::Progress) => {
+                        format!("progress request {}", request.0)
+                    }
+                    SourceTarget::Request(request, RequestSourceKind::Settlement) => {
+                        format!("settlement request {}", request.0)
+                    }
+                    SourceTarget::Command(key) => format!("command {}", uuid::Uuid::from_u128(key)),
+                    SourceTarget::Lifecycle(actor) => {
+                        format!("lifecycle {}@{}", actor.id.0, actor.incarnation.0)
+                    }
+                };
+                format!("  {slot}: {target}")
+            })
+            .collect::<Vec<_>>();
+        let attachments = if attachments.is_empty() {
+            "  (none)".to_owned()
+        } else {
+            attachments.join("\n")
+        };
 
         format!(
-            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nsource drift:\n{source_drift}",
+            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nattachments:\n{attachments}\nsource drift:\n{source_drift}",
             actor.id.0, actor.incarnation.0,
         )
     }
@@ -2853,6 +2882,54 @@ where
         settled
     }
 
+    fn attach_source(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        owner: crate::ActorRef,
+        source: crate::request::sources::SourceBinding,
+    ) -> Result<(), String> {
+        use crate::request::sources::SourceTarget;
+        if owner != context.actor {
+            return Err("event sink belongs to another actor incarnation".into());
+        }
+        if self.source_connections.is_none() {
+            let recipient = kernel
+                .resolve(context.actor)
+                .ok_or_else(|| "current actor is absent from its directory".to_owned())?;
+            self.source_connections = Some(
+                self.environment
+                    .requests
+                    .attach_sources(context.actor, recipient, &[])
+                    .map_err(|error| format!("source attachment rejected: {error:?}"))?,
+            );
+        }
+        let slot = self.sources.len();
+        let connections = self
+            .source_connections
+            .as_mut()
+            .ok_or_else(|| "source connections are unavailable".to_owned())?;
+        match source.target {
+            SourceTarget::Request(request, kind) => connections
+                .attach_request(slot, request, kind, context.actor)
+                .map_err(|error| format!("request source refused: {error:?}"))?,
+            SourceTarget::Command(key) => connections
+                .attach_command(slot, key, context.actor, &self.environment.commands)
+                .map_err(|error| format!("command source refused: {error:?}"))?,
+            SourceTarget::Lifecycle(target) => {
+                if !actor_can_observe(context.actor, target, &self.environment.actors.lock()) {
+                    return Err("lifecycle source is not authorized".into());
+                }
+                let actor = kernel
+                    .resolve(target)
+                    .ok_or_else(|| "lifecycle source target is unavailable".to_owned())?;
+                connections.attach_lifecycle(slot, &actor);
+            }
+        }
+        self.sources.push(source);
+        Ok(())
+    }
+
     async fn resolve_effect(
         &mut self,
         kernel: &KernelContext,
@@ -3011,6 +3088,17 @@ where
                         continuation,
                         (actor_address(context.actor), self.input_origin.clone()),
                     )
+                    .await
+            }),
+            ResidentActorBoundary::AttachSource {
+                continuation,
+                owner,
+                source,
+            } => Box::pin(async move {
+                let result = self.attach_source(kernel, context, owner, source);
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, result)
                     .await
             }),
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
@@ -5269,6 +5357,7 @@ where
                                 .await?;
                         }
                         ResidentActorStartupStep::Ready(readiness) => {
+                            self.static_source_count = self.sources.len();
                             if !self.sources.is_empty() {
                                 let owner = self.descriptor.creator().ok_or_else(|| {
                                     ResidentActorWorkbenchError::ActorProtocol(

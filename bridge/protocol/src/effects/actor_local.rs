@@ -62,6 +62,18 @@ pub fn actor_local() -> Effect {
                 handling: HandlingClass::Actor,
                 extract: None,
             },
+            source_attach("ActorLocalAttachProgressSourceWith", "actor_local_attach_progress_source_with", Arg {
+                name: "request", ty: HsType::Int, rust: RustBinding::Derived,
+            }),
+            source_attach("ActorLocalAttachSettlementSourceWith", "actor_local_attach_settlement_source_with", Arg {
+                name: "request", ty: HsType::Int, rust: RustBinding::Derived,
+            }),
+            source_attach("ActorLocalAttachCommandSourceWith", "actor_local_attach_command_source_with", Arg {
+                name: "job", ty: HsType::Text, rust: RustBinding::Path("String"),
+            }),
+            source_attach("ActorLocalAttachLifecycleSourceWith", "actor_local_attach_lifecycle_source_with", Arg {
+                name: "target", ty: HsType::Tuple(vec![HsType::Int, HsType::Int]), rust: RustBinding::Path("(i64, i64)"),
+            }),
             Verb {
                 ctor: "ActorReceiveWith",
                 method: "actor_receive_with",
@@ -116,5 +128,35 @@ pub fn actor_local() -> Effect {
         polymorphism: Polymorphism::None,
         generated_handler: false,
         caller_principal: false,
+    }
+}
+
+fn source_attach(ctor: &'static str, method: &'static str, target: Arg) -> Verb {
+    Verb {
+        ctor,
+        method,
+        args: vec![
+            Arg {
+                name: "owner",
+                ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                rust: RustBinding::Path("(i64, i64)"),
+            },
+            target,
+            Arg {
+                name: "entry",
+                ty: HsType::func(
+                    HsType::Int,
+                    HsType::app(
+                        HsType::app(HsType::Named("Eff"), HsType::Var("sourceEffs")),
+                        HsType::Unit,
+                    ),
+                ),
+                rust: RustBinding::HaskellValue,
+            },
+        ],
+        ret: HsType::Either(Box::new(HsType::Text), Box::new(HsType::Unit)),
+        errors: None,
+        handling: HandlingClass::Actor,
+        extract: None,
     }
 }
