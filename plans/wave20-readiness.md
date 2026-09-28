@@ -65,3 +65,19 @@ Wave19 root and worker panes are dead; its compiler remains alive. The root
 interview is unavailable after the crash. Dirty wave19 NEXT, trial notes,
 friction notes and surviving commits are preserved. Do not restart shared
 daemons, discard work, or treat this checkpoint as an accepted integrated release.
+
+## Compiler recycling observation
+
+The matching persistent daemon started at 2026-09-28 01:11:14 UTC with one
+worker and a 7168 MiB RSS ceiling. It recycled workers at 01:13:34 (7478 MiB,
+8 requests) and 01:16:54 (7376 MiB, 18 requests). Request
+`d9aba353205d11ad` then took 52.760 seconds: its 139-module compilation reported
+51.211 seconds wall time, including 26.675 seconds lowering, 13.426 seconds
+interfaces and 5.320 seconds typechecking. Evidence is in
+`~/.cache/tidepool/battery-daemon/compiler.log` and the retained test artifacts.
+
+Daemon reuse fixes the accidental fresh-worker-per-call path; it does not
+remove memory-triggered recycling. Follow up on retained compiler state and
+unnecessary module loading after launch. Do not infer a uniform notebook
+latency from the observed 0.3–4-second warm requests, or raise the memory limit
+without considering simultaneous run/compiler memory.
