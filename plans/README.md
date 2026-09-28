@@ -7,6 +7,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Bounded continuations](bounded-continuations.md): dependency routing, retained
+  failure investigation and checked repair, with next-wave adoption and evaluation.
+
 - [Dedicated swarm host](hetzner-swarm-host.md): 128 GB Hetzner host, declarative
   NixOS installation, resource budgets, recovery and staged wave migration.
 
