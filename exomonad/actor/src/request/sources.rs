@@ -774,6 +774,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_request_connection_survives_pause_and_detaches_on_drop() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let owner = actor(100);
+        let target = actor(101);
+        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let mut sources = registry
+            .attach_sources(owner, recipient.clone(), &[])
+            .unwrap();
+
+        // Attachment before publication receives the future settlement. A
+        // paused owner retains its connection until explicit retirement.
+        sources
+            .attach_request(0, request, RequestSourceKind::Settlement, owner)
+            .unwrap();
+        recipient.terminal().publish_paused("handler failed".into());
+        assert_eq!(registry.state.lock().requests[&request].sources.len(), 1);
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+        let first = receive(&mut events).await;
+        assert_eq!(first.slot, 0);
+        assert!(matches!(first.event, SourceEvent::Settled(Ok(()))));
+
+        // Attachment after publication captures the retained terminal event
+        // once under the same request lock.
+        sources
+            .attach_request(1, request, RequestSourceKind::Settlement, owner)
+            .unwrap();
+        let retained = receive(&mut events).await;
+        assert_eq!(retained.slot, 1);
+        assert!(matches!(retained.event, SourceEvent::Settled(Ok(()))));
+        assert!(events.try_recv().is_err());
+        drop(sources);
+        assert!(registry.state.lock().requests[&request].sources.is_empty());
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn dynamic_connection_handoff_keeps_queued_event_without_replay() {
         let registry = Arc::new(RequestRegistry::default());
         let (old_send, mut old_events) = mpsc::unbounded_channel();
