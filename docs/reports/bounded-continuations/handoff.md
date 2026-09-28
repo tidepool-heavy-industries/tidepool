@@ -1,5 +1,35 @@
 # Bounded continuations implementation handoff
 
+## Yield checkpoint — 2026-09-28 22:29 UTC
+
+User requested a status check and yielding instead of live watching. Wave23 has
+**not launched**. Wave22 accepted WIP wind-down and is collecting/settling component
+handoffs and cleanup. Read `docs/wave22-handoff.md` in its run checkout, root pane
+`%724`; exact product baseline is distinct from its docs commits. Provider reports
+combined checks/review completed with one custom-finalize execution gap; preserve
+these per-slice facts rather than treating the whole wave as accepted or failed.
+The successor brief is committed in canonical harness at `d36ef10` and explicitly
+treats wave22 as WIP commits potentially containing completed features.
+
+Active gate: `/tmp/rsi-continuations-final-recipes.log`, exec session 83769,
+private workspace `/tmp/rsi-continuations-remaining-pc81fqbs`. It has the fixture
+repair from shared `9de8cad`: bind activations by admitted labels, not arrival
+order. Routing passed 9 assertions; batchLimits passed 6. AdmissionRefusal and
+17 further recipes remain in this run. Definitions:
+`e222ec9e32109449a2dcb6a3410850dc0acca5f8537e7258891022525120b86d`.
+Earlier two failures used order-dependent fixtures; the policy was not weakened.
+One compiler slot remains held by this command. Do not start another battery.
+
+Next: finish recipes; publish shared main/pin/template, focused pin checks and
+matched build. Reconcile stopped wave22's final source/handoff with peer `b4dbef7`
+roadmap and canonical successor brief. Replace the old shared prompt body inside
+project role prompts while preserving project prefixes. Upgrade the authored
+`.exomonad/helpers/SessionHelpers/TestEvidence.hs` from the new seed (adds
+runInvestigatedCheck), preserving browser/acceptance helpers and their exports;
+existing authored helpers are not overwritten automatically by a workspace pin.
+Compile the actual successor source. Read interviews and verify wave22 release
+before launching Sol Medium wave23; keep component commits/dirty worktrees intact.
+
 ## Readiness update — 2026-09-28 22:14 UTC
 
 The operator now authorizes the successor **when ready**, superseding the earlier
