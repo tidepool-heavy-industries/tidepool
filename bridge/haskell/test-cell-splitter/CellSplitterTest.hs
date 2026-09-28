@@ -514,6 +514,9 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       reexport = root </> "WarmReexport.hs"
       child = root </> "WarmChild.hs"
       target = root </> "WarmTarget.hs"
+      producer = root </> "MemoProducer.hs"
+      consumer = root </> "MemoConsumer.hs"
+      memoTarget = root </> "MemoTarget.hs"
       chainLength = 16 :: Int
       chainName index = "WarmChain" ++ show index
   writeFile base "module WarmBase (value) where\nvalue :: Int\nvalue = 42\n"
@@ -530,6 +533,9 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
     , "import " ++ chainName chainLength ++ " (value)"
     , "result = value"
     ]
+  writeFile producer "module MemoProducer (value) where\nvalue :: Int\nvalue = 42\n"
+  writeFile consumer "module MemoConsumer (result) where\nimport MemoProducer (value)\nresult = value + 1\n"
+  writeFile memoTarget "module MemoTarget where\nimport MemoConsumer (result)\nfinal = result\n"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelected [root] $ \compile -> do
@@ -553,7 +559,24 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       -- twice per warm cycle (once for the reachability walk, once for the
       -- real recompile) while core2core/prepare still run once.
       assertContains "warm compile prepares only its evicted target"
-        "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog)
+        "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog
+      _ <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+      (_, executableWarmLog) <- captureStderr root "executable-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+      when ("tidepool-memo-miss module=MemoProducer" `isInfixOf` executableWarmLog ||
+            "tidepool-memo-miss module=MemoConsumer" `isInfixOf` executableWarmLog) $
+        fail "unchanged producer or consumer executable was recompiled"
+      previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
+      forcedLog <- (do
+          setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "MemoProducer"
+          snd <$> captureStderr root "executable-interface-miss" (
+            compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing))
+        `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
+                        (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
+      assertContains "missing producer interface regenerates producer executable"
+        "tidepool-memo-miss module=MemoProducer reason=required-interface-not-retained" forcedLog
+      assertContains "regenerated producer invalidates cached consumer executable"
+        "tidepool-memo-miss module=MemoConsumer reason=dependency-executable-regenerated" forcedLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
@@ -634,11 +657,8 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
 -- the final source consumer, so it must prepare successfully without creating
 -- a registration interface solely for itself.
 --
--- The same resident worker first serves an ordinary request whose target
--- imports 'SessionUnused' without referencing it, so that module is outside
--- the Core-reachable closure. The resident memo must still store its body and
--- interface: the session request imports it on the every-module tier and has
--- to hit instead of recompiling it.
+-- The ordinary request also has an unused import. Its body must be completed
+-- for the later every-module session request.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
@@ -646,11 +666,15 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       seed = root </> "SessionSeed.hs"
       target = root </> "PreparedSessionLeaf.hs"
       unused = root </> "SessionUnused.hs"
+      consumer = root </> "SessionConsumer.hs"
+      unreachable = root </> "SessionUnreachable.hs"
       ordinary = root </> "OrdinaryFirst.hs"
       scope = SessionScope scopeRoot [valueModule] Nothing
   writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
   writeFile unused "module SessionUnused (unused) where\nunused :: Int\nunused = 5\n"
-  writeFile ordinary "module OrdinaryFirst where\nimport SessionUnused ()\nresult = 1 :: Int\n"
+  writeFile consumer "module SessionConsumer (used) where\nimport SessionUnused (unused)\nused = unused + 1\n"
+  writeFile unreachable "module SessionUnreachable (other) where\nother = 10 :: Int\n"
+  writeFile ordinary "module OrdinaryFirst where\nimport SessionConsumer (used)\nimport SessionUnreachable ()\nresult = used\n"
   seeded <- runPipelineSelected PreparedStg seed [root]
   let environment = prHscEnv (pprPipelineResult seeded)
   iface <- mkThinSessionIface environment valueModule [(mkVarOcc "prior", intTy)]
@@ -658,8 +682,9 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
   writeFile target $ unlines
     [ "module PreparedSessionLeaf where"
     , "import Tidepool.Session.Val.G1 (prior)"
-    , "import SessionUnused (unused)"
-    , "__result = prior + unused"
+    , "import SessionConsumer (used)"
+    , "import SessionUnreachable ()"
+    , "__result = prior + used"
     ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
@@ -681,7 +706,22 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
             (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
         fail "prepared session leaf constructed an unused target interface"
       when ("tidepool-memo-miss module=SessionUnused" `isInfixOf` output) $
-        fail ("session tier recompiled a module the ordinary request memoized: " ++ output))
+        fail ("session tier recompiled a module the ordinary request memoized: " ++ output)
+      when ("tidepool-memo-miss module=SessionConsumer" `isInfixOf` output) $
+        fail ("session tier recompiled a consumer the ordinary request memoized: " ++ output)
+      when ("tidepool-memo-miss module=SessionUnreachable" `isInfixOf` output) $
+        fail ("session tier recompiled the completed unreachable module: " ++ output)
+      previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
+      forcedLog <- (do
+          setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "SessionUnused"
+          snd <$> captureStderr root "prepared-session-interface-miss" (runRequest $ \compiler ->
+            compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing))
+        `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
+                        (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
+      assertContains "session tier regenerates producer with missing interface"
+        "tidepool-memo-miss module=SessionUnused reason=required-interface-not-retained" forcedLog
+      assertContains "session tier invalidates consumer after producer regeneration"
+        "tidepool-memo-miss module=SessionConsumer reason=dependency-miss:SessionUnused" forcedLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
