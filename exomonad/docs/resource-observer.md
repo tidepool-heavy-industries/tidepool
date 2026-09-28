@@ -22,7 +22,9 @@ contains no command lines, environment variables, log contents, transcripts,
 or recovery credentials.
 
 Attribution requires a matching run record. The host service cgroup and sibling
-scopes with an exact run ID launcher argument identify run processes. Other
+scopes with an exact run ID launcher argument identify run processes. Native
+client scopes also match the run-owned frozen executable plus the exact
+`process-supervisor` subcommand; the shared command-resource service is excluded. Other
 processes in the shared slice are counted and sampled separately. `run_scopes` sums
 disjoint run scope cgroup memory, which includes cache; `process_memory` sums
 PSS only for attributed processes. These figures have different accounting

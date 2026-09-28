@@ -83,7 +83,7 @@ def cgpath(pid):
     return None
 
 
-def processes(run_id):
+def processes(run_id, run_root):
     """Use only exact argv tokens for ownership; never retain argv or environment."""
     found = {}
     for entry in PROC.iterdir():
@@ -112,6 +112,11 @@ def processes(run_id):
         explicit = any(token == marker for token in tokens)
         # Runtime launcher arguments can contain the root path instead.
         explicit = explicit or any(token.endswith(b"/" + marker) for token in tokens)
+        # Native clients live under a detached supervisor scope. Its frozen
+        # executable is run-owned; require the supervisor subcommand so the
+        # shared command-resource service is not attributed to its first run.
+        explicit = explicit or tokens[:2] == [
+            os.fsencode(run_root / "bin" / "exomonad"), b"process-supervisor"]
         try:
             executable = Path(os.readlink(entry / "exe")).name.removesuffix(" (deleted)")
         except OSError:
@@ -327,7 +332,7 @@ def sample(args, deep, prior):
     except (OSError, ValueError):
         pass
     record_valid = isinstance(status, dict) and status.get("run_id") == args.run_id and status.get("workspace") == str(args.workspace)
-    table = processes(args.run_id)
+    table = processes(args.run_id, args.run_root)
     owned, host_paths, seed_paths = ownership(table, args.run_id) if record_valid else (set(), set(), set())
     run_path = sorted(host_paths)[0] if host_paths else None
     slice_path = None
