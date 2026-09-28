@@ -63,8 +63,9 @@ checks, review verdict and unresolved integration needs.
    settles once on its original call, persists output and typed final result,
    and releases execution resources after cancel. Reuse
    `crates/harness/tests/adapter_readiness.rs` as the offline starting point;
-   its fake cell is not resident Haskell acceptance. Root owns the real
-   Exomonad workbench binding and request-wire decision.
+   its fake cell is the test boundary for this wave. Root owns the standalone
+   request-wire decision and integrated stub test. Binding a real Exomonad
+   workbench is future supervisor integration work.
 2. **Typed job-side agent operations.** Own the Provider/JobScheduler agent
    operation contract in `crates/harness/src/{provider,turn,agents}.rs` and
    focused tests. Today `CallContext` carries unbounded progress and no
