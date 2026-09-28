@@ -187,3 +187,11 @@ A source-only investigation is checking site-rewrite/cache ownership; root is
 repeating the remaining recipes without that predecessor in
 `/tmp/rsi-continuations-behavior-remainder.log`. Do not misclassify this as a
 continuation assertion failure or claim those unexecuted recipes passed.
+
+Isolation result: `pendingProbe` passed all five assertions when first, then
+`terminalFailure` hit the same startup error. The predecessor run had passed
+`followerLoss` first and failed on `pendingProbe` second. A narrow compiler fix
+is now assigned in isolation: register owned generated siblings when replaying
+valid nonreachable cached home modules, with a cross-target regression. The
+current hypothesis is supported by the owning cache paths but is not yet a
+verified compiler repair. This is an integration blocker, not a green helper gate.
