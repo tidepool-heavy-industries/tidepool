@@ -7,13 +7,21 @@ do
           R.attach (watcherEvent own) (R.lifecycle target))
         (\() -> R.get)
         (R.on mempty (\_ -> R.modify' (+ 1))))
+    ; replacementSpec = R.definition "dynamic-source-watcher-replacement" (Actor.Selected (knownEffects @'[Actor]))
+      (Watcher
+        0
+        (\_ -> pure (Right ()))
+        (\() -> R.get)
+        (R.on mempty (\_ -> R.modify' (+ 10))))
     ; tools current = Tools
       { runCase = finishTool "Attach a lifecycle source to this actor." $ \_ -> do
           watcher <- R.start watcherSpec
           attached <- R.call (watcherBegin (R.client watcher)) watcher
-          observed <- R.call (watcherCount (R.client watcher)) ()
-          _ <- R.finish watcher
-          pure (CaseOutput (attached == Right () && observed >= 1)
+          before <- R.call (watcherCount (R.client watcher)) ()
+          successor <- R.replace watcher replacementSpec
+          observed <- R.call (watcherCount (R.client successor)) ()
+          _ <- R.finish successor
+          pure (CaseOutput (attached == Right () && before == 1 && observed == 11)
             (T.pack (show attached)) observed, current)
       }
     }
