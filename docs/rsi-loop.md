@@ -21,6 +21,30 @@ work without another model turn, and where semantic judgment is still valuable.
 Prove extension seams with standalone deterministic consumers before integration.
 Each wave should produce usable behavior and evidence for the next design slice.
 
+## Evidence sufficiency for semantic automation
+
+For every new or changed Jev judgment, review the exact packet and its production
+consumer together. Write down the question, the facts needed to answer it, where
+those facts came from, and what happens when they are missing. Commit IDs, job
+handles, check names and summaries locate evidence; they do not supply the source,
+diagnostics or acceptance evidence the judgment may need. Retrieve the smallest
+sufficient evidence from its existing owner before asking.
+
+Bound inputs explicitly. Preserve omission, unavailable output, stale source and
+uncertainty as facts; never silently replace them with empty or successful evidence.
+Keep deterministic admission, provenance, counts and limits in code. Use shared
+state and one packet for related judgments when they need the same evidence.
+A typed answer only establishes shape; its meaning remains an empirical claim.
+
+Probe counterexamples as well as happy paths: identical IDs with different source
+content, irrelevant changes, omitted/binary content, ambiguous diagnostics,
+conflicting scope and instructions embedded in evidence. Inspect live requests and
+replay real responses through the production interpreter. Record what was tested,
+what was only compiled and which operational consequences remain unverified.
+Retain that audit with the implementation handoff so later RSI passes can improve
+both the question and the evidence acquisition, rather than tuning thresholds over
+an inadequate packet.
+
 ## Working defaults
 
 Prioritize parallel work and Luna delegation, with Sol owning shared decisions
