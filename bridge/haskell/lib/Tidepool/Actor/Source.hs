@@ -95,15 +95,15 @@ attachSource
   :: forall protocol effs. Member (ActorLocal protocol) effs
   => (Int, Int) -> Source protocol -> Eff effs (Either Text ())
 attachSource owner (CommandSource (Job job) project) =
-  send @(ActorLocal protocol) (ActorLocalAttachCommandSourceWith owner job (sourceEntry ActorCommandInputWith project))
+  send @(ActorLocal protocol) (ActorLocalAttachCommandSourceWith (owner, job) (sourceEntry ActorCommandInputWith project))
 attachSource owner (ProgressSource (Progress (RequestId request)) project) =
-  send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith owner request
+  send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith (owner, request)
     (sourceEntry (ObserveProgressWith request) project))
 attachSource owner (SettlementSource response@(Response (RequestId request) _ _ _) project) =
-  send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith owner request
+  send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith (owner, request)
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 attachSource owner (LifecycleSource (ActorRef actor incarnation _) project) =
-  send @(ActorLocal protocol) (ActorLocalAttachLifecycleSourceWith owner (actor, incarnation)
+  send @(ActorLocal protocol) (ActorLocalAttachLifecycleSourceWith (owner, (actor, incarnation))
     (sourceEntry ActorLifecycleInputWith project))
 
 sourceEntry

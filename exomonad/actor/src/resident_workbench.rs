@@ -8557,15 +8557,15 @@ fn attached_source_target(
     use crate::generated::actor_local::ActorLocalReq;
     use crate::request::sources::{RequestSourceKind, SourceTarget};
     let (owner, target) = match request {
-        ActorLocalReq::ActorLocalAttachProgressSourceWith(owner, request, _) => (
+        ActorLocalReq::ActorLocalAttachProgressSourceWith((owner, request), _) => (
             *owner,
             SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Progress),
         ),
-        ActorLocalReq::ActorLocalAttachSettlementSourceWith(owner, request, _) => (
+        ActorLocalReq::ActorLocalAttachSettlementSourceWith((owner, request), _) => (
             *owner,
             SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Settlement),
         ),
-        ActorLocalReq::ActorLocalAttachCommandSourceWith(owner, job, _) => (
+        ActorLocalReq::ActorLocalAttachCommandSourceWith((owner, job), _) => (
             *owner,
             SourceTarget::Command(
                 uuid::Uuid::parse_str(job)
@@ -8577,7 +8577,7 @@ fn attached_source_target(
                     .as_u128(),
             ),
         ),
-        ActorLocalReq::ActorLocalAttachLifecycleSourceWith(owner, target, _) => (
+        ActorLocalReq::ActorLocalAttachLifecycleSourceWith((owner, target), _) => (
             *owner,
             SourceTarget::Lifecycle(crate::wait::decode_address(target.0, target.1)?),
         ),

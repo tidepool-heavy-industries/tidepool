@@ -11,8 +11,10 @@ do
       { runCase = finishTool "Attach a lifecycle source to this actor." $ \_ -> do
           watcher <- R.start watcherSpec
           attached <- R.call (watcherBegin (R.client watcher)) watcher
-          pure (CaseOutput (attached == Right ())
-            (T.pack (show attached)) 0, current)
+          observed <- R.call (watcherCount (R.client watcher)) ()
+          _ <- R.finish watcher
+          pure (CaseOutput (attached == Right () && observed >= 1)
+            (T.pack (show attached)) observed, current)
       }
     }
   serveToolsWith 0 tools

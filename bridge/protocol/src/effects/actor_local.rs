@@ -62,16 +62,16 @@ pub fn actor_local() -> Effect {
                 handling: HandlingClass::Actor,
                 extract: None,
             },
-            source_attach("ActorLocalAttachProgressSourceWith", "actor_local_attach_progress_source_with", Arg {
+            source_attach("ActorLocalAttachProgressSourceWith", "actor_local_attach_progress_source_with", "((i64, i64), i64)", Arg {
                 name: "request", ty: HsType::Int, rust: RustBinding::Derived,
             }),
-            source_attach("ActorLocalAttachSettlementSourceWith", "actor_local_attach_settlement_source_with", Arg {
+            source_attach("ActorLocalAttachSettlementSourceWith", "actor_local_attach_settlement_source_with", "((i64, i64), i64)", Arg {
                 name: "request", ty: HsType::Int, rust: RustBinding::Derived,
             }),
-            source_attach("ActorLocalAttachCommandSourceWith", "actor_local_attach_command_source_with", Arg {
+            source_attach("ActorLocalAttachCommandSourceWith", "actor_local_attach_command_source_with", "((i64, i64), String)", Arg {
                 name: "job", ty: HsType::Text, rust: RustBinding::Path("String"),
             }),
-            source_attach("ActorLocalAttachLifecycleSourceWith", "actor_local_attach_lifecycle_source_with", Arg {
+            source_attach("ActorLocalAttachLifecycleSourceWith", "actor_local_attach_lifecycle_source_with", "((i64, i64), (i64, i64))", Arg {
                 name: "target", ty: HsType::Tuple(vec![HsType::Int, HsType::Int]), rust: RustBinding::Path("(i64, i64)"),
             }),
             Verb {
@@ -131,17 +131,26 @@ pub fn actor_local() -> Effect {
     }
 }
 
-fn source_attach(ctor: &'static str, method: &'static str, target: Arg) -> Verb {
+fn source_attach(
+    ctor: &'static str,
+    method: &'static str,
+    route_rust: &'static str,
+    target: Arg,
+) -> Verb {
     Verb {
         ctor,
         method,
+        // The actor runner retains value field 1 as the live payload. Keep
+        // owner and target together in field 0 so field 1 is always the mapper.
         args: vec![
             Arg {
-                name: "owner",
-                ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
-                rust: RustBinding::Path("(i64, i64)"),
+                name: "route",
+                ty: HsType::Tuple(vec![
+                    HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                    target.ty,
+                ]),
+                rust: RustBinding::Path(route_rust),
             },
-            target,
             Arg {
                 name: "entry",
                 ty: HsType::func(

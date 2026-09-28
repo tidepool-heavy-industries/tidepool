@@ -59,7 +59,7 @@ fn typed_self_event_sink_compiles_against_generated_actor_local_effect() {
 }
 
 #[tokio::test]
-async fn actor_can_attach_its_own_lifecycle_source() {
+async fn attached_lifecycle_event_reaches_record_handler_and_actor_cleans_up() {
     eval_harness::require_extract();
     let session = support::process_unique_session(811);
     let declarations = [

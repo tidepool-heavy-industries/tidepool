@@ -22,10 +22,10 @@ use tidepool_bridge_derive::FromHaskell;
 )]
 pub enum ActorLocalReq {
     ActorLocalContextWith,
-    ActorLocalAttachProgressSourceWith((i64, i64), i64, tidepool_bridge::HaskellValue),
-    ActorLocalAttachSettlementSourceWith((i64, i64), i64, tidepool_bridge::HaskellValue),
-    ActorLocalAttachCommandSourceWith((i64, i64), String, tidepool_bridge::HaskellValue),
-    ActorLocalAttachLifecycleSourceWith((i64, i64), (i64, i64), tidepool_bridge::HaskellValue),
+    ActorLocalAttachProgressSourceWith(((i64, i64), i64), tidepool_bridge::HaskellValue),
+    ActorLocalAttachSettlementSourceWith(((i64, i64), i64), tidepool_bridge::HaskellValue),
+    ActorLocalAttachCommandSourceWith(((i64, i64), String), tidepool_bridge::HaskellValue),
+    ActorLocalAttachLifecycleSourceWith(((i64, i64), (i64, i64)), tidepool_bridge::HaskellValue),
     ActorReceiveWith(i64, tidepool_bridge::HaskellValue),
     ActorCheckpointWith(i64, tidepool_bridge::HaskellValue),
 }
