@@ -2,6 +2,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Tidepool.Actor.Source
   ( Source
@@ -90,18 +92,18 @@ installSource (LifecycleSource (ActorRef actor incarnation _) project) =
     (sourceEntry ActorLifecycleInputWith project))
 
 attachSource
-  :: Member (ActorLocal protocol) effs
+  :: forall protocol effs. Member (ActorLocal protocol) effs
   => (Int, Int) -> Source protocol -> Eff effs (Either Text ())
 attachSource owner (CommandSource (Job job) project) =
-  send (ActorLocalAttachCommandSourceWith owner job (sourceEntry ActorCommandInputWith project))
+  send @(ActorLocal protocol) (ActorLocalAttachCommandSourceWith owner job (sourceEntry ActorCommandInputWith project))
 attachSource owner (ProgressSource (Progress (RequestId request)) project) =
-  send (ActorLocalAttachProgressSourceWith owner request
+  send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith owner request
     (sourceEntry (ObserveProgressWith request) project))
 attachSource owner (SettlementSource response@(Response (RequestId request) _ _ _) project) =
-  send (ActorLocalAttachSettlementSourceWith owner request
+  send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith owner request
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 attachSource owner (LifecycleSource (ActorRef actor incarnation _) project) =
-  send (ActorLocalAttachLifecycleSourceWith owner (actor, incarnation)
+  send @(ActorLocal protocol) (ActorLocalAttachLifecycleSourceWith owner (actor, incarnation)
     (sourceEntry ActorLifecycleInputWith project))
 
 sourceEntry

@@ -189,6 +189,10 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         &[
             "ActorInputOrigin",
             "ActorLocalContextWith",
+            "ActorLocalAttachProgressSourceWith",
+            "ActorLocalAttachSettlementSourceWith",
+            "ActorLocalAttachCommandSourceWith",
+            "ActorLocalAttachLifecycleSourceWith",
             "ActorReceiveWith",
             "ActorCheckpointWith",
         ],

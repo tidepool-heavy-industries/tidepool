@@ -8,6 +8,7 @@ struct StagedHandler {
     checkpoint: StateCheckpoint,
     shutdown_hook: Option<RootCustody>,
     sources: Vec<crate::request::sources::SourceBinding>,
+    dynamic_sources: Vec<crate::request::sources::SourceBinding>,
 }
 
 pub(super) struct PreparedSuccessor {
@@ -27,7 +28,6 @@ pub(super) struct RetainedHandler {
 
 pub(super) struct ReplacementCustody {
     sources: Option<crate::request::sources::ActorSourceConnections>,
-    dynamic_sources: Vec<crate::request::sources::SourceBinding>,
     worktree: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
     _admissions: Vec<tokio::sync::OwnedRwLockReadGuard<bool>>,
@@ -169,7 +169,6 @@ where
                 "replacement transfer requested before a prepared replacement was admitted".into(),
             )
         })?;
-        let dynamic_sources = self.sources[self.static_source_count..].to_vec();
         let retained = RetainedHandler {
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),
@@ -180,7 +179,6 @@ where
         self.retained_replacements.push(retained);
         let custody = ReplacementCustody {
             sources: self.source_connections.take(),
-            dynamic_sources,
             worktree: self.worktree_custody.take(),
             retained: std::mem::take(&mut self.retained_replacements),
             _admissions: transfer.admissions,
@@ -236,7 +234,7 @@ where
         self.shutdown_hook = staged.shutdown_hook;
         self.static_source_count = staged.sources.len();
         self.sources = staged.sources;
-        self.sources.extend(custody.dynamic_sources);
+        self.sources.extend(staged.dynamic_sources);
         Ok(KernelStep::Continue(()))
     }
 
@@ -447,6 +445,27 @@ where
         if receiver.site != site {
             return Err(reject("replacement checkpoint and receiver sites differ"));
         }
+        let dynamic_sources =
+            if descriptor.placement().session == self.descriptor.placement().session {
+                self.sources[self.static_source_count..].to_vec()
+            } else {
+                let mut imported = Vec::new();
+                for source in &self.sources[self.static_source_count..] {
+                    let entry = runner
+                        .import_shared_custody(
+                            Arc::clone(&source.entry),
+                            self.descriptor.placement().session,
+                            descriptor.placement().session,
+                            descriptor.placement().resource_scope,
+                        )
+                        .await?;
+                    imported.push(crate::request::sources::SourceBinding {
+                        target: source.target,
+                        entry: Arc::new(entry),
+                    });
+                }
+                imported
+            };
         Ok(StagedHandler {
             descriptor,
             receiver,
@@ -456,6 +475,7 @@ where
             },
             shutdown_hook,
             sources,
+            dynamic_sources,
         })
     }
 }

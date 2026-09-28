@@ -772,4 +772,48 @@ mod tests {
         address.stop(None);
         task.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn dynamic_connection_handoff_keeps_queued_event_without_replay() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (old_send, mut old_events) = mpsc::unbounded_channel();
+        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
+        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (new_send, mut new_events) = mpsc::unbounded_channel();
+        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
+        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let owner = actor(100);
+        let target = actor(101);
+        let before = registry.reserve(owner, target);
+        let after = registry.reserve(owner, target);
+        for request in [before, after] {
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+        }
+        let mut sources = registry.attach_sources(owner, old, &[]).unwrap();
+        sources
+            .attach_request(0, before, RequestSourceKind::Settlement, owner)
+            .unwrap();
+        sources
+            .attach_request(1, after, RequestSourceKind::Settlement, owner)
+            .unwrap();
+        registry.begin_reply(target, before).unwrap();
+        registry.finish_reply(before, None);
+        sources.handoff(successor, |_| Ok::<_, ()>(())).unwrap();
+        let queued = receive(&mut old_events).await;
+        assert_eq!(queued.slot, 0);
+        assert!(matches!(queued.event, SourceEvent::Settled(Ok(()))));
+        registry.begin_reply(target, after).unwrap();
+        registry.finish_reply(after, None);
+        let subsequent = receive(&mut new_events).await;
+        assert_eq!(subsequent.slot, 1);
+        assert!(matches!(subsequent.event, SourceEvent::Settled(Ok(()))));
+        assert!(old_events.try_recv().is_err());
+        assert!(new_events.try_recv().is_err());
+        drop(sources);
+        old_address.stop(None);
+        new_address.stop(None);
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+    }
 }

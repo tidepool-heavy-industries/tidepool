@@ -14,5 +14,7 @@ mod prepared_render_probe;
 mod profile_compile_failures;
 #[path = "../ractor_substrate.rs"]
 mod ractor_substrate;
+#[path = "../record_dynamic_sources.rs"]
+mod record_dynamic_sources;
 #[path = "../resident_local_actor.rs"]
 mod resident_local_actor;

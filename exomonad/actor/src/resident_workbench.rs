@@ -1412,6 +1412,7 @@ impl ResidentActorBoundary {
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
             Self::ActorLocalContext(_) => "actor local context",
+            Self::AttachSource { .. } => "attach source",
             Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
             Self::ForkGroup(ForkGroupBoundary::Checkpoint { .. }) => "capture context checkpoint",
             Self::ForkGroup(ForkGroupBoundary::CheckCheckpoint { .. }) => {
@@ -1775,6 +1776,24 @@ impl ResidentRequest {
             Self::ActorLocal(
                 crate::generated::actor_local::ActorLocalReq::ActorLocalContextWith,
             ) => "actor local context",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorLocalAttachProgressSourceWith(
+                    ..,
+                ),
+            ) => "attach progress source",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorLocalAttachSettlementSourceWith(
+                    ..,
+                ),
+            ) => "attach settlement source",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorLocalAttachCommandSourceWith(..),
+            ) => "attach command source",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorLocalAttachLifecycleSourceWith(
+                    ..,
+                ),
+            ) => "attach lifecycle source",
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
             )) => "receive",
