@@ -19,7 +19,7 @@ import qualified Project.RoutingChecks as Routing
 
 integration :: Member RecipeCheck effects => Eff effects ()
 integration = do
-  let proposal = handoffProposal (Blocked "no candidate" []) Nothing (CheckState [] []) ["run the selected tests"]
+  let proposal = handoffProposal (Blocked "no candidate" []) Nothing (CheckState [] [] Nothing) ["run the selected tests"]
   check "handoff keeps missing review and remaining checks explicit"
     (all (`Text.isInfixOf` proposal)
       ["Reported candidate:", "Reported review: not supplied", "run the selected tests"])

@@ -16,7 +16,7 @@ modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.ConversationContext", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
-  "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.SupervisionProfiles",
+  "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.WorkPlan", "Project.WorkPlanCoordinator", "Project.WorkPlanVerification", "Project.WorkPlanChecks", "Project.WorkPlanRegressionChecks", "Project.SupervisionProfiles",
   "Project.FieldNotesChecks", "Project.RebaseRouterChecks", "Project.BaselineIncorporationChecks",
   "Project.Service", "Project.Repository", "Project.CheckResults", "Project.FocusedGateExample",
   "Project.PrepareContinue", "Project.RetainedEvidence",
@@ -72,6 +72,10 @@ checks = [
   "Project.ReviewFlowChecks.failurePaths",
   "Project.ReviewFlowChecks.effectfulRouting",
   "Project.ReviewFlowChecks.workflowExample",
+  "Project.WorkPlanChecks.correction",
+  "Project.WorkPlanRegressionChecks.duplicateReview",
+  "Project.WorkPlanRegressionChecks.parallelVerification",
+  "Project.WorkPlanRegressionChecks.missingIncorporation",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in

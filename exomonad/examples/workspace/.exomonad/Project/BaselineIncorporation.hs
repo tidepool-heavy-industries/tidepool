@@ -20,6 +20,7 @@ module Project.BaselineIncorporation
   , UpdateDelivery (..), IncorporationReport (..), ReportResult (..)
   , openBaselineEpisode, beginBaselineEpisode, refreshBaselineEpisode, episodeView
   , episodeComplete, exactOwners, routeQuestion
+  , validateBaselineFor, incorporationUpdate
   ) where
 
 import Control.Monad (forM)
@@ -165,6 +166,13 @@ validateCore change rows
     amendment = baselineAmendment change
     decision = baselineDecision change
     labels = [label | (label, _, _, _) <- rows]
+
+-- | Share the episode's exact baseline/decision policy with a coordinator
+-- that already owns the request and needs a single correction, without
+-- starting a second collector or moving request ownership.
+validateBaselineFor :: BaselineChange -> Task -> Question -> [Text] -> Either Text ()
+validateBaselineFor change task question checks =
+  validateCore change [("coordinator", task, question, checks)]
 
 -- | Allocate the handle before workers fork. No baseline is selected yet.
 -- This costs one resident actor and one typed assignment field per anticipated

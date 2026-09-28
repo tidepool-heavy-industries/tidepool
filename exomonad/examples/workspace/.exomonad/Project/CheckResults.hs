@@ -56,6 +56,7 @@ instance Show CheckNotice where
 data CheckState = CheckState
   { checkEntries :: [CheckEntry]
   , checkNotices :: [CheckNotice]
+  , checkForwardAdmission :: Maybe (Either Text ())
   }
 
 instance Show CheckState where
@@ -63,6 +64,7 @@ instance Show CheckState where
     [(checkName entry, fmap (checkVerdict entry) (checkOutcome entry))
       | entry <- checkEntries state]
     ++ " notices=" ++ show (length (checkNotices state))
+    ++ " forwarding=" ++ show (checkForwardAdmission state)
 
 data CheckActor mode = CheckActor
   { checkState :: mode :- State CheckState
@@ -122,7 +124,7 @@ finishChecks = R.finish
 checkDefinition :: CheckDelivery -> [(Text, FocusedRun)] -> ActorSpec CheckActor CheckEffects
 checkDefinition delivery runs =
   R.definition "focused-check-results" (Actor.Selected knownEffects) CheckActor
-      { checkState = CheckState [CheckEntry name run Nothing | (name, run) <- runs] []
+      { checkState = CheckState [CheckEntry name run Nothing | (name, run) <- runs] [] Nothing
       , checkSnapshot = \() -> R.get
       , checkCompletions = R.on (mconcat
           [fmap (\receipt -> (name, run, receipt)) (Cmd.completion job)
@@ -145,7 +147,9 @@ checkDefinition delivery runs =
         case delivery of
           ForwardChecks destination ->
             if all (maybe False (const True) . checkOutcome) (checkEntries state)
-              then R.send destination state
+              then do
+                admission <- R.trySend destination state
+                R.modify' (\current -> current { checkForwardAdmission = Just admission })
               else pure ()
           NotifyChecks owner policy refused -> do
             case policy of

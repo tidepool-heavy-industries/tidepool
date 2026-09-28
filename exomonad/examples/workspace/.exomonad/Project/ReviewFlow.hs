@@ -21,6 +21,7 @@ module Project.ReviewFlow
   , ReviewCleanupRequest (..)
   , ReviewCleanupResult (..)
   , ReviewStage (..)
+  , ReviewCompletion (..)
   , ReviewStop (..)
   , ReviewChoice (..)
   , ReviewContext (..)
@@ -95,6 +96,9 @@ data ReviewFlowPolicy = ReviewFlowPolicy
   , flowReviewChoice :: Candidate -> ReviewDecision -> ReviewChoice
   , flowEscalationCriteria :: [Text]
   , flowNotice :: ReviewStage -> Maybe Text
+  -- An owning coordinator resumes from the exact terminal stage. The route
+  -- carries the implementer's original request identity for correlation.
+  , flowCompleted :: Maybe (R.Send ReviewCompletion)
   }
 
 defaultReviewFlowPolicy :: ReviewFlowPolicy
@@ -103,6 +107,7 @@ defaultReviewFlowPolicy = ReviewFlowPolicy
   , flowSourcePlan = ComponentReview
   , flowReviewChoice = \_ _ -> HonorReview
   , flowEscalationCriteria = []
+  , flowCompleted = Nothing
   , flowNotice = \stage -> case stage of
       ReviewAccepted reviewed -> Just
         ("review accepted " <> renderGitOid (candidateCommit (reviewedCandidate reviewed))
@@ -189,6 +194,7 @@ data ReviewStop
   | ReviewerSourceMismatch GitOid GitOid
   | ReviewerCandidateMismatch Candidate Candidate
   | ReviewerScopeMismatch
+  | ReviewerEvidenceRefused ReviewEvidenceIssue
   | EmptyRepairFindings Candidate
   | ReviewEscalated Text
   | RepairBudgetSpent Int Candidate [Text]
@@ -202,6 +208,13 @@ data ReviewStage
   | AwaitingRepair Candidate
   | ReviewAccepted ReviewedCandidate
   | ReviewStopped ReviewStop
+  deriving (Show)
+
+-- | The exact reviewer response stays owned by ReviewFlow. Only its admitted
+-- proof crosses to the coordinator; a copied Accepted verdict cannot do so.
+data ReviewCompletion
+  = ReviewApproved RequestId ReviewedCheckpoint
+  | ReviewRefused RequestId ReviewStop
   deriving (Show)
 
 -- Cleanup is requested after the owner has read the terminal result and
@@ -236,6 +249,8 @@ data ReviewFlowState = ReviewFlowState
   , flowCheckPlans :: [(Candidate, PlanStart)]
   , flowCheckReports :: [(Candidate, PlanReport)]
   , flowCheckCleanup :: [Actor.ActorExit CheckState]
+  , flowReviewedProof :: Maybe ReviewedCheckpoint
+  , flowCompletionAdmission :: Maybe (Either Text ())
   }
 
 instance Show ReviewFlowState where
@@ -246,6 +261,7 @@ instance Show ReviewFlowState where
     ++ " repairRequests=" ++ show (length (flowRepairRequests state))
     ++ " notices=" ++ show (length (flowNotices state))
     ++ " cleanup=" ++ show (flowCleanupResult state)
+    ++ " completion=" ++ show (flowCompletionAdmission state)
     ++ " routes=" ++ show (length (flowReviewRoutes state))
 
 data ReviewFlow mode = ReviewFlow
@@ -313,7 +329,7 @@ buildReviewFlow
   -> ActorSpec ReviewFlow effects
 buildReviewFlow profile prepareSource owner task policy implementer checkPlan choose =
   R.definition "review-flow" profile ReviewFlow
-    { flowStateField = ReviewFlowState AwaitingCandidate 0 False [] [] [] [] [] [] [] [] Nothing [] [] [] []
+    { flowStateField = ReviewFlowState AwaitingCandidate 0 False [] [] [] [] [] [] [] [] Nothing [] [] [] [] Nothing Nothing
     , reviewSnapshot = \() -> R.get
     , reviewCleanup = \request -> do
         origin <- R.sender @ReviewFlow
@@ -414,20 +430,39 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
         | executionRequest (responseExecution receipt) /= requestId reviewer ->
             publish (ReviewStopped (ReviewerReceiptMismatch
               (requestId reviewer) (executionRequest (responseExecution receipt))))
-      _ -> acceptReview own selected result
+      _ -> acceptReview own selected reviewer result
 
     publish stage = do
-      R.modify' (\state -> state { flowStage = stage })
-      let notice = case stage of
-            ReviewStopped (ReviewEscalated reason) ->
-              Just ("review escalated to owner: " <> reason
-                <> "; inspect flowReviewRoutes and decide repair or scope")
-            _ -> flowNotice policy stage
-      case notice of
-        Nothing -> pure ()
-        Just message -> do
-          sent <- sendMessage owner message
-          R.modify' (\state -> state { flowNotices = flowNotices state ++ [sent] })
+      previous <- R.gets flowStage
+      if terminalStage previous then pure () else do
+        R.modify' (\state -> state { flowStage = stage })
+        case (flowCompleted policy, stage) of
+          (Just route, ReviewStopped reason) -> do
+            admission <- R.trySend route (ReviewRefused (requestId implementer) reason)
+            R.modify' (\state -> state { flowCompletionAdmission = Just admission })
+          (Just route, ReviewAccepted _) -> do
+            proof <- R.gets flowReviewedProof
+            case proof of
+              Just exact -> do
+                admission <- R.trySend route (ReviewApproved (requestId implementer) exact)
+                R.modify' (\state -> state { flowCompletionAdmission = Just admission })
+              Nothing -> R.modify' (\state -> state
+                { flowStage = ReviewStopped (ReviewerEvidenceRefused CheckpointNotReady) })
+          _ -> pure ()
+        let notice = case stage of
+              ReviewStopped (ReviewEscalated reason) ->
+                Just ("review escalated to owner: " <> reason
+                  <> "; inspect flowReviewRoutes and decide repair or scope")
+              _ -> flowNotice policy stage
+        case notice of
+          Nothing -> pure ()
+          Just message -> do
+            sent <- sendMessage owner message
+            R.modify' (\state -> state { flowNotices = flowNotices state ++ [sent] })
+
+    terminalStage (ReviewAccepted _) = True
+    terminalStage (ReviewStopped _) = True
+    terminalStage _ = False
 
     acceptCandidate own expected result = do
       R.modify' (\state -> state
@@ -577,7 +612,7 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
         "\nReview scope: required sibling commits were verified in this exact candidate: "
           <> Text.intercalate ", " (map renderGitOid required)
 
-    acceptReview own selected result = case result of
+    acceptReview own selected reviewer result = case result of
       Left failure -> publish (ReviewStopped (ReviewerUnavailable failure))
       Right receipt -> case (case responseValue receipt of
           Produced (Accepted _) -> reviewCandidateAtSubmission
@@ -597,7 +632,14 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
               case routeChoice route of
                 EscalateReview reason -> publish (ReviewStopped (ReviewEscalated reason))
                 HonorReview -> case decision of
-                  Accepted reviewed -> publish (ReviewAccepted reviewed)
+                  Accepted reviewed -> do
+                    let request = ReviewRequest (AssignedTask task) selected OwnerRepairs
+                    proof <- admitReviewedCheckpoint request reviewer
+                    case proof of
+                      Left issue -> publish (ReviewStopped (ReviewerEvidenceRefused issue))
+                      Right exact -> do
+                        R.modify' (\state -> state { flowReviewedProof = Just exact })
+                        publish (ReviewAccepted reviewed)
                   Repair candidate findings
                     | null findings -> correctReviewer own candidate
                     | otherwise -> requestRepair own candidate findings
