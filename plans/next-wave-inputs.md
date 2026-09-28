@@ -833,3 +833,18 @@ recovery semantics. Evidence: dynamic-sources worktree
 `target/tidepool-test-runs/20260928T211101Z-3871481-battery`, nextest run
 `7d709d28-931b-4316-aeef-cfc6e317a76b`, session `16632024630559531`, Watcher `2@1`.
 The current batch fixes the invalid mapper, not this general failure-reporting path.
+
+## Wave22 readiness: queued checkpoint backlog (2026-09-28)
+
+At 22:16 UTC, root 1@1 of run fc8dae5b-b02e-4884-959c-12cc060b1b8c
+had durable inbox checkpoint sequence 202 and accepted messages through 325.
+Operator readiness notification 319 was retained but not presented. The root TUI
+was separately checking ancestry of delayed component checkpoints against newer
+retained source. This demonstrates a queue/backlog and redundant reconciliation;
+it does not by itself identify a transport loss or prove a particular scheduling
+fix. A console readiness request was queued explicitly and observed being read.
+
+Next observation: distinguish required obligations from superseded progress; trace
+admission, presentation and model turns before changing delivery. The new optional
+digest coordinator is a bounded trial, not a claim to solve existing FIFO backlog.
+Measure concrete owner relays/rereads removed and preserve original evidence.
