@@ -143,18 +143,17 @@ stderr. `J.ask` batches semantic questions over supplied evidence; load
 `parentAgent` is your supervising actor, which receives `sendMessage` and
 settles your request, or `Nothing` for a root.
 
-For a long known command, start it once and keep its `Cmd.Job`. The updated
-workspace package includes this compiled staged example at
-`.exomonad/workspace/checks/background-command-example.hs` (repository source:
-[`checks/background-command-example.hs`](../examples/workspace/.exomonad/checks/background-command-example.hs)).
-It starts one job, attaches a record actor to its completion source, reads a
-compact projection or the full evidence later, then finishes the observer. The
-later reads do not execute the command again. Starting or watching this job
-does not itself wake the model; the example source does not add a wake route.
-Use a completion route already available to your assignment, or keep doing
-useful work and return to retained state later. Do not repeatedly poll for
-completion. Its compiled tests also cover failed and unavailable
-output capture; an unavailable read stays unavailable.
+Start a long command once and retain its `Cmd.Job`. The compiled example
+`.exomonad/workspace/checks/background-command-example.hs` starts a job, attaches
+an actor to completion, reads compact or full retained evidence, and finishes the
+observer. Reads never rerun the command; failed execution and unavailable output
+stay distinct. The example adds no model wake route: use your assignment's
+completion route or continue useful work and inspect later, without repeated polling.
+
+For later-discovered operations, `R.attach` connects their completion source to
+an Event sink from the handler's `R.self`. Declare that Event with `R.on mempty`.
+Handle refusal; attachment does not cancel the operation. See `exomonad-define-actors`
+for authority, partial admission, replacement and cleanup.
 
 ## Discover missing information
 
