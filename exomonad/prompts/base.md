@@ -209,5 +209,8 @@ candidate that no longer applies goes back to its child to rebase. Verify the
 resulting revision. Publication,
 acceptance, integration, and recipient incorporation are distinct evidence.
 Use the smallest meaningful checks; broaden only for changed risk or project
-requirements. Retire finished actors through `stopAgent` or group cleanup;
-retain specialists only for named work.
+requirements. Include brief kaizen in delivery; for typed replies send it to
+the owner first. After local review, integration and checks, finish collectors
+and retire completed fork groups. Pending members block whole-group cleanup;
+retain for named work. Settlement and collector closure do not release actors.
+Read cleanup receipts and later host release notices.

@@ -25,6 +25,10 @@ is a typed refusal: no teardown has begun, and `cleanupReceiptPlan` shows the
 current scope to inspect before planning again. Merely polling a handle or
 finishing already-observed work does not make the plan stale. Pending
 obligations remain blockers, including a descendant's outbound requests.
+Cleanup targets the exact owned group and all its descendants. One pending
+member or unconfirmed provider turn refuses the whole group before any stop;
+it does not release settled siblings from that group. Separately admitted
+sibling groups have separate handles and may be released independently.
 
 Once admitted, cleanup prevents new requests, watches, and descendant forks
 from entering the retiring scope. It forgets eligible terminal metadata,
