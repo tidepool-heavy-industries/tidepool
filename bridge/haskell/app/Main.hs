@@ -12,7 +12,7 @@ import Control.Exception
   ( evaluate, try, catch, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
 import Control.Monad (foldM, forM, forM_, when)
@@ -648,7 +648,7 @@ runTurnMode compiler caches args path = do
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
-      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt
+      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr [] lastAttempt
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -687,11 +687,21 @@ writeSplicedModule outDir lastAttempt spliced = do
 -- SAME compile from a verdict and pin it already has from the whole-cell
 -- check — in the same worker invocation, with no separate classify/compile
 -- spawn.
+insertCheckedTypeImports :: [String] -> String -> IO String
+insertCheckedTypeImports [] source = pure source
+insertCheckedTypeImports modules source =
+  let marker = T.pack "default (Int, Double, Text)\n"
+      (before, after) = T.breakOn marker (T.pack source)
+  in if T.null after
+       then fail "cell fold: turn template has no import insertion point"
+       else pure (T.unpack before ++ concatMap (\modu -> "import qualified " ++ modu ++ "\n") modules
+         ++ T.unpack after)
+
 compileClassifiedTurn
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> IORef (Maybe (FilePath, String))
+  -> String -> StmtBinders -> String -> [String] -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt = do
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports lastAttempt = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -704,7 +714,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr l
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
           tmplSrc <- readFile tmplFile
-          let spliced = spliceTemplate tmplSrc turnSrc bindersStr
+          tmplWithImports <- insertCheckedTypeImports typeImports tmplSrc
+          let spliced = spliceTemplate tmplWithImports turnSrc bindersStr
           if requestActivationPreview args
             then do
               let replace body = T.unpack (T.replace (T.pack "{{ACTIVATION_PREVIEW}}") (T.pack body) (T.pack spliced))
@@ -899,7 +910,8 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled =
             pins = itemBinderPins 0 (sbBinders sb) (crCheckedBinderPins compiled)
         bindersStr <- either fail pure (renderPinnedBinders (sbBinders sb) pins)
         lastAttempt <- newIORef Nothing
-        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr lastAttempt
+        let typeImports = nub (concatMap checkedPinImports [pin | Just pin <- pins])
+        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports lastAttempt
         BS.writeFile outFile (encodeTurnOut turnOut)
 
 -- | The cell's sole item, when the whole-cell check resolved to exactly one

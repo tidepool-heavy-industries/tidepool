@@ -148,8 +148,9 @@ encodeCellExpressionPlan CellExpressionPlan
   , expressionPlanPresentation = presentation
   , expressionPlanType = ty
   , expressionPlanHeads = heads
+  , expressionPlanImports = imports
   } =
-  encodeListLen 5
+  encodeListLen 6
   <> encodeString (T.pack key)
   <> encodeString (case liftPlan of
        ExpressionEffectful -> "effectful"
@@ -159,6 +160,7 @@ encodeCellExpressionPlan CellExpressionPlan
        ExpressionOpaque -> "opaque")
   <> encodeString (T.pack ty)
   <> encodeHeads heads
+  <> encodeStringList imports
 
 encodeDeclarationSource :: DeclarationSource -> Encoding
 encodeDeclarationSource (DeclarationSource prologue body) =
@@ -236,11 +238,13 @@ encodeCheckedBinderPin CheckedBinderPin
   { checkedPinKey = key
   , checkedPinType = ty
   , checkedPinHeads = heads
+  , checkedPinImports = imports
   } =
-  encodeListLen 3
+  encodeListLen 4
   <> encodeString (T.pack key)
   <> encodeString (T.pack ty)
   <> encodeHeads heads
+  <> encodeStringList imports
 
 encodeTextList :: [Text] -> Encoding
 encodeTextList xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeString xs

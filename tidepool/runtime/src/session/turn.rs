@@ -19,6 +19,7 @@
 //! a session turn has on-disk side effects (the iface write) and depends on
 //! mutable session state (the injected ifaces), so a cache hit would be wrong.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use ciborium::value::Value as CborValue;
@@ -148,6 +149,8 @@ pub struct CheckedExpressionPlan {
     /// effectful expression this includes its exact `Eff` row.
     pub type_display: String,
     pub heads: Vec<NominalHead>,
+    /// Modules GHC qualified in the rendered type, needed by its wrapper.
+    pub imports: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +170,8 @@ pub struct CheckedBinderPin {
     pub ty: String,
     /// Nominal heads used by relocation/preflight to identify same-cell names.
     pub heads: Vec<NominalHead>,
+    /// Modules GHC qualified in the rendered type, needed by its wrapper.
+    pub imports: Vec<String>,
 }
 
 /// Compiler-parsed header syntax, preserved in authored order. It applies to
@@ -2338,7 +2343,53 @@ pub fn run_turn_pinned(
                 .join(", ")
         )
     };
-    run_turn_with_pin(req, Some(&pin), false)
+    let imports = pins
+        .iter()
+        .flat_map(|pin| pin.imports.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let templates = req
+        .templates
+        .iter()
+        .map(|template| {
+            let source = if template.kind == TemplateSelector::Bind {
+                insert_checked_type_imports(&template.source, &imports)?
+            } else {
+                template.source.clone()
+            };
+            Ok(TurnTemplate {
+                kind: template.kind,
+                source,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    run_turn_with_pin(
+        TurnRequest {
+            templates: &templates,
+            ..req
+        },
+        Some(&pin),
+        false,
+    )
+}
+
+fn insert_checked_type_imports(
+    source: &str,
+    imports: &BTreeSet<&str>,
+) -> Result<String, CompileError> {
+    if imports.is_empty() {
+        return Ok(source.to_owned());
+    }
+    if !source.contains(PREAMBLE_DEFAULT_MARKER) {
+        return Err(CompileError::ExtractFailed(
+            "checked binder template has no import insertion point".into(),
+        ));
+    }
+    let specs = imports
+        .iter()
+        .map(|module| format!("qualified {module}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(insert_preamble_imports(source, &specs))
 }
 
 /// The second compile granularity: one per input unit, after the whole-cell
@@ -2905,7 +2956,7 @@ fn decode_cell_out(
 fn decode_checked_expression_plan(
     value: &CborValue,
 ) -> Result<CheckedExpressionPlan, CompileError> {
-    let fields = cbor_expect_array_len(value, 5, "checked expression plan")?;
+    let fields = cbor_expect_array_len(value, 6, "checked expression plan")?;
     let lift = match cbor_expect_text(&fields[1], "expression lift")? {
         "effectful" => ExpressionLift::Effectful,
         "pure" => ExpressionLift::Pure,
@@ -2930,6 +2981,7 @@ fn decode_checked_expression_plan(
         presentation,
         type_display: cbor_expect_text(&fields[3], "full expression type")?.to_owned(),
         heads: decode_nominal_heads(&fields[4], "expression result nominal heads")?,
+        imports: decode_string_array(&fields[5], "expression type imports")?,
     })
 }
 
@@ -3032,11 +3084,12 @@ fn decode_cell_source_item(value: &CborValue) -> Result<CellAnalysisSourceItem, 
 }
 
 fn decode_checked_binder_pin(value: &CborValue) -> Result<CheckedBinderPin, CompileError> {
-    let fields = cbor_expect_array_len(value, 3, "checked binder pin")?;
+    let fields = cbor_expect_array_len(value, 4, "checked binder pin")?;
     Ok(CheckedBinderPin {
         key: cbor_expect_text(&fields[0], "checked binder pin key")?.to_owned(),
         ty: cbor_expect_text(&fields[1], "checked binder pin type")?.to_owned(),
         heads: decode_nominal_heads(&fields[2], "checked binder pin heads")?,
+        imports: decode_string_array(&fields[3], "checked binder pin imports")?,
     })
 }
 
@@ -4168,6 +4221,157 @@ mod tests {
             panic!("same-cell nominal staged item was not a bind");
         };
         assert_eq!(bound[0].type_display, "Maybe G");
+    }
+
+    #[test]
+    fn checked_handler_pin_carries_qualified_type_imports() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("PinHandler.hs"),
+            "{-# LANGUAGE DataKinds, TypeOperators #-}\n\
+             module PinHandler (Handler, Box(..)) where\n\
+             import Control.Monad.Freer (Eff)\n\
+             import qualified Control.Monad.Freer.State as S\n\
+             type Handler a = Eff '[S.State Int] a\n\
+             data Box = Box\n",
+        )
+        .unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            root.path(),
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let template = concat!(
+            "{-# LANGUAGE NoImplicitPrelude #-}\n",
+            "{{CELL_PRAGMAS}}\n",
+            "module CellCheck where\n",
+            "import Prelude\n",
+            "{{CELL_IMPORTS}}\n",
+            "__tidepoolCellExpression :: value -> IO ()\n",
+            "__tidepoolCellExpression _ = pure ()\n",
+            "__tidepoolInEffectRow :: IO value -> IO value\n",
+            "__tidepoolInEffectRow = id\n",
+            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
+            "__tidepoolCellDisplayConstraint _ = ()\n",
+            "{{CELL_DECLS}}\n",
+            "__cell :: IO ()\n",
+            "__cell = do {\n",
+            "{{CELL_BODY}}\n",
+            "; pure () }\n",
+        );
+        let cell = concat!(
+            "import PinHandler (Handler)\n",
+            "import qualified PinHandler as Alias\n",
+            "let saved = (pure () :: Handler ())\n",
+            "let boxed = (1 :: Int, [Alias.Box])\n",
+        );
+        let checked = check_cell(CellCheckRequest {
+            session_id: None,
+            cell_text: cell,
+            template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        })
+        .unwrap();
+        let saved = checked
+            .pins
+            .iter()
+            .find(|pin| pin.key.ends_with("_saved"))
+            .expect("saved pin");
+        assert!(saved
+            .imports
+            .contains(&"Control.Monad.Freer.State".to_string()));
+        let boxed = checked
+            .pins
+            .iter()
+            .find(|pin| pin.key.ends_with("_boxed"))
+            .expect("boxed pin");
+        assert!(boxed.ty.contains("Alias.Box"));
+        assert!(
+            boxed.imports.is_empty(),
+            "authored alias import remains in the source"
+        );
+        let saved_item = checked
+            .items
+            .iter()
+            .find(|item| item.verdict.binders == ["saved"])
+            .expect("saved bind item");
+        let templates = [TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: assemble_bind_module(
+                "{-# LANGUAGE DataKinds, TypeOperators, ExtendedDefaultRules #-}\n\
+                 module PinStage where\n\
+                 import Prelude\n\
+                 import Data.Text (Text)\n\
+                 import Control.Monad.Freer (Eff)\n\
+                 import PinHandler (Handler)\n\
+                 default (Int, Double, Text)\n",
+                "",
+                "__result",
+                "'[]",
+                "{{TURN_STMT}}",
+                "({{BINDERS}})",
+                false,
+            ),
+        }];
+        let staged = run_turn_pinned(
+            TurnRequest {
+                session_id: None,
+                turn_text: &saved_item.source,
+                templates: &templates,
+                include: &include,
+                session_root: root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: Some(saved_item.verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            std::slice::from_ref(saved),
+        )
+        .unwrap();
+        let TurnResult::Bind { wrapped_source, .. } = staged else {
+            panic!("Handler pin did not produce a staged bind");
+        };
+        assert!(wrapped_source.contains("import qualified Control.Monad.Freer.State"));
+        let fold_template = template.replacen(
+            "import Prelude\n",
+            "import Prelude\nimport PinHandler (Handler)\n",
+            1,
+        );
+        let (_, folded) = check_cell_with_fold(
+            CellCheckRequest {
+                session_id: None,
+                cell_text: "let saved = (pure () :: Handler ())\n",
+                template: &fold_template,
+                include: &include,
+                session_root: root.path(),
+                inject_modules: &[],
+                compile_generation: 0,
+                compile_view_evidence: "",
+            },
+            CellFoldTurn {
+                templates: &templates,
+                gen: 2,
+                retained_imports: &[],
+            },
+        )
+        .unwrap();
+        let Some(TurnResult::Bind { wrapped_source, .. }) = folded else {
+            panic!("worker did not complete its checked Handler fold");
+        };
+        assert!(wrapped_source.contains("import qualified Control.Monad.Freer.State"));
     }
 
     /// A local, minimal `Eff` so these two tests can exercise the REAL

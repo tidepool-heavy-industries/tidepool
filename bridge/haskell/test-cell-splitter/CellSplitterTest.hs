@@ -70,10 +70,11 @@ main = do
     ["--dependency-evidence"] -> dependencyEvidenceCompilation
     ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
+    ["--pin-imports"] -> pinnedTypeImportsCompilation
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
 
 multilineLetPlacement :: DynFlags -> IO ()
 multilineLetPlacement flags = do
@@ -503,6 +504,65 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-path-insensitive-witness"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+pinnedTypeImportsCompilation :: IO ()
+pinnedTypeImportsCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let alias = root </> "PinHandler.hs"
+      checkedSource = root </> "PinCheck.hs"
+      stagedSource = root </> "PinStage.hs"
+  writeFile alias $ unlines
+    [ "{-# LANGUAGE DataKinds, TypeOperators #-}"
+    , "module PinHandler (Handler, Box(..)) where"
+    , "import Control.Monad.Freer (Eff)"
+    , "import qualified Control.Monad.Freer.State as S"
+    , "type Handler a = Eff '[S.State Int] a"
+    , "data Box = Box"
+    ]
+  writeFile checkedSource $ unlines
+    [ "module PinCheck where"
+    , "import PinHandler (Handler)"
+    , "import qualified PinHandler as Alias"
+    , "__cell = do { let { saved = (pure () :: Handler ()) };"
+    , "  let { __tidepool_cell_pin_0_saved = saved };"
+    , "  let { boxed = (1 :: Int, [Alias.Box]) };"
+    , "  let { __tidepool_cell_pin_1_boxed = boxed }; pure () } :: IO ()"
+    ]
+  withResidentPipelineSelected [root] $ \compile -> do
+    checked <- compile CheckedEnvironment mempty GeneralCompile Nothing checkedSource [] Nothing
+    pin <- case filter ((== "__tidepool_cell_pin_0_saved") . checkedPinKey)
+                 (crCheckedBinderPins checked) of
+      [selected] -> pure selected
+      _ -> fail "whole-cell check did not capture the Handler binding"
+    unless ("Control.Monad.Freer.State" `elem` checkedPinImports pin) $
+      fail ("expanded Handler type omitted its qualified State import: " ++ show pin)
+    aliasPin <- case filter ((== "__tidepool_cell_pin_1_boxed") . checkedPinKey)
+                      (crCheckedBinderPins checked) of
+      [selected] -> pure selected
+      _ -> fail "whole-cell check did not capture the alias-qualified binding"
+    assertContains "authored import alias stays in the pinned type" "Alias.Box" (checkedPinType aliasPin)
+    unless (null (checkedPinImports aliasPin)) $
+      fail ("tuple/list/alias type added an unneeded module import: " ++ show aliasPin)
+    writeFile stagedSource $ unlines $
+      [ "{-# LANGUAGE DataKinds, TypeOperators #-}"
+      , "module PinStage where"
+      , "import PinHandler (Handler)"
+      , "import qualified PinHandler as Alias"
+      ] ++ map ("import qualified " ++) (checkedPinImports pin) ++
+      [ "__result = do { let { saved = (pure () :: Handler ()) };"
+      , "  let { boxed = (1 :: Int, [Alias.Box]) };"
+      , "  pure ((saved :: " ++ checkedPinType pin ++ "),"
+          ++ " (boxed :: " ++ checkedPinType aliasPin ++ ")) } :: IO (Handler (), (Int, [Alias.Box]))"
+      ]
+    _ <- compile CheckedEnvironment mempty GeneralCompile Nothing stagedSource [] Nothing
+    pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-pin-imports"
       hClose handle
       removeFile path
       createDirectory path

@@ -10071,17 +10071,15 @@ fn compile_block_off_checkout(
     visible_names: &[String],
     candidate_dir: Option<&std::path::Path>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let pin_heads = pins
-        .into_iter()
-        .flatten()
-        .flat_map(|pin| &pin.heads)
-        .chain(expression_plan.into_iter().flat_map(|plan| &plan.heads));
-    let pin_imports = SourceImports::from_specs(
-        pin_heads
-            .filter(|head| head.module.starts_with("Tidepool.Session."))
-            .map(|head| format!("qualified {}", head.module)),
+    // Observation templates embed the checked expression type directly.
+    // Bind wrappers receive their pin imports in run_turn_pinned.
+    let expression_imports = SourceImports::from_specs(
+        expression_plan
+            .into_iter()
+            .flat_map(|plan| &plan.imports)
+            .map(|module| format!("qualified {module}")),
     );
-    let compile_view = compile_view.with_workbench_imports(&pin_imports);
+    let compile_view = compile_view.with_workbench_imports(&expression_imports);
     let mut prepared = source.prepare(&compile_view);
     if let Some(prologue) = prologue {
         prepared.preamble = prepared.preamble.replacen(

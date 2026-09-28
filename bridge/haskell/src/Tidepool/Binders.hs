@@ -479,6 +479,7 @@ data CellExpressionPlan = CellExpressionPlan
   , expressionPlanPresentation :: ExpressionPresentation
   , expressionPlanType :: String
   , expressionPlanHeads :: [NominalHead]
+  , expressionPlanImports :: [String]
   } deriving (Eq, Show)
 
 -- | One original source item retained beneath its execution item. Declaration
@@ -498,6 +499,7 @@ data CheckedBinderPin = CheckedBinderPin
   { checkedPinKey :: String
   , checkedPinType :: String
   , checkedPinHeads :: [NominalHead]
+  , checkedPinImports :: [String]
   } deriving (Eq, Show)
 
 -- | Split and classify a cell in one GHC session. Classification is deliberately
