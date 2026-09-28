@@ -304,7 +304,8 @@ fn read_scalar(path: &Path) -> std::io::Result<u64> {
         .map_err(|_| io_error(format!("invalid counter in {}", path.display())))
 }
 fn read_memory_limit(path: &Path) -> std::io::Result<Option<u64>> {
-    let value = std::fs::read_to_string(path)?;
+    let value = std::fs::read_to_string(path)
+        .map_err(|error| io_error(format!("read {}: {error}", path.display())))?;
     let value = value.trim();
     if value == "max" {
         Ok(None)
@@ -316,34 +317,69 @@ fn read_memory_limit(path: &Path) -> std::io::Result<Option<u64>> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MemoryLimitKind {
+    High,
+    Max,
+}
+impl MemoryLimitKind {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::High => "memory.high",
+            Self::Max => "memory.max",
+        }
+    }
+}
+
+struct ActorMemoryCapacity {
+    group: PathBuf,
+    kind: MemoryLimitKind,
+    limit: u64,
+    current: u64,
+    remaining: u64,
+}
+
 /// The service is placed beneath the same slice as actor scopes. A limit on
 /// any ancestor constrains that slice too; command-pool children are excluded.
-fn actor_slice_available(slice: &Path) -> std::io::Result<u64> {
+fn actor_slice_available(slice: &Path) -> std::io::Result<ActorMemoryCapacity> {
     let cgroup_root = Path::new("/sys/fs/cgroup");
     if !slice.starts_with(cgroup_root) || slice == cgroup_root {
         return Err(io_error("actor slice is outside the cgroup hierarchy"));
     }
-    let mut available = u64::MAX;
-    let mut target_bounded = false;
+    let mut available: Option<ActorMemoryCapacity> = None;
     // The v2 root has no memory controller limit files of its own.
     for group in slice.ancestors().take_while(|group| *group != cgroup_root) {
         let high = read_memory_limit(&group.join("memory.high"))?;
         let max = read_memory_limit(&group.join("memory.max"))?;
-        if group == slice {
-            target_bounded = high.is_some() || max.is_some();
-        }
-        if let Some(limit) = high.into_iter().chain(max).min() {
-            let current = read_scalar(&group.join("memory.current"))?;
-            available = available.min(limit.saturating_sub(current));
+        if high.is_some() || max.is_some() {
+            let current_path = group.join("memory.current");
+            let current = read_scalar(&current_path)
+                .map_err(|error| io_error(format!("read {}: {error}", current_path.display())))?;
+            for (kind, limit) in [(MemoryLimitKind::High, high), (MemoryLimitKind::Max, max)] {
+                if let Some(limit) = limit {
+                    let remaining = limit.saturating_sub(current);
+                    if available
+                        .as_ref()
+                        .is_none_or(|capacity| remaining < capacity.remaining)
+                    {
+                        available = Some(ActorMemoryCapacity {
+                            group: group.to_path_buf(),
+                            kind,
+                            limit,
+                            current,
+                            remaining,
+                        });
+                    }
+                }
+            }
         }
     }
-    if !target_bounded {
-        return Err(io_error(format!(
-            "actor slice has no finite memory.high or memory.max: {}",
+    available.ok_or_else(|| {
+        io_error(format!(
+            "actor slice and ancestors have no finite memory.high or memory.max: {}",
             slice.display()
-        )));
-    }
-    Ok(available)
+        ))
+    })
 }
 fn read_pressure_avg10(path: &Path) -> std::io::Result<u64> {
     let text = std::fs::read_to_string(path)?;
@@ -1246,16 +1282,19 @@ impl CommandResources {
                 let decision = actor_start_decision(&self.policy, available, *pending)
                     .map_err(|shortfall| format!("host: {shortfall}"))
                     .and_then(|()| {
-                        (slice_available.saturating_sub(*pending)
+                        (slice_available.remaining.saturating_sub(*pending)
                             >= self.policy.actor_start_bytes)
                             .then_some(())
                             .ok_or_else(|| {
                                 format!(
-                                    "actor slice {}: {:.1} GiB available after {:.1} GiB pending actor starts; {:.1} GiB start needed",
-                                    self.actor_slice.display(),
-                                    slice_available.saturating_sub(*pending) as f64 / GIB as f64,
-                                    *pending as f64 / GIB as f64,
-                                    self.policy.actor_start_bytes as f64 / GIB as f64
+                                    "actor memory limit {}/{}: current={} limit={} remaining={} bytes; pending actor starts={} bytes; new start={} bytes needed",
+                                    slice_available.group.display(),
+                                    slice_available.kind.file_name(),
+                                    slice_available.current,
+                                    slice_available.limit,
+                                    slice_available.remaining,
+                                    *pending,
+                                    self.policy.actor_start_bytes
                                 )
                             })
                     });
