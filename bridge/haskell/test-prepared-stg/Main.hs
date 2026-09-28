@@ -42,7 +42,7 @@ import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
 import Tidepool.PreparedSites
-  ( PreparedSite(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
+  ( PreparedSite(..), SiteRejection(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
@@ -536,6 +536,12 @@ main = do
           unfold = unfoldDir </> "Unfold.hs"
           replyDir = dir </> "Tidepool" </> "Agent" </> "Reply"
           replyInternal = replyDir </> "Internal.hs"
+          currentRequestTarget = dir </> "CurrentRequestSiteExpr.hs"
+          dormantRequestTarget = dir </> "DormantRequestExpr.hs"
+          hiddenRequestTool = dir </> "HiddenRequestTool.hs"
+          activeRequestTarget = dir </> "ActiveRequestExpr.hs"
+          laterRequestTarget = dir </> "LaterRequestSiteExpr.hs"
+          changedRequestTarget = dir </> "ChangedRequestSiteExpr.hs"
           siteTarget = dir </> "SiteExpr.hs"
           partialChildTarget = dir </> "PartialChildExpr.hs"
           polySiteTarget = dir </> "PolySiteExpr.hs"
@@ -602,8 +608,60 @@ main = do
         , "childSited _ _ = Nothing"
         ])
       writeFile replyInternal (unlines
-        [ "module Tidepool.Agent.Reply.Internal where"
+        [ "{-# LANGUAGE ExplicitForAll #-}"
+        , "{-# LANGUAGE KindSignatures #-}"
+        , "module Tidepool.Agent.Reply.Internal where"
+        , "import Data.Kind (Type)"
         , "data ResponseResult a = ResponseResult a"
+        , "data RequestScope (input :: Type) (result :: Type) = RequestScope"
+        , "data Eff (effs :: Type) (value :: Type) = Eff value"
+        , "{-# OPAQUE currentRequest #-}"
+        , "currentRequest :: forall input result effs. Eff effs (RequestScope input result)"
+        , "currentRequest = currentRequestSited (-1)"
+        , "{-# OPAQUE currentRequestSited #-}"
+        , "currentRequestSited :: forall input result effs. Int -> Eff effs (RequestScope input result)"
+        , "currentRequestSited _ = Eff RequestScope"
+        ])
+      writeFile currentRequestTarget (unlines
+        [ "{-# LANGUAGE TypeApplications #-}"
+        , "module CurrentRequestSiteExpr where"
+        , "import Tidepool.Agent.Reply.Internal"
+        , "typedRequest :: Eff Bool (RequestScope Int Char)"
+        , "typedRequest = currentRequest @Int @Char @Bool"
+        ])
+      writeFile laterRequestTarget (unlines
+        [ "{-# LANGUAGE TypeApplications #-}"
+        , "module LaterRequestSiteExpr where"
+        , "import Tidepool.Agent.Reply.Internal"
+        , "typedRequest :: Eff Bool (RequestScope Int Char)"
+        , "typedRequest = currentRequest @Int @Char @Bool"
+        ])
+      writeFile hiddenRequestTool (unlines
+        [ "{-# LANGUAGE TypeApplications #-}"
+        , "module HiddenRequestTool (tool) where"
+        , "import Tidepool.Agent.Reply.Internal"
+        , "tool :: Eff Bool (RequestScope Int Char)"
+        , "tool = currentRequest @Int @Char @Bool"
+        ])
+      writeFile dormantRequestTarget (unlines
+        [ "module DormantRequestExpr where"
+        , "import HiddenRequestTool ()"
+        , "unrelated :: Int"
+        , "unrelated = 1"
+        ])
+      writeFile activeRequestTarget (unlines
+        [ "module ActiveRequestExpr where"
+        , "import HiddenRequestTool (tool)"
+        , "active = tool"
+        ])
+      writeFile changedRequestTarget (unlines
+        [ "{-# LANGUAGE TypeApplications #-}"
+        , "module ChangedRequestSiteExpr where"
+        , "import Tidepool.Agent.Reply.Internal"
+        , "typedRequest :: Eff Bool (RequestScope Int Char)"
+        , "typedRequest = currentRequest @Int @Char @Bool"
+        , "marker :: Int"
+        , "marker = generationMarker"
         ])
       runTypeEvidenceChecks dir
         (\result entry -> projectEntry result "TypeEvidence" entry mempty)
@@ -665,6 +723,19 @@ main = do
       assert (map fst directShape == ["Dep", "Expr"])
         ("direct prepared modules lost context: " ++ show directShape)
       siteDirect <- runPipelineSelected PreparedStg siteTarget [dir]
+      currentRequestDirect <- runPipelineSelected PreparedStg currentRequestTarget [dir]
+      laterRequestDirect <- runPipelineSelected PreparedStg laterRequestTarget [dir]
+      let currentRequestEvidence = preparedEvidence "CurrentRequestSiteExpr" currentRequestDirect
+          laterRequestEvidence = preparedEvidence "LaterRequestSiteExpr" laterRequestDirect
+      assert (case currentRequestEvidence of
+                (inventory, [site]) -> "currentRequestSited" `isInfixOf` inventory
+                  && ysOrigin site == "CurrentRequestSiteExpr.typedRequest"
+                _ -> False)
+        ("currentRequest must resolve its exact generated sibling: "
+          ++ show currentRequestEvidence
+          ++ "; rejections=" ++ show [srMessage rejection
+            | prepared <- pprModules currentRequestDirect
+            , rejection <- pmSiteRejections prepared])
       let (siteInventory, directSites) = preparedEvidence "SiteExpr" siteDirect
       assert (case filter ((== "SiteExpr.typedSite") . ysOrigin) directSites of
                 [site] -> "runLLMTurnSited" `isInfixOf` siteInventory
@@ -702,6 +773,21 @@ main = do
         "list-answer site did not preserve shared legacy answer identity"
 
       withResidentPipelineSelected [dir] $ \compileSite -> do
+        requestCold <- compileSite PreparedStg mempty GeneralCompile Nothing currentRequestTarget [] Nothing
+        assert (preparedEvidence "CurrentRequestSiteExpr" requestCold == currentRequestEvidence)
+          "resident cold currentRequest site differs from direct"
+        dormantRequest <- compileSite PreparedStg mempty GeneralCompile Nothing dormantRequestTarget [] Nothing
+        assert (all ((/= "HiddenRequestTool") . fst) (preparedShape dormantRequest))
+          "dormant import unexpectedly reached the hidden request tool"
+        activeRequest <- compileSite PreparedStg mempty GeneralCompile Nothing activeRequestTarget [] Nothing
+        let hiddenModules = [prepared | prepared <- pprModules activeRequest
+              , moduleNameString (moduleName (pmModule prepared)) == "HiddenRequestTool"]
+        assert (case hiddenModules of
+                  [hidden] -> null (pmSiteRejections hidden)
+                  _ -> False)
+          ("cached nonreachable tool retained a missing-sibling site rejection: "
+            ++ show [srMessage rejection | hidden <- hiddenModules
+              , rejection <- pmSiteRejections hidden])
         siteCold <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         siteWarm <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteCold == (siteInventory, directSites))
@@ -714,6 +800,23 @@ main = do
         siteRecovered <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteRecovered == (siteInventory, directSites))
           "resident compiler did not recover after a partial recognized site"
+        requestLater <- compileSite PreparedStg mempty GeneralCompile Nothing laterRequestTarget [] Nothing
+        assert (preparedEvidence "LaterRequestSiteExpr" requestLater == laterRequestEvidence)
+          "fresh consumer lost currentRequest sibling after another target"
+        appendFile replyInternal (unlines
+          [ "{-# OPAQUE generationMarker #-}"
+          , "generationMarker :: Int"
+          , "generationMarker = 1"
+          ])
+        requestChanged <- compileSite PreparedStg mempty GeneralCompile Nothing changedRequestTarget [] Nothing
+        let (changedInventory, changedSites) = preparedEvidence "ChangedRequestSiteExpr" requestChanged
+        assert ("generationMarker" `isInfixOf` changedInventory
+          && "currentRequestSited" `isInfixOf` changedInventory
+          && length changedSites == 1)
+          ("changed sibling provider source was not recompiled for a fresh consumer: "
+            ++ show ("generationMarker" `isInfixOf` changedInventory,
+              "currentRequestSited" `isInfixOf` changedInventory,
+              length changedSites))
 
       -- Use the production forall/dictionary shape with an open effect row.
       readFile "test-prepared-stg/site-fixtures/Core.hs" >>= writeFile effects

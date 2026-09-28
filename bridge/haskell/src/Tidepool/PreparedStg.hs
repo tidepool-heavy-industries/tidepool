@@ -75,6 +75,8 @@ import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 data PreparedElaboration = PreparedElaboration
   { peGuts :: CgGuts
   , peBindings :: [CoreBind]
+  -- | Siblings defined by this module. Elaborating a module may read the
+  -- accumulated bindings from earlier modules, but its memo owns only these.
   , peSitedSiblings :: Map String Id
   , peYieldSites :: [YieldSite]
   , pePreparedSites :: [PreparedSite]
@@ -124,6 +126,7 @@ data PreparedModule = PreparedModule
   , pmPassProfile :: PreparedPassProfile
   , pmBindings :: [(CgStgTopBinding, IdSet)]
   , pmTagSigs :: StgCgInfos
+  -- | Defining-module sibling Ids only, replayed after memo validity checks.
   , pmSitedSiblings :: Map String Id
   , pmYieldSites :: [YieldSite]
   , pmPreparedSites :: [PreparedSite]

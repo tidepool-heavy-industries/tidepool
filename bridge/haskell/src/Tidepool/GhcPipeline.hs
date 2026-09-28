@@ -1397,8 +1397,9 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   cgGuts <- case mRegisteredTidy of
                     Just tidy -> pure tidy
                     Nothing -> fst <$> timePhase timing "prepared_tidy" (liftIO (hscTidy (mfHscEnv mf) simplified))
+                  let ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
-                    let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
+                    let known' = Map.union ownedSiblings known
                     in (known', known')
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
                     (resolveSiteAuthority (mfHscEnv mf) (tcg_insts (mfTcGblEnv mf)))
@@ -1407,7 +1408,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   let elaboration = PreparedElaboration
                         { peGuts = cgGuts
                         , peBindings = elaboratedBindings
-                        , peSitedSiblings = siblings
+                        , peSitedSiblings = ownedSiblings
                         , peYieldSites = yieldSites
                         , pePreparedSites = preparedSites
                         , peTypeGraph = typeGraph
@@ -1416,7 +1417,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                         }
                   Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration))
               rememberPreparedSiblings prepared = liftIO $
-                modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
+                modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
           -- Module names do not identify generated content across independent
           -- requests. A memo hit therefore requires the current source hash and
           -- the selected path/fingerprint closure of every home import. The
@@ -1887,6 +1888,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   else case observation of
                     CachedObservation _ entry -> do
                       recordExecutableValidity modSum True
+                      forM_ (gmePrepared entry) rememberPreparedSiblings
                       forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
                       pure []
                     -- Without a memo, only dependency and type facts are needed.
