@@ -817,3 +817,19 @@ This older retained-reviewer fixture is separate from the new exact-source fresh
 review workflow. The latter passed source mismatch, revised review, checked
 publication and bounded repair/continuation tests. Keep the old regression and
 its failure evidence; do not weaken the request or source contract to green it.
+
+### 2026-09-28 — Calls waiting behind a failed source mapper
+
+The dynamic-attachment reproduction initially retained the wrong Haskell payload
+field. Its mapper application failed with reusable `UnresolvedCallee` after the
+session checkout had succeeded; the following synchronous `R.call` waited until
+the test timed out. Correcting the effect payload fixed event delivery and the
+replacement/cleanup regression now passes. This was not checkout contention.
+
+Retain a separate investigation of pending-call failure visibility: trace whether
+an actor paused by source-mapper failure should promptly refuse a queued call or
+expose a recoverable retained wait. Do not silently change cancellation or actor
+recovery semantics. Evidence: dynamic-sources worktree
+`target/tidepool-test-runs/20260928T211101Z-3871481-battery`, nextest run
+`7d709d28-931b-4316-aeef-cfc6e317a76b`, session `16632024630559531`, Watcher `2@1`.
+The current batch fixes the invalid mapper, not this general failure-reporting path.

@@ -3,6 +3,11 @@
 Approved 2026-09-28. Implementation in isolated worktrees under
 `/home/inanna/dev/rsi-continuations`; wave22 keeps its frozen runtime and source.
 
+The accepted [compiler and continuation simplification](continuation-simplification.md)
+now governs implementation: compact authored-note coordination, Luna code review,
+and dynamic attachment replace the earlier semantic review and observer layers.
+Finish verification and handoff, then pause before launching another wave.
+
 ## Decisions
 
 Carry an operation through its mundane steps and return control at a meaningful

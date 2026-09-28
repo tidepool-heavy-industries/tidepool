@@ -1,8 +1,10 @@
 # Compiler repair and coordinator simplification
 
 Approved 2026-09-28. Implementation follows bounded continuations; the current
-run remains frozen. Finish the matched build and handoff, then pause: no successor
-wave is authorized by this batch.
+run remains frozen. Updated operator direction: finish the matched build and
+handoff, reconcile the peer-authored harness roadmap, then launch the next wave
+when its brief and gates are ready. Obtain the current root handoff/interview and
+verify retirement before launching; never overlap live waves.
 
 ## Ownership and sequence
 
@@ -53,7 +55,8 @@ retained digest. Do not invent an answer, grant authority, resolve a question or
 infer incorporation. Preserve required questions, failures, final results and
 delivery refusals. Missing notes, uncertainty, unavailable Jev and exhausted
 budgets fall back to ordinary delivery. Flush digests with the next required
-notice, explicit inspection/flush, source completion or batch finish. No polling
+notice, explicit flush, source completion or batch finish. Passive reads remain
+passive. No polling
 watchdog or new timer. Retain original publications, judgment provenance and send
 receipts through the existing collector and coordination state.
 
@@ -70,4 +73,4 @@ Update canonical prompts, skills and executable examples; delete superseded
 guidance. Publish matched workspace/harness revisions, synchronize the template,
 run focused pin/catalog checks and `just exomonad-build`. Record structural
 deletions separately from measured savings. Preserve the three-wave evaluation
-period. Pause before launch.
+period. Launch only after the readiness boundary above is satisfied.

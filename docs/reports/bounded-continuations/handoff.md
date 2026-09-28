@@ -1,5 +1,69 @@
 # Bounded continuations implementation handoff
 
+## Readiness update — 2026-09-28 22:14 UTC
+
+The operator now authorizes the successor **when ready**, superseding the earlier
+pause. No successor has launched. Wave22 still owns active custom-cell component
+work; notification 319 to root 1@1 requests its exact-source handoff and kaizen
+before retirement. Canonical harness peer plan is `b4dbef7`, now followed by
+root-guidance commit `f30fa31`; preserve that roadmap while reconciling the newer
+wave22 implementation. Do not overlay the older canonical product baseline.
+
+Full `just fixtures-check` passed on main `3dc463760` plus the producer-generated
+oracle fingerprint, now committed as `1dfdcfb65`. Retained summary:
+`target/prepared-corpus/run.1XzCZx`; `latest-success.json` records exact binary
+hashes and dirty-source provenance. Suite: 692 executed passes; other execution
+cohorts: 48 passes, zero failures. Seven registered embedded artifacts validated.
+Expected oracle values and payload digest did not change.
+
+Remaining composed routing run passed the publication, required notice, missing
+note fallback and late-note assertions, then failed the later-question projection.
+This is still a gate, not a pass. A diagnostic rerun is in
+`/tmp/rsi-continuations-remaining-diagnostic.log`; shared production source remains
+unchanged while its owner investigates. Workspace publication/pins and final
+matched build follow the remaining recipe gate.
+
+Prompt followups through shared `0ee858c` put admission-time flow selection and
+concrete behavior/consequence notes in root instructions as well as worker roles.
+They remove the stale completed-implementer prerequisite and make planner
+checkpoints conditional on an actual accepted assignment. No live-wave source
+reload was performed.
+
+## Current integration checkpoint — 2026-09-28 22:00 UTC
+
+**Not yet published or ready to launch.** Earlier checkpoints below retain history;
+they are not the current release verdict. Wave22 is unchanged.
+
+- Compiler memo repair is on main (`3e0033227`), with failing-old/passing-new
+  dormant-sibling regression. The originally failing cross-recipe sequence now
+  passes: pendingProbe then terminalFailure, five assertions each, in
+  `/tmp/rsi-continuations-composed.log`.
+- Dynamic attachment is on main through `c120a9b8c`: actual retained event
+  delivery, replacement handler selection, failed-handler pause/replacement,
+  completion and source-guard cleanup have focused executed coverage. Generated
+  protocol tests passed 8/8. Actual cross-session replacement remains unexecuted;
+  its mapper-custody import was source-reviewed and compiled.
+- Shared candidate `f7b6071` includes direct investigation/review continuations,
+  unified authored-note/accepted-decision correspondence, overflow/refusal
+  handbacks, source/plan validation, and the denser prompt pass. It is still on
+  the isolated integration branch, not the workspace pin.
+- Shared evidence audit passed 5 assertions; build-failure evidence passed 1;
+  typed report delivery/refusal passed 4; six actual live-response decoder replays
+  passed. The routing recipe exposed a fixture question naming a different plan
+  than its admitted Task; the policy correctly fell back. The fixture is corrected
+  without weakening policy. Remaining recipes run in
+  `/tmp/rsi-continuations-remaining.log` against the private snapshot recorded by
+  `/tmp/rsi-continuations-remaining-path`.
+- Six current-design live requests: 4,864 input / 397 output tokens, no retries.
+  Raw packets and honest low-confidence handling are in the evidence audit.
+- Prompt catalog/guide: 8/8 passed before the final semantic-choice prose edit;
+  the final core catalog passed 7/7. Catalog 47, shared base/API 3,384 words.
+  The updated publication snippet is exercised by the remaining routing recipe.
+- Native GHC oracle regenerated through its producer: expected values and payload
+  digest unchanged, only the input fingerprint changed. Full corpus execution,
+  final publication/pins/template sync and matched build remain required.
+
+
 2026-09-28. **In progress; not a release verdict.** The running wave22 source and
 runtime remain frozen. This file will separate final verified revisions from drafts.
 
@@ -195,3 +259,59 @@ is now assigned in isolation: register owned generated siblings when replaying
 valid nonreachable cached home modules, with a cross-target regression. The
 current hypothesis is supported by the owning cache paths but is not yet a
 verified compiler repair. This is an integration blocker, not a green helper gate.
+
+## Compiler and continuation simplification — current batch
+
+The accepted successor design is [continuation-simplification](../../../plans/continuation-simplification.md).
+It supersedes this report's earlier exact-diff Jev routing and review-scope
+classifier. Earlier live probes remain historical evidence of that older design.
+The new coordinator forwards compact authored notes and existing owner decisions;
+independent Luna reviewers own code review. Passive inspection never flushes a digest.
+
+- Compiler fix `8fe34f2c81b9d9aab55adc988c6f5480d2bedf4a`, integrated as
+  `3e0033227`: memoize module-owned generated siblings and replay them for cached
+  nonreachable modules. The new dormant-consumer regression failed on old source
+  and passed on repaired source. `tidepool-extract-bin` built and the complete
+  `prepared-stg-pipeline-test` target passed (1/1 Cabal suite). Structural corpus
+  and the original two-recipe reproduction still await integration checks.
+- Shared draft `8876ec9`: remove semantic review-scope classification; original
+  implementers repair verified failures under the unchanged scope and budget;
+  independent reviewers return typed decisions. Direct dynamic Events replace
+  diagnostic followers, their observers, investigation guards and result routes.
+  Twenty-five files changed, 232 insertions/733 deletions. Not compiled yet.
+- Dynamic-source draft `880b2fee4` plus uncommitted repairs: typed attachment to
+  private Event sinks from `Self api`, ordered partial admission, current-actor
+  authorization, retained source state and retirement cleanup. Root review found
+  cross-session replacement must transfer mapper custody, now under repair/test.
+  Executed source-owner tests and Haskell fixture compilation pass; actual Event
+  dispatch is still being isolated after a synchronous-call contention finding.
+- Coordination consolidation is still an uncompiled review candidate. Source
+  review requires consumer question context, per-consumer freshness, retained
+  delivery failures, actual judgment provenance, bounded fallback and lifecycle
+  checks. No new live semantic claims until production packets are exported and
+  their real responses replayed.
+
+No workspace pin, template, deployed runtime or live wave has changed. All draft
+work remains in isolated worktrees; this is not a completion or release verdict.
+
+Integration review checkpoint:
+
+- Shared candidate `52df105` contains the consolidated coordinator and migrated
+  recursive example. `2292db1` adds owner recovery for an exact refused diagnostic
+  report and cleanup retry after the retained command actually settles. These are
+  still uncompiled candidates, not deployment evidence.
+- `just fixtures-check` on compiler revision `3e0033227` compiled every selected
+  cohort, then stopped at a stale Suite oracle seal before corpus execution.
+  Retained run: `target/prepared-corpus/run.bcvCdI`; log:
+  `/tmp/rsi-continuations-corpus.log`. Since oracle commit `14eb93371`, its only
+  fingerprint input change is Actor/Record.hs from `4fee1adcb` (fallible cast).
+  Regenerate through the native producer after final library integration; never
+  rewrite the seal by hand or describe preparation as execution.
+- The dynamic-source timeout was not a checkout deadlock. The instrumented
+  reproduction acquired the machine and failed with reusable `UnresolvedCallee`.
+  Root found that the new three-field verb put its mapper in field 2, whereas
+  `LivePayloadPolicy::HASKELL_EFFECT_VALUE` retains field 1. The runtime therefore
+  retained the target instead of the callable. The private schema is being
+  corrected to metadata in field 0 and mapper in field 1, matching startup source
+  installation. Public `R.attach` stays unchanged. Full delivery and cleanup
+  remain the acceptance test, not attachment admission alone.

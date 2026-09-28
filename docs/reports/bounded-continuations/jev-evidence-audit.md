@@ -1,5 +1,42 @@
 # Bounded continuation Jev evidence audit
 
+## Current design
+
+The [approved simplification](../../../plans/continuation-simplification.md)
+supersedes the diff-relevance and repair-scope classifiers below. Jev compares
+exact-candidate authored publication notes with admitted consumer interests and
+open questions, or selects an existing accepted owner decision. It does not judge
+code correctness or review findings. Independent reviewers own code review;
+verified check failures return to the original implementer under the same scope.
+
+New packets must retain question/decision evidence, source/plan identity, explicit
+uncertainty, and actual judgment provenance. Missing notes use declared delivery.
+The live probes below concern the old design and are not new-design validation.
+
+## Simplified coordinator live probes
+
+Six requests exported by production `prepareCoordinationRequest` at shared
+candidate `f4a1cc5` (definitions
+`ab9fd88f43fd8b2f434053a210aa03285ed1d313581c5d29fdd9659e260ec4f8`)
+were sent once each, without retries. [Raw packets and responses](coordination-live-probes.json)
+retain actual model, usage, probabilities and wall times. Jev resolved to
+`jev-1.13.0`; 4,864 input tokens and 397 output tokens across all six requests.
+
+- Contract note: API recipient's raw digest winner had confidence 0.56, below
+  the careful floor. The policy returns uncertainty and ordinary declared
+  delivery; it does not claim confident urgency classification.
+- Optional naming example: both recipients digest.
+- Existing consumer question: select `token-kind`; unrelated database recipient
+  remains a digest.
+- Existing accepted wait decision: select its original index, 0.
+- New restart policy question: return to the owner, without inventing a decision.
+- Instructions embedded in a publication note: both recipients digest.
+
+These are synthetic semantic probes, not evidence of real worker incorporation
+or model turns saved. Production decoder replay is a separate required gate.
+
+## Historical implementation and probes
+
 Status: implementation review in progress, 2026-09-28. Live probe and recipe
 results are not yet claimed. Candidate branches are under
 `/home/inanna/dev/rsi-continuations`; the current wave is untouched.
