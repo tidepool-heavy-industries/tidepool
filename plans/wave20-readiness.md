@@ -1,75 +1,67 @@
 # Wave20 readiness
 
-Updated 2026-09-27 at the authorized one-shot supervision check.
-User authorizes launch once the inter-wave work is complete. No launch has
-occurred. The timer is one-shot, not permission to skip gates or recur.
+Updated 2026-09-28 UTC. Launch is authorized after the remaining gates.
+No wave20 run has started. No recurring timer is active.
 
-## Latest integration check
+## Integrated and checked
 
-Main `44f418d98` integrates storage retirement/recovery, checkpoint capture and
-release, fallible record sends, and durable run paths. The combined facade
-target compiled; six selected tests passed (535 skipped, 52.088 seconds): four
-durable-path/discovery checks, the hosted deferred-checkpoint scenario, and the
-fallible mailbox scenario. This supersedes the integration status below.
+- Git-aware source import and shared copy admission: `6360d2329`,
+  `476f7228e`, `4c46712e8`. Concurrent admission and process-death lock release
+  each passed a focused test.
+- Retired checkout layers, recovery and last-reference release are integrated.
+  The production four-child fork/retire test passed; the separate 16-manifest
+  unit test is not a production storage measurement. Durable state now lives
+  outside the disposable cache (`44f418d98`); legacy discovery is fenced.
+- Context checkpoints, explicit release and fallible record sends are
+  integrated. Six combined facade checks passed at `44f418d98` (535 skipped,
+  52.088 seconds), including the hosted deferred-checkpoint and mailbox cases.
+  Checkpoint sponsor accounting was subsequently repaired at `65cfd1408`;
+  sponsor-budget and configured-spec checks passed, two tests total.
+- Coherent run tooling and historical product-source isolation are integrated
+  through `72efbbca4`; six focused source/recovery checks passed. Catalog v44
+  and fingerprint were fixed at `ff5c3babe`, with its exact test passing.
+- The local check wrapper preserves validated paired extractor overrides and
+  starts/reuses its compiler daemon (`840d933e8`; 28 shell checks passed).
+  The earlier direct-binary workaround started a cold GHC worker per request.
+  The corrected path reuses worker 0: one observed cold request was 56.935s,
+  followed by requests of 2.253s, 7.035s, 0.973s and 12.514s. These are individual
+  compiler requests, not full recipe durations or a uniform latency promise.
 
-Post-integration review found checkpoint release removes sponsor metadata used
-to charge already-admitted descendants. The checkpoint owner is repairing the
-budget ledger independently of capability lifetime. This remains a launch gate
-despite the six passing tests.
+## Remaining gates
 
-The coordinator owner now has the compiler slot for authored helper checks.
-The source owner is removing automatic checkout-tooling shadowing: ordinary
-product work uses coherent run tooling and branch-local notebook helpers.
-Explicit per-actor checkout-tooling selection is a documented follow-up rather
-than an implicit incomplete module overlay.
+1. Finish the authored WorkPlan hosted correction rehearsal. Its structural
+   start, typed parallel join and terminal close have passed. Notebook fixture
+   display errors and asynchronous observation ordering were repaired.
+2. Repair review-discovered coordinator callback ownership: parallel verification
+   cannot overwrite a single pending slot; repeated review of one developed
+   candidate cannot reuse an ambiguous completion key. Check admission accounting
+   before releasing checkpoint leases. Pin only the verified final candidate.
+3. Integrate the shared workspace, update the scaffold pin and shipped template,
+   and pin the wave20 checkout. Execute focused pin and launch-workspace checks
+   using the matched local runtime and one compiler slot.
+4. Launch and verify actual root admission/activity, then record all revisions,
+   binary identity, run ID and log path. Do not infer launch from a tmux session.
 
-## Current evidence
+The coordinator exposes exact review-flow handles for the original owner to
+clean up. It cannot impersonate that owner. Terminal plan completion and that
+explicit external cleanup step remain distinct.
 
-- Wave19 root and worker tmux panes are dead; the compiler pane remains alive.
-  Do not restart that shared daemon or confuse retained tmux windows with a
-  live frontier wave. The root interview is unavailable after the crash.
-- Wave19 root checkout remains at `d22c5a5`, with dirty NEXT, automation trial
-  notes and friction notes preserved. Inspect surviving candidate commits and
-  their reviews before choosing the wave20 product baseline.
-- Source import/admission changes are integrated on main at `6360d2329`,
-  `476f7228e`, `4c46712e8`. Root executed both lock tests through `just test-lib
-  exomonad-node`: concurrent admission and process-death release, each 1 passed.
-- Retirement candidate `dc9707f2c` has focused branch checks, but root review
-  found finalized manifests never released their layer references. Repair and
-  last-reference cleanup evidence are required before integration. The manual
-  16-manifest test is not a production multi-child retirement measurement.
-- Checkpoint candidate `c32580a47` has generated checks, five-crate compilation
-  and focused tests. Root review found published capabilities retain their
-  issuing machine indefinitely; explicit release and a hosted end-to-end test
-  remain. Do not claim registry tests prove the provider round trip.
-- Coordinator draft `dc7d2f8` in shared workspace branch
-  `rsi/w19-continuation` is uncompiled and is not a launchable helper pin.
+## Product preparation
 
-## Remaining launch gates and owners
+`/home/inanna/dev/exomonad-harness-runs/wave20`, branch `rsi/wave20`, starts from
+wave19 checkpoint `d22c5a525adb104eedece0fb9fce373520c8b7ad`. Its brief and NEXT
+are committed (`f7e487c`, `c553a6b`). See
+[wave20 preparation](../docs/reports/wave20-preparation.md).
 
-1. Storage: complete bounded import/copy admission, durable retired custody,
-   reclamation, state/cache separation and failure-path review. Root owns exact
-   integration; source/durable-path and retirement lanes own repairs.
-2. Runtime: fallible mailbox admission (`R.trySend`), checkpoint release and
-   delayed hosted fork test. Checkpoint lane owns implementation. No synchronous
-   request disguised as a cast.
-3. Authored coordinator: resume the parked typed interpreter after runtime APIs
-   settle; compile and execute sequence/parallel joins, exact review completion,
-   refused callback retention, explicit corrections and cleanup. Update prompts
-   with compiled examples and pin the resulting shared workspace.
-4. Source coherence: distinguish historical product source from coherent run
-   tooling. Checkpoint-specific frozen source admission alone does not resolve
-   the general wave19 historical-review module mixing defect.
-5. Product baseline/brief: reconcile surviving wave19 work. Intended wave20
-   parallel components are deterministic asynchronous custom-cell integration,
-   typed job-side agent operations, and a reusable tree-driver lifecycle.
-   Preserve standalone extension seams; no credentialed inference or production
-   Codex replacement. Shared contracts precede dependent implementation forks.
-6. Build the matched local runtime and execute focused integration/launch checks.
-   Record binary/source revision, shared workspace pin, product baseline,
-   prompt revision, run/log identity and experiment hypotheses. Launch Sol
-   Medium only when the brief, helper rehearsal and storage gates are ready.
+Sol Medium first reconciles surviving wave19 candidates and freezes the shared
+contract, then coordinates three parallel Luna component trees: deterministic
+asynchronous custom cells, typed job-side agent operations, and reusable tree
+lifecycle. These use standalone stubs; production Exomonad integration and
+credentialed inference remain outside this assignment. One bounded real
+WorkPlan episode measures coordination value with ordinary orchestration as a
+fallback.
 
-Use one expensive compiler slot. Do not apply prerequisite commits twice:
-the retirement branch contains cherry-picks of the source/admission lane.
-Retain exact command/count evidence and report unavailable behavior honestly.
+Wave19 root and worker panes are dead; its compiler remains alive. The root
+interview is unavailable after the crash. Dirty wave19 NEXT, trial notes,
+friction notes and surviving commits are preserved. Do not restart shared
+daemons, discard work, or treat this checkpoint as an accepted integrated release.
