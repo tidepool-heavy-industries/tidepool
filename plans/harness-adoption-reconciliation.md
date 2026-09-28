@@ -102,3 +102,24 @@ review found concrete defects, and reports preserved unexecuted checks as unknow
 
 This applies to adapter design as well: start from what an actor needs to do and
 trace the end-to-end flow before deciding which existing interface to adapt.
+
+## Shared harness memory hypothesis — 2026-09-28
+
+Inanna's architectural target is one shared harness host that multiplexes many
+actors, replacing the swarm of native client processes. Wave21 retained 37 native
+clients with roughly 18.1 GiB combined PSS plus SwapPSS in the sampled footprint.
+This motivates the migration, but is not a measured saving from a replacement.
+
+A shared executable launched separately for every actor still duplicates private
+runtime allocations. The useful design shares process infrastructure, provider
+clients and immutable context prefixes where semantics permit; each actor keeps
+its own authority, cancellation, conversation suffix and lifecycle. Completed
+actors must release those private allocations. One process also concentrates
+failure impact, so preserve actor supervision and bounded retained evidence.
+
+Use the next run's external resource observations as a baseline: PSS plus SwapPSS
+by client/host/compiler/build, cgroup current and pressure, live versus retired
+actors, and release after local integration. Later compare the same useful work
+and concurrency through the standalone harness. Compiler/JIT memory remains a
+separate owner and does not disappear by sharing the model driver. This is future
+architecture guidance, not an expansion of the current three-change batch.
