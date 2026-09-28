@@ -1,7 +1,8 @@
 # Wave20 readiness
 
 Updated 2026-09-28 UTC. Launch is authorized after the remaining gates.
-No wave20 run has started. No recurring timer is active.
+The first launch failed before model admission; its retry is rebuilding.
+No recurring timer is active.
 
 ## Integrated and checked
 
@@ -27,20 +28,38 @@ No wave20 run has started. No recurring timer is active.
   followed by requests of 2.253s, 7.035s, 0.973s and 12.514s. These are individual
   compiler requests, not full recipe durations or a uniform latency promise.
 
-## Remaining gates
+## Final integration and launch
 
-1. Finish the authored WorkPlan hosted correction rehearsal. Its structural
-   start, typed parallel join and terminal close have passed. Notebook fixture
-   display errors and asynchronous observation ordering were repaired.
-2. Repair review-discovered coordinator callback ownership: parallel verification
-   cannot overwrite a single pending slot; repeated review of one developed
-   candidate cannot reuse an ambiguous completion key. Check admission accounting
-   before releasing checkpoint leases. Pin only the verified final candidate.
-3. Integrate the shared workspace, update the scaffold pin and shipped template,
-   and pin the wave20 checkout. Execute focused pin and launch-workspace checks
-   using the matched local runtime and one compiler slot.
-4. Launch and verify actual root admission/activity, then record all revisions,
-   binary identity, run ID and log path. Do not infer launch from a tmux session.
+The helper package is pinned at `b270dbf86b5c755780ca1c04805fa786153b578c`
+(shared origin main), integrated into Tidepool at `2b3360254`, and pinned into
+wave20 at `6af0f58`. Scaffold and shipped template match.
+
+- Hosted happy/correction checks passed 13 assertions; separate final targeted
+  regressions passed 13 assertions for repeated review, parallel exact-source
+  verification, missing incorporation refusal and cleanup. These were split
+  focused runs, not one complete aggregate run.
+- Pin and prompt-catalog checks passed 2 tests (539 skipped).
+- The actual launch workspace passed source and child-effect preflight;
+  definition identity is
+  `f86c3c075f679bcb7af145f37418757c42e63c783d8b95bccbd2d758b997cd7d`.
+- First run `e467e715-35af-40af-8c98-14be65564eb7` failed before a model
+  conversation: its durable operator socket path exceeded Linux SUN_LEN.
+  Run resources were stopped with the owning CLI; service inactivity and absent
+  wave20 tmux session were verified. Logs remain in the launch checkout.
+  No root interview was possible before conversation creation.
+- `9bd6b3df1` fixes the owning operator transport using a retained directory FD
+  and short proc-fd address, preserving the actual durable socket location.
+  Long-path HTTP/permissions/cleanup and artifact-query tests passed (2 tests,
+  540 skipped). The retry rebuild is in progress.
+
+Remaining gate: launch and verify actual root admission and provider activity,
+then retain run/log identities and binary hash. A tmux session alone is not
+launch evidence.
+
+Follow-up: the first failure also exposed a pre-conversation recovery mismatch:
+recovery says it can start fresh but subsequently refuses incomplete root
+conversation evidence. The stopped failed run's logs retain this secondary
+failure; it is not evidence that a provider session ran.
 
 The coordinator exposes exact review-flow handles for the original owner to
 clean up. It cannot impersonate that owner. Terminal plan completion and that
