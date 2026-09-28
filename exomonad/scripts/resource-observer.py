@@ -112,19 +112,25 @@ def processes(run_id):
         explicit = any(token == marker for token in tokens)
         # Runtime launcher arguments can contain the root path instead.
         explicit = explicit or any(token.endswith(b"/" + marker) for token in tokens)
-        found[pid] = {"ppid": ppid, "comm": comm, "cgroup": cg, "explicit": explicit}
+        try:
+            executable = Path(os.readlink(entry / "exe")).name.removesuffix(" (deleted)")
+        except OSError:
+            executable = None
+        found[pid] = {"ppid": ppid, "comm": comm, "executable": executable,
+                      "cgroup": cg, "explicit": explicit}
     return found
 
 
-def group_for(comm, host_unit):
+def group_for(value, host_unit):
+    name = value["executable"] or value["comm"]
+    if name.startswith(("codex", "claude", "gemini", "opencode")):
+        return "client"
+    if name.startswith(("tidepool-extract", "ghc")):
+        return "compiler"
+    if name.startswith(("cargo", "rustc", "cabal", "nix", "make", "cc1", "ld")):
+        return "build"
     if host_unit:
         return "host"
-    if comm.startswith(("codex", "claude", "gemini", "opencode")):
-        return "client"
-    if comm.startswith(("tidepool-extrac", "ghc")):
-        return "compiler"
-    if comm.startswith(("cargo", "rustc", "cabal", "nix", "make", "cc1", "ld")):
-        return "build"
     return "other"
 
 
@@ -137,6 +143,12 @@ def ownership(table, run_id):
     for value in table.values():
         if value["explicit"] and "/swarm.slice/" in value["cgroup"]:
             seed_paths.add(value["cgroup"])
+    # Parent cgroup counters include descendants. Keep only disjoint roots.
+    collapsed = set()
+    for path in sorted(seed_paths, key=len):
+        if not any(path == parent or path.startswith(parent + "/") for parent in collapsed):
+            collapsed.add(path)
+    seed_paths = collapsed
     owned = set()
     for pid, value in table.items():
         if any(value["cgroup"] == path or value["cgroup"].startswith(path + "/") for path in seed_paths):
@@ -232,28 +244,77 @@ def actor_probe(run_root):
     if not sock.exists():
         return {"state": "socket_absent"}
     started = time.monotonic()
+    deadline = started + 2.0
     try:
         previous = os.open(".", os.O_RDONLY)
         try:
             # Unix socket addresses have a short path limit; use its directory.
             os.chdir(sock.parent)
             with socket.socket(socket.AF_UNIX) as connection:
-                connection.settimeout(2.0)
+                connection.settimeout(max(0.001, deadline - time.monotonic()))
                 connection.connect(sock.name)
                 request = f"GET /v1/sessions/{quote(session)}/actors HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                connection.settimeout(max(0.001, deadline - time.monotonic()))
                 connection.sendall(request.encode("ascii"))
-                line = b""
-                while b"\r\n" not in line and len(line) < 256:
-                    chunk = connection.recv(256)
+                response = bytearray()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return {"state": "timeout", "latency_ms": round((time.monotonic() - started) * 1000)}
+                    connection.settimeout(remaining)
+                    chunk = connection.recv(min(65536, 262144 + 8192 - len(response) + 1))
                     if not chunk:
                         break
-                    line += chunk
+                    response.extend(chunk)
+                    if len(response) > 262144 + 8192:
+                        return {"state": "response_too_large", "latency_ms": round((time.monotonic() - started) * 1000)}
         finally:
             os.fchdir(previous)
             os.close(previous)
-        code = int(line.split(b" ", 2)[1])
-        return {"state": "ok" if code == 200 else "http_error", "http_status": code, "latency_ms": round((time.monotonic() - started) * 1000)}
-    except (OSError, ValueError, IndexError):
+        headers, separator, body = bytes(response).partition(b"\r\n\r\n")
+        if not separator or len(headers) > 8192 or len(body) > 262144:
+            return {"state": "invalid_response"}
+        lines = headers.split(b"\r\n")
+        code = int(lines[0].split(b" ", 2)[1])
+        result = {"state": "ok" if code == 200 else "http_error", "http_status": code,
+                  "latency_ms": round((time.monotonic() - started) * 1000)}
+        if code != 200:
+            return result
+        transfer_chunked = any(line.lower().startswith(b"transfer-encoding: chunked") for line in lines[1:])
+        if transfer_chunked:
+            decoded = bytearray()
+            while body:
+                size_text, separator, rest = body.partition(b"\r\n")
+                if not separator:
+                    return {"state": "invalid_response"}
+                size = int(size_text.split(b";", 1)[0], 16)
+                if size == 0:
+                    break
+                if size > len(rest) - 2 or len(decoded) + size > 262144:
+                    return {"state": "invalid_response"}
+                decoded.extend(rest[:size])
+                body = rest[size + 2:]
+            body = bytes(decoded)
+        graph = json.loads(body)
+        actors = graph.get("actors") if isinstance(graph, dict) else None
+        if not isinstance(actors, list) or graph.get("session") != session:
+            return {"state": "invalid_roster"}
+        kinds = {}
+        terminal = 0
+        for actor in actors:
+            if not isinstance(actor, dict):
+                return {"state": "invalid_roster"}
+            if actor.get("terminal") is not None:
+                terminal += 1
+            workbench = actor.get("workbench")
+            kind = workbench.get("kind") if isinstance(workbench, dict) else None
+            if isinstance(kind, str) and re.fullmatch(r"[a-z_]{1,40}", kind):
+                kinds[kind] = kinds.get(kind, 0) + 1
+        result["roster"] = {"actors": len(actors), "terminal": terminal, "workbench_kinds": kinds}
+        return result
+    except socket.timeout:
+        return {"state": "timeout", "latency_ms": round((time.monotonic() - started) * 1000)}
+    except (OSError, ValueError, IndexError, TypeError, UnicodeError):
         return {"state": "unresponsive", "latency_ms": round((time.monotonic() - started) * 1000)}
 
 
@@ -284,7 +345,7 @@ def sample(args, deep, prior):
     slice_pids = {pid for pid, v in table.items() if slice_path and (v["cgroup"] == slice_path or v["cgroup"].startswith(slice_path + "/"))}
     for pid in owned:
         value = table[pid]
-        run_counts[group_for(value["comm"], any(value["cgroup"] == path or value["cgroup"].startswith(path + "/") for path in host_paths))] += 1
+        run_counts[group_for(value, any(value["cgroup"] == path or value["cgroup"].startswith(path + "/") for path in host_paths))] += 1
     result = {
         "time": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
         "record": {"available": status is not None, "matches_input": record_valid,
@@ -300,19 +361,22 @@ def sample(args, deep, prior):
         "logs": log_freshness(args.workspace, args.run_id, now),
     }
     if deep:
-        groups = {key: {"processes": 0, "pss_bytes": 0, "swap_pss_bytes": 0, "unreadable": 0} for key in GROUPS}
-        for pid in owned:
-            value = table[pid]
-            group = group_for(value["comm"], any(value["cgroup"] == path or value["cgroup"].startswith(path + "/") for path in host_paths))
-            target = groups[group]
-            target["processes"] += 1
-            rollup = memory_rollup(pid)
-            if rollup is None:
-                target["unreadable"] += 1
-            else:
-                target["pss_bytes"] += rollup.get("pss_bytes", 0)
-                target["swap_pss_bytes"] += rollup.get("swappss_bytes", 0)
-        result["process_memory"] = groups
+        process_memory = {}
+        for label, pids in (("run", owned), ("other_slice", slice_pids - owned)):
+            groups = {key: {"processes": 0, "pss_bytes": 0, "swap_pss_bytes": 0, "unreadable": 0} for key in GROUPS}
+            for pid in pids:
+                value = table[pid]
+                group = group_for(value, any(value["cgroup"] == path or value["cgroup"].startswith(path + "/") for path in host_paths))
+                target = groups[group]
+                target["processes"] += 1
+                rollup = memory_rollup(pid)
+                if rollup is None:
+                    target["unreadable"] += 1
+                else:
+                    target["pss_bytes"] += rollup.get("pss_bytes", 0)
+                    target["swap_pss_bytes"] += rollup.get("swappss_bytes", 0)
+            process_memory[label] = groups
+        result["process_memory"] = process_memory
         result["actor_probe"] = actor_probe(args.run_root) if record_valid else {"state": "record_unmatched"}
     warnings = []
     if not record_valid:
@@ -334,7 +398,7 @@ def sample(args, deep, prior):
         warnings.append("sustained_shared_slice_memory_pressure")
     if deep:
         probe = result["actor_probe"]["state"]
-        prior["probe_streak"] = prior.get("probe_streak", 0) + 1 if probe == "unresponsive" else 0
+        prior["probe_streak"] = prior.get("probe_streak", 0) + 1 if probe in ("unresponsive", "timeout") else 0
         if prior["probe_streak"] >= 2:
             warnings.append("actor_inspection_unresponsive")
     result["warnings"] = warnings
