@@ -139,5 +139,5 @@ Eleven live Jev requests are retained in `live-probes.json`: 8,373 input tokens 
 783 output tokens, no retries. Dependency export passed 13 construction assertions;
 review export passed five. The six dependency responses have now replayed through
 the actual Haskell decoder/policy, including honest doubts for ambiguous evidence
-and one scope relationship. Review replay and integrated lifecycle checks remain
-in progress. See the audit for raw-winner versus policy-handback distinctions.
+and one scope relationship. All five review responses also passed the actual Haskell replay. Integrated
+lifecycle and combined-flow checks remain in progress. See the audit for raw-winner versus policy-handback distinctions.

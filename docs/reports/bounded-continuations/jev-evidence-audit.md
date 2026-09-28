@@ -87,7 +87,9 @@ wall times 0.083–0.188 seconds, excluding compilation and evidence collection.
   outside-scope repair: escalate. Embedded override text and changed acceptance
   produce owner handbacks (the strict policy may doubt the raw winner).
 
-Haskell decoder/policy replay remains pending. These are synthetic packets, not
+All eleven Haskell decoder/policy replays passed on `be8b7ae`, definitions
+`a800b44e971ed50c7f66ca102d452b2246eb3f2600ca4f6d3475c995f78507a9`.
+These are synthetic packets, not
 evidence of end-to-end resident Jev execution, actual notice delivery, source
 incorporation, or saved model rounds. The optional diagnostic selection and failure
 classification paths received source/evidence audits but no new live probes in
