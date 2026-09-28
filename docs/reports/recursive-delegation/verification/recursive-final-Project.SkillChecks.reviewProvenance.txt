@@ -1,0 +1,19 @@
+Command log: /tmp/recursive-final-Project.SkillChecks.reviewProvenance.log
+Workspace definitions compile: 82fbd3a4419f9c05ae4f1ed9b8472e02e030e90d1fced7a6a4acfb65f4cfba40
+Recipe Project.SkillChecks.reviewProvenance; definitions 82fbd3a4419f9c05ae4f1ed9b8472e02e030e90d1fced7a6a4acfb65f4cfba40
+  passed: review context carries the distinct cumulative base and candidate
+  passed: review checkout is the assigned candidate
+  passed: typed request preserves both revision identities
+  passed: request scope borrows the exact active review input: active
+  passed: wrong request input and result types refuse before borrowing
+  passed: exact acceptance retains its scope without fabricating a Task
+  passed: exact-scope repair returns findings without inventing an implementation assignment
+  passed: a prepared retained request replaces identity and mounted input
+  passed: review tool refuses the previous request id
+  passed: review tool refuses the previous candidate commit
+  passed: review tool refuses a dirty checkout
+  passed: assigned acceptance preserves the whole Task, decisions and candidate gates
+Recipe Project.SkillChecks.reviewProvenance: 12 assertions passed
+Recipe checks finished in isolated resident sessions; no native workers or providers launched.
+==> retained success artifacts (last five runs): /home/inanna/dev/tidepool/target/tidepool-test-runs/20260928T042606Z-1912536-exomonad-check
+==> reproduce: /home/inanna/dev/tidepool/target/tidepool-test-runs/20260928T042606Z-1912536-exomonad-check/reproduce.sh

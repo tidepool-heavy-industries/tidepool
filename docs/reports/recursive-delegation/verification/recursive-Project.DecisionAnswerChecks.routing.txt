@@ -1,0 +1,13 @@
+Command log: /tmp/recursive-Project.DecisionAnswerChecks.routing.log
+Workspace definitions compile: 22f51a469e3a5c9381191cc41de9d48a3dce954964d138175c3c2f04d2b53384
+Recipe Project.DecisionAnswerChecks.routing; definitions 22f51a469e3a5c9381191cc41de9d48a3dce954964d138175c3c2f04d2b53384
+  passed: unavailable notification retains the original decision and preserves escalation; [(UseDecision 0,
+  passed: failed relay is retained and never automatically retried
+  passed: unknown targets preserve the parent question notice
+  passed: a newer question cannot use an older decision set
+  passed: contradictory decisions cannot be authorized by the chooser
+  passed: owner invalidation prevents further relays
+Recipe Project.DecisionAnswerChecks.routing: 6 assertions passed
+Recipe checks finished in isolated resident sessions; no native workers or providers launched.
+==> retained success artifacts (last five runs): /home/inanna/dev/tidepool/target/tidepool-test-runs/20260928T035720Z-1747116-exomonad-check
+==> reproduce: /home/inanna/dev/tidepool/target/tidepool-test-runs/20260928T035720Z-1747116-exomonad-check/reproduce.sh

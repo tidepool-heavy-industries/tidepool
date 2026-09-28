@@ -1,0 +1,52 @@
+bash scripts/dev-shell.sh --exomonad exomonad/scripts/exomonad-run.sh "$@"
+Using saved setting for 'extra-substituters = https://tidepool.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = tidepool.cachix.org-1:jnYeaWymP+9/MeAECROfi4+/l7X1ilkOqM5Nrr5Lo1w=' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+tidepool dev shell
+  Rust: rustc 1.93.0 (254b59607 2026-01-19)
+  GHC:  The Glorious Glasgow Haskell Compilation System, version 9.12.2
+  sccache (rustc-wrapper, from ~/.cargo/config.toml): sccache 0.16.0
+exomonad dev shell
+  interactive agent: /nix/store/mj0p2saxpqrqc8s0vwchvjjj28hc7j9a-codex-rs-0.155.1/bin/codex
+warning: TIDEPOOL_EXTRACT='/home/inanna/dev/tidepool/target/debug/tidepool-extract' is older than tidepool-extract-cmd sources — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)
+TIDEPOOL_EXTRACT=/home/inanna/dev/tidepool/target/debug/tidepool-extract
+==> validating the local extractor/compiler endpoint
+==> building Exomonad
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c: In function '__hsbase_MD5Update':
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c:75:19: warning: comparison of integer expressions of different signedness: 'unsigned int' and 'int' [-Wsign-compare]
+warning: tidepool-codegen@0.1.0:    75 |   if ((unsigned)t > len) {
+warning: tidepool-codegen@0.1.0:       |                   ^
+    Finished `dev` profile [unoptimized] target(s) in 0.14s
+==> reusing already-running compile daemon at /tmp/tidepool-dev-shell.7QqWf5/nix-shell.7Lf3PC/tidepool-extract-daemon.Gz1P7y/extract.sock (outer wrapper owns its lifecycle)
+Workspace definitions compile: a8aac6fd97c7e968f06f33b97a7ad882c10bacabb9618b9751f3998bca99306f
+Modules: Exomonad.Workspace, Project.Types, Project.Actors, Project.Work, Project.Routing, Project.DecisionAnswers, Project.Observe, Project.Shell, Project.Sift, Project.Lookup, Project.ConversationContext, Project.Reflex, Project.Evidence, Project.Contract, Project.Investigate, Project.Merge, Project.Review, Project.Search, Project.History, Project.FieldNotes, Project.RebaseRouter, Project.BaselineIncorporation, Project.SupervisionProfiles, Project.Service, Project.Repository, Project.CheckResults, Project.FocusedGateExample, Project.PrepareContinue, Project.RetainedEvidence, Project.AssumptionWatch, Project.ParallelInvestigate, Project.SlowCommandWatch, Project.BackgroundInvestigator, Project.BackgroundCommandExample, Project.NotificationTrial, Project.WorkflowReminders, Project.WorkflowReminderExamples, Project.Interview, Project.WorkflowExamples, Project.ReviewFlow
+Spec effect requirements: every launchable child role holds what the spec requires.
+Recipe Project.SkillChecks.skills; definitions a8aac6fd97c7e968f06f33b97a7ad882c10bacabb9618b9751f3998bca99306f
+  passed: skill launches a fresh Luna Medium worker
+  passed: scoped release retains the pending worker instead of cancelling its request
+  passed: record skill joins differently typed inputs
+  passed: record skill attaches the exact pending request
+  passed: compact snapshot shows candidate and pending result
+  passed: root review-by-commit forks a fresh Luna reviewer with no parent path
+  passed: successful reply explicitly reports submission
+  passed: compact snapshot retains terminal candidate and gates
+  passed: record skill receives the typed terminal source once
+  passed: the coordinate skill retains its scoped cleanup receipt
+  passed: one plan yields two distinct Luna assignments with their shared contract: ["corpus/fanout/consumer","corpus/fanout/interface"]
+  passed: collector retains both candidates without a routine wake
+  passed: the workbench skill renders an Int into Text with T.pack . show
+  passed: an annotated polymorphic binding installs without being forced
+  passed: the review gate resolves to an accepted key or a stated doubt
+  passed: the selected continuation is what runs, not a key string
+  passed: a settled child is inspected through its typed submission evidence
+  passed: the cleanup skill inspects a typed plan without retiring anything
+  passed: primitive fork example admits its three ready obligations
+  passed: a record definition pins its own effect row without a project wrapper
+  passed: a signature beside its equation installs both forms of binding
+  passed: an annotated literal settles an otherwise ambiguous encodable field
+  passed: branch and ref identities round-trip through their constructors
+Recipe Project.SkillChecks.skills: 23 assertions passed
+Recipe checks finished in isolated resident sessions; no native workers or providers launched.
+==> retained success artifacts (last five runs): /home/inanna/dev/tidepool-recursive-forks/target/tidepool-test-runs/20260928T065303Z-2605371-exomonad-check
+==> reproduce: /home/inanna/dev/tidepool-recursive-forks/target/tidepool-test-runs/20260928T065303Z-2605371-exomonad-check/reproduce.sh

@@ -1,0 +1,29 @@
+Command log: /tmp/recursive-questions-Project.SkillChecks.skills.log
+Workspace definitions compile: f28cab3a8fc2df1e7b21c2ea110d5fc16cd9f9b9c1cd2ae91f0dc7670d67e40c
+Recipe Project.SkillChecks.skills; definitions f28cab3a8fc2df1e7b21c2ea110d5fc16cd9f9b9c1cd2ae91f0dc7670d67e40c
+  passed: skill launches a fresh Luna Medium worker
+  passed: scoped release retains the pending worker instead of cancelling its request
+  passed: record skill joins differently typed inputs
+  passed: record skill attaches the exact pending request
+  passed: compact snapshot shows candidate and pending result
+  passed: root review-by-commit forks a fresh Luna reviewer with no parent path
+  passed: successful reply explicitly reports submission
+  passed: compact snapshot retains terminal candidate and gates
+  passed: record skill receives the typed terminal source once
+  passed: the coordinate skill retains its scoped cleanup receipt
+  passed: one plan yields two distinct Luna assignments with their shared contract: ["corpus/fanout/consumer","corpus/fanout/interface"]
+  passed: collector retains both candidates without a routine wake
+  passed: the workbench skill renders an Int into Text with T.pack . show
+  passed: an annotated polymorphic binding installs without being forced
+  passed: the review gate resolves to an accepted key or a stated doubt
+  passed: the selected continuation is what runs, not a key string
+  passed: a settled child is inspected through its typed submission evidence
+  passed: the cleanup skill inspects a typed plan without retiring anything
+  passed: a record definition pins its own effect row without a project wrapper
+  passed: a signature beside its equation installs both forms of binding
+  passed: an annotated literal settles an otherwise ambiguous encodable field
+  passed: branch and ref identities round-trip through their constructors
+Recipe Project.SkillChecks.skills: 22 assertions passed
+Recipe checks finished in isolated resident sessions; no native workers or providers launched.
+==> retained success artifacts (last five runs): /home/inanna/dev/tidepool-recursive-forks/target/tidepool-test-runs/20260928T055843Z-2389722-exomonad-check
+==> reproduce: /home/inanna/dev/tidepool-recursive-forks/target/tidepool-test-runs/20260928T055843Z-2389722-exomonad-check/reproduce.sh

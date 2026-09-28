@@ -1,0 +1,29 @@
+warning: TIDEPOOL_EXTRACT='/home/inanna/dev/tidepool/target/debug/tidepool-extract' is older than tidepool-extract-cmd sources — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)
+TIDEPOOL_EXTRACT=/home/inanna/dev/tidepool/target/debug/tidepool-extract
+==> reusing already-running compile daemon at /tmp/tidepool-dev-shell.J6COm8/nix-shell.v72XOu/tidepool-extract-daemon.ffQ7D6/extract.sock (outer wrapper owns its lifecycle)
+   Compiling tidepool-repr v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/repr)
+   Compiling tidepool-codegen v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/codegen)
+   Compiling tidepool-extract-cmd v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/extract-cmd)
+   Compiling tidepool-extract-report v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/extract-report)
+   Compiling exomonad-model v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/exomonad/model)
+   Compiling exomonad-tool v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/exomonad/tool)
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c: In function '__hsbase_MD5Update':
+warning: tidepool-codegen@0.1.0: csrc/prepared_md5/md5.c:75:19: warning: comparison of integer expressions of different signedness: 'unsigned int' and 'int' [-Wsign-compare]
+warning: tidepool-codegen@0.1.0:    75 |   if ((unsigned)t > len) {
+warning: tidepool-codegen@0.1.0:       |                   ^
+   Compiling tidepool-bridge v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/bridge)
+   Compiling tidepool-heap v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/heap)
+   Compiling tidepool-toolchain v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/toolchain)
+   Compiling tidepool-test-data v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/bridge/test-data)
+   Compiling tidepool-effect v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/effect)
+   Compiling tidepool-bridge-effects v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/bridge-effects)
+   Compiling tidepool-runtime v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/tidepool/runtime)
+   Compiling tidepool-mcp v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/bridge/mcp)
+   Compiling tidepool-testing v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/bridge/testing)
+   Compiling exomonad-actor v0.1.0 (/home/inanna/dev/tidepool-recursive-forks/exomonad/actor)
+    Finished `test` profile [unoptimized] target(s) in 19.40s
+────────────
+ Nextest run ID 7321742e-94f7-4816-a5a1-950b5683270d with nextest profile: battery
+    Starting 4 tests across 1 binary (345 tests skipped)
+────────────
+     Summary [   0.005s] 4 tests run: 4 passed, 345 skipped
