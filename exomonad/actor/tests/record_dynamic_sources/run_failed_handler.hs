@@ -1,14 +1,14 @@
 do
-  let { watcherSpec = R.definition "dynamic-source-watcher" (Actor.Selected (knownEffects @'[Actor]))
+  let { watcherSpec = R.definition "dynamic-source-failing-watcher" (Actor.Selected (knownEffects @'[Actor]))
       (Watcher
         0
         (\target -> do
           own <- R.self @Watcher
           R.attach (watcherEvent own) (R.lifecycle target))
         (\() -> R.get)
-        (\() -> pure ())
+        (\() -> P.error "intentional handler failure")
         (R.on mempty (\_ -> R.modify' (+ 1))))
-    ; replacementSpec = R.definition "dynamic-source-watcher-replacement" (Actor.Selected (knownEffects @'[Actor]))
+    ; replacementSpec = R.definition "dynamic-source-repaired-watcher" (Actor.Selected (knownEffects @'[Actor]))
       (Watcher
         0
         (\_ -> pure (Right ()))
@@ -16,14 +16,15 @@ do
         (\() -> pure ())
         (R.on mempty (\_ -> R.modify' (+ 10))))
     ; tools current = Tools
-      { runCase = finishTool "Attach a lifecycle source to this actor." $ \_ -> do
+      { runCase = finishTool "Repair a failed handler while retaining its attached source." $ \_ -> do
           watcher <- R.start watcherSpec
           attached <- R.call (watcherBegin (R.client watcher)) watcher
           before <- R.call (watcherCount (R.client watcher)) ()
+          R.send (watcherFail (R.client watcher)) ()
           successor <- R.replace watcher replacementSpec
           observed <- R.call (watcherCount (R.client successor)) ()
           finished <- R.finish successor
-          pure (CaseOutput (attached == Right () && before == 1 && observed == 11 && finished == Actor.Completed 11)
+          pure (CaseOutput (attached == Right () && before == 1 && observed == 21 && finished == Actor.Completed 21)
             (T.pack (show attached)) observed, current)
       }
     }

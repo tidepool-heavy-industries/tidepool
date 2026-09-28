@@ -13,5 +13,6 @@ data Watcher mode = Watcher
   { watcherState :: mode R.:- R.State Int
   , watcherBegin :: mode R.:- R.Call (R.ActorHandle Watcher) (R.Reply (Either R.AttachmentError ()))
   , watcherCount :: mode R.:- R.Call () (R.Reply Int)
+  , watcherFail :: mode R.:- R.Call () R.NoReply
   , watcherEvent :: mode R.:- R.Event Actor.ActorLifecycle
   } deriving (Generic)

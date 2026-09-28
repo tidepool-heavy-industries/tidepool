@@ -60,8 +60,21 @@ fn typed_self_event_sink_compiles_against_generated_actor_local_effect() {
 
 #[tokio::test]
 async fn attached_lifecycle_event_uses_successor_handler_and_actor_cleans_up() {
+    run_record_case(include_str!("record_dynamic_sources/run.hs"), 811).await;
+}
+
+#[tokio::test]
+async fn failed_handler_retains_attached_source_through_replacement() {
+    run_record_case(
+        include_str!("record_dynamic_sources/run_failed_handler.hs"),
+        812,
+    )
+    .await;
+}
+
+async fn run_record_case(source: &str, discriminator: u32) {
     eval_harness::require_extract();
-    let session = support::process_unique_session(811);
+    let session = support::process_unique_session(discriminator);
     let declarations = [
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
@@ -98,7 +111,7 @@ async fn attached_lifecycle_event_uses_successor_handler_and_actor_cleans_up() {
     let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
         session_id: None,
-        turn_text: include_str!("record_dynamic_sources/run.hs"),
+        turn_text: source,
         templates: &templates,
         include: &include_refs,
         session_root: session_root.path(),
