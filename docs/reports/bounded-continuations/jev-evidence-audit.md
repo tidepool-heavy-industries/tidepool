@@ -56,3 +56,39 @@ base to candidate, including path and added-line content. A declared task or
 injected positive decision alone would not prove this; the recipe now asserts the
 retained evidence itself. Actor processing is asynchronous, so it waits for a
 processing marker before checking decisions separately.
+
+The composed snapshot also exceeded the explicit 7168 MiB test-worker ceiling:
+its log at 18:57:35 UTC records 8315 MiB after five requests, followed by worker
+replacement. The earlier limit adjustment does not eliminate cold-compile churn
+for the larger integrated program. Preserve this as an artifact/build-cost finding
+for the next pass; no shared daemon was restarted or memory ceiling raised again.
+
+## Live synthetic probes
+
+Eleven exact requests were exported from Haskell `J.request` using composed
+workspace candidate `358525c` (definitions
+`46598c7232b6ce74eaf5f49e25f373a992570ac70c23a8631526ce9c25c7d51e`).
+The dependency exporter passed 13 construction assertions; the review exporter
+passed five. The operator sent each request once, without retries, to the live
+System One endpoint. [Raw requests and responses](live-probes.json) retain all
+evidence. Model `jev-1.13.0`; 8,373 input and 783 output tokens; individual HTTP
+wall times 0.083–0.188 seconds, excluding compilation and evidence collection.
+
+- API change and reviewed API change: API client relevant, database owner irrelevant.
+- Same commit ID with an unrelated documentation change: both irrelevant.
+- Opaque implementation with a conditional consumer contract: API-client raw winner
+  relevant at confidence 0.67, below careful's 0.70 floor. This is a policy handback,
+  not a confident recognition of insufficient evidence.
+- Schema change: database owner relevant; API-client raw irrelevant confidence
+  0.20, also a handback. The replay permits honest doubt here instead of requiring
+  confident irrelevance. This changes only the fixture acceptance, not policy.
+- Instructions embedded in documentation: both irrelevant.
+- Concrete in-scope repair: repair; commit ID and exit alone: insufficient;
+  outside-scope repair: escalate. Embedded override text and changed acceptance
+  produce owner handbacks (the strict policy may doubt the raw winner).
+
+Haskell decoder/policy replay remains pending. These are synthetic packets, not
+evidence of end-to-end resident Jev execution, actual notice delivery, source
+incorporation, or saved model rounds. The optional diagnostic selection and failure
+classification paths received source/evidence audits but no new live probes in
+this set; their effectful behavior must not inherit these probe results.

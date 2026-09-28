@@ -92,11 +92,14 @@ all suitable component trees over three waves, with immediate repair of harm.
 
 ## Latest verification candidate
 
-Shared integration `af54b6c` includes the lifecycle follow-up, corrected rank-two
+Shared integration `be8b7ae` (plus prose-only `aee2455`) includes the lifecycle follow-up, corrected rank-two
 notebook callback fixtures, typed progress observations and cleanup exit checks.
 This is a candidate, not the published pin. The private integrated validation root
 is `/tmp/rsi-continuations-integrated-wblqw9dh`; its `candidate-revision` names the
-exact snapshot. It waits for the dependency lane to release the sole compiler slot.
+exact snapshot. The dependency lane released the sole compiler slot; integrated validation is running.
+Its current log is `/tmp/rsi-continuations-integrated-replay.log`; the earlier
+export log is `/tmp/rsi-continuations-integrated.log`. The first integrated attempt
+found a cancellation-reason rendering type error, fixed before this candidate.
 
 The dependency recipe has observed real `ChangedSource` evidence from admission
 base to candidate: `contract.txt` and its exact added line. Its initial failures
@@ -104,3 +107,37 @@ also exposed two fixture errors (monomorphic notebook callback binding and displ
 prefix matching), plus an asynchronous observation race. Wait for a processing
 marker, then assert the separate result; immediate snapshots are not delivery
 barriers. Full recipe completion is recorded separately from those assertions.
+
+## Decision boundaries for the next pass
+
+```mermaid
+flowchart TD
+  A[Exact admitted task and candidate] --> B[Execute declared checks once]
+  B -->|Source or evidence unavailable| O[Owner decision]
+  B -->|Passed| R[Independent exact-source review]
+  B -->|Verified failure| I[Retain original job and bounded diagnostics]
+  I -->|Evidence sufficient and within scope| P[Same-worker repair within shared budget]
+  I -->|Uncertain, failed observer, or pending cleanup| O
+  P -->|New candidate| B
+  R -->|Accepted| D[Reviewed delivery; owner integrates]
+  R -->|Actionable findings and budget remains| P
+  R -->|Scope change or budget exhausted| O
+```
+
+A dependency collector runs alongside that flow: publications → exact bounded
+source evidence → one semantic packet for declared consumers → direct notices
+or an owner decision. A notice never establishes acknowledgment or incorporation.
+
+The next planning pass should inspect whether these boundaries actually eliminate
+model rounds, whether handbacks contain enough evidence for one owner decision,
+and whether the authored actor/follower layers are proportionate to that benefit.
+Do not infer operational value from the amount of helper code or recipe coverage.
+
+## Live probe checkpoint
+
+Eleven live Jev requests are retained in `live-probes.json`: 8,373 input tokens and
+783 output tokens, no retries. Dependency export passed 13 construction assertions;
+review export passed five. The six dependency responses have now replayed through
+the actual Haskell decoder/policy, including honest doubts for ambiguous evidence
+and one scope relationship. Review replay and integrated lifecycle checks remain
+in progress. See the audit for raw-winner versus policy-handback distinctions.
