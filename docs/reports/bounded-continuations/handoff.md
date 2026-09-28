@@ -65,7 +65,7 @@ will be presented as evidence that a live worker incorporated source.
    focused pin/catalog checks and matched incremental rebuild.
 5. Final revisions, exact executed counts and limitations recorded here.
 
-No successor wave is launched by this batch. Evaluate the exposed procedures in
+User reaffirmed: finish this batch and pause before launching any successor wave. Evaluate the exposed procedures in
 all suitable component trees over three waves, with immediate repair of harm.
 
 ## Useful next design pass
@@ -141,3 +141,49 @@ review export passed five. The six dependency responses have now replayed throug
 the actual Haskell decoder/policy, including honest doubts for ambiguous evidence
 and one scope relationship. All five review responses also passed the actual Haskell replay. Integrated
 lifecycle and combined-flow checks remain in progress. See the audit for raw-winner versus policy-handback distinctions.
+
+## Final source-review limits
+
+- The observer-loss fixture exercises early `ActorFinished`. Production also
+  handles failed, cancelled and paused lifecycle events; those variants do not
+  gain direct scenario coverage from this fixture. A pause stops automatic
+  continuation and retains the pending job; it does not claim command termination.
+- Some older recipe waits still use rendered readiness and up to 120 observations.
+  This batch bounds the new problematic waits; a general typed wait contract is a
+  follow-up, not claimed complete. FIFO-based diagnostic fixtures establish pending
+  work explicitly but their release writers assume the pending reader survives.
+- Dependency entries retain source evidence, typed decisions and send receipts;
+  settled decisions currently retain a short reason, unlike ReviewFlow's model and
+  probability explanation. Consider consistent judgment provenance in the next
+  interface pass. Full synthetic responses are retained separately in this handoff.
+
+## Behavior checkpoint
+
+The four `BackgroundInvestigatorChecks.typedContinuation` assertions passed on
+`8ab1602` after replacing a sleep-based closed-destination fixture with explicit
+close-before-start ordering. This covers report delivery without duplicate owner
+notice, no redelivery, retained refusal with fallback notice, and no retry. The
+current behavior log is `/tmp/rsi-continuations-behavior.log`; observer loss and
+combined-flow recipes remain in progress. Include
+`DependencyRoutingChecks.composition` in the final focused follow-up: the combined
+review recipe uses the lower-level attachment seam, so it does not replace an
+execution check of the public admission wrapper.
+
+The next follower-loss attempt exposed generated notebook type pinning of the
+private `ProbeFollower` type. The test now keeps the handle inside one expression
+instead of exporting implementation types. The underlying wrapper limitation is
+not fixed by this batch. The remaining behavior log is
+`/tmp/rsi-continuations-behavior-final.log`; the private test worker alone now uses
+a 10240 MiB ceiling after measured memory headroom, still with one worker.
+
+## Startup failure under investigation
+
+`BackgroundInvestigatorChecks.followerLoss` passed all four assertions in
+`/tmp/rsi-continuations-behavior-final.log` on `8aa9f4b`. The next recipe,
+`pendingProbe`, failed during actor startup before its assertions:
+`currentRequest site in Project.ReviewTools.tools: missing generated site-aware sibling`.
+Compiler artifacts: `target/tidepool-test-runs/20260928T192055Z-3510518-exomonad-check/`.
+A source-only investigation is checking site-rewrite/cache ownership; root is
+repeating the remaining recipes without that predecessor in
+`/tmp/rsi-continuations-behavior-remainder.log`. Do not misclassify this as a
+continuation assertion failure or claim those unexecuted recipes passed.

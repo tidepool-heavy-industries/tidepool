@@ -61,7 +61,10 @@ The composed snapshot also exceeded the explicit 7168 MiB test-worker ceiling:
 its log at 18:57:35 UTC records 8315 MiB after five requests, followed by worker
 replacement. The earlier limit adjustment does not eliminate cold-compile churn
 for the larger integrated program. Preserve this as an artifact/build-cost finding
-for the next pass; no shared daemon was restarted or memory ceiling raised again.
+for the next pass; no shared daemon was restarted. A later owned test run used a 10240 MiB
+ceiling after measuring 11 GiB available and zero memory pressure, while retaining
+one worker. This is a test-process setting, not a deployment default or a compiler
+memory fix.
 
 ## Live synthetic probes
 
