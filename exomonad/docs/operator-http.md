@@ -38,6 +38,10 @@ the host owner. Operator roots receive forest inspection/control authority;
 ordinary actors retain their subtree boundaries, including children launched by
 an operator. Context cloning still requires an actual provider context.
 
+On Linux, the Exomonad clients also handle socket paths beyond the Unix address
+length limit. For external clients such as `curl`, change into the socket's
+directory and use `--unix-socket operator.sock` when the absolute path is too long.
+
 ## JSON graph interface for TUIs
 
 `GET /v1/sessions/{session}/actors` returns a JSON snapshot without executing

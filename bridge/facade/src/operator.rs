@@ -24,6 +24,54 @@ use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRu
 use tokio::{net::UnixListener, sync::Mutex};
 use wire::*;
 
+/// Keep the directory descriptor alive while a client can open connections.
+/// Linux resolves this short address to the socket's existing filesystem inode,
+/// so durable run paths need not fit in sockaddr_un and retain their permissions.
+struct SocketAddress {
+    path: PathBuf,
+    #[cfg(target_os = "linux")]
+    _directory: std::fs::File,
+}
+
+impl SocketAddress {
+    fn new(socket: &Path) -> std::io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let parent = socket
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let name = socket.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket needs a file name")
+            })?;
+            let directory = std::fs::File::open(parent)?;
+            let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+            Ok(Self {
+                path,
+                _directory: directory,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {
+                path: socket.to_owned(),
+            })
+        }
+    }
+}
+
+fn client_for(socket: &Path) -> std::io::Result<(reqwest::Client, SocketAddress)> {
+    let address = SocketAddress::new(socket)?;
+    let client = reqwest::Client::builder()
+        .unix_socket(address.path.as_path())
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .map_err(std::io::Error::other)?;
+    Ok((client, address))
+}
+
 type InspectGraph =
     dyn Fn(exomonad_actor::ActorRef) -> Option<Vec<exomonad_actor::ActorGraphNode>> + Send + Sync;
 type InspectArtifact = dyn Fn(exomonad_actor::ActorRef, PathBuf) -> BoxFuture<'static, crate::run_map::ArtifactProvenance>
@@ -63,7 +111,8 @@ impl OperatorService {
             .ok_or_else(|| std::io::Error::other("socket needs a parent"))?;
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        let listener = UnixListener::bind(&socket)?;
+        let address = SocketAddress::new(&socket)?;
+        let listener = UnixListener::bind(&address.path)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let state = AttachmentState {
             sessions: Arc::default(),
@@ -482,11 +531,7 @@ pub async fn command(
     socket: &Path,
     action: OperatorAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()?;
+    let (client, _address) = client_for(socket)?;
     let url = match &action {
         OperatorAction::New | OperatorAction::List => "http://localhost/host/operators".to_owned(),
         OperatorAction::Artifact { .. } => "http://localhost/host/artifacts".to_owned(),
@@ -527,6 +572,52 @@ mod artifact_tests {
     use super::*;
     use exomonad_actor::{ActorId, ActorRef};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn operator_transport_supports_long_durable_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory
+            .path()
+            .join("long-state-path-".repeat(10))
+            .join("operator.sock");
+        assert!(socket.as_os_str().len() > 108);
+        let service = OperatorService::bind(
+            socket.clone(),
+            Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
+            Arc::new(|_| None),
+            Arc::new(|_, _| panic!("artifact inspection must not run")),
+        )
+        .await
+        .unwrap();
+        let (client, _address) = client_for(&socket).unwrap();
+        let response = client
+            .get("http://localhost/host/operators")
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            std::fs::metadata(socket.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        service.shutdown().await;
+        assert!(!socket.exists());
+        assert!(socket.parent().unwrap().exists());
+    }
 
     #[tokio::test]
     async fn artifact_query_is_read_only_and_rejects_traversal_before_inspection() {

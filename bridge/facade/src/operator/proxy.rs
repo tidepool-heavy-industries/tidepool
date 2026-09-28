@@ -218,15 +218,6 @@ impl Drop for ProxyLock {
     }
 }
 
-fn client_for(socket: &Path) -> Result<reqwest::Client, ProxyError> {
-    reqwest::Client::builder()
-        .unix_socket(socket)
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()
-        .map_err(|e| format!("cannot build operator client for {}: {e}", socket.display()).into())
-}
-
 /// Provision a fresh operator workbench and record it.
 async fn provision(client: &reqwest::Client, proxy_json: &Path) -> Result<String, ProxyError> {
     let response = client
@@ -361,7 +352,12 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
         None => run_root_for_session_in_roots(&default_runs_dirs()?, &options.session)?,
     };
     let socket = run_root.join("operator/operator.sock");
-    let client = client_for(&socket)?;
+    let (client, _address) = super::client_for(&socket).map_err(|error| {
+        ProxyError(format!(
+            "cannot connect to operator socket {}: {error}",
+            socket.display()
+        ))
+    })?;
     let session = resident_operator_session(&run_root, &client, options.fresh).await?;
 
     if options.actors {
