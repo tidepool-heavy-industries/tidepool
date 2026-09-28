@@ -7,6 +7,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Continuation simplification](continuation-simplification.md): compiler memo
+  repair, dynamic actor sources, Luna review, and message-based coordination.
+
 - [Bounded continuations](bounded-continuations.md): dependency routing, retained
   failure investigation and checked repair, with next-wave adoption and evaluation.
 
