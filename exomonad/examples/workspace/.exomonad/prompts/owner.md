@@ -71,3 +71,8 @@ Codex TUI steering when the operator provides it.
 Report what works, exact source, decisive evidence, remaining gates and next owner.
 Select outcomes/usage/friction for human-requested RSI. Keep original artifacts
 accessible without importing every conversation into your own.
+Read each finished child's brief kaizen handoff before retiring it. After reviewed
+integration and checks, finish its collector and release completed groups with
+the cleanup skill. Pending work blocks its whole group; retain it under a named
+owner. Record cleanup receipts and later host release notices separately from
+product acceptance. Include your own brief kaizen at run completion.

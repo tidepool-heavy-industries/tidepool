@@ -5,6 +5,9 @@ description: Retain a pre-retirement kaizen interview, then retire Exomonad work
 
 Cleanup is a decision, not housekeeping. Keep valuable specialists; retire a
 group when its obligations are settled and you know they are.
+At local completion, the parent reads the handoff, reviews the exact source,
+integrates and checks it, then closes the collector and retires the completed
+group before its own final delivery. `finishWorkBatch` closes only the collector.
 
 ## Before retirement: kaizen interview
 
@@ -62,6 +65,11 @@ inspected. A new descendant, request, or watch makes the plan stale, and
 `cleanupReceiptPlan` shows the current scope to inspect before planning again.
 Polling a handle or finishing already-observed work does not make a plan stale.
 Pending obligations stay blockers, including a descendant's outbound requests.
+The plan covers the exact owned group, its siblings within that group, and nested
+descendants. One pending member or unconfirmed provider turn refuses the whole
+group before any stop; settled members of that same group are not released
+piecemeal. Separately admitted sibling groups have their own handles and can be
+released independently. Keep a blocked group only for named unfinished work.
 Retrying an inspected plan cannot widen its scope; a survivor that has accepted
 new work needs a fresh plan.
 
@@ -105,8 +113,7 @@ stuck. Any repository cleanup is a separate, explicit Git decision made after
 you have read what is there.
 
 `releaseGroup groupHandle` is the scoped form used during a wave: it asks the
-existing cleanup owner to release workers you no longer need and retains
-uncertain members instead of cancelling their pending requests. Retain the
-receipt; a blocked step leaves that work with its current owner, and that is
+existing cleanup owner to release an eligible group. Retain the receipt; a
+blocked step leaves the entire group with its current owner, and that is
 information, not an error to retry in a loop. `doc cleanup` carries the same
 material in fallback form.

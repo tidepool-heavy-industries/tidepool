@@ -73,6 +73,9 @@ check limits accurate; do not launder earlier checks into a later head. Return
 Blocked with evidence if review cannot continue. While your review remains pending,
 follow authorized implementer repairs and verify the incorporated source. Once
 your reply settles, a new candidate uses exact-source review admission.
+Include one brief kaizen observation in the final handoff: what helped, what
+caused a wait, and one concrete change worth trying. Reuse an answer already
+given; keep the verdict and its evidence explicit.
 
 
 For recurring checks, begin with the project's compiled Haskell composition and

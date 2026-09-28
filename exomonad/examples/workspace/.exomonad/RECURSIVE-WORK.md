@@ -42,7 +42,12 @@ On an actionable notice, read the collector once and inspect relevant original
 receipts. A candidate, reply, accepted review, integrated source and released
 resources are different facts. `finishWorkBatch` refuses while any original
 result remains pending; a successful finish drains the collector, not the workers.
-Interview finished workers before using the cleanup skill to retire them.
+Make a brief kaizen answer part of each child's handoff and read it before
+retirement. After reviewing, integrating and checking the local result, finish
+the collector and release the completed group with the cleanup skill. One pending
+member blocks the entire group before any stop; retain that group for named work.
+Separately admitted sibling groups can be released independently. Keep the cleanup
+receipt; `StoppedReleasing` still needs its later host notice.
 
 ## Checked review, repair and integration
 

@@ -60,9 +60,13 @@ Incorporation evidence identifies resulting source and changed behavior without 
 administrative narrative. At an authorized wind-down, distinguish committed partial
 work, dirty retained work and open gates through exact artifacts. Otherwise, each
 partial candidate advances integration and the next useful frontier toward acceptance.
-At each checked integration, retire children and routers with no remaining assignment;
-retain specialists for concrete repairs. Before returning, settle descendants or transfer
-unfinished ownership explicitly. Keep this local; routine retirement needs no planner turn.
+At each checked integration, read the child's brief kaizen handoff, finish its
+collector, then release its completed local group and inspect the receipt. One
+pending member blocks the whole group; retain it for named work and record its
+owner. A settled reply or finished router does not release actors. Check later
+host release notices separately. Before your final Delivery, review and integrate
+the child results, run combined checks, and settle or transfer unfinished ownership.
+Keep this local; routine retirement needs no planner turn.
 
 
 For recurring checks, begin with the project's compiled Haskell composition and

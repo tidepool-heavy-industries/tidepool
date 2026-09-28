@@ -90,14 +90,18 @@ queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.
 A new attempt gets new sources and a new router. After incorporating the old
 result and assigning remaining obligations, drain the old router and retain its
-exit. Keep the reviewer only while a concrete repair or review remains; otherwise
-retire it and finished implementation children. Before returning, settle descendants
-or explicitly transfer unfinished ownership. A reply does not release their processes
-or workspace storage.
+exit. `finishWorkBatch` closes only the collector. After reading a finished
+child's brief kaizen answer, reviewing its exact source, integrating and checking
+the result, release its completed local group. A pending member blocks that
+whole group; retain it only for named repair or other unfinished work and record
+the owner. Before returning, settle descendants or explicitly transfer unfinished
+ownership. A reply and collector exit do not release processes or workspace storage.
 
 Accepted contains the reviewed basis, candidate, checks and rationale. Verify your
 resulting integration head; review semantic integration changes. Bind accepted,
-head and checks to that actual evidence, then:
+head and checks to that actual evidence. Send your requester a brief kaizen
+finding before the typed reply, reuse any answer already in the handoff, and
+retain cleanup receipts for completed local groups, then:
 
 ```haskell
 let delivery = Delivered accepted head checks
