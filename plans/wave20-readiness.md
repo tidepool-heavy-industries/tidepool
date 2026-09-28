@@ -1,7 +1,7 @@
 # Wave20 readiness
 
 Updated 2026-09-28 UTC. Launch is authorized after the remaining gates.
-The first launch failed before model admission; its retry is rebuilding.
+The retry launched successfully; root queue-ready handshake completed.
 No recurring timer is active.
 
 ## Integrated and checked
@@ -50,11 +50,13 @@ wave20 at `6af0f58`. Scaffold and shipped template match.
 - `9bd6b3df1` fixes the owning operator transport using a retained directory FD
   and short proc-fd address, preserving the actual durable socket location.
   Long-path HTTP/permissions/cleanup and artifact-query tests passed (2 tests,
-  540 skipped). The retry rebuild is in progress.
+  540 skipped). The retry used the rebuilt binary successfully.
 
-Remaining gate: launch and verify actual root admission and provider activity,
-then retain run/log identities and binary hash. A tmux session alone is not
-launch evidence.
+Retry run `4d826f44-f964-40e1-82d2-a74ebf405222` started at
+2026-09-28 01:40:26 UTC. Root `1@1` completed its queue-ready handshake at
+01:41:44 UTC on conversation `01a0e5ac-d39f-7d70-a50c-e8a7ceed26ba`.
+The operator socket is ready. Exact hashes and launch evidence are retained in
+`/home/inanna/dev/exomonad-harness-runs/wave20/docs/wave20-launch.md`.
 
 Follow-up: the first failure also exposed a pre-conversation recovery mismatch:
 recovery says it can start fresh but subsequently refuses incomplete root
