@@ -105,8 +105,10 @@ trace the end-to-end flow before deciding which existing interface to adapt.
 
 ## Shared harness memory hypothesis — 2026-09-28
 
-Inanna's architectural target is one shared harness host that multiplexes many
-actors, replacing the swarm of native client processes. Wave21 retained 37 native
+Inanna's architectural target is **one shared exomonad-harness instance for all
+agents**, multiplexing actors instead of launching a harness per actor or per
+component tree. Actor identities, authority and lifecycles remain distinct
+inside that host, replacing the swarm of native client processes. Wave21 retained 37 native
 clients with roughly 18.1 GiB combined PSS plus SwapPSS in the sampled footprint.
 This motivates the migration, but is not a measured saving from a replacement.
 
