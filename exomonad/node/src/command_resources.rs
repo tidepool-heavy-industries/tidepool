@@ -216,6 +216,7 @@ fn rebuild_observation_indexes(state: &mut State) {
 
 pub struct CommandResources {
     root: PathBuf,
+    actor_slice: PathBuf,
     policy: CommandResourcePolicy,
     state: Mutex<State>,
     journal: Mutex<Journal>,
@@ -301,6 +302,48 @@ fn read_scalar(path: &Path) -> std::io::Result<u64> {
         .trim()
         .parse()
         .map_err(|_| io_error(format!("invalid counter in {}", path.display())))
+}
+fn read_memory_limit(path: &Path) -> std::io::Result<Option<u64>> {
+    let value = std::fs::read_to_string(path)?;
+    let value = value.trim();
+    if value == "max" {
+        Ok(None)
+    } else {
+        value
+            .parse()
+            .map(Some)
+            .map_err(|_| io_error(format!("invalid memory limit in {}", path.display())))
+    }
+}
+
+/// The service is placed beneath the same slice as actor scopes. A limit on
+/// any ancestor constrains that slice too; command-pool children are excluded.
+fn actor_slice_available(slice: &Path) -> std::io::Result<u64> {
+    let cgroup_root = Path::new("/sys/fs/cgroup");
+    if !slice.starts_with(cgroup_root) || slice == cgroup_root {
+        return Err(io_error("actor slice is outside the cgroup hierarchy"));
+    }
+    let mut available = u64::MAX;
+    let mut target_bounded = false;
+    // The v2 root has no memory controller limit files of its own.
+    for group in slice.ancestors().take_while(|group| *group != cgroup_root) {
+        let high = read_memory_limit(&group.join("memory.high"))?;
+        let max = read_memory_limit(&group.join("memory.max"))?;
+        if group == slice {
+            target_bounded = high.is_some() || max.is_some();
+        }
+        if let Some(limit) = high.into_iter().chain(max).min() {
+            let current = read_scalar(&group.join("memory.current"))?;
+            available = available.min(limit.saturating_sub(current));
+        }
+    }
+    if !target_bounded {
+        return Err(io_error(format!(
+            "actor slice has no finite memory.high or memory.max: {}",
+            slice.display()
+        )));
+    }
+    Ok(available)
 }
 fn read_pressure_avg10(path: &Path) -> std::io::Result<u64> {
     let text = std::fs::read_to_string(path)?;
@@ -393,6 +436,16 @@ impl CommandResources {
             return Err(io_error("invalid cgroup membership"));
         }
         let parent = Path::new("/sys/fs/cgroup").join(relative);
+        let actor_slice = parent
+            .ancestors()
+            .find(|group| {
+                group
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".slice"))
+            })
+            .ok_or_else(|| io_error("resource service is outside an actor slice"))?
+            .to_path_buf();
         let control = parent.join("control");
         std::fs::create_dir(&control)?;
         std::fs::write(control.join("cgroup.procs"), std::process::id().to_string())?;
@@ -412,6 +465,7 @@ impl CommandResources {
         };
         let owner = Arc::new(Self {
             root,
+            actor_slice,
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 active: HashSet::new(),
@@ -1186,9 +1240,25 @@ impl CommandResources {
         let mut last_warn = start;
         loop {
             let available = read_counter(Path::new("/proc/meminfo"), "MemAvailable:")? * 1024;
+            let slice_available = actor_slice_available(&self.actor_slice)?;
             let decision = {
                 let mut pending = self.actor_starts.lock();
-                let decision = actor_start_decision(&self.policy, available, *pending);
+                let decision = actor_start_decision(&self.policy, available, *pending)
+                    .map_err(|shortfall| format!("host: {shortfall}"))
+                    .and_then(|()| {
+                        (slice_available.saturating_sub(*pending)
+                            >= self.policy.actor_start_bytes)
+                            .then_some(())
+                            .ok_or_else(|| {
+                                format!(
+                                    "actor slice {}: {:.1} GiB available after {:.1} GiB pending actor starts; {:.1} GiB start needed",
+                                    self.actor_slice.display(),
+                                    slice_available.saturating_sub(*pending) as f64 / GIB as f64,
+                                    *pending as f64 / GIB as f64,
+                                    self.policy.actor_start_bytes as f64 / GIB as f64
+                                )
+                            })
+                    });
                 if decision.is_ok() {
                     *pending += self.policy.actor_start_bytes;
                 }
@@ -1246,6 +1316,7 @@ mod tests {
         let policy = policy();
         CommandResources {
             root: root.to_path_buf(),
+            actor_slice: root.to_path_buf(),
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 active: HashSet::new(),
