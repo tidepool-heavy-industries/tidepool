@@ -7,6 +7,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Dedicated swarm host](hetzner-swarm-host.md): 128 GB Hetzner host, declarative
+  NixOS installation, resource budgets, recovery and staged wave migration.
+
 - [Recursive delegation](recursive-delegation.md): canonical live scaffold/unfold/
   integration workflow, Luna implementation trees and reusable event routing.
 - [Wave19 coordination rethink](wave19-coordination-rethink.md): retained evidence
