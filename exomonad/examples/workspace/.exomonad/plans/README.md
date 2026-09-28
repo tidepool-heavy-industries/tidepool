@@ -26,25 +26,30 @@ goal/
     README.md            # Owned outcome, next frontier, later local waves
     hard-question.md     # Declared Astra task and its release condition, if needed
   component-b/
-    README.md            # Another substantial Sol-owned outcome
+    README.md            # Another Luna-owned component
 ```
 
 Each substantive branch needs its scope, current source, shared prerequisites,
 next independently useful children, integration owner and acceptance evidence.
 Describe later waves by the behavior they unlock, refining details as results land.
-A child can recursively own several such waves. Keep current intent concise;
+A component owner repeats these local waves recursively. Keep current intent concise;
 retain older evidence by reference instead of appending every conversation here.
 
-Before broad execution, the designated initial Sol leads write their interpretation with a normal and
+Before broad execution, the designated initial component owners write their interpretation with a normal and
 awkward consumer example, concrete interfaces, dependency/fork structure, checks,
 assumptions, objections and questions. The original planner reviews coupled choices
 and returns explicit corrections and release scope. Incorporate those decisions
 before dependent implementation. Later local work within the agreement proceeds
 without repeating this initial interview or inventing more approval stages. The
-planner becomes idle without execution subscriptions. Sol owns integration and
-routine decisions across workstreams; fresh Astra specialists handle explicit hard questions.
+planner becomes idle without execution subscriptions. The Sol root owns shared
+cross-component decisions; Luna owners integrate and resolve routine decisions
+within their subtrees. Fresh Astra specialists handle explicit hard questions.
 
 ## Use the workbench
+
+[RECURSIVE-WORK.md](../RECURSIVE-WORK.md) defines the execution workflow:
+Sol root, recursive Luna owners, justified terminal leaves, and checked local
+integration. Use its installed Haskell compositions for each ready frontier.
 
 - [composition.md](composition.md): paired source/context unfolds, dependency frontiers,
   checked integration and a continuation at every substantial node.

@@ -2089,10 +2089,11 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
         &[
             "implement",
             "reviewCandidate",
-            "reviewAgain",
+            "requestReview",
             "repair",
             "withDecision",
-            "followWork",
+            "unfoldWork",
+            "lunaLead",
         ],
     )
     .await;

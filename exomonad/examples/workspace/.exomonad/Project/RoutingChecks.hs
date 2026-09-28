@@ -129,11 +129,16 @@ reviewCycle failAfterAdmission automaticRepair = do
   else script owner "review-continuation"
   candidate <- checkpoint (checkActor worker) "feature.txt" "candidate feature\n" "candidate for automatic review"
   void $ turn (checkActor worker) ("respond (Produced (Candidate " <> gitOidLiteral candidate <> " [\"read feature\"] [\"integration pending\"]))")
+  if failAfterAdmission then pure () else do
+    routed <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (retainedReviewCollectors flow, retainedCandidateReceipts flow, retainedSourceProblems flow)" (Text.isInfixOf candidate)
+    check ("candidate settlement retained by the review router: " <> routed) (candidate `Text.isInfixOf` routed)
+    routerExit <- turn owner "inspectFull <$> Actor.pollExit (R.actorRef reviewBox)"
+    check ("retained review router is live before activation: " <> lastOutput routerExit) (lastOutput routerExit == "Nothing")
   reviewing <- activation
   check "settlement submits to the available retained reviewer without a model relay" (checkActor reviewing == checkActor reviewer)
   if failAfterAdmission then do
     void $ turn owner "reviewBox <- R.replace reviewBox reviewBoxDefinition"
-    retained <- turn owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow))"
+    retained <- turn owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (length (retainedReviewCollectors flow))"
     check ("replacement receives the exact request handle queued before admission: " <> lastOutput retained) (lastOutput retained == "1")
   else pure ()
   input <- turn (checkActor reviewing) "inspectFull (reviewInput sessionInput)"
@@ -158,14 +163,14 @@ reviewCycle failAfterAdmission automaticRepair = do
   else pure (reviewing, candidate)
   void $ turn (checkActor accepting) "reportProgress (WorkProgress [reviewInput sessionInput] [])"
   void $ turn (checkActor accepting) "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
-  received <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (reviewEvents flow)" (Text.isInfixOf "Accepted")
+  received <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (retainedReviewEvents flow)" (Text.isInfixOf "Accepted")
   let arrived = finalCandidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
   check (if arrived then "typed review progress and acceptance return through the mailbox"
          else "missing typed review evidence: " <> received) arrived
-  finished <- turn owner (("let expectedReviews = " <> (if automaticRepair then "2" else "1") <> "\n") <> "finished <- R.finish reviewBox\n(== (0,expectedReviews)) (case finished of { Actor.Completed state -> (length (reviewCollectors state), length (completedReviews state)); _ -> (-1,-1) })")
+  finished <- turn owner (("let expectedReviews = " <> (if automaticRepair then "2" else "1") <> "\n") <> "finished <- R.finish reviewBox\n(== (0,expectedReviews)) (case finished of { Actor.Completed state -> (length (retainedReviewCollectors state), length (retainedCompletedReviews state)); _ -> (-1,-1) })")
   check "each admitted review completes and its collector drains" (lastOutput finished == "True")
   if automaticRepair then do
-    forwarding <- turn owner "case finished of { Actor.Completed state -> mapM (R.forwardingExit . snd) (repairAttempts state); _ -> pure [] }"
+    forwarding <- turn owner "case finished of { Actor.Completed state -> mapM (R.forwardingExit . snd) (retainedRepairAttempts state); _ -> pure [] }"
     check "the result-only repair forwarder exits without a model retirement turn" ("Completed" `Text.isInfixOf` output forwarding)
     void $ git owner ["merge", "--ff-only", finalCandidate]
     integrated <- readFile owner "feature.txt"
@@ -175,7 +180,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   blocked <- activation
   script owner "review-continuation"
   void $ turn (checkActor blocked) "respond (Blocked \"needs owner decision\" [\"contract conflict\"] :: Outcome Candidate)"
-  stopped <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow), stoppedCandidates flow, length (stoppedNotices flow))" (Text.isInfixOf "contract conflict")
+  stopped <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (length (retainedReviewCollectors flow), retainedStoppedCandidates flow, length (retainedStoppedNotices flow))" (Text.isInfixOf "contract conflict")
   check "a blocked candidate retains its receipt without starting review" ("(0," `Text.isInfixOf` stopped && "contract conflict" `Text.isInfixOf` stopped)
   void $ turn owner "R.finish reviewBox"
   if automaticRepair then do
@@ -184,11 +189,11 @@ reviewCycle failAfterAdmission automaticRepair = do
     script owner "review-continuation"
     actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"
     void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> gitOidLiteral baseline <> " [] []))")
-    _ <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\nnot (null (sourceProblems flow))" (Text.isSuffixOf "True")
+    _ <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\nnot (null (retainedSourceProblems flow))" (Text.isSuffixOf "True")
     let expectedProblem = "candidate " <> baseline <> "; submitted " <> actual
     rejected <- turn owner
-      ("null (reviewCollectors flow) && map snd (sourceProblems flow) == [" <> literal expectedProblem
-        <> "] && (case candidateReceipts flow of { [Right receipt] -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == "
+      ("null (retainedReviewCollectors flow) && map snd (retainedSourceProblems flow) == [" <> literal expectedProblem
+        <> "] && (case retainedCandidateReceipts flow of { [Right receipt] -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == "
         <> literal baseline <> "; _ -> False }; _ -> False })")
     check "source mismatch retains the original receipt and stops automatic review"
       (lastOutput rejected == "True")
@@ -324,7 +329,7 @@ reviewedCheckpoints = do
   check "a requested candidate without the review checkout HEAD is refused"
     ("CheckpointSourceRejected" `Text.isInfixOf` output mismatchedSource)
   void $ turn owner
-    "(alteredReview, _) <- reviewAgain (responseActor reviewer) [label|altered-review|] reviewRequest"
+    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { checkedCommands = [\"different\"] }) [] \"accepted\")))"
@@ -332,7 +337,7 @@ reviewedCheckpoints = do
   check "a reviewer verdict for another full candidate is refused"
     ("CheckpointCandidateMismatch" `Text.isInfixOf` output mismatchedCandidate)
   void $ turn owner
-    "(blockedReview, _) <- reviewAgain (responseActor reviewer) [label|blocked-review|] reviewRequest"
+    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
@@ -340,7 +345,7 @@ reviewedCheckpoints = do
   check "a blocked review cannot become a reviewed checkpoint"
     ("CheckpointBlocked" `Text.isInfixOf` output blocked)
   void $ turn owner
-    "(repairReview, _) <- reviewAgain (responseActor reviewer) [label|repair-review|] reviewRequest"
+    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
@@ -348,7 +353,7 @@ reviewedCheckpoints = do
   check "a review requesting repair cannot become a reviewed checkpoint"
     ("CheckpointNeedsRepair" `Text.isInfixOf` output needsRepair)
   void $ turn owner
-    "(dirtyReview, _) <- reviewAgain (responseActor reviewer) [label|dirty-review|] reviewRequest"
+    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)"
   void activation
   writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
   void $ turn (checkActor reviewerActor)
@@ -516,7 +521,8 @@ forwardCandidate disposition = do
   else void $ turn (checkActor worker) ("respond (Candidate " <> gitOidLiteral candidate <> " [\"read exact feature\"] [\"independent review remains\"])")
   if disposition == CancelDestination then do
     failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
-    check "cancellation remains a retained callback failure" ("CancellationRequested" `Text.isInfixOf` failure)
+    -- Route diagnostics are rendered text; the reply below owns cancellation state.
+    check ("cancellation remains a retained callback failure: " <> failure) ("RouteFailed" `Text.isInfixOf` failure)
     obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
     check "a cancelled destination cannot silently receive success" ("ReplyCancellationRequested" `Text.isInfixOf` output obligation)
   else if disposition == LoseProducer then do

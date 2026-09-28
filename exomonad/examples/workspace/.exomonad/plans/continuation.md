@@ -1,83 +1,33 @@
-# A known review handoff without a relay turn
+# Continue a local component without relay turns
 
-Use this when the owning plan calls for independent review and a retained reviewer
-is available. The owning Sol chooses work, repairs defects and checks integration.
-Load `exomonad-define-actors` for the record syntax.
+Use the [recursive-work procedure](../RECURSIVE-WORK.md). Each execution owner
+scaffolds, admits a ready parallel batch, integrates checked results, and repeats.
+`unfoldWork` retains the original handles and their collector; react to its
+notices instead of adding a second settlement watch.
 
-The [executable composition](../checks/review-continuation.hs) defines one
-`ReviewFlow` record with private state, typed message endpoints and a fixed
-candidate-result source. It uses `coordinationActor`, the project's selected
-`Replies`, `Actor`, `Notifications` row. It is not a mandatory worker stage.
+For a separate implementer's candidate, `startReviewFlow` owns counted checks,
+exact-source independent review and bounded repair. Supply the incorporated Task,
+original implementer response, focused checks, and explicit escalation criteria.
+The [executed setup](../checks/checked-review-setup.hs) is the working example;
+`Project.CheckedReviewChecks` retains its acceptance and failure evidence.
 
-Supply these bindings:
+The flow selects a fresh reviewer at each exact candidate. It preserves the
+original response receipts, scope, gates and review proof. A returned acceptance
+is distinct from integration: set `flowIntegration` to an existing MergeTarget
+for serialized checked publication, or keep integration with the local owner.
+Never route repair to yourself while your own Delivery waits for that review.
 
-- `task :: Task`, the incorporated assignment;
-- `worker :: Response (Outcome Candidate)`, the pending implementer;
-- `reviewer :: Response (Outcome ReviewDecision)`, an available retained reviewer;
-- `reviewLabel, repairLabel :: Label`, created from compile-checked static
-  literals such as `[label|review|]`;
-- `repairPolicy :: RepairOwner`, `OwnerRepairs` or an explicitly selected available
-  `RetainedImplementer`;
-- `onReview :: WorkSink (Outcome ReviewDecision)`, the local notification policy;
-- `onStopped :: Settlement (Outcome Candidate) -> Maybe Text`;
-- `owner :: AgentRef`, bound to the owning actor's incarnation (`let owner = me`).
+A changed contract or decision set needs an explicitly updated Task and a new
+flow after resolving outstanding work. Rebinding a notebook value does not amend
+an existing actor's closure. New scope decisions and uncertain semantic judgments
+return to the owner. Do not replay uncertain request admission.
 
-For ordinary steering back to that owner:
+Read the flow's terminal result, retain its evidence and pre-retirement interview,
+and inspect `reviewCleanup` outcomes before finishing it. Keep the returned
+check worktree handle until its owning cleanup path releases it. Review,
+publication and resource release remain separate outcomes.
 
-```haskell
-import qualified Data.Text as T
-let onReview = notifyWork me (workMessage reviewSummary)
-let onStopped outcome = Just ("implementation: " <> either (T.pack . show) candidateSummary (settledValue outcome))
-```
-
-This composition captures a fixed `task`. A source amendment or changed accepted
-decision requires a new flow after pending requests settle; changing a notebook
-binding does not update the existing actor's closure. Preserve outstanding
-handles and do not replay uncertain admissions.
-
-A produced candidate submits a new request to the existing reviewer. A blocked or
-unavailable implementation retains its original receipt and does not request review.
-`requestWithProgressInto` enqueues the exact response/progress handles at
-`reviewStarted` before admitting the request. That handler creates the collector
-with the receiving incarnation's own return endpoint. Those handles therefore do not rely
-on the submitting handler successfully committing its final state. The callback
-must retain the handles, not merely print or inspect them. Admission failure does
-not authorize repeating the request.
-
-The collector forwards changes and the exact terminal result to `reviewEvent`.
-Once that result is handled, the flow drains the attempt's collector and retains
-its final state. No model turn rearms a watch, forwards a verdict or maintains a
-list of collectors to retire. The integration actor remains available for queries
-and the owner's next useful continuation. With `RetainedImplementer`, a repair
-verdict directly submits the repair to that worker; its finite `forwardResult`
-returns the repaired candidate to the same flow for another review. No new agent
-is launched for these repeated requests. Suppress routine repair notifications in
-`onReview` when this edge is already declared; retain questions, final acceptance
-and failures that need the owner. `OwnerRepairs` instead leaves the engineering
-choice with the owning Sol.
-
-```haskell
-flow <- R.call (reviewView (R.client reviewBox)) ()
-inspectFull (reviewEvents flow, stoppedCandidates flow)
-```
-
-A parent snapshot does not flush descendants. React to actual routed results,
-not elapsed time or a parent's empty queue. Full runtime result evidence stays
-attached; no separate settlement watch is needed.
-
-After all relevant review results have arrived and the owner has incorporated the
-verdicts or retained actionable blockers:
-
-```haskell
-retiredFlow <- R.finish reviewBox
-inspectFull retiredFlow
-```
-
-Keep the returned exit and the reviewer agent independently. `R.finish` does not
-cancel pending review requests or retire specialists. If work is still pending,
-keep the flow alive. A failed handler retains its last committed state; replace
-it with the same record schema after inspecting the exact request and queued
-continuation. Do not replay uncertain effects. Existing distributed endpoints
-remain exact: if replacing a flow that already owns active forwarders, inspect
-and rebuild those routes against its retained original responses rather than
-resubmitting work or assuming the old endpoints changed identity.
+Custom record actors can use `requestWithProgressInto` to retain newly allocated
+request handles before submission. The low-level `review-continuation` fixture
+tests handler failure, replacement and retained-request delivery with explicitly
+prepared checkouts. It is a primitive regression, not the component review policy.

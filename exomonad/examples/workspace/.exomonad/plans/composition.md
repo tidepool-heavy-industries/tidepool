@@ -3,7 +3,7 @@
 Think in terms of **recursive fork/join inside local integration loops**. A lead
 owns an outcome, establishes a shared starting point, forks independent work,
 integrates checked results, and uses that new source and understanding to open
-the next useful work. Its children can do exactly the same. Going down the tree
+the next useful work. Its children repeat this cycle unless they justify a terminal leaf. Going down the tree
 divides responsibility; going around a loop advances the same responsibility.
 
 The useful unit is an obligation paired with source and reasoning, not an empty
@@ -34,7 +34,7 @@ acceptance, known limits, and the reasons behind the consequential choices.
 |---|---|---|
 | Prepare | Commit useful shared source, or reuse an adequate existing baseline. | Resolve coupled choices and retain their reasons and limits. |
 | Fork | Seed each child's worktree from the chosen source. | Inherit a useful completed boundary or select a focused context; add its own obligation. |
-| Work | Children implement and check their artifacts, recursively where useful. | Children investigate independent questions and own their local decisions. |
+| Work | Luna owners scaffold and delegate; justified terminal leaves implement and check. | Children investigate independent questions and own their local decisions. |
 | Integrate | Incorporate coherent candidates and check the resulting revision. | Reconcile findings; retain changed decisions, evidence and remaining gates. |
 | Continue | Use the new integrated source for the next ready work. | Supply decision changes to new or retained workers and reuse useful expertise. |
 
@@ -100,8 +100,8 @@ the owner of the shared contract; avoid circular requests between mutually waiti
 workers or repeated relays through uninvolved ancestors.
 
 Choose branches for independently checkable outcomes, not a target headcount or
-mandatory procession of implementer/reviewer/integrator actors. A small leaf can
-implement and check its task directly. A substantial lead owns real engineering,
+mandatory procession of implementer/reviewer/integrator actors. Before substantial direct implementation, explain why the task is a terminal
+leaf with no useful independent frontier. A substantial lead owns real engineering,
 useful recursive delegation, appropriate review, and integration.
 
 ## A node owns multiple local waves
@@ -115,8 +115,8 @@ responses and watches carry this; these words do not introduce another registry.
 flowchart TD
     P["Lead: continuing component obligation"] --> B["Checked shared source + useful reasoning"]
     B --> U["Fork the ready frontier"]
-    U --> A["Sol child A: its own integration loops"]
-    U --> C["Sol child B: bounded implementation"]
+    U --> A["Luna component: recursive local loops"]
+    U --> C["Luna component: recursive local loops"]
     U --> D["Declared Astra task: difficult uncertainty"]
     A --> F["Join coherent results: integrate, check, reconcile"]
     C --> F
@@ -145,7 +145,7 @@ observe the intended result. A type definition or palette alone is partial work.
 
 The first local frontier can establish recipe semantics, editor insertion rules
 and a real integration seam, while independent terminal-regression work proceeds.
-Once that shared source is checked, Sol leads own catalog generation, palette/editor
+Once that shared source is checked, Luna component owners own catalog generation, palette/editor
 interaction and presentation. Graph exploration can advance on its own established
 contract. Put difficult shared uncertainty in its declared Astra slot.
 

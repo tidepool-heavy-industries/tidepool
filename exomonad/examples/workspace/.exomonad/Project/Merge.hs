@@ -11,31 +11,10 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
--- Publishing a checked revision. `Merge` is the worktree-holding record
--- actor: one per merge target, called by every review under a parent. It
--- merges one candidate per `Call`, runs the project check on the merged head, and
--- only then advances the named branch. A failed check leaves the merged head
--- and its evidence in the integration worktree. Read by whoever
--- starts a merge target and by Project.Review, which is the only caller of
--- `publish`.
---
--- Publishing a checked revision is a separate actor from the review. Worktree
--- custody is exclusive and publish authority follows custody, so the actor
--- that merges is the actor that holds the integration worktree: one `Merge`
--- per merge target, started with `R.withWorktree` on a worktree the parent
--- created and never bound. Reviews hold no worktree (they resolve to the
--- research role) and `R.call` the merge actor; its mailbox serialises every
--- merge-and-check. The merge actor checks before it publishes: the project check
--- runs on the merged head; only a green head advances the named branch. A red
--- head remains in the integration worktree for repair. With a named publication
--- branch, the next request observes branch drift until the owner reconciles it.
--- The same two actors run from any node: a Sol or Luna node creates its own
--- integration worktree from its bound head (the coding role may allocate),
--- starts its own merge actor, and replies to its parent with the same
--- `ImplReport` a leaf sends -- integrated head, aggregate changed paths,
--- literal check output, unresolved conditions -- so the parent's review
--- checks the whole subtree diff against the node's contract exactly as it
--- checks a leaf.
+-- One worktree-holding actor serializes merge and check for a parent. A green
+-- check advances an optional named publication branch; red evidence remains in
+-- the integration checkout. Review and ReviewFlow call the same owner. Local
+-- component integration uses this mechanism at every implementation depth.
 module Project.Merge
   ( -- The merge target: supplied by whoever starts a review
     MergeTarget (..)

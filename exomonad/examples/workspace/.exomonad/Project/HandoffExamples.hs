@@ -7,7 +7,7 @@ module Project.HandoffExamples (handoffProposal) where
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Project.CheckResults (CheckState, checksSummary)
-import Project.Observe (candidateSummary, reviewSummary)
+import Project.Observe (candidateOutcomeSummary, reviewSummary)
 import Project.Types (Outcome, Candidate, ReviewDecision)
 
 handoffProposal
@@ -17,7 +17,7 @@ handoffProposal
   -> [Text]
   -> Text
 handoffProposal candidate review checks remaining = Text.unlines
-  [ "Reported candidate: " <> candidateSummary candidate
+  [ "Reported candidate: " <> candidateOutcomeSummary candidate
   , "Reported review: " <> maybe "not supplied" reviewSummary review
   , "Observed checks: " <> checksSummary checks
   , "Remaining obligations: " <> if null remaining

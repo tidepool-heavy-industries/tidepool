@@ -3,8 +3,12 @@ name: exomonad-fork
 description: Compose Exomonad implementation children in resident Haskell, choosing inherited or fresh context and collecting typed progress/results. Use when decomposing work with the Project coordination package.
 ---
 
-Use the resident Haskell tool. The selected package imports Project.Types, Work,
-Plan, Routing and Observe. An inherited fork carries conversation, not skill
+Use the resident Haskell tool for scaffold/delegate/integrate; briefly
+justify terminal leaves. Give Luna component owners `lunaLead` (Delivery) and
+other children `lunaTask` with their real result type. Admit each ready frontier
+with `unfoldWork` and retain its original handles. See `RECURSIVE-WORK.md`
+for a compiled two-batch example and ready-frontier task construction. The selected package imports Project.Types, Work,
+Routing and Observe. An inherited fork carries conversation, not skill
 contents. A child using `withContext (selected taskContext)` reads relevant skills
 itself or receives the needed facts in its assignment. Its request-local bindings
 come from its own assignment, not the parent's history.
@@ -20,23 +24,37 @@ string literals, e.g. `batch "review" "lane-a"`, `subgroup "wave-2"`.
 `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
 builds a branch value on the `luna` alias: the cheap, fast tier, and the default
 for bounded implementation and review children. Effort (`Low`, `Medium`, `High`)
-is chosen at every fork. It selects fresh context from the Task (a Luna cannot
-reuse a Sol conversation), so the assignment must carry every fact the child
+is chosen at every fork. It selects fresh context from the Task, so the assignment must carry every fact the child
 needs, including the contract at each seam it shares with a sibling.
 Use the assignment's actual result type for findings or no-change work;
 do not manufacture a code Candidate to fit the example below.
 `solTaskFrom` has the same shape on the `executor` (Sol) alias with inherited
-context; use it only for a child that owns design judgment or its own
-integration loop. The child's settlement notice wakes you with its reply; no
-watch is needed per child.
+context; when crossing from Luna, override it with `withContext (selected taskContext)`.
+Use Sol for consequential design judgment. Routine local integration belongs
+with the recursive Luna owner. The batch collector routes settlement and question
+notices; no watch is needed per child.
 
-Given your authored `work :: Task` and `source :: WorktreeSeed`, this launches
-one fresh Luna implementer returning `Outcome Candidate`, with a progress stream:
+## Admit the ready frontier
+
+Given your authored `work :: Task` and `source :: WorktreeSeed`, this admits
+one ready obligation returning `Outcome Candidate` and installs its collector.
+Include every independent ready obligation in the same list. Use `lunaLeadFrom`
+and `deliverySummary` when admitting component owners returning `Delivery`.
 
 ```haskell
-let branch = lunaTaskFrom [label|implementation|] Medium source work
-(worker, progress) <- unfold (taskGroup work) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
+let implementationBranch = lunaTaskFrom [label|implementation|] Medium source work :: Branch CodingEffects Task (Outcome Candidate)
+localBatch <- unfoldWork (taskGroup work) [workChild "implementation" implementationBranch] (notifyWork me (workMessage candidateOutcomeSummary))
+let [(_, worker, progress)] = batchMembers localBatch
 ```
+
+Keep `localBatch` for observations and `finishWorkBatch`; the original `worker`
+and `progress` handles remain available for typed follow-up. The coordinate
+skill continues from this binding.
+
+## Underlying admission operations
+
+For a custom join or mixed result types, compose the primitives directly. They
+implement the same scaffold/delegate/integrate cycle.
 
 `task label objective ownedPaths acceptance source` builds a `Task` with the
 group, plan path and empty decisions defaulted; update any field with record
@@ -51,9 +69,13 @@ let testTask = task [label|contract-tests|] "Write failing tests for the parse/s
   <$> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|parser|] Medium currentCheckout parserTask)
   <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|store|] Medium currentCheckout storeTask)
   <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|contract-tests|] Low currentCheckout testTask)
+primitiveQuestions <- followWork [("parser", parser, parserProgress), ("store", store, storeProgress), ("tests", tests, testsProgress)] (notifyWork me workQuestionsMessage)
 ```
 
-End the turn after admission; each child's notice wakes you. Before merging a
+End the admission cell promptly; continue independent work or end the turn when
+waiting is all that remains. The requests own settlement notices; the collector
+surfaces pending questions without duplicate final notices. Read it for question
+details and drain `finishWork primitiveQuestions` after all results settle. Before merging a
 candidate, refuse paths it does not own:
 
 ```haskell

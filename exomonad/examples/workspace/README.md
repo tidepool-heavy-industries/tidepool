@@ -15,9 +15,11 @@ observations and retained output. The lookup record uses
 [`Project/Lookup.hs`](.exomonad/Project/Lookup.hs) to select among typed lookup
 candidates with Jev. These presenters and selectors are part of their tools.
 
-`Project.Watchdog` provides monitor logic for an after-tool hook a parent
-installs on a child. It can add advice to the child's result or send an
-escalation to the parent; it does not present shell or lookup results.
+The spec has no blanket after-tool monitor. Execution owners use the
+[recursive-work procedure](.exomonad/RECURSIVE-WORK.md): scaffold a shared boundary,
+admit ready children, integrate checked results and repeat locally. The installed
+routing and review actors handle ordinary progress, questions and bounded repair.
+Task-specific semantic decisions have explicit inputs and bounded effects.
 
 The [workspace skills](.exomonad/skills/) describe the current Exomonad
 interfaces. The [check modules](.exomonad/Project/Checks.hs) and

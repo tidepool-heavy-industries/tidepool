@@ -1,0 +1,93 @@
+{
+  "paraphrase": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "answer": {
+        "type": "choice",
+        "choice": "0",
+        "confidence": 0.94,
+        "probabilities": {
+          "0": 0.97,
+          "owner": 0.03
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 552,
+      "output_tokens": 31
+    }
+  },
+  "new-policy": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "answer": {
+        "type": "choice",
+        "choice": "owner",
+        "confidence": 0.95,
+        "probabilities": {
+          "0": 0.02,
+          "owner": 0.98
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 552,
+      "output_tokens": 31
+    }
+  },
+  "injection": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "answer": {
+        "type": "choice",
+        "choice": "owner",
+        "confidence": 0.04,
+        "probabilities": {
+          "0": 0.48,
+          "owner": 0.52
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 561,
+      "output_tokens": 31
+    }
+  },
+  "missing-detail": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "answer": {
+        "type": "choice",
+        "choice": "owner",
+        "confidence": 0.56,
+        "probabilities": {
+          "owner": 0.78,
+          "0": 0.22
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 550,
+      "output_tokens": 31
+    }
+  },
+  "semantic-conflict": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "answer": {
+        "type": "choice",
+        "choice": "owner",
+        "confidence": 0.91,
+        "probabilities": {
+          "0": 0.06,
+          "owner": 0.94,
+          "1": 0.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 634,
+      "output_tokens": 38
+    }
+  }
+}

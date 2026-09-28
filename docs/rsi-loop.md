@@ -57,6 +57,23 @@ several layers. Separate that work from unresolved design questions and experime
 For the current harness workload, prove extension points through standalone stubs
 and production consumers before attempting Exomonad integration.
 
+### Recursive delegation experiment
+
+The execution workflow is live scaffold → unfold → checked integration → next
+ready batch. WorkPlan's preauthored graph is removed. Sol holds cross-component
+choices; Luna owners recursively define shared boundaries and delegate ready
+implementation. Target at least three Luna implementation levels on average,
+with terminal-leaf justification instead of a mandatory fork count. Reviews do
+not count toward implementation depth. Nested review checks leaf changes and
+component joins at their respective boundaries.
+
+The hypothesis is shorter accepted-delivery wall time through parallel work at
+several depths, plus fewer parent relay rounds through checked ReviewFlow and
+bounded relays of existing decisions. Measure useful depth, overlap, time to
+first useful fork, blocked dependency time, source corrections, reviewed defects,
+parent relays and accepted-delivery time from existing run evidence. A deeper
+tree is not success if the same work is serialized or repeatedly re-reviewed.
+
 ## Method: reconstruct the workflow before tuning its mechanisms
 
 Apply this method in every RSI pass and every audit analysis. Start with the

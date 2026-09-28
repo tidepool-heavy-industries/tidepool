@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 // Keep this in step with this repository's .exomonad/workspace gitlink.
 // `exomonad new` pulls the source from DEFAULT_WORKSPACE_URL, but must install
 // the commit this release compiled and checked, even if the remote advances.
-pub(super) const DEFAULT_WORKSPACE_REV: &str = "b270dbf86b5c755780ca1c04805fa786153b578c";
+pub(super) const DEFAULT_WORKSPACE_REV: &str = "6f548d7b3e1f432af8311a3c75e09e1035c8ada5";
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
@@ -35,11 +35,10 @@ maximum_depth = 8
 [haskell]
 source_roots = [".", "workspace"]
 modules = [
-  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
+  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.DecisionAnswers", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
-  "Project.FieldNotesChecks", "Project.RebaseRouterChecks",
   "Project.Service", "Project.Repository", "Project.CheckResults",
   "Project.PrepareContinue", "Project.RetainedEvidence", "Project.AssumptionWatch",
   "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
@@ -48,6 +47,13 @@ modules = [
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
+  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.revisedReview",
+  "Project.DecisionAnswerChecks.routing",
+  "Project.DecisionAnswerChecks.replay",
+  "Project.CheckedReviewChecks.published",
+  "Project.CheckedReviewChecks.continuation",
+  "Project.CheckedReviewChecks.sourceMismatch",
   "Project.AutomationChecks.integration",
   "Project.CheckResultsChecks.completionRouting",
   "Project.RoutingChecks.routing",

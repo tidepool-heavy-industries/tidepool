@@ -1,6 +1,6 @@
 [defaults]
 model = "gpt-6-sol"
-effort = "low"
+effort = "medium"
 
 [models]
 planner = "gpt-6-astra"
@@ -13,13 +13,21 @@ systemd_slice = "swarm.slice"
 [haskell]
 source_roots = [".", "workspace"]
 modules = [
-  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
+  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.DecisionAnswers", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
   "Project.Service", "Project.Repository",
+  "Project.CheckResults", "Project.FocusedGateExample", "Project.ReviewFlow",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
+  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.revisedReview",
+  "Project.DecisionAnswerChecks.routing",
+  "Project.DecisionAnswerChecks.replay",
+  "Project.CheckedReviewChecks.published",
+  "Project.CheckedReviewChecks.continuation",
+  "Project.CheckedReviewChecks.sourceMismatch",
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",
   "Project.RoutingChecks.notificationRetention",

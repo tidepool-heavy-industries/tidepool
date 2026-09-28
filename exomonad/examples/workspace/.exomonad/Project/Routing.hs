@@ -2,21 +2,23 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 -- Project policy for live waves. The kernel owns ordered delivery and lifetime;
 -- this actor retains engineering evidence and chooses which changes need judgment.
 module Project.Routing
   ( WorkActor (workSnapshot, workNotification, incorporatedWork), WorkState (..), WorkSource (..), WorkStatus (..)
-  , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink
+  , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..)
   , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
   , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
-  , notifyWork, workNoticeMessage, workMessage, withCheckpoints
+  , notifyWork, workNoticeMessage, workMessage, workQuestionsMessage, withCheckpoints
   , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
+  , WorkBranch, WorkBatch (..), workChild, unfoldWork, unfoldWorkWith, finishWorkBatch
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -32,6 +34,65 @@ import Tidepool.Effects.Core (Actor)
 import Project.Types
 import Project.Actors (CoordinationEffects, coordinationActor)
 import Project.Work (candidateAtSubmission, sameQuestion)
+
+-- A batch describes only the children admitted now. Later batches are ordinary
+-- subsequent notebook calls, and results need not be code candidates.
+data WorkBranch effects value = WorkBranch Text
+  (Unfold effects (Text, Response value, Progress WorkProgress))
+
+data WorkBatch value = WorkBatch
+  { batchMembers :: [(Text, Response value, Progress WorkProgress)]
+  , batchRouter :: ActorHandle (WorkActor value)
+  }
+
+-- Prepared admission needs the caller's concrete result type.
+{-# INLINE workChild #-}
+workChild
+  :: forall value child input parent. (KnownEffects child, Subset child parent)
+  => Text -> Branch child input value -> WorkBranch parent value
+workChild name branch = WorkBranch name $
+  (\(response, progress) -> (name, response, progress))
+    <$> childWithProgress @WorkProgress @value (withReport Silent branch)
+
+-- Validate names before admitting children. The caller remains the requester;
+-- the collector observes outcomes without acquiring active-update authority.
+unfoldWork
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
+      Member Actor effects)
+  => ForkGroupPath -> [WorkBranch effects value] -> WorkSink value
+  -> Eff effects (WorkBatch value)
+unfoldWork group branches sink = fst <$> unfoldWorkWith group branches (\_ -> pure (sink, ()))
+
+-- Configure routing from the original admitted handles before attaching the
+-- collector. Authored compositions use this seam without readmitting children.
+unfoldWorkWith
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
+      Member Actor effects)
+  => ForkGroupPath -> [WorkBranch effects value]
+  -> ([(Text, Response value, Progress WorkProgress)] -> Eff effects (WorkSink value, extra))
+  -> Eff effects (WorkBatch value, extra)
+unfoldWorkWith group branches configure
+  | null branches = error "unfoldWork: empty batch"
+  | length names /= length (nub names) = error "unfoldWork: duplicate child name"
+  | any (Text.null . Text.strip) names = error "unfoldWork: empty child name"
+  | otherwise = do
+      members <- unfold group (sequenceA [branch | WorkBranch _ branch <- branches])
+      (sink, extra) <- configure members
+      router <- followWork members sink
+      pure (WorkBatch members router, extra)
+  where names = [name | WorkBranch name _ <- branches]
+
+-- Closing the collector is distinct from retiring children. Refuse while any
+-- original request lacks a terminal observation, leaving its route intact.
+finishWorkBatch
+  :: Member Actor effects => WorkBatch value
+  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
+finishWorkBatch batch = do
+  state <- readWork (batchRouter batch)
+  case [sourceName source | source <- collectedWork state,
+        Nothing <- [sourceResult source]] of
+    [] -> Right <$> finishWork (batchRouter batch)
+    pending -> pure (Left pending)
 
 -- Closure keeps unanswered questions. The terminal response is independent of
 -- progress closure and retains its execution/worktree evidence, including failure.
@@ -121,12 +182,16 @@ data WorkActor value mode = WorkActor
   } deriving Generic
 
 type WorkEffects value = CoordinationEffects (WorkActor value)
-type WorkSink value = WorkEvent value
-  -> Handler (WorkState value) (WorkEffects value)
-       (Maybe (Either NotificationError NotificationReceipt))
+-- Keep callback internals behind a named value. Notebook type pins can retain
+-- WorkSink without exposing State or the collector's private effect list.
+newtype WorkSink value = WorkSink
+  { runWorkSink :: WorkEvent value
+      -> Handler (WorkState value) (WorkEffects value)
+           (Maybe (Either NotificationError NotificationReceipt))
+  }
 
 keepWork :: WorkSink value
-keepWork _ = pure Nothing
+keepWork = WorkSink (const (pure Nothing))
 
 followWork
   :: Member Actor effects
@@ -150,7 +215,7 @@ finishWork = R.finish
 workDefinition
   :: forall value. [(Text, Response value, Progress WorkProgress)] -> WorkSink value
   -> ActorSpec (WorkActor value) (WorkEffects value)
-workDefinition inputs sink
+workDefinition inputs (WorkSink sink)
   | length names /= length (nub names) = error "work source names must be unique"
   | otherwise = coordinationActor "work" WorkActor
       { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] [] QuestionsAndResults
@@ -234,7 +299,7 @@ putSource source state = state { collectedWork =
 -- Use another projection when partial evidence unlocks a known consumer. The
 -- default wakes only for question deltas, source failure and terminal results.
 notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value
-notifyWork owner render event = do
+notifyWork owner render = WorkSink $ \event -> do
   policy <- R.gets workNoticePolicy
   case workNoticeMessage policy render event of
     Nothing -> pure Nothing
@@ -303,23 +368,23 @@ notifyReviewReady owner = notifyWork owner reviewReadyMessage
 
 workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text
 workMessage render event = case event of
+  WorkFinished name result -> Just (name <> ": " <> either
+    (\failure -> "unavailable " <> Text.pack (show failure)) (render . responseValue) result)
+  _ -> workQuestionsMessage event
+
+-- Use when another retained route owns settlement. Questions and failed progress
+-- still wake the owner; ordinary evidence and terminal results do not duplicate it.
+workQuestionsMessage :: WorkEvent value -> Maybe Text
+workQuestionsMessage event = case event of
   WorkChanged name delta ->
-    let opened = openedQuestions delta
-        closed = resolvedQuestions delta
-        ref q = questionPlan (questionDetails q) <> "#" <> questionKey q
+    let ref q = questionPlan (questionDetails q) <> "#" <> questionKey q
           <> "@" <> renderGitOid (questionSource (questionDetails q))
         added q = "+" <> ref q <> " " <> questionFinding (questionDetails q)
         removed q = "-" <> ref q
-        parts = map added opened ++ map removed closed
+        parts = map added (openedQuestions delta) ++ map removed (resolvedQuestions delta)
     in if null parts then Nothing else Just (name <> ": " <> Text.intercalate "; " parts)
-  WorkEnded name (WorkRejected failure) -> Just (name <> ": progress " <> shown failure)
-  WorkEnded _ _ -> Nothing
-  WorkFinished name result -> Just (name <> ": " <> either
-    (\failure -> "unavailable " <> shown failure) (render . responseValue) result)
-  WorkPolicyChanged _ _ -> Nothing
-  where
-    shown :: Show a => a -> Text
-    shown = Text.pack . show
+  WorkEnded name (WorkRejected failure) -> Just (name <> ": progress " <> Text.pack (show failure))
+  _ -> Nothing
 
 -- A component owner can consume useful partial checkpoints before final delivery.
 -- Preserve simultaneous question/result messages instead of choosing one signal.

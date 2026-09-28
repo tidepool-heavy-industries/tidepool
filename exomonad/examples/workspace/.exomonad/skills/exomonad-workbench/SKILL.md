@@ -20,10 +20,10 @@ not used here.
 
 ```haskell
 data Finding = Finding { findingPath :: Text, findingLine :: Int }
-render :: Finding -> Text
-render finding = findingPath finding <> ":" <> T.pack (show (findingLine finding))
+renderFindingLocation :: Finding -> Text
+renderFindingLocation finding = findingPath finding <> ":" <> T.pack (show (findingLine finding))
 let findings = [Finding "src/Retry.hs" 12, Finding "src/Fetch.hs" 44]
-map render findings
+map renderFindingLocation findings
 ```
 
 ## Look up a name from a cell

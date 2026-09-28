@@ -93,9 +93,8 @@ pub(crate) struct PromptArtifact {
 /// workspace modules existed.
 /// The skills an Exomonad workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
-const SHIPPED_SKILLS: [&str; 11] = [
+const SHIPPED_SKILLS: [&str; 10] = [
     "exomonad-jev",
-    "exomonad-orchestrate",
     "exomonad-unfold",
     "exomonad-workbench",
     "exomonad-cleanup",
@@ -156,7 +155,7 @@ pub(crate) fn workbench_doc(
         "help" | "topics" => {
             let mut body = String::from(
                 "Exomonad topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-jev (judgment-model packets and gates), exomonad-orchestrate (the implement/review/repair/merge loop as one record actor), exomonad-unfold (multi-child unfolds and reading a child's commit), exomonad-workbench (cells that typecheck the first time), exomonad-cleanup (retiring workers and groups), exomonad-agent-spec (your own tools, after-tool slot, and watchdog heuristics on children — all read, edited and reloaded live), exomonad-fork, exomonad-coordinate, exomonad-review, exomonad-command, exomonad-define-actors.",
+                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-jev (judgment-model packets and gates), exomonad-unfold (multi-child unfolds and reading a child's commit), exomonad-workbench (cells that typecheck the first time), exomonad-cleanup (retiring workers and groups), exomonad-agent-spec (declaring and reloading your typed tools), exomonad-fork (recursive scaffold and delegation), exomonad-coordinate (ready batches and retained event routing), exomonad-review (exact-source checks, review and bounded repair), exomonad-command, exomonad-define-actors.",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
@@ -253,6 +252,18 @@ mod tests {
     }
 
     #[test]
+    fn discovery_names_only_existing_shipped_skills() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/workspace/.exomonad/skills");
+        for skill in SHIPPED_SKILLS {
+            assert!(
+                root.join(skill).join("SKILL.md").is_file(),
+                "missing {skill}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_topic_naming_a_shipped_skill_says_so() {
         // A live lead asked `doc command` while `exomonad-command` — whose whole
         // subject is running commands — went unmentioned, then spent four
@@ -266,7 +277,7 @@ mod tests {
 
         // The full name works too, and so does every other shipped skill that
         // is not already a topic in its own right.
-        for topic in ["exomonad-command", "review", "coordinate", "orchestrate"] {
+        for topic in ["exomonad-command", "review", "coordinate"] {
             let refusal = workbench_doc(topic, &[]).unwrap_err();
             assert!(
                 refusal.contains("skill covers this"),

@@ -1,11 +1,19 @@
-Implement the supplied Task in your bound checkout from its accepted source and
+Use the local scaffold/delegate/integrate loop. If the assignment is a true
+terminal leaf, explain why briefly and implement it; otherwise give ready disjoint
+implementation to Luna children and retain shared decisions and integration.
+Delegation does not change your requested result type or acceptance. Reuse the
+published recursive-work example and `unfoldWork`; do not write an orchestration
+interpreter. Child criteria can be narrower than your combined acceptance.
+
+Own the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition.
 
 Build the owning production consumer. Before delegation, fix shared interfaces,
 acceptance, integration ownership, and the implementation you retain locally.
-Wire returned components together early. Default project helpers preserve
-inherited context and the bound source; select fresh context deliberately.
+Wire returned components together early. The Luna helpers select context from the Task and use the bound source. Focused
+Luna descendants should use `withContext inherited` at a useful scaffold boundary;
+select focused Task context when crossing model tiers. Use fresh context for independent review.
 The initial brief names that consumer, the relevant state distinctions and an
 exact focused acceptance command with its expected matched count.
 

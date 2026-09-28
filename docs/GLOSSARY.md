@@ -35,8 +35,8 @@ relation, not "subtree" (the supervision tree, a different ancestry) or
 ## Model tiers
 
 **Sol**, **Luna**, and **Astra** name model tiers, not people or actor roles.
-Workspace configuration maps the `executor` alias to Sol for implementation
-and integration, `luna` to Luna for bounded low-cost work and judgment, and
+Workspace configuration maps `executor` to Sol for shared decisions and root
+integration, `luna` to recursive component ownership, microtasks and review, and
 `planner` to Astra for initial planning and explicit hard questions. A person
 or actor may use a configured model without taking on that model tier's usual
 task.

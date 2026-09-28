@@ -37,7 +37,7 @@
 - **Task**: source, obligation, rationale, owning scope, acceptance and relevant
   accepted decisions supplied to a fresh context. A plan path alone is insufficient.
 - **Attention**: the cumulative unresolved Question set published by an active
-  request, retained by Sol execution owners rather than forwarded to the planner.
+  request, retained by local execution owners rather than forwarded to the planner.
   Hard questions use explicit consultDesign requests. An AcceptedDecision records the exact answered question, checked source,
   reasoning and evidence; it grants no authority and cannot erase a newer question.
 - **Outcome**: Produced value or Blocked reason evidence. This product conclusion

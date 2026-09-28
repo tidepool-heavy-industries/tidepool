@@ -4,7 +4,7 @@
 
 module Project.Observe
   ( WorkObservation (..), observeWork, workSummary, deliverySummary
-  , candidateSummary, reviewSummary, attentionSummary, progressSummary, workSnapshotSummary
+  , candidateOutcomeSummary, reviewSummary, attentionSummary, progressSummary, workSnapshotSummary
   , workingAndAbnormal, actorSummary
   , RsiInput (..), rsiContext, rsiBranch
   ) where
@@ -48,9 +48,9 @@ observeWork task (worker, progress) = do
 shown :: Show value => value -> Text
 shown = Text.pack . show
 
-candidateSummary :: Outcome Candidate -> Text
-candidateSummary (Blocked reason evidence) = blockedSummary reason evidence
-candidateSummary (Produced candidate) = candidateRef candidate
+candidateOutcomeSummary :: Outcome Candidate -> Text
+candidateOutcomeSummary (Blocked reason evidence) = blockedSummary reason evidence
+candidateOutcomeSummary (Produced candidate) = candidateRef candidate
 
 reviewSummary :: Outcome ReviewDecision -> Text
 reviewSummary (Blocked reason evidence) = blockedSummary reason evidence

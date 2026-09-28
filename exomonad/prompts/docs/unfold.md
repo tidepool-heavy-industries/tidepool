@@ -1,3 +1,8 @@
+Execution owners use the recursive scaffold → ready batch → checked integration
+cycle in `RECURSIVE-WORK.md`, normally through `lunaLead`/`lunaTask` and
+`unfoldWork`. This page describes the underlying admission primitive used by
+that procedure and by custom typed joins.
+
 `unfold` admits persistent child actor applications and returns their handles now. Children
 start after the entire enclosing cell finishes, including statements after
 `unfold`. All forks queued in that block inherit its final committed Haskell
@@ -54,7 +59,8 @@ cancelled with an explicit failure; already started children are unaffected.
 effort. Omission uses the launch selector's inherited default. Inspect provider
 observations when checking the effective selection or cache reuse. The consumer
 branch above inherits the same committed context while explicitly selecting
-Medium, as the example workspace requires for Sol execution forks.
+Medium. Model placement is independent: the workspace execution policy uses a
+Sol root and recursive Luna owners; its branch constructors select those models.
 `withEffort` applies when constructing a context unfold; it is not an API for steering
 an already active Exomonad assignment. The Codex backend's configuration-update
 mechanism is a separate control layer, not a missing model capability.
@@ -75,8 +81,9 @@ fork fails with its source files preserved; it does not silently use an older
 still selects its specified revision. Build caches follow the creator; a
 completed warm build helps descendants without stopping active builds.
 
-`coding` children can repeat the scaffold/fork/fold rhythm within their inherited
-descendant budget. Use `currentCheckout` when their children should start from the
+`coding` owners repeat scaffold, ready parallel batch and checked integration
+within their inherited descendant budget. Before substantial direct implementation,
+briefly justify a terminal leaf. Use `currentCheckout` when their children should start from the
 child-owned scaffold. `scaffolding` selects a scaffold emphasis with the same
 capabilities. Use a coding reviewer when review includes running checks.
 

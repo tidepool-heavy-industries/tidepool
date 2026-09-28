@@ -1,0 +1,85 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
+module Project.RecursiveWorkChecks (nestedBatches, revisedReview) where
+
+import Control.Monad (void)
+import Control.Monad.Freer (Eff, Member)
+import qualified Data.Text as Text
+import Tidepool.Check
+import Project.Checks (script)
+
+-- Scripted model replies exercise the actual resident fork/collector boundary.
+-- Findings stay findings throughout three levels; scaffold commits test source
+-- inheritance and never masquerade as Candidate results.
+nestedBatches :: Member RecipeCheck effects => Eff effects ()
+nestedBatches = do
+  owner <- root
+  base <- git owner ["rev-parse", "HEAD"]
+  setup owner base "first"
+  component <- activation
+  sibling <- activation
+  pending <- turn owner "early <- finishWorkBatch work\ninspectFull (case early of { Left names -> length names == 2; _ -> False })"
+  check "collector cannot close over pending original requests" (lastOutput pending == "True")
+  componentSource <- checkpoint (checkActor component) "component-scaffold.txt" "component contract\n" "component scaffold fixture"
+  setup (checkActor component) componentSource "subcomponents"
+  subcomponent <- activation
+  peer <- activation
+  inheritedComponent <- git (checkActor subcomponent) ["rev-parse", "HEAD"]
+  check "subcomponent starts from its local owner scaffold, not root HEAD" (inheritedComponent == componentSource && componentSource /= base)
+  subcomponentSource <- checkpoint (checkActor subcomponent) "subcomponent-scaffold.txt" "microtask contract\n" "subcomponent scaffold fixture"
+  setup (checkActor subcomponent) subcomponentSource "microtasks"
+  leaf1 <- activation
+  leaf2 <- activation
+  inheritedSubcomponent <- git (checkActor leaf1) ["rev-parse", "HEAD"]
+  check "microtask starts from the next local scaffold" (inheritedSubcomponent == subcomponentSource && subcomponentSource /= componentSource)
+  void $ turn (checkActor leaf1) "respond (Produced (\"left evidence\" :: Text))"
+  void $ turn (checkActor leaf2) "respond (Produced (\"right evidence\" :: Text))"
+  finish (checkActor subcomponent)
+  void $ turn (checkActor subcomponent) "respond (Produced (\"joined microtasks\" :: Text))"
+  void $ turn (checkActor peer) "respond (Produced (\"independent evidence\" :: Text))"
+  finish (checkActor component)
+  -- A second local batch is authored only after the first result is known.
+  setup (checkActor component) componentSource "followup"
+  later1 <- activation
+  later2 <- activation
+  void $ turn (checkActor later1) "respond (Produced (\"followup one\" :: Text))"
+  void $ turn (checkActor later2) "respond (Produced (\"followup two\" :: Text))"
+  finish (checkActor component)
+  void $ turn (checkActor component) "respond (Produced (\"component findings\" :: Text))"
+  void $ turn (checkActor sibling) "respond (Produced (\"sibling findings\" :: Text))"
+  finish owner
+  where
+    setup actor base group = do
+      void $ turn actor ("let sourceHead = " <> gitOidLiteral base <> "\nlet groupName = " <> Text.pack (show group) <> " :: ForkGroupLabel")
+      script actor "recursive-batch"
+    finish actor = do
+      void $ awaitOutput actor
+        "inspectFull . length . filter (maybe False (const True) . sourceResult) . collectedWork <$> readWork (batchRouter work)"
+        (== "2")
+      result <- turn actor "closed <- finishWorkBatch work\ninspectFull (case closed of { Right _ -> True; _ -> False })"
+      check "settled findings batch drains without retiring its workers" (lastOutput result == "True")
+      void $ turn actor "case answerer of { Nothing -> pure (); Just answers -> do { _ <- R.finish answers; pure () } }"
+
+-- A new review request changes both the exact source and the actor, while
+-- preserving the original scope. It must not disturb the previous checkout.
+revisedReview :: Member RecipeCheck effects => Eff effects ()
+revisedReview = do
+  owner <- root
+  base <- git owner ["rev-parse", "HEAD"]
+  first <- checkpoint owner "candidate.txt" "first\n" "first review candidate"
+  void $ turn owner ("let basis = ExactScope " <> gitOidLiteral base <> " [\"candidate.txt\"] \"The candidate contains the corrected text\"\nlet original = ReviewRequest basis (Candidate " <> gitOidLiteral first <> " [] []) OwnerRepairs\n(review, progress) <- requestReview [label|first-review|] original")
+  reviewer <- activation
+  firstHead <- git (checkActor reviewer) ["rev-parse", "HEAD"]
+  check "initial review uses Luna at the exact candidate"
+    (firstHead == first && checkModel reviewer == Just "gpt-6-luna")
+  void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) [\"correct the text\"]))"
+  revised <- checkpoint owner "candidate.txt" "corrected\n" "revised review candidate"
+  void $ turn owner ("let revised = original { reviewInput = Candidate " <> gitOidLiteral revised <> " [] [] }\n(nextReview, nextProgress) <- requestReview [label|revised-review|] revised")
+  next <- activation
+  nextHead <- git (checkActor next) ["rev-parse", "HEAD"]
+  oldHead <- git (checkActor reviewer) ["rev-parse", "HEAD"]
+  check "revised review gets a fresh actor and the new candidate"
+    (checkActor next /= checkActor reviewer && nextHead == revised)
+  check "revised review leaves the retained previous checkout intact" (oldHead == first)
+  scope <- turn (checkActor next) ("inspectFull (reviewBase (reviewBasis sessionInput) == " <> gitOidLiteral base <> " && reviewOwnedPaths (reviewBasis sessionInput) == [\"candidate.txt\"])")
+  check "fresh review preserves the original cumulative scope" (lastOutput scope == "True")

@@ -1,5 +1,8 @@
 Your input is `ReviewRequest`. Its `reviewBasis` is either `AssignedTask Task`
 or `ExactScope GitOid [Text] Text` (base, owned paths, acceptance).
+Review the assigned boundary yourself; do not delegate review or commission a
+review of your review. Leaf review checks the change; component review checks
+joins and combined acceptance without repeating every descendant review.
 Independently review its exact candidate, current accepted decisions and the real
 owning consumers. Incorporate the requested source
 in your review checkout before claiming checks there. Verify the candidate's
@@ -30,7 +33,7 @@ next <- repair repairLabel current latest findings
 ```
 
 Left verdict means your requester repairs: respond (Produced verdict), then it
-can reuse you through reviewAgain. Right response means an available separate
+uses `requestReview` for a changed candidate so the reviewer starts on its exact source. Right response means an available separate
 implementer has a repair request. Bind that response and watch it:
 
 ```haskell
@@ -54,7 +57,9 @@ let reviewed = ReviewedCandidate (reviewBasis current) latest checks conclusion
 respond (Produced (Accepted reviewed))
 ```
 
-You can also submit acceptance with `submit_review`. Read the current request id
+A coding reviewer can also submit acceptance with `submit_review`. An
+inspection-only reviewer uses the typed reply above and retained check evidence;
+do not execute checks or pin its effects to CodingEffects. For the coding tool, read the current request id
 with `requestIdNumber` from `currentRequest :: Eff CodingEffects
 (RequestScope ReviewRequest (Outcome ReviewDecision))`, and pass it as
 `expectedRequestId`. Pass `candidateCommit (reviewInput current)` as
@@ -65,8 +70,9 @@ same reply. A refusal leaves the request open; inspect it before trying again.
 
 The reviewed candidate is the single source of its reviewed revision. Keep source
 check limits accurate; do not launder earlier checks into a later head. Return
-Blocked with evidence if review cannot continue. Remain available for repairs
-without requiring a fresh reviewer for every attempt.
+Blocked with evidence if review cannot continue. While your review remains pending,
+follow authorized implementer repairs and verify the incorporated source. Once
+your reply settles, a new candidate uses exact-source review admission.
 
 
 For recurring checks, begin with the project's compiled Haskell composition and

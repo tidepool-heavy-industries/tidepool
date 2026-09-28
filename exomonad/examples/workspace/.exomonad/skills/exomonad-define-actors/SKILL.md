@@ -101,8 +101,10 @@ Previously distributed endpoints still name their original incarnation.
 For handler-owned requests, `requestWithProgressInto` runs your retention callback
 with the exact typed response/progress handles before submission. Send those handles
 to a route on `Self`; that route can create a collector using its receiving
-incarnation's endpoints. See `checks/review-continuation.hs` and
-`plans/continuation.md` for the executable review/repair loop. Do not reconstruct
+incarnation's endpoints. `checks/review-continuation.hs` is a low-level regression
+fixture for this retention boundary; its retained reviewer requires explicit
+checkout preparation. Routine review uses `startReviewFlow`, described in
+`plans/continuation.md`, which owns exact-source admission. Do not reconstruct
 response handles from labels or repeat submission after uncertain failure.
 
 Keep the integration actor alive through useful repairs. When done:
@@ -140,12 +142,14 @@ the **same** cell item; a signature alone installs nothing.
 import GHC.Generics (Generic)
 data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) } deriving Generic
 type TallyEffects = LocalEffects Tally '[Replies, Actor, Notifications]
-let recordNote :: Text -> Handler [Text] TallyEffects (); recordNote note = modify' (++ [note])
-let tallyDefinition = R.definition "tally" (Actor.Selected knownEffects) Tally
+recordNote :: Text -> Handler [Text] TallyEffects ()
+recordNote note = modify' (++ [note])
+tallyDefinition :: ActorSpec Tally TallyEffects
+tallyDefinition = R.definition "tally" (Actor.Selected knownEffects) Tally
       { tallyState = []
       , noted = recordNote
       , noteCount = \() -> gets length
-      } :: ActorSpec Tally TallyEffects
+      }
 tally <- R.start tallyDefinition
 R.send (noted (R.client tally)) "first finding"
 R.call (noteCount (R.client tally)) ()

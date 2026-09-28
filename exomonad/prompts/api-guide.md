@@ -24,6 +24,14 @@ not justify replaying a command.
 
 ## Delegate and inspect
 
+The standard execution cycle is scaffold, admit the ready parallel frontier,
+integrate checked results, then admit a later batch. Luna component owners repeat
+it down to justified microtask leaves. The installed project's `unfoldWork`
+composes admission with a persistent `Project.Routing` collector;
+`lunaLead` returns Delivery and `lunaTask` supports the requested result type.
+Use the compiled `RECURSIVE-WORK.md` procedure. The primitives below explain that
+composition and support custom typed work; they do not prescribe a second workflow.
+
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
 (worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
@@ -49,7 +57,8 @@ let reviewTask = "Review the interface." :: Text
 A later wave from the same actor uses `subgroup "wave-2"`: it nests under
 your own path, so you pass only the new segment, never your full path.
 
-End the turn. Each child's settlement notice wakes you with its reply; read
+End the admission cell; continue independent work or end the turn while waiting.
+Each child's settlement notice wakes you with its reply; read
 the full value with `pollResponse` only when the notice's preview is not
 enough. A `watch` joins several responses into one wake:
 
@@ -175,7 +184,7 @@ it by hand many more.
 Load the relevant skill at an unfamiliar boundary: `exomonad-command` for retained
 output/stdin/completion; `exomonad-workbench` for parser/type/display recovery;
 `exomonad-jev` for typed judgment composition; `exomonad-unfold` for delegation/source;
-`exomonad-coordinate`, `exomonad-fork`, `exomonad-orchestrate`, and `exomonad-review` for project
+`exomonad-coordinate`, `exomonad-fork`, and `exomonad-review` for project
 coordination; `exomonad-define-actors` for custom event handlers; `exomonad-cleanup` for
 retirement; `exomonad-agent-spec` for typed tools and spec reload; `doc` is the
 fallback.

@@ -7,7 +7,7 @@ let parentDefinition = coordinationActor "parent-handoff" Handoff
       , handoffSnapshot = \() -> get
       }
 parent <- R.start parentDefinition
-let forwardFinal = (\event -> case event of
+let forwardFinal = (WorkSink $ \event -> case event of
       WorkFinished _ _ -> do { R.send (componentFinished (R.client parent)) event; pure Nothing }
       _ -> pure Nothing) :: WorkSink Delivery
 handoff <- followWork [("left", left, leftProgress), ("right", right, rightProgress)] forwardFinal

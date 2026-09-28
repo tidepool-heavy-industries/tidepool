@@ -4,7 +4,7 @@ Read your assigned plan and the relevant recipe below. For recursive parallel
 implementation, start with [local waves](operating.md#repeated-local-waves-and-context-choices).
 Only the initial designated leads submit execution plans for planner review;
 descendants implement within that agreement unless their assignment says otherwise.
-The optional [graph walkthrough](graph/run.md) illustrates a separate project.
+The canonical executable workflow is [recursive work](../RECURSIVE-WORK.md).
 
 Launch preparation and package checks belong to the launch operator; workers
 start with their assigned product work. See [launch.md](launch.md) when preparing
@@ -12,11 +12,13 @@ a new swarm or validating a package change.
 
 ## Context and source defaults
 
-`solTask` and `componentLead` inherit the current completed reasoning and use
-`currentCheckout`. `implement` uses `solTask`. They suit recursive implementation from
-the executing actor's checkout. Component leads, solTask/implement and reviews explicitly select Medium;
-keep Sol effort stable across inherited forks. Original-root callers use `solTaskFrom label projectHead`
-or `componentLeadFrom label projectHead`. A Task's source hash records its accepted
+`lunaLead`/`lunaLeadFrom` create Luna component owners returning Delivery;
+`lunaTask`/`lunaTaskFrom` retain the caller's actual result type. `implement` uses
+Luna Medium. These select fresh Task context and `currentCheckout` by default;
+same-model descendants can explicitly select inherited context. `solTask` is an
+explicit escape for consequential design uncertainty, not the execution default.
+It inherits by default; crossing model tiers requires selected Task context.
+A Task's source hash records its accepted
 baseline; it does not override live checkout selection. Exomonad checkpoints eligible
 source changes on the current branch before a live-source fork. Commit authored
 units with meaningful messages for Git integration and restart recovery.
@@ -34,7 +36,7 @@ the current plan when it supplies one. Otherwise bind `plan`, `source`, `outcome
 plan path, exact committed Git hash, owned result, rationale, owned paths,
 acceptance and incorporated decisions. The text fields are Text; paths and
 decisions are lists. Do not put an explanatory sentence in `source`.
-Capture the current Sol owner's address before creating a router. Its policy
+Capture the current owner's address before creating a router. Its policy
 runs as the router, not as the capturing model.
 
 ```haskell
@@ -53,9 +55,9 @@ let task = Task
       , acceptance = criterion
       , acceptedDecisions = decisions
       }
-work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
-let (lead, progress) = work
-wave <- followWork [("component-a", lead, progress)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
+work <- unfoldWork group [workChild "component-a" (lunaLeadFrom label Medium currentCheckout task)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
+let [("component-a", lead, progress)] = batchMembers work
+let wave = batchRouter work
 ```
 
 Continue the parent's independent engineering after attaching the wave router.
@@ -70,22 +72,23 @@ local frontiers use the same operations below and in [operating.md](operating.md
 
 ## Implement, review, repair in the context that owns the code
 
-A lead implements substantial work and owns its recursive local waves. After
+A lead owns shared decisions and recursive local batches. It scaffolds and
+delegates substantial implementation; direct work needs a terminal-leaf reason. After
 scaffold/fork/integration, bind the exact checked commit as candidate:
 
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
-reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMessage reviewSummary))
+reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me workQuestionsMessage)
 ```
 
 The reviewer returns Produced (Repair latest findings) for defects the lead must
 repair. Its attempt settles; the lead's delivery stays open. After local repair and
-checks, bind `revised :: Candidate` and reuse the retained reviewer:
+checks, bind `revised :: Candidate` and admit an exact-source reviewer:
 
 ```haskell
 let retryLabel = [label|review-repaired|]
-(attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewRequest (AssignedTask task) revised OwnerRepairs)
-retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork me (workMessage reviewSummary))
+(attempt, retryProgress) <- requestReview retryLabel (ReviewRequest (AssignedTask task) revised OwnerRepairs)
+retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork me workQuestionsMessage)
 ```
 
 Retain the prior attempt's receipt and any unanswered questions before replacing
@@ -142,7 +145,7 @@ reportProgress (WorkProgress [candidate] updatedQuestions)
 A stable questionKey is local to its plan; source and finding distinguish revisions
 of that question. Publish the whole unresolved set so a newly attached collector receives the
 current questions. Attached actors receive every subsequent publication. Publish on meaningful changes, not every tool step. Keep this request
-pending and continue unrelated useful work. The Sol owner handles the question; this is not a planner notification.
+pending and continue unrelated useful work. The parent owner handles the question; this is not a planner notification.
 The wave router retains evidence and each source's question set, and selects
 which changes deserve a message. See [coordination.md](coordination.md) for local
 retention, typed parent routing and compact notification policy.
@@ -173,7 +176,7 @@ with the updated assignment, not the original sessionInput after its contract ch
 
 ## Find the owning helper
 
-Project.Work owns solTask, implement, reviewCandidate, reviewAgain, repair,
+Project.Work owns solTask, implement, reviewCandidate, requestReview, repair,
 designQuestion, consultDesign, withDecision. Project.Routing owns followWork, workDefinition and notification
 policy. Use these operations to express the current task's allocation; the
 template does not ship campaign-specific plan constructors.

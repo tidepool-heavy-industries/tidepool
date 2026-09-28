@@ -9,14 +9,18 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Optimize instructions for model decisions: use established technical vocabulary
   with its actual semantics; explain Exomonad-specific departures. Give each contract
   one canonical home, and move rare recovery detail behind targeted discovery.
-  Base plus API guide must stay within 2,000 words; inspect the assembled role
-  and tool layers too rather than relocating verbosity into always-loaded text.
+  Keep a complete usable baseline within the catalog's checked word budget;
+  inspect the assembled role and tool layers too. Record prompt size when editing;
+  aggressive trimming is a separate evaluation decision.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.
 - Keep role-specific instructions and runtime authority observations separate.
   Inherited bindings and descriptions do not transfer permissions or reply ownership.
-- Teach scaffold, context unfold, independent review and checked integration.
+- Teach recursive scaffold, ready parallel unfold, independent review and checked
+  integration as the execution workflow. Sol owns cross-component choices; Luna
+  owners recursively delegate to justified terminal leaves. Reviewers do not
+  create another review tree.
   Delivery of a baseline is not acknowledgment or verified incorporation.
 - Describe omitted fork effort through the native launch selector's inherited
   default; native Codex goals remain disabled on all Exomonad nodes. Verify policy

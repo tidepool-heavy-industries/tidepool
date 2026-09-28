@@ -5,12 +5,13 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- Tools for resident sessions. Bind their handles and compose the next operation
--- when it is useful; importing this module prescribes no worker tree.
+-- Branches and exact-source review for recursive local work. Importing the
+-- module admits nothing; the execution owner composes each ready frontier.
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
-  , lunaTask, lunaTaskFrom, lunaTaskInputFrom, solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, reviewAgain, repair
+  , lunaTask, lunaTaskFrom, lunaTaskInputFrom, lunaLead, lunaLeadFrom
+  , solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, requestReview, repair
   , candidateAtSubmission, reviewCandidateAtSubmission, admitReviewedCheckpoint
   , requestIncorporation, consultDesign
   , settledValue
@@ -74,7 +75,7 @@ decisionContext decision = Text.unlines
   [ questionKey question <> " @" <> renderGitOid (questionSource details) <> " " <> questionPlan details
   , questionFinding details
   , decisionSummary decision
-  , "incorporated " <> renderGitOid (decisionSource decision)
+  , "Decision source: " <> renderGitOid (decisionSource decision)
   , Text.intercalate "; " (decisionEvidence decision)
   ]
   where
@@ -87,14 +88,21 @@ updateDecision
 updateDecision response = updateRequest response . decisionContext
 
 -- Model placement: the "luna" alias is the cheap, fast tier and the default
--- for bounded implementation and review children; fork many of them. A Luna
--- child starts from fresh context selected from its Task, since a different
--- model cannot reuse this conversation. The "executor" alias (Sol) inherits
--- context and is for children that own design judgment or an integration
--- loop of their own. Effort is always the caller's explicit choice -- there
--- is no default tier (the user's wave-3 decision).
+-- for bounded implementation, recursive component ownership and review.
+-- Selected Task context crosses model tiers; same-model descendants can use
+-- inherited context. Sol is available for consequential design uncertainty.
+-- Effort remains an explicit choice at each branch.
 lunaTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
 lunaTask label effort = lunaTaskFrom label effort currentCheckout
+
+-- Component ownership changes instructions and result contract, not runtime
+-- authority. The caller can override context with the ordinary branch modifier.
+lunaLead :: Label -> ForkEffort -> Task -> Branch CodingEffects Task Delivery
+lunaLead label effort = lunaLeadFrom label effort currentCheckout
+
+lunaLeadFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
+lunaLeadFrom label effort source work =
+  withInstructions (projectPrompt "lead") (lunaTaskFrom label effort source work)
 
 solTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
 solTask label effort = solTaskFrom label effort currentCheckout
@@ -103,13 +111,9 @@ solTask label effort = solTaskFrom label effort currentCheckout
 -- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
 --
--- Reporting defaults to the Assignment default (NotifyOwner): the requester
--- gets the ordinary settlement notice. A record-actor router that consumes
--- settlement itself (Project.Routing's followWork, or a purpose-built
--- collector like checks/review-continuation.hs's ReviewFlow) builds its own
--- assignment directly with `{ report = Silent }` rather than going through
--- this sugar -- see Project.Review's startReviewer and
--- checks/review-continuation.hs for that shape.
+-- An ordinary assignment reports settlement to its requester. Project.Routing's
+-- workChild selects Silent when the batch collector owns that notification.
+-- Custom collectors should likewise select one notification owner explicitly.
 lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 lunaTaskFrom label effort source = lunaTaskInputFrom label effort source taskContext
 
@@ -144,7 +148,7 @@ implement task = unfold (taskGroup task) $
 -- owning Task with which to address a retained implementer.
 repairOwnerContext :: RepairOwner -> Text
 repairOwnerContext owner = case owner of
-  OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
+  OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and commission the exact revised source. Do not queue work behind its pending delivery."
   RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
     <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
 
@@ -174,11 +178,8 @@ reviewContext request = Text.unlines
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
-  withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "luna" $ withEffort Medium $
-  coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
-    (assignment [label|review|] (ReviewRequest (AssignedTask task) candidate owner))
+reviewCandidate task owner candidate =
+  admitReview (taskGroup task) (ReviewRequest (AssignedTask task) candidate owner)
 
 -- A root review of one exact commit, with no owning Task: useful when the
 -- root itself produced or selected the commit (an incorporation, a direct
@@ -195,11 +196,8 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewCommit reviewLabel base commit accept owned = unfold (batch (labelCampaign reviewLabel) "review") $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
-  withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "luna" $ withEffort Medium $
-  coding (atRef (GitRef (renderGitOid commit)))
-    (assignment [label|review|] (ReviewRequest (ExactScope base owned accept) (Candidate commit [] []) OwnerRepairs))
+reviewCommit reviewLabel base commit accept owned = requestReview reviewLabel $
+  ReviewRequest (ExactScope base owned accept) (Candidate commit [] []) OwnerRepairs
 
 -- After the original review response settles, a producer can call
 -- 'admitReviewedCheckpoint' with its ReviewRequest and Response handle, then
@@ -223,14 +221,24 @@ unownedPaths base candidate owned = do
     Right stat -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
     Left issue -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show issue)
 
--- A completed review attempt leaves its actor available for the revised
--- candidate. Reporting is the Assignment default (NotifyOwner); see
--- lunaTaskFrom's note above.
-reviewAgain
-  :: Member Replies effects
-  => AgentRef -> Label -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
-reviewAgain actor label request = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
-  (assignment label request) { guidance = Just (projectPrompt "review") }
+-- A revised candidate gets its own exact checkout. A retained actor's previous
+-- checkout is never implicitly treated as the source named by a new request.
+requestReview
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
+  => Label -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+requestReview reviewLabel = admitReview (batch (labelCampaign reviewLabel) "review")
+
+-- All review entry points share model placement, exact-source admission and
+-- the original typed request. Scope construction belongs to their callers.
+admitReview
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
+  => ForkGroupPath -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+admitReview group request = unfold group $
+  childWithProgress @WorkProgress @(Outcome ReviewDecision) $
+    withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
+    withModel "luna" $ withEffort Medium $
+    coding (atRef (GitRef (renderGitOid (candidateCommit (reviewInput request)))))
+      (assignment [label|review|] request)
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
 -- separate request to an available implementer. No queue is created for Left.

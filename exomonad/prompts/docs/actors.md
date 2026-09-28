@@ -64,8 +64,11 @@ your own `.exomonad/Project`, or call `R.definition` directly and pin the row wi
 ambiguous without it. `Jev` and `Commands` are effect types from
 `Tidepool.Effects.Core` and need an import before a row can name them.
 
-When the record is carrying a whole implement → review → repair → merge loop,
-load `exomonad-orchestrate`: the record, the seven conditions worth waking the
-owner for, and the decisions kept in its state that the owner reads with one call.
+For execution coordination, use the installed recursive-work procedure:
+`unfoldWork` admits a ready batch and retains its event collector; each owner
+integrates checked children and repeats locally. Load `exomonad-coordinate` for
+that procedure and `exomonad-review` for counted checks, exact-source review and
+bounded repair through `startReviewFlow`. Author a custom record only for a
+specific join or routing decision those compositions do not express.
 
 skill: exomonad-define-actors

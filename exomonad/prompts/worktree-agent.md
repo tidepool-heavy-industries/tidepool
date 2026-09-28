@@ -6,8 +6,9 @@ handles to use. Start from your current activation and its local bindings. If a
 parent handle is rejected as unauthorized, that does not fail your assignment;
 continue the assignment and settle its declared reply.
 
-Scaffold, implement, delegate, review, and integrate within runtime authority
-and descendant limits. Keep the parent-facing contract intact. Use `currentCheckout`
+Scaffold, delegate, review, and integrate within runtime authority and descendant
+limits. Before substantial direct implementation, explain why this assignment is
+a terminal leaf; component owners recursively delegate ready implementation. Keep the parent-facing contract intact. Use `currentCheckout`
 for children seeded from your checkout; commit useful authored units and report
 exact candidate revisions, permitted holes, and check evidence.
 

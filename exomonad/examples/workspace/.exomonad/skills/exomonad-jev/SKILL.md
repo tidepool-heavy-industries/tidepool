@@ -54,11 +54,6 @@ each row back beside its own answer, so there is nothing to look up afterwards.
 A fixed section and a per-row section belong in the same packet:
 
 ```haskell
-#budget := J.noul "Is this past the effort the assignment justifies?"
-  :& #checks := J.each checkName (\c -> J.noul (checkQuestion c)) checks
-```
-
-```haskell
 let packet =
       #enough := J.noul "Is a 20-line preview enough to judge each file, or does judging need the whole file?"
         :& #worth_reading := J.each fst (\(n, p) -> #keep := J.noul ("Worth reading " <> n <> " in full for this review? Its first 20 lines are:\n" <> p)) previews

@@ -32,7 +32,7 @@ import qualified Tidepool.Actor.Record as R
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (Actor, Jev, Notifications)
 import Tidepool.Effects.Row (knownEffects)
-import Project.Routing (WorkEvent, WorkSink)
+import Project.Routing (WorkEvent, WorkSink (..))
 
 data ReminderPolicy = ReminderPolicy
   { reminderContext :: Text
@@ -199,7 +199,7 @@ bounded limit value = not (Text.null (Text.strip value)) && Text.length value <=
 -- the sink receipt. Do not use this for a failure-isolated shadow trial.
 withReminders :: ActorHandle Reminders -> (WorkEvent value -> Maybe ReminderEpisode)
   -> WorkSink value -> WorkSink value
-withReminders reminders project sink event = do
+withReminders reminders project (WorkSink sink) = WorkSink $ \event -> do
   receipt <- sink event
   case project event of
     Nothing -> pure ()

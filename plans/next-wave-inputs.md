@@ -794,3 +794,26 @@ wait 0 ms. Root interview: harness docs/exomonad-friction.md at 73f3816.
   modules each transaction (65 ms); lookups could pass
   `--session-incarnation`; a stale comment at the lookup still describes the
   old rule; the per-module interface build grows with the session.
+
+## 2026-09-28 — retained-review fixture stalls after candidate receipt
+
+On recursive-delegation workspace definition
+`88cc6e51c885840c6e9a3680540b80bc41b25b68bcdaca606436f6583cd301e3`,
+`Project.RoutingChecks.automaticReview` receives the real candidate/submitted HEAD,
+records no source refusal, and retains no reviewer collector. Waiting for the
+retained reviewer's next activation times out. `Actor.pollExit` returns Nothing;
+this excludes a terminal exit, **not a paused handler**. The runtime can preserve
+a failed handler in `ResidentStanding::Paused` until intervention. Observe the
+current `R.lifecycle` snapshot and its Paused detail before another blind retry.
+The root's status roster alone may render this nonterminal actor as running.
+
+Evidence: `target/tidepool-test-runs/20260928T072118Z-2621728-exomonad-check`,
+`docs/reports/recursive-delegation/verification/retained-review-final.log`.
+Request ordering is reserve → retain callback → submit; distinguish a paused
+callback from failure to activate the target. Do not infer success from the
+candidate receipt or silently retry an uncertain request.
+
+This older retained-reviewer fixture is separate from the new exact-source fresh
+review workflow. The latter passed source mismatch, revised review, checked
+publication and bounded repair/continuation tests. Keep the old regression and
+its failure evidence; do not weaken the request or source contract to green it.

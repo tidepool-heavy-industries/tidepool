@@ -1,11 +1,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.SkillChecks (skills, reviewProvenance) where
+module Project.SkillChecks (skills, notebookForms, reviewProvenance) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
+import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Exomonad.Workspace (workspaceRoot)
@@ -46,13 +47,16 @@ skills = do
   void $ example owner "exomonad-review" 0
   commitReviewer <- activation
   check "root review-by-commit forks a fresh Luna reviewer with no parent path" (checkModel commitReviewer == Just "gpt-6-luna")
+  void $ turn (checkActor commitReviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
+  void $ turn owner "finishWork reviewQuestions"
   void $ example (checkActor worker) "exomonad-review" 1
   reviewer <- activation
   void $ turn (checkActor reviewer) "let checks = [\"fixture review\"] :: [Text]\nlet scope = \"skill composition only\" :: Text"
   replied <- example (checkActor reviewer) "exomonad-review" 2
   check "successful reply explicitly reports submission" ("Reply submitted." `Text.isInfixOf` output replied)
+  void $ turn (checkActor worker) "finishWork reviewQuestions"
   void $ turn (checkActor worker) "respond (Produced candidate)"
-  final <- awaitOutput owner "state <- readWork router\ninspectFull (workSnapshotSummary candidateSummary state)" (not . Text.isInfixOf "result pending")
+  final <- awaitOutput owner "state <- readWork router\ninspectFull (workSnapshotSummary candidateOutcomeSummary state)" (not . Text.isInfixOf "result pending")
   check "compact snapshot retains terminal candidate and gates" (baseline `Text.isInfixOf` final && "product acceptance remains" `Text.isInfixOf` final)
   resultCount <- turn owner "R.call (resultCount (R.client results)) ()"
   check "record skill receives the typed terminal source once" (output resultCount == "1")
@@ -61,39 +65,39 @@ skills = do
   check "the coordinate skill retains its scoped cleanup receipt" ("CleanupReceipt" `Text.isInfixOf` lastOutput cleanup)
 
   -- The shipped decomposition example is a real multi-item cell. It uses an
-  -- ordinary local selector, one inherited prefix and a selective collector.
+  -- ordinary local selector, selected Task context and a selective collector.
   void $ turn owner ("let baseline = " <> gitOidLiteral baseline)
   void $ example owner "exomonad-coordinate" 3
-  interface <- activation
-  consumer <- activation
-  let labels = map checkLabel [interface, consumer]
-  check "one plan yields two distinct inherited Sol Medium assignments"
-    (checkModel interface == Just "gpt-6-sol"
-      && checkModel consumer == Just "gpt-6-sol"
-      && "interface" `elem` labels && "consumer" `elem` labels
-      && all (Text.isInfixOf "Deliver the feature through its real consumer" . checkContext) [interface, consumer])
+  firstChild <- activation
+  secondChild <- activation
+  let children = sortOn checkLabel [firstChild, secondChild]
+      [consumer, interface] = children
+      labels = map checkLabel children
+  check ("one plan yields two distinct Luna assignments with their shared contract: " <> Text.pack (show labels))
+    (labels == ["corpus/fanout/consumer", "corpus/fanout/interface"]
+      && all ((== Just "gpt-6-luna") . checkModel) children
+      && all (Text.isInfixOf "The interface and consumer share one accepted contract" . checkContext) children)
   void $ example owner "exomonad-coordinate" 4
   void $ turn (checkActor interface) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"interface evidence\"] []\nreportProgress (WorkProgress [found] [])")
   void $ turn (checkActor consumer) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"consumer evidence\"] []\nreportProgress (WorkProgress [found] [])")
-  observed <- awaitOutput owner "state <- readWork router\ninspectFull (map (workEvidence . sourceProgress) (collectedWork state))" (Text.isInfixOf "consumer evidence")
+  observed <- awaitOutput owner "state <- readWork router\ninspectFull (map (workEvidence . sourceProgress) (collectedWork state))" (\value -> all (`Text.isInfixOf` value) ["interface evidence", "consumer evidence"])
   check "collector retains both candidates without a routine wake" ("interface evidence" `Text.isInfixOf` observed && "consumer evidence" `Text.isInfixOf` observed)
   void $ turn (checkActor interface) "respond (Produced found)"
   void $ turn (checkActor consumer) "respond (Produced found)"
-  void $ turn owner "drained <- finishWork router\nlet Just group = forkGroupHandle interface\nreleased <- releaseGroup group\ninspectFull released"
+  void $ turn owner "drained <- finishWorkBatch localBatch\nlet Just group = forkGroupHandle interface\nreleased <- releaseGroup group\ninspectFull released"
 
-  -- The workbench skill's cells are the ones a model copies verbatim; each
-  -- must typecheck and run with no surrounding context. Block 4 reads files
-  -- and block 6 describes a command, so both need a command owner and are
-  -- exercised by the exomonad-command material instead.
+  -- Execute the published notebook forms in the actual ambient namespace.
+  -- File/command examples belong to the command material.
   void $ example owner "exomonad-workbench" 0
-  converted <- example owner "exomonad-workbench" 1
+  void $ example owner "exomonad-workbench" 1
+  converted <- example owner "exomonad-workbench" 2
   check "the workbench skill renders an Int into Text with T.pack . show"
     ("retry budget 3 exhausted" `Text.isInfixOf` output converted)
-  annotated <- example owner "exomonad-workbench" 2
+  annotated <- example owner "exomonad-workbench" 3
   check "an annotated polymorphic binding installs without being forced"
     ("annotated" `Text.isInfixOf` output annotated)
-  void $ example owner "exomonad-workbench" 3
-  void $ example owner "exomonad-workbench" 5
+  void $ example owner "exomonad-workbench" 4
+  void $ example owner "exomonad-workbench" 6
 
   -- The Jev skill's packets must compile against the real operators and
   -- resolve to a typed value whether or not an endpoint is configured. Block 0
@@ -121,6 +125,22 @@ skills = do
   check "the cleanup skill inspects a typed plan without retiring anything"
     ("Cleanup" `Text.isInfixOf` lastOutput planned)
 
+  void $ example owner "exomonad-fork" 1
+  parserChild <- activation
+  storeChild <- activation
+  testChild <- activation
+  check "primitive fork example admits its three ready obligations"
+    (all ((== Just "gpt-6-luna") . checkModel) [parserChild, storeChild, testChild])
+  mapM_ (\child -> void $ turn (checkActor child) "respond (Blocked \"fixture complete\" [] :: Outcome Candidate)") [parserChild, storeChild, testChild]
+  void $ turn owner "finishWork primitiveQuestions"
+  checkNotebookForms owner
+
+-- Run the pure authoring forms independently of the worker/review examples.
+notebookForms :: Member RecipeCheck effects => Eff effects ()
+notebookForms = root >>= checkNotebookForms
+
+checkNotebookForms :: Member RecipeCheck effects => CheckActor -> Eff effects ()
+checkNotebookForms owner = do
   -- The project-free record definition: no Project.Actors wrapper, the row
   -- named in the cell and pinned by a signature on the definition.
   tallied <- example owner "exomonad-define-actors" 3
@@ -129,15 +149,15 @@ skills = do
 
   -- The workbench cells a model copies to get past the run-6 rejections:
   -- where a signature goes, annotating a literal under ToJSON, and building
-  -- the worktree identity types. Blocks 10 and 11 read a file and run a
+  -- the worktree identity types. Blocks 11 and 12 read a file and run a
   -- command, so they belong to the command material instead.
-  placed <- example owner "exomonad-workbench" 7
+  placed <- example owner "exomonad-workbench" 8
   check "a signature beside its equation installs both forms of binding"
-    ("high" `Text.isInfixOf` output placed && "lane 7" `Text.isInfixOf` output placed)
-  annotatedLiteral <- example owner "exomonad-workbench" 8
+    ("high" `Text.isInfixOf` output placed && "work 7" `Text.isInfixOf` output placed)
+  annotatedLiteral <- example owner "exomonad-workbench" 9
   check "an annotated literal settles an otherwise ambiguous encodable field"
     ("src/app.rs" `Text.isInfixOf` output annotatedLiteral)
-  identities <- example owner "exomonad-workbench" 9
+  identities <- example owner "exomonad-workbench" 10
   check "branch and ref identities round-trip through their constructors"
     ("integration/tags" `Text.isInfixOf` output identities
       && "exomonad/integration" `Text.isInfixOf` output identities)
@@ -183,7 +203,7 @@ reviewProvenance = do
     (lastOutput accepted == "True")
   -- Exact review retries retain the real scope, including when the caller offers
   -- a retained implementer: there is no implementation Task to assign to it.
-  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- reviewAgain (responseActor reviewer) [label|exact-retry|] exact"
+  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|exact-retry|] exact)"
   retried <- turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair [label|exact-findings|] current latest [\"repair at the owner\"]\ninspectFull (case verdict of { Left (Repair found issues) -> found == latest && issues == [\"repair at the owner\"]; _ -> False })"
   check "exact-scope repair returns findings without inventing an implementation assignment"
     (lastOutput retried == "True")
@@ -191,14 +211,14 @@ reviewProvenance = do
   revised <- checkpoint owner "review-provenance.txt" "revised review candidate\n" "review repair fixture"
   void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
   void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
-  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- reviewAgain (responseActor reviewer) [label|assigned-retry|] assignedRequest"
+  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|assigned-retry|] assignedRequest)"
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
   revisedScope <- turn (checkActor reviewer)
     ("newScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\n"
       <> "let newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }\n"
       <> "inspectFull (case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber request /= oldId && candidateCommit (reviewInput active) == "
       <> gitOidLiteral revised <> "; _ -> False })")
-  check "reviewAgain replaces request identity and mounted input" (lastOutput revisedScope == "True")
+  check "a prepared retained request replaces identity and mounted input" (lastOutput revisedScope == "True")
   staleSubmission <- turn (checkActor reviewer)
     ("import qualified Project.ReviewTools as ReviewTool\nimport Tidepool.Agent.Contract (handler)\nlet submit = handler (ReviewTool.submit_review ReviewTool.tools)\nstale <- submit (ReviewTool.ReviewSubmitInput oldId "
       <> gitOidLiteral revised <> " [\"checked revised candidate\"] \"assigned acceptance\")\ninspectFull (case stale of { ReviewTool.RequestIdMismatch _ -> True; _ -> False })")

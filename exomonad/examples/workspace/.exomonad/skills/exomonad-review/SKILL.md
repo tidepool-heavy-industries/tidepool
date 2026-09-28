@@ -3,7 +3,12 @@ name: exomonad-review
 description: Commission independent review and repair of exact Exomonad candidates using Project.Work, and return typed review decisions without copying full task histories.
 ---
 
-Use review when independent judgment helps the owning integration decision.
+In the recursive execution loop, substantive leaves receive independent review;
+component review checks joins and combined acceptance using accepted leaf evidence.
+For a separate implementer's candidate, `startReviewFlow` handles the counted
+check/review/bounded-repair sequence. Use the direct requests below for an owner’s
+own candidate or an independent exact-commit question; preserve the same evidence
+and integration boundaries.
 The reviewer is seeded at the exact candidate commit, so it can run the
 candidate's own tests. From any actor, root included, with the cumulative base, candidate commit, its
 acceptance and its owned paths, pass a label naming this review's own
@@ -13,6 +18,7 @@ nesting under your own (root has no allocated actor path to nest under):
 
 ```haskell
 (reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] base commit "Round-trip tests for every item kind pass" ["src/parse.rs"]
+reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
 ```
 
 Inside a request whose `sessionInput :: Task` describes the work, with your
@@ -21,9 +27,15 @@ committed `candidate :: Candidate`:
 ```haskell
 (reviewer, reviewProgress) <- reviewCandidate sessionInput OwnerRepairs candidate
 let reviewerRef = responseActor reviewer
+reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
 ```
 
-Both return a retained reviewer plus progress; its settlement notice wakes you.
+Both retain the original reviewer response and a question-only collector.
+The request owns its settlement notice; the collector surfaces questions while
+review is still pending, without a duplicate settlement notice. Read
+`readWork reviewQuestions` for full questions and delivery receipts. After the
+result arrives, drain `finishWork reviewQuestions` and retain its exit before
+retiring the reviewer or starting the next attempt.
 `OwnerRepairs` means you repair findings; it avoids queuing a repair behind
 your own pending delivery.
 
@@ -60,12 +72,13 @@ Keep findings actionable: exact source, defect, consequence and required repair.
 Reference durable evidence rather than reproducing the plan or unaffected constraints.
 The tool's reply-submission result is sufficient; don't add an acknowledgment turn.
 
-After repair, reuse the retained specialist with `reviewAgain` and a revised
-`ReviewRequest` that preserves its basis and carries the revised candidate;
-consult its signature only when needed. `ExactScope` findings return to the
-requester because an exact scope has no Task to delegate for repair. Integrate the reviewed source,
-then verify the changed integration boundary. A review decision covers its stated
-scope and does not turn partial work into product completion.
+After repair use `requestReview retryLabel revisedRequest` and attach the same
+question-only collector to its returned handles in that admission cell. It preserves the
+review basis and admits a fresh reviewer at the new candidate. A retained reviewer's
+checkout does not change just because the request names another commit.
+For automatic counted check/review/repair, use `startReviewFlow` with a separate
+completed implementer, focused PlanChecks and a bounded policy. Optional
+`flowIntegration` publishes through an existing MergeTarget after acceptance.
 
 ## Owner map and repair policy from exact commits
 
@@ -75,17 +88,9 @@ assignment base and the exact candidate tip. Require `git merge-base
 --is-ancestor <base> <tip>` to succeed, then use `git diff <base>..<tip>
 --name-only`, never from the tip commit alone: a tip that looks scoped can
 carry an ancestor commit that edited an unowned path, and the same branch
-can pass the tip check twice while still carrying it. Route the verdict
-with a `J.choice`, naming the base and
-candidate commits it ran at; `insufficient_evidence` means the state was
-incomplete, not that the candidate is a defect — name the missing field
-instead of merging or repairing on a guess:
-
-```haskell
-let outside = [p | p <- changed, p `notElem` owned]
-let gate = J.choice "Which statement describes the candidate?"
-      (J.alt #all_present "Every changed file is inside the owned paths and the required tests pass" ("merge" :: Text)
-        J..| J.alt #item_missing "A changed file is outside the owned paths, or a required test is missing or failing" "repair"
-        J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs" "ask again")
-answer <- J.ask1 (J.state (#owned_paths := owned :& #base := ("abc1230" :: Text) :& #candidate := ("def4560" :: Text) :& #outside := outside)) gate
-```
+can pass the tip check twice while still carrying it. Escalate an ownership violation to the owner. Counted checks and exact source are
+authoritative facts; Jev must not invent a passing gate or authorize a merge.
+`semanticReviewChoice` can classify concrete review findings against explicit
+repair/escalation criteria. Unknown evidence returns to the owner. ReviewFlow
+retains the exact reviewer response and performs these transitions under its
+bounded repair policy.

@@ -13,20 +13,24 @@ systemd_slice = "swarm.slice"
 [haskell]
 source_roots = ["."]
 modules = [
-  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
+  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.DecisionAnswers", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.ConversationContext", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
-  "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.WorkPlan", "Project.WorkPlanCoordinator", "Project.WorkPlanVerification", "Project.WorkPlanChecks", "Project.WorkPlanRegressionChecks", "Project.SupervisionProfiles",
-  "Project.FieldNotesChecks", "Project.RebaseRouterChecks", "Project.BaselineIncorporationChecks",
+  "Project.FieldNotes", "Project.RebaseRouter", "Project.BaselineIncorporation", "Project.SupervisionProfiles",
   "Project.Service", "Project.Repository", "Project.CheckResults", "Project.FocusedGateExample",
   "Project.PrepareContinue", "Project.RetainedEvidence",
   "Project.AssumptionWatch", "Project.ParallelInvestigate", "Project.SlowCommandWatch",
   "Project.BackgroundInvestigator", "Project.BackgroundCommandExample",
-  "Project.NotificationTrial", "Project.WorkflowReminders", "Project.WorkflowReminderExamples", "Project.WorkflowReminderRoutingChecks",
+  "Project.NotificationTrial", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
   "Project.Interview", "Project.WorkflowExamples", "Project.ReviewFlow",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
+  "Project.DecisionAnswerChecks.routing",
+  "Project.DecisionAnswerChecks.exportRequests",
+  "Project.DecisionAnswerChecks.replay",
+  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.revisedReview",
   "Project.BackgroundCommandExampleChecks.completion",
   "Project.MergeChecks.redPreserved",
   "Project.WorkflowReminderChecks.bounded",
@@ -63,6 +67,7 @@ checks = [
   "Project.FieldNotesChecks.policy",
   "Project.CheckedReviewChecks.continuation",
   "Project.CheckedReviewChecks.green",
+  "Project.CheckedReviewChecks.published",
   "Project.CheckedReviewChecks.zeroSelection",
   "Project.CheckedReviewChecks.missingEvidence",
   "Project.CheckedReviewChecks.infrastructure",
@@ -72,10 +77,6 @@ checks = [
   "Project.ReviewFlowChecks.failurePaths",
   "Project.ReviewFlowChecks.effectfulRouting",
   "Project.ReviewFlowChecks.workflowExample",
-  "Project.WorkPlanChecks.correction",
-  "Project.WorkPlanRegressionChecks.duplicateReview",
-  "Project.WorkPlanRegressionChecks.parallelVerification",
-  "Project.WorkPlanRegressionChecks.missingIncorporation",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in

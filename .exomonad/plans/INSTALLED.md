@@ -1,78 +1,42 @@
-# What is installed
+# Installed workspace surface
 
-Every module below is compiled into every session in this workspace, verified by
-`exomonad check --workspace .` from the run directory. `lookup <name>` browses any
-of them and is authoritative over this file.
+`.exomonad/config.toml` selects the modules, spec and project prompts for this
+repository. `.exomonad/workspace` pins the shared Haskell package. Run
+`exomonad check --workspace .` to validate that selection before a new run;
+a file on disk alone does not install it in a running actor.
 
-The modules and recipe checks ship in the default workspace submodule,
-`.exomonad/workspace`, which this repository's `.exomonad/config.toml` names as
-its second source root and which `exomonad new` installs into a project at the
-revision pinned in `bridge/facade/src/exomonad/scaffold.rs`. A change to a
-Project module or check lands there. `exomonad/examples/workspace/.exomonad` is
-the in-repo template: `exomonad new` scaffolds its `AgentSpec.hs`, prompts and
-plans, and the facade tests exercise its modules; it is not what a project's
-sessions compile.
+## Execution workflow
 
-## Orchestration
+Use [the recursive-work procedure](../workspace/RECURSIVE-WORK.md): scaffold,
+admit the ready parallel batch, integrate checked children and repeat locally.
+The Sol root owns shared decisions; Luna owners delegate through useful
+subcomponents to justified terminal leaves. `lunaLead` requests Delivery;
+`lunaTask` preserves the caller's actual result type. `unfoldWork` retains the
+original handles and owns event collection. Use `currentCheckout` for the local
+owner's scaffold; `projectHead` explicitly selects the root project source.
 
-| Module | Enabled | A working invocation |
-|---|---|---|
-| `Project.Types` | yes | `Task { taskGroup = group, planPath = "…", obligation = "…", ownedPaths = […], acceptance = "…" }` — the shared vocabulary; also `Candidate`, `Outcome`, `Question`, `WorkProgress`, `RepairOwner`. |
-| `Project.Actors` | yes | role and effect aliases used by the branch constructors below. |
-| `Project.Work` | yes | `implement :: Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)`; also `solTask`, `solTaskFrom`, `reviewCandidate`, `reviewAgain`, `repair`, `requestIncorporation`, `consultDesign`, `projectPrompt`. |
-| `Project.Routing` | yes | collection patterns over several children's replies and questions. |
-| `Project.Observe` | yes | `observeWork` for a read-only snapshot of work in flight; `workSummary` renders it without consuming it. |
+`startReviewFlow` composes counted checks, exact-source review and bounded repair
+for a separate completed implementer. Manual `requestReview` admits the revised
+candidate's exact checkout. Pending review questions need the question-only
+collector shown in the review skill. Accepted review, incorporation, post-merge
+verification and resource release remain separate facts.
 
-## Judgment and integration
+`Project.Merge` owns checked publication. A failed integration/check retains its
+source and evidence for the owner; it does not silently roll back. Bounded
+`DecisionAnswers` actors relay supplied original owner decisions and escalate
+new, stale, conflicting or uncertain cases. The default AgentSpec installs the
+typed tool records without a blanket watchdog.
 
-| Module | Enabled | A working invocation |
-|---|---|---|
-| `Project.Reflex` | yes | `classify :: Text -> Maybe Reflex` — classify compiler, lint or test output from a precedence-ordered table, no model turn. `reflexFor :: Int -> Text -> Maybe Reflex` takes the exit code too. |
-| `Project.Evidence` | yes | `coverageCheck :: Text -> Text -> CheckResult`; `CheckSource` keeps `ChildReported` separate from `RanHere`. |
-| `Project.Contract` | yes | `Contract`, `ImplReport`, `ImplNote`, `defaultReviewPolicy`, `renderBrief :: ReviewBrief -> Text`. |
-| `Project.Investigate` | yes | `investigate :: (Member Jev effs, Member Commands effs) => InvestigationPolicy -> Text -> Text -> [Text] -> [Text] -> [Text] -> Text -> Int -> Text -> Eff effs Investigation` — policy, directory, oid, owned paths, requirements, intent, command, exit code, output. |
-| `Project.Merge` | yes | `mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects`, started as `R.start (mergeInto (worktreeId tree) (Just "exomonad/integration") ["just","test-lib","exomonad-actor","test(request::updates)"])`. The check is an argument: name the narrowest command that would catch a regression in the change at hand, never `just verify`. Checks a merged head before publishing and rolls a red one back. |
-| `Project.Review` | yes | `reviewOf :: Contract -> (Response ImplReport, Progress ImplNote) -> MergeTarget -> ActorSpec Review ReviewEffects`, started as `R.start (reviewOf contract worker (MergeTarget merge))`. |
+## Discovery and examples
 
-The same source root supplies `Project.Shell` and `Project.Lookup` for typed tool
-selection, plus `Project.Search`, `Project.History`, `Project.Service` and
-`Project.Repository` for the repository-reading examples. `AgentSpec.agentSpec`
-installs `Project.Watchdog.watchBy` as its after-tool handler: children labelled
-`escalate-child` get an out-of-scope escalation, children labelled `nudge-child`
-get repeating-failure advice, and other actors abstain.
+The shipped base/API guide and role prompts describe the standing workflow.
+Project role instructions come from the configured `prompts.files` mapping.
+Use targeted `lookup` for public signatures, and the skills under `.agents/skills`
+for executable examples. They link to the shipped template in this checkout.
 
-## Not installed, deliberately
-
-`Project.Plan` generated assignments for one graph-UI feature. It was retired
-rather than carried forward as though it were a general tool. Its campaign
-tree is in Git history.
-
-The recipe list is shared with the shipped template. Its current-head status is
-pending the Nix-backed Exomonad checks after the toolchain fork is pushed.
-
-## Prompts and skills
-
-The root runs on the **shipped** `base.md` + `api-guide.md` and `root.md`. This
-workspace sets no `[prompts] core` or `root`, and none of the reserved child keys
-(`research`, `coding`, `scaffolding`, `integration`), so children get the shipped
-role prompts too.
-
-`[prompts.files]` carries only what this workspace's own Haskell reads through
-`projectPrompt`: `task`, `review`, `repair`, `incorporate`, `specialist`, `lead`,
-`rsi`.
-
-All ten skills resolve through `.agents/skills/`, which points at the shipped
-originals in this repository rather than at a second copy.
-
-## Worked cells
-
-`.exomonad/plans/examples/` holds six cells with the fixtures they read —
-reference to copy from, not modules to import. Its README says which run here
-unchanged and which were repointed at this repository and not re-run.
-
-## Verification boundary
-
-The prior configuration was checked before this source consolidation. The
-consolidated workspace and its recipes must be checked against the current head
-after the Nix toolchain becomes available; the moved examples have not been
-executed since being adapted.
+Shared modules and checks are edited in the pinned workspace repository and
+synced to `exomonad/examples/workspace/.exomonad`; the facade scaffolder pins the
+same source. This guide does not certify all recipes green. Exact executed gates
+and remaining limitations are recorded in the current implementation report and
+run launch record. Older `.exomonad/plans/examples` are retained reference
+experiments, not the canonical execution procedure.

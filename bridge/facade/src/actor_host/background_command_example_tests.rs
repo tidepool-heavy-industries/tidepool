@@ -1,4 +1,4 @@
-use super::command_jobs_tests::{TestCommands, backend_request, committed};
+use super::command_jobs_tests::{backend_request, committed, TestCommands};
 use super::test_campaign::TestCampaign;
 
 const EXAMPLE: &str = include_str!(

@@ -35,9 +35,10 @@ is the agent's own harness. Save the useful programs for future runs and pass
 them to other agents.
 
 The same model extends to teams: **unfold assignments into workers; fold
-typed results back through review and integration.** Parents can give
-children code as well as instructions and supervise them without a model turn
-for every event.
+typed results back through review and integration.** Execution owners scaffold
+the shared boundary, admit ready independent work together, integrate checked
+results, and repeat at each useful level. They give children code as well as
+instructions and supervise them without a model turn for every event.
 
 This is an early alpha for people who want to build and reshape agent
 workflows. [Try it](#try-it) on Linux with Nix.

@@ -139,10 +139,13 @@ Keep detailed design references out of always-loaded instructions.
 - Scaffold the shared types, semantics, source baseline, and integration owner
   before forking independent obligations. Use resident Haskell `unfold` for
   Exomonad work; native tools operate on the assigned checkout.
-- Fork around meaningful shared decisions, not a headcount target. Leads can
-  recursively delegate implementation and fresh-context review. Use Sol Medium
-  consistently across execution forks; use fresh Astra consultations for
-  consequential uncertainty.
+- Fork around meaningful shared decisions, not a headcount target. Execution
+  owners scaffold and recursively delegate
+  to Luna component owners, subcomponent owners and microtask leaves. The Sol
+  Medium root owns cross-component choices and integration. Explain genuine
+  terminal leaves before substantial direct implementation; review leaf changes
+  and component joins at their owning boundaries. Use fresh Astra consultations
+  for consequential uncertainty.
 - Reuse the exact parent prefix rather than reconstructing it through long task
   briefs. Keep one shared superset API guide and stable tool definitions across
   roles; put changing assignments and authority observations after the shared

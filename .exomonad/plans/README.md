@@ -1,103 +1,52 @@
-# Plan the current goal, then execute it
+# Execute the current Tidepool goal
 
-This package supplies an operating style, typed Haskell tools and worked examples.
-The human's current task and the target repository determine the product. No
-example component, old run name or imported module is an assignment to build it.
-The same model applies to a standalone application or an explicitly chosen
-Tidepool dogfood task; obey the current source scope and concurrent owners.
+Start from the human's agreed objective and current source/ownership constraints.
+Examples and old run briefs are reference material, not new assignments. Resolve
+consequential missing decisions with the human or a bounded Astra consultation;
+existing approval does not require another planning ceremony.
 
-Start from an existing agreed goal/plan when one is supplied. Otherwise, the
-initial Astra planner collaborates with the human to establish the intended
-outcome, important examples and acceptance. A Sol execution owner can orient the
-current project and collect concrete questions, but should not treat a missing
-planner decision as permission for broad implementation. Use normal Codex TUI
-conversations; selecting an actor's model does not select its instructions.
+Execution uses **scaffold → ready parallel batch → checked integration → repeat**.
+The Sol Medium root owns cross-component decisions. Luna component owners repeat
+the cycle through useful subcomponents and microtask leaves. Explain a genuine
+terminal leaf before substantial direct implementation. Give each child a narrow
+local gate and retain the stronger combined acceptance at its parent. Use the
+local owner's `currentCheckout` for descendants of its committed scaffold.
 
-A root's instructions come from the shipped `base.md` and `root.md`, not from a
-copy kept here. This workspace used to override both, and the overrides drifted
-until they told a root to commission a coordinator and go idle while the shipped
-prompts told it to stay engaged. What this repository needs on top of the shared
-prompts lives in this package, which they can be pointed at.
+The canonical examples and signatures are in
+[the pinned recursive-work guide](../workspace/RECURSIVE-WORK.md), the shipped
+API guide and skills. Use `unfoldWork` for batch admission/event collection and
+`startReviewFlow` for a separate implementer's checked review/repair. A pending
+question needs a route to its local owner; settlement alone cannot deliver it.
+Retain exact source, original handles, counted checks and cleanup outcomes.
+Do not prewrite the entire future tree or create a second coordinator.
 
-## A plan that can be executed
+## Source and instruction owners
 
-Put the current goal in a focused Markdown tree, following this shape where useful:
+The root gets the shipped base/API and root instructions. Project instructions
+come from this workspace's config. Shared Project modules, skills and recipes
+live in `.exomonad/workspace`; the in-repo template is their release copy.
+Saving source is not publication into a running actor: follow source/spec reload
+contracts and keep live selections unchanged until explicitly updated.
 
-```text
-goal/
-  README.md              # Human intent, finished walkthrough, overall acceptance
-  shared.md              # Shared contracts, language, source/decision basis
-  component-a/
-    README.md            # Owned outcome, next frontier, later local waves
-    hard-question.md     # Declared Astra task and its release condition, if needed
-  component-b/
-    README.md            # Another substantial Sol-owned outcome
-```
+Keep the current contract concise and link older evidence. Preserve remaining
+obligations and unmerged commits in handoffs. An explicit operator hold is lifted
+by the operator, not by a prompt edit or passing check.
 
-Each substantive branch needs its scope, current source, shared prerequisites,
-next independently useful children, integration owner and acceptance evidence.
-Describe later waves by the behavior they unlock, refining details as results land.
-A child can recursively own several such waves. Keep current intent concise;
-retain older evidence by reference instead of appending every conversation here.
+## Working in Tidepool
 
-Before broad execution, the designated initial Sol leads write their interpretation with a normal and
-awkward consumer example, concrete interfaces, dependency/fork structure, checks,
-assumptions, objections and questions. The original planner reviews coupled choices
-and returns explicit corrections and release scope. Incorporate those decisions
-before dependent implementation. Later local work within the agreement proceeds
-without repeating this initial interview or inventing more approval stages.
+The root [contributor guide](../../AGENTS.md) owns repository and test rules.
+Read the nearest subsystem guide before edits. Use the smallest owning `just`
+check with real matched counts and compile changed consumers. Ordinary checks
+are not a reason to run the full `just verify` gate. Share one expensive compiler
+slot and leave shared daemons running.
 
-## Use the shared workbench
+`just exomonad-build` builds matched local tools incrementally. Use
+`just exomonad-init` when also starting an authorized run. Distribution builds
+and deployment are separate operations. Preserve dirty work; commit by explicit
+pathspec without attribution trailers.
 
-The shared workbench plans, Project modules, prompts, skills and checks live in
-the default workspace submodule, `workspace/` beside this file, which is what
-this repository's sessions compile (`config.toml` lists the selected modules and
-checks) and what `exomonad new` installs elsewhere. The in-repo template at
-`../../exomonad/examples/workspace/.exomonad/` carries the scaffolded
-`AgentSpec.hs`, prompts and plans plus test copies of the modules. Use the
-actual task/result contracts and callable signatures. Importing a module or
-binding a composition starts no worker.
-
-There is one original-root runtime .exomonad and one frozen selection per swarm.
-This package is tracked in the repository, so a worktree gets it from git and
-there is one maintained copy to edit; it is not copied forward by hand between
-runs. A changed prompt, completed check or watch notification does not release an
-explicit operator hold. Preserve remaining obligations when handing off across a
-new swarm.
-
-## Working in this repository
-
-Shared mechanics — commands, quieting output, notebook cells, Jev packets — are
-in the installed guide and the skills, and are not repeated here. What follows is
-true of Tidepool specifically.
-
-**Checks are focused, never the gate.** `just test-lib CRATE 'test(name)'` and
-`just test-target CRATE SUITE 'test(name)'` run exactly what you name.
-`just verify` is the pre-review gate and is budgeted at up to two hours; do not
-run it as part of ordinary work, and do not run `just check` or a whole-crate
-`just suite` without agreeing it first — other work shares this machine.
-
-**Integration tests live inside suite entry points** under `tests/suites/*.rs`
-with `autotests = false`, so `--test <file>` is not a valid target and fails
-confusingly. Name the suite.
-
-**`nix-shell` does not work here.** Everything goes through `just`, which enters
-the shell itself, or `bash scripts/dev-shell.sh bash -c '…'`.
-
-**A change to the extractor needs a rebuild, not a redeploy.**
-`cd haskell && cabal build tidepool-extract-bin` is incremental and the launcher
-picks it up. `scripts/redeploy.sh` rebuilds from scratch with the full Haskell
-suite and takes the better part of an hour; it refreshes long-running MCP
-servers and is not part of testing a change.
-
-**This repository has 2,612 tracked files.** Bound every search — a pathspec on
-`git grep`, a pattern on `git ls-files` — rather than walking the tree.
-
-## Opening a repository session
-
-Start with the human's current task and the selected workspace's plans. Use a
-real change to explore a small Haskell program that combines available commands,
-evidence and Jev judgments, then keep its runnable example and observed result.
-The productivity ambition is 10×; it is not a measured result or a target quota.
-Use actual run evidence to choose the next friction point, and preserve failures
-with their source and output so the program can improve from what happened.
+During RSI, reconstruct the workflow and its ownership/dependencies before
+choosing a mechanism to change. Use actual source, timings, errors and interviews;
+retain failed experiments and distinguish structural savings from measured gains.
+The [installed surface](INSTALLED.md) links current owners; old cells under
+`examples/` are historical probes with their original verification limits.

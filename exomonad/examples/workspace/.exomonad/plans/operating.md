@@ -73,13 +73,14 @@ presented update alone proves neither understanding nor incorporation. Complete
 this initial checkpoint once, then allow the agreed local waves; repeat planner
 review only when the human reengages that planning relationship. Hard technical
 questions during execution go directly to fresh Astra consultations; ordinary
-interface and ownership decisions stay with Sol.
+interface and ownership decisions stay with the nearest executing owner.
 An operator hold is separate and always requires explicit release.
 
 ## Repeated local waves and context choices
 
-Every substantial lead can scaffold, fork a broad useful frontier, integrate
-checked results and scaffold again. Children can repeat this recursively. Keep
+Every substantial lead scaffolds, forks a broad useful frontier, integrates
+checked results and scaffolds again. Children repeat this recursively unless
+they justify a terminal leaf. Keep
 one owner for each shared mechanism and file seam. Parent delivery stays open
 through its own waves. Integrate useful partial source while unrelated children
 continue, retaining the remaining component obligation.
@@ -113,8 +114,8 @@ let leftLabel = [label|generator|]
 let rightLabel = [label|consumer|]
 let left = leftTask { taskGroup = group, taskSource = source }
 let right = rightTask { taskGroup = group, taskSource = source }
-let leftBranch = solTask leftLabel left :: Branch CodingEffects Task (Outcome Candidate)
-let rightBranch = solTask rightLabel right :: Branch CodingEffects Task (Outcome Candidate)
+let leftBranch = lunaTask leftLabel Medium left :: Branch CodingEffects Task (Outcome Candidate)
+let rightBranch = lunaTask rightLabel Medium right :: Branch CodingEffects Task (Outcome Candidate)
 ```
 
 When their prerequisites and any release condition are met, admit them together:
@@ -137,11 +138,10 @@ completes when the tool block returns; do not await its new child in that same b
 
 `inherited` chooses the caller's current completed context boundary. Use it when
 shared investigation and accepted decisions are valuable to the child, and fork
-before unrelated debugging accumulates. Default solTask/componentLead uses
-inherited context and currentCheckout, as does implement. Use
-solTaskFrom/componentLeadFrom with projectHead for an explicit project source. Select a fresh taskContext
-explicitly for unrelated work. componentLead, solTask/implement and reviews select Medium. Keep Sol effort
-stable across inherited forks. Use an explicit atRef
+before unrelated debugging accumulates. Default `lunaLead` and `lunaTask` select fresh Task context and currentCheckout.
+Use their From variants with projectHead for an explicit project source. Luna
+owners scaffold and delegate recursively; direct implementation is a justified
+terminal leaf. Same-model descendants can select inherited context. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants
 normally remain supervised. A root
 may admit SwarmOwned selected leads; that lifetime is not compatible with an

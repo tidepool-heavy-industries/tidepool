@@ -37,7 +37,12 @@ turn (CheckActor actor) source = do
   encoded <- send (RecipeTurn actor source)
   case eitherDecode encoded of
     Right value@(Object fields) | KeyMap.lookup "status" fields `elem` [Just (String "committed"), Just (String "replied")] -> pure value
-    _ -> error (Text.unpack ("Resident check turn failed: " <> encoded))
+    _ -> do
+      -- The recipe machine may be latched after a failed cell. Report through
+      -- the host assertion effect so its retained receipt is not lost while
+      -- trying to recover a Haskell exception from that machine.
+      check ("Resident check turn failed: " <> encoded) False
+      error "RecipeAssert returned after a failed assertion"
 
 activation :: Member RecipeCheck effects => Eff effects Activation
 activation = do

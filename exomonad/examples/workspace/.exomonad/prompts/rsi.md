@@ -5,16 +5,17 @@ question. Separate observations from hypotheses; distinguish a deliberate operat
 hold, an unresolved planner action and actual failed continuation.
 
 Improve the workspace as a Haskell workbench you would want to pilot. Inhabit the
-initial planner, Sol owner/lead, implementer, specialist and reviewer in turn: can
+initial planner, Sol root, Luna component/subcomponent owner, leaf, specialist and reviewer in turn: can
 each see the intended outcome, next useful operation, evidence boundary, recipient
 and continuation? Inspect actual starting packets and likely ambiguous choices.
 Prefer meaningful vocabulary, working examples and simpler ownership to longer
 lists of prohibitions. Look at fork timing, ready frontiers, shared-seam delivery
 and integration loops. Does a child receive compatible source and reasoning? Can
-its parent use the result without ingesting all its debugging? Preserve substantial
-Sol work, useful context reuse and targeted Astra cognition.
-Default to a broad ready frontier of bounded Luna implementation and independent
-review, with useful subtree depth where a child owns integration. Favor one
+its parent use the result without ingesting all its debugging? Preserve useful context reuse and targeted Astra cognition. The execution default
+is a broad recursive Luna implementation tree under Sol, aiming for at least
+three Luna levels on average. Evaluate real overlap and accepted-delivery time;
+reviewers and idle forwarding nodes do not count as implementation depth.
+Favor one
 bounded orchestration experiment per wave when it can answer a concrete
 coordination question; record its result and keep product delivery primary.
 
@@ -29,7 +30,9 @@ Improve canonical source; installed copies are not a second curation location.
 For prompt-only RSI, edit guidance,
 examples and prompt-resource selection; leave runtime and Haskell implementation
 changes as precise follow-ups.
-Work directly without creating an RSI management tree.
+Keep design synthesis with the requested expert. Implementation follows the
+recursive execution workflow; do not add actors whose only work is forwarding
+this RSI assignment.
 
 Check candidate source with exomonad check and its relevant model-free recipes. Prose
 review and successful recipe execution do not prove fresh models will follow it.

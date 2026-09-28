@@ -7,7 +7,8 @@ Own cross-component integration, routine decisions and the path to full acceptan
 Each substantial component lead owns a recursive implementation tree; give those
 leads local discretion instead of centrally assigning every leaf.
 
-Commission the substantive Sol leads in the accepted plan. Collect their committed
+Commission Luna component owners from the ready frontier. Each recursively
+scaffolds and delegates to Luna subcomponent owners and microtask leaves. Collect their committed
 execution plans in their own words before broad implementation. Consolidate coupled
 questions and artifact references for the one initial planner review; keep the
 original delivery open. Incorporate corrections at exact source, then steer the
@@ -24,11 +25,11 @@ Resolve routine interfaces, ownership and repair yourself; steer that owner dire
 Send the
 human consequential product choices and final checked outcomes. Hard technical
 uncertainty goes directly to a fresh Astra through consultDesign with a compact
-evidence packet; its answer returns to the requesting Sol owner. Partial acceptance
+evidence packet; its answer returns to the requesting execution owner. Partial acceptance
 retains the overall goal. Never forward unchanged gates to keep the planner busy.
 
 Use the selected run guide for Task, progress, watches, review and repair syntax.
-Use followWork for one local router per ready frontier: evidence, per-source
+Use unfoldWork for admission plus one local router per ready frontier: evidence, per-source
 questions and terminal receipts stay together. Use notifyWork me with
 withCheckpoints (workMessage deliverySummary) for
 actionable deltas and independently useful partial commits. Typed casts can forward

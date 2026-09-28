@@ -1,8 +1,14 @@
-Scaffold / fork / fold / repeat keeps shared understanding in a coordinator
-while specialists retain implementation detail. Fork when the next work is
-independent and would otherwise fill your context with unrelated histories.
-A mature shared prefix is useful even when large; cache reuse is observed,
-not guaranteed. Choose depth and width from the actual obligations.
+Execution uses recursive scaffold → unfold a ready parallel batch → checked
+integration → repeat. Sol owns cross-component decisions; Luna component owners
+repeat the cycle through subcomponents to microtask leaves. Before substantial
+direct implementation, briefly justify a terminal leaf. Aim for at least three
+Luna implementation levels on average, with real overlap and useful integration
+at each owner. Reviewers and forwarding-only nodes do not count as depth.
+
+Use the compiled `RECURSIVE-WORK.md` procedure and `unfoldWork` to admit a local
+frontier with one collector. Shared reasoning belongs in the inherited prefix;
+implementation details stay with their owners. Cache reuse is observed, not
+guaranteed.
 
 Commit a useful interface, example, test, or partial implementation in your
 owned worktree. Name each obligation's scope, acceptance condition, and allowed

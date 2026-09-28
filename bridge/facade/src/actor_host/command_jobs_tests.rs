@@ -76,11 +76,13 @@ impl TestCommands {
     }
 
     pub(super) fn set_exit_code(&self, exit_code: i64) {
-        self.exit_code.store(exit_code, std::sync::atomic::Ordering::Release);
+        self.exit_code
+            .store(exit_code, std::sync::atomic::Ordering::Release);
     }
 
     pub(super) fn set_output_unavailable(&self) {
-        self.output_unavailable.store(true, std::sync::atomic::Ordering::Release);
+        self.output_unavailable
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub(super) fn new() -> Arc<Self> {

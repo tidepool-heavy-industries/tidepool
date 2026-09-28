@@ -37,15 +37,15 @@ import qualified Tidepool.Actor as Actor
 reportProgress (WorkProgress [candidate] open)
 ```
 
-`open :: Attention` contains only decisions/blockers needing this Sol recipient's
+`open :: Attention` contains only decisions/blockers needing this owning recipient's
 action. Do not invent questions to announce activity or repeat a known gate.
 Publish the current unresolved set so a newly attached collector can capture it;
 attached collectors receive every later publication. Bound values keep this small; use `progressSummary` or `attentionSummary`
 when inspecting rather than expanding every field. Keep original values for checks.
 
-The Sol owner resolves ordinary interfaces and ownership. A reservation without
+The local owner resolves ordinary interfaces and ownership. A reservation without
 an executing owner is work to allocate. The planner has no execution subscription
-after the initial understanding check. For a hard question, the Sol owner calls
+after the initial understanding check. For a hard question, the local owner calls
 `consultDesign` directly. Give the fresh context enough exact source evidence,
 alternatives and a decision to make without a transcript:
 
@@ -161,10 +161,10 @@ stopped: inspect retained state and actual delivery before choosing an intervent
 
 ## Route typed values up the tree
 
-A subtree can use a different sink: `WorkEvent Delivery -> Eff ...` is ordinary
-Haskell, so forward checked component results to the parent's typed mailbox while
+A component's `WorkSink Delivery` can forward checked results to its parent's
+typed mailbox while
 keeping partial evidence local. The parent can receive other event types in its
-own protocol and select only relevant engineering decisions for its Sol owner.
+own protocol and select only relevant engineering decisions for its local owner.
 The [executable handoff](../checks/handoff-router.hs) builds that parent mailbox,
 casts the original WorkFinished value with its full response receipt, and retains
 partial evidence in the child collector. Its [recipe](../Project/RoutingChecks.hs)
@@ -173,12 +173,12 @@ or model wake sits between the two Haskell actors.
 
 Choose sinks for all consequential outcomes: unresolved child questions need their
 local owner, and unavailable/Blocked results need an action owner. The handoff
-example's terminal-only sink is for a subtree whose local Sol already owns its
+example's terminal-only sink is for a subtree whose local owner already owns its
 questions; it must not be copied as a policy that ignores every question.
 
 Known continuations execute in typed actor handlers. The
-[review continuation](continuation.md) submits to an available retained reviewer,
-retains exact handles before admission, and receives the verdict in its mailbox.
+[review continuation](continuation.md) checks the submitted source, admits its
+exact-source reviewer, and receives the verdict in its mailbox.
 No model turn forwards the known next action; a candidate is still not acceptance.
 Load `exomonad-define-actors` when defining a custom join or continuation.
 
@@ -187,7 +187,9 @@ Load `exomonad-define-actors` when defining a custom join or continuation.
 Keep the collector through partial checkpoints and wind-down: later final results
 still matter. Source closure does not imply that unresolved questions, uncertain
 notifications or resource custody can be discarded. Incorporate the useful results
-and put remaining obligations with a concrete owner, then:
+and put remaining obligations with a concrete owner. For the standard WorkBatch,
+use `finishWorkBatch` to refuse closure over pending original responses. For a
+custom collector whose requests are already terminal:
 
 ```haskell
 finishedWave <- finishWork wave

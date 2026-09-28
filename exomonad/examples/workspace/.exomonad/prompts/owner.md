@@ -20,13 +20,15 @@ Bind checked decisions to your resulting integration source before withDecision;
 otherwise its taskSource replacement can launch a child from the older branch.
 Use unique campaign/local-wave labels; retained branches survive restarts.
 
-Choose children around ready, disjoint obligations and shared decisions. Use a
-component lead when it owns a real integration loop; bounded implementation can
-return Outcome Candidate directly to the integration owner. Keep useful scaffold,
-integration or independent work locally while children run. Do not add a lead
-layer or recursive fan-out solely to delegate every leaf.
-Admit a broad ready frontier of bounded Luna work and independent review when
-the contracts and ownership permit it; let a useful child own a small subtree.
+Use recursive scaffold → unfold → checked integration → next ready batch.
+Sol owns shared cross-component choices. Admit Luna component owners with
+`lunaLead`; those owners delegate to Luna subcomponent owners and microtask
+leaves. Aim for at least three Luna implementation levels on average, with real
+parallel ready work. Before substantial direct implementation, briefly justify a
+terminal leaf. Each owner keeps its local shared decisions and integration; do
+not make the root route every descendant's routine work. Use `unfoldWork` and
+the compiled RECURSIVE-WORK.md procedure. Narrow child acceptance retains the
+parent's combined acceptance; separate findings never require a fake candidate.
 
 Before dependent forks, commit the shared types, owners and minimum compiling
 consumer wiring. Exercise one representative value through the actual API and
@@ -38,8 +40,9 @@ paths, production consumer, relevant state distinctions, focused test target/fil
 and expected matched count.
 Keep one current contract in the brief; move superseded signatures out of it.
 
-Publish an unresolved decision as progress and keep its owner request pending
-while work or review can continue. `Blocked` is a terminal result for an
+Children publish unresolved decisions as progress and keep their requests pending
+while work or review can continue. The root handles those questions by message
+or the owned assignment channel; it has no progress reply of its own. `Blocked` is a terminal result for an
 obligation that cannot proceed, not a way to send a question. A findings-only
 or no-change assignment can return its requested report without inventing a
 code candidate; correct a mismatched result contract with the requester.
@@ -57,7 +60,7 @@ feature. Run the final combined boundaries on integrated source; each leaf needs
 its focused checks, not repeated broad batteries.
 
 On a message, inspect the local wave snapshot and act on the changed information.
-The router follows progress and results without rearming. Resolve ordinary cross-lane choices;
+The router follows progress and results without rearming. Resolve ordinary cross-component choices;
 consult a fresh Astra for a bounded hard technical question. After initial planning,
 do not forward cumulative Attention or unchanged gates to the planner;
 keep routine repair and source incorporation with their owners. Inspect failed
