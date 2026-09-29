@@ -13,7 +13,10 @@ use harness::{
 use serde_json::json;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -94,6 +97,7 @@ struct CompactionTransport {
     model_requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     successor_seen: mpsc::UnboundedSender<()>,
     late_output_seen: mpsc::UnboundedSender<()>,
+    compactions: Arc<AtomicU64>,
 }
 
 #[async_trait]
@@ -101,6 +105,7 @@ impl ResponsesTransport for CompactionTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             assert!(request.tools.is_empty());
+            self.compactions.fetch_add(1, Ordering::Relaxed);
             for call_id in ["raw-pending-call", "typed-pending-call"] {
                 assert!(
                     !request
@@ -271,6 +276,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         model_requests: Arc::new(Mutex::new(Vec::new())),
         successor_seen: successor_tx,
         late_output_seen: late_output_tx,
+        compactions: Arc::new(AtomicU64::new(0)),
     };
     let settings_for_engine = settings.clone();
     let runtime = Arc::clone(&service.runtime);
@@ -334,10 +340,9 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         .expect("Engine did not make a request after both late outputs settled")
         .expect("transport dropped late-output request signal");
     stop_driver.send_replace(true);
-
     tokio::time::timeout(Duration::from_secs(10), &mut running)
         .await
-        .expect("Engine did not settle the late outputs")
+        .expect("embedded host driver did not stop")
         .unwrap()
         .unwrap();
     let requests = transport.model_requests.lock().unwrap();
@@ -352,6 +357,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
             .any(|item| { item.0["call_id"] == call_id && item.0.to_string().contains(output) }));
     }
     drop(requests);
+    assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
     service.shutdown().await.unwrap();
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
