@@ -4,9 +4,13 @@ set -euo pipefail
 # Materialize the pinned Nix closures on the executor before remote actions.
 # `nix eval` here only identifies paths and does not compile the toolchains.
 cd "$(dirname "$0")/.."
+if [[ -z ${TIDEPOOL_DEV_SHELL:-} ]]; then
+  exec bash scripts/dev-shell.sh bash scripts/buck2-configure.sh "$@"
+fi
+flake_source=${TIDEPOOL_DEV_SHELL%#*}
 system="$(nix eval --raw --impure --expr 'builtins.currentSystem')"
 output_path() {
-  nix eval --raw ".#packages.${system}.buck-$1.outPath"
+  nix eval --raw "${flake_source}#packages.${system}.buck-$1.outPath"
 }
 rust="$(output_path rust)"
 ghc="$(output_path ghc)"
@@ -23,27 +27,15 @@ perl="$(output_path perl)"
 pkg_config="$(output_path pkg-config)"
 remote_enabled=false
 remote_toolchain=""
-if [ -r /etc/swarm-build/platform ]; then
+if [ "${TIDEPOOL_BUCK_REMOTE:-false}" = true ]; then
+  test -r /etc/swarm-build/platform || { echo "Missing remote platform identity" >&2; exit 1; }
   remote_toolchain="$(cat /etc/swarm-build/platform)"
   remote_enabled=true
 fi
 
-if [ "$remote_enabled" = true ]; then
-  mountpoint -q /srv/build || {
-    printf 'Buck output volume /srv/build is not mounted\n' >&2
-    exit 1
-  }
-  if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    checkout_root="$(realpath "$(git rev-parse --show-toplevel)")"
-  else
-    checkout_root="$PWD"
-  fi
-  checkout_key="$(printf '%s' "$checkout_root" | sha256sum | cut -d ' ' -f1)"
-  output_root="/srv/build/buck-out/$checkout_key"
-  if ! mountpoint -q "$checkout_root/buck-out"; then
-    printf 'Bind mount %s onto %s/buck-out before configuring Buck\n' "$output_root" "$checkout_root" >&2
-    exit 1
-  fi
+if ! mountpoint -q "$PWD/buck-out"; then
+  printf 'Provision a real per-checkout buck-out bind mount before configuring Buck: %s/buck-out\n' "$PWD" >&2
+  exit 1
 fi
 
 cat > .buckconfig.local <<EOF
