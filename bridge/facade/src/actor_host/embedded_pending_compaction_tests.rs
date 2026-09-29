@@ -7,7 +7,8 @@ use exomonad_tool::{
 };
 use harness::{
     engine::ResponsesTransport,
-    model::{AgentPath, Effort},
+    model::{AgentPath, CallId, Effort},
+    store::ClaimState,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
 };
 use serde_json::json;
@@ -179,6 +180,24 @@ impl ResponsesTransport for CompactionTransport {
                 let _ = self.late_output_seen.send(());
                 Ok(message_turn("finished", "Both late outputs were retained."))
             }
+            4 => Ok(ResponsesTurn {
+                response_id: "pending-before-cancel".into(),
+                items: vec![
+                    harness::item::Item(json!({
+                        "type":"custom_tool_call",
+                        "call_id":"cancel-pending-call",
+                        "name":"raw_hold",
+                        "input":"hold until Engine cancellation"
+                    })),
+                    harness::item::Item(json!({
+                        "type":"message",
+                        "role":"assistant",
+                        "phase":"final_answer",
+                        "content":[{"type":"output_text","text":"cancel this pending call"}]
+                    })),
+                ],
+                usage: Default::default(),
+            }),
             other => panic!("unexpected model request {other}"),
         }
     }
@@ -205,6 +224,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
     let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
     let (raw_release_tx, raw_release_rx) = oneshot::channel();
     let (typed_release_tx, typed_release_rx) = oneshot::channel();
+    let (cancel_release_tx, cancel_release_rx) = oneshot::channel();
     let endpoint = GatedEndpoint {
         tools: vec![
             HostedTool::Custom(CustomToolDeclaration {
@@ -227,6 +247,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         releases: Arc::new(Mutex::new(HashMap::from([
             ("raw-pending-call".into(), raw_release_rx),
             ("typed-pending-call".into(), typed_release_rx),
+            ("cancel-pending-call".into(), cancel_release_rx),
         ]))),
         started: started_tx,
         settled: settled_tx,
@@ -339,14 +360,38 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         .await
         .expect("Engine did not make a request after both late outputs settled")
         .expect("transport dropped late-output request signal");
-    stop_driver.send_replace(true);
-    tokio::time::timeout(Duration::from_secs(10), &mut running)
+    conversation
+        .input(
+            "begin-pending-cancel",
+            "operator",
+            "Start a held operation so the Engine can cancel it.",
+        )
         .await
-        .expect("embedded host driver did not stop")
-        .unwrap()
         .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+            .await
+            .expect("cancellable operation did not start")
+            .expect("test endpoint dropped start observer"),
+        "cancel-pending-call"
+    );
+    stop_driver.send_replace(true);
+    let cancelled = tokio::time::timeout(Duration::from_secs(10), &mut running)
+        .await
+        .expect("pending Engine cancellation did not finish")
+        .unwrap()
+        .expect_err("cancelling a pending Engine should stop the host drive");
+    assert!(cancelled.contains("cancel"), "{cancelled}");
+    cancel_release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+            .await
+            .expect("cancelled test future did not exit after release")
+            .expect("test endpoint dropped settlement observer"),
+        "cancel-pending-call"
+    );
     let requests = transport.model_requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     for (call_id, output) in [
         ("raw-pending-call", "raw late output"),
         ("typed-pending-call", "typed late output"),
@@ -358,6 +403,13 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
     }
     drop(requests);
     assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
+    let cancellation_claim = service
+        .runtime
+        .store()
+        .claims(&CallId("cancel-pending-call".into()))
+        .unwrap();
+    assert_eq!(cancellation_claim.len(), 1);
+    assert_eq!(cancellation_claim[0].state, ClaimState::Settled);
     service.shutdown().await.unwrap();
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
