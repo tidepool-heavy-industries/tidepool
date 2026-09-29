@@ -31,6 +31,13 @@
       url = "github:inanna-malick/jev-dsl/f16f1363b4d389d6e34f9d695fbd254ca0735f2e";
       flake = false;
     };
+    # Browser assets must come from the exact harness source used by Cargo.
+    harnessWeb = {
+      url = "github:tidepool-heavy-industries/exomonad-harness/c485edb9b697ffc671b22c9ef25a73fc84763d76";
+      flake = false;
+    };
+    # Match the harness web verification shell's pinned Node 24 package.
+    harnessNixpkgs.url = "github:NixOS/nixpkgs/bfc1b8a4574108ceef22f02bafcf6611380c100d";
   };
 
   outputs =
@@ -41,6 +48,8 @@
       rust-overlay,
       codex,
       jev-dsl,
+      harnessWeb,
+      harnessNixpkgs,
     }:
     if builtins.compareVersions builtins.nixVersion "2.27" < 0 then
       throw "Tidepool requires Nix 2.27 or newer so the matched Codex submodule is included"
@@ -120,6 +129,7 @@
             ghcInternalOverlay
           ];
           pkgs = import nixpkgs { inherit system overlays; };
+          harnessPkgs = import harnessNixpkgs { inherit system; };
           # rust-toolchain.toml is the single source of truth for the Rust
           # version + components; the flake reads it rather than pinning
           # `stable.latest` (which drifts silently on every flake.lock update).
@@ -167,6 +177,20 @@
             ]
           );
           interactiveCodex = codex.packages.${system}.default;
+          embeddedWebAssets = harnessPkgs.buildNpmPackage {
+            pname = "exomonad-harness-web";
+            version = "c485edb9b697ffc671b22c9ef25a73fc84763d76";
+            src = "${harnessWeb}/web";
+            nodejs = harnessPkgs.nodejs_24;
+            npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/share/exomonad/web"
+              cp -R dist/. "$out/share/exomonad/web/"
+              runHook postInstall
+            '';
+            passthru.sourceRevision = "c485edb9b697ffc671b22c9ef25a73fc84763d76";
+          };
           # Tidepool consumes only the standalone private wire crate from the
           # matched Codex checkout. Keep the rest of Codex in its independent
           # flake/toolchain graph so implementation-only client edits do not
@@ -237,6 +261,7 @@
             EXOMONAD_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
             EXOMONAD_CODEX_CLOSURE = "${interactiveCodex}";
             EXOMONAD_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
+            EXOMONAD_EMBEDDED_ASSET_ROOT = "${embeddedWebAssets}/share/exomonad/web";
             # Fetches the project's flake inputs when `[haskell.flake_sources]`
             # pins Haskell source outside the workspace.
             EXOMONAD_NIX_BIN = "${pkgs.nix}/bin/nix";
@@ -317,6 +342,8 @@
               ln -s ${harness}/bin/tidepool-extract-bin "$out/bin/tidepool-extract-bin"
             '';
 
+          packages.exomonad-embedded-assets = embeddedWebAssets;
+
           packages.exomonad-unwrapped = tidepoolRustPlatform.buildRustPackage {
             pname = "exomonad-unwrapped";
             version = "0.1.0";
@@ -349,7 +376,10 @@
 
           packages.exomonad = pkgs.symlinkJoin {
             name = "exomonad";
-            paths = [ self.packages.${system}.exomonad-unwrapped ];
+            paths = [
+              self.packages.${system}.exomonad-unwrapped
+              embeddedWebAssets
+            ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               wrapProgram "$out/bin/exomonad" \
@@ -369,7 +399,8 @@
                 --set EXOMONAD_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
                 --set EXOMONAD_CODEX_CLOSURE "${interactiveCodex}" \
                 --set EXOMONAD_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
-                --set EXOMONAD_NIX_BIN "${pkgs.nix}/bin/nix"
+                --set EXOMONAD_NIX_BIN "${pkgs.nix}/bin/nix" \
+                --set EXOMONAD_EMBEDDED_ASSET_ROOT "${embeddedWebAssets}/share/exomonad/web"
             '';
           };
 
@@ -464,6 +495,14 @@
 
             # Covers extractor construction as part of `nix flake check`.
             tidepool-extract = self.packages.${system}.tidepool-extract;
+
+            embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
+              revision=c485edb9b697ffc671b22c9ef25a73fc84763d76
+              grep -Fq "$revision" ${./Cargo.lock}
+              grep -Fq "$revision" ${./flake.nix}
+              test -s ${embeddedWebAssets}/share/exomonad/web/index.html
+              touch "$out"
+            '';
 
             # Deterministic and model-free. The first private Codex build can be
             # substantial, so use this targeted check during iteration.

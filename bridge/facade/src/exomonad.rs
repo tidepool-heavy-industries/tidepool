@@ -246,12 +246,19 @@ pub(crate) struct LaunchConfig {
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
+    #[serde(default = "default_embedded_asset_root")]
     pub(crate) asset_root: PathBuf,
     pub(crate) session_secret_file: PathBuf,
     pub(crate) codex_auth_file: PathBuf,
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
+}
+
+fn default_embedded_asset_root() -> PathBuf {
+    std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 fn default_embedded_concurrent_jobs() -> usize {
@@ -266,6 +273,11 @@ impl EmbeddedLaunchConfig {
         if self.context_capacity_tokens == 0 || self.concurrent_jobs == 0 {
             return Err(runtime_error(
                 "embedded context capacity and concurrent jobs must be positive",
+            ));
+        }
+        if self.asset_root.as_os_str().is_empty() {
+            return Err(runtime_error(
+                "embedded browser asset_root is required unless EXOMONAD_EMBEDDED_ASSET_ROOT is set",
             ));
         }
         for path in [
@@ -2348,6 +2360,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn embedded_asset_root_uses_packaged_default_when_omitted() {
+        const ASSET_ROOT: &str = "EXOMONAD_EMBEDDED_ASSET_ROOT";
+        let previous = std::env::var_os(ASSET_ROOT);
+        let packaged = "/nix/store/web-assets/share/exomonad/web";
+        std::env::set_var(ASSET_ROOT, packaged);
+        let omitted: Result<EmbeddedLaunchConfig, _> = toml::from_str(
+            "listen = '127.0.0.1:0'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+        );
+        let explicit: Result<EmbeddedLaunchConfig, _> = toml::from_str(
+            "listen = '127.0.0.1:0'\nasset_root = '/tmp/override'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+        );
+        match previous {
+            Some(value) => std::env::set_var(ASSET_ROOT, value),
+            None => std::env::remove_var(ASSET_ROOT),
+        }
+        assert_eq!(omitted.unwrap().asset_root, PathBuf::from(packaged));
+        assert_eq!(explicit.unwrap().asset_root, PathBuf::from("/tmp/override"));
+    }
 
     fn test_agent_defaults() -> ExomonadAgentDefaults {
         ExomonadAgentDefaults {
