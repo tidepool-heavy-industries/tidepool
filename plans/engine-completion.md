@@ -1,0 +1,164 @@
+# Engine completion contracts and execution record
+
+Approved continuation of `engine-harness-integration.md`, 2026-09-29, from
+verified foundation `2adfe22f1ccf4add4eb77efb9b2c17a70161ea9b`. This document
+records the implementation baseline and accepted shared boundaries. The
+foundation checkpoint is complete; the overall implementation is not.
+
+## Finish line
+
+- M1: production sequential embedded Engine/Store/browser composition and
+  deterministic real-resident acceptance, preserving Codex as default.
+- Compiler/native: independently reusable durable module products across
+  different cells and fresh workers, exact import provenance, reachable-group
+  native demand and final-real-owner reclamation.
+- M2: execution-local notebook state, atomic final publication, exact cleanup,
+  independent reusable captures, shared runtime semantics for both backends.
+- Git/process: retained execution evidence for cross-process admission and
+  the production thin launcher's failure and cleanup paths.
+- Delivery: matched package, full joined gates, verified remote dependencies
+  once the user lifts the push hold, then approved live G5 acceptance.
+
+Pushes remain deferred. G5 requires a concrete readiness report and separate
+user approval. No running-session migration, default-backend cutover, automatic
+effect replay, or shared-service replacement belongs to this implementation.
+
+## Shared ownership and interfaces
+
+### Harness / facade
+
+Harness `OperationId` (origin conversation/incarnation, request, original call)
+and schema v5 remain the operation authority. Preserve IDs on the wire and
+in inherited claims. No Tidepool identity registry or duplicate model journal.
+Facade owns immutable per-run backend selection and production composition;
+one Store/scheduler lives under `run_root/harness/`. Actor admission binds the
+conversation, tools, authority and lifecycle. Durable input precedes wake.
+An exact retry returns the retained outcome without reevaluation.
+
+Keep the harness's own pending-result wait tool; it is not an actor supervisor.
+Do not expose standalone spawn/message/retirement tools in embedded mode.
+Use the existing router, authentication and matching immutable browser assets.
+Retain configured read-only Codex credentials, explicit public HTTPS scheme,
+session expiry/rotation checks, compaction and unavailable-after-host-loss
+semantics from `harness-integration.md`.
+
+### Compiler / runtime
+
+The compiler owner owns Haskell worker changes and its typed Rust transport,
+including the declaration-join validator. The runtime owner consumes that
+validator; it must not independently edit the worker protocol or GHC pipeline.
+
+Neutral products are entry-free, versioned definitions with stable original
+recursive-group ordinals. The toolchain's existing cache owns atomic pairing
+of neutral bytes, skinny `.hi` bytes and complete dependency evidence. The
+worker owns semantic evidence; Rust owns cache policy and filesystem storage.
+
+Compilation has graph-inventory and product-consumption phases within the
+existing transaction. Inventory includes exact source/options, ordinary/boot
+nodes, direct resolution and negative witnesses, package-interface identities
+and scoped retained context. Revalidate consumed evidence before publication.
+Use SCC closure identities to avoid cyclic hashes. Assign module versions
+before annotating exact inter-module owner references; validate every edge and
+integrity-check the final bundle. Unknown compile-time inputs cause misses.
+
+Imports distinguish an exact source module version/binder, retained binding
+instance, and package origin. A spelling/signature match is not an owner match.
+Demand closes reachable recursive groups before entry, seals checked batches,
+and compiles outside checkout. Coalescing uses exact group identity. Immutable
+code keys exclude roots, mutable imports and evaluatedness. Materialized CAFs
+keep explicit semantic leases; unused exports are weak metadata.
+
+Declaration validation takes the exact current public generation and private
+write set/provenance. Its typed receipt represents either a validated candidate
+or a rejection for that generation. Wrapper typechecking is supplemented by
+combined class/family-instance consistency, including instance-only and
+transitive imports. An unprovable join fails without visibility changes.
+Stale successful or rejected staging must be retried, never treated as final.
+
+### Runtime / actor
+
+`ResidentSession` owns staged declaration and binding publication and one
+synchronous no-await paired visibility swap. Preserve original binding IDs,
+interfaces, roots and dependency leases; choose winners by completion order.
+Do not recompile private source against the newer public environment.
+
+The actor keeps lifecycle/shared coordination/model-turn state. Existing exact
+execution identities key records owning private scopes, admitted source/tool
+leases, cursor, control/reply, effects, reservations and continuations. Keep
+`WorkbenchExecutions` as replay authority. Execution-owned tasks send exact
+step-generation outcomes to Ractor; do not move the whole behavior or await
+external work in the actor handler. Machine mutation retains one checkout.
+
+The lock order is machine checkout then short publication-decision lock.
+Cancellation never holds that lock while awaiting checkout or cleanup. Only a
+successful visibility swap marks Published; stale staging leaves it unpublished.
+Computing cancellation is non-preemptive until a boundary establishes outcome.
+
+Before removing dispatch serialization, make request reservation and after-tool
+hole cleanup exact to the creating operation. Direct uncorrelated raw cells use
+local execution identities with no remote retry promise. Structured actor turns
+remain explicitly non-reentrant, using owned completion messages across waits.
+
+### Captures
+
+A successful capture owns completed private lexical state and strong leases on
+the execution's admitted source, independently of later parent settlement.
+Harness attachments preserve the same effect boundary and original pending
+claims. Children acquire their own admitted scope/source ownership.
+
+A user-visible Haskell token is a real explicit owner until ReleaseCheckpoint,
+regardless of backend. Do not weaken it to a weak index merely because a harness
+attachment exists. Harness attachments/children retain independent shares;
+attachment-only captures need no hidden token owner. Release revokes future
+token admissions and drops its share; existing children survive. Final scope
+cleanup queues to the resident session owner, not the possibly retired issuer.
+No new checkpoint registry and no serialized live-heap recovery.
+
+## Assignment and verification rules
+
+Integration owns shared contracts, cross-owner review and joins. Sol owns
+compiler, runtime and facade transitions; Luna owns bounded independent leaves.
+Use Astra only for consequential unresolved decisions and exact-commit review.
+Each assignment uses its own real Git worktree and mutable build outputs.
+
+Use declared Nix wrappers. Initially bound local build scopes to 40 GiB total
+(24 GiB compiler/integration plus 16 GiB secondary), disable swap within scopes,
+and coordinate one expensive compiler/Nix realization. Nix daemon work is not
+bounded by the caller scope; realize expensive closures serially and account
+for it separately. Never restart shared daemons or obtain sudo for a build.
+
+Compile changed consumers, run exact focused success/failure tests, format, and
+record full revision, command, executed count, exit status and retained log.
+At joined boundaries run structural fixtures and all relevant broad suites.
+Final verification must cover every `just verify` constituent in coordinated
+bounded lanes, plus matched harness/assets/client package construction.
+
+Acceptance includes source-hidden interface consumption with a validated
+inventory, independent module hits, dependency/shadowing/unsafe-effect misses,
+recursive/overlapping demand, unused-code omission, distinct installs/CAF state,
+static and copied parcel failure/lifetime, final-owner release, both cancel/
+commit orders, stale staging, exact cleanup, and children from an unfinished
+parent surviving its later failure. M1 must use actual production composition,
+including reconnect gaps, authentication rotation and pending-call compaction.
+
+Remove obsolete ownership paths as their consumers migrate. Report structural
+savings separately from matched time, allocation, memory and native-byte
+measurements. Preserve source-box historical evidence and all existing bundles.
+
+## Delivery and live acceptance
+
+Publish companions before root gitlinks only after the user lifts the hold.
+Verify remote OIDs and clean-checkout package/source capture. Until then retain
+verified bundles and an explicit unpublished-dependency limitation.
+
+G5 follows an approved exact binary/assets/workspace/task readiness packet:
+a browser-operated Sol root delegates two small independent components through
+recursive Luna owners, with at most four simultaneous model clients. Ordinary
+Haskell orchestration, typed replies and a Haskell-only result join are required.
+Retain commits/checks/reviews, trace, memory/timings, root interview before
+retirement, and explicit remaining-resource disposition. Infrastructure
+acceptance and a default-backend cutover remain separate.
+
+## Implementation record
+
+- Baseline scaffold: contracts recorded; implementation and gates pending.
