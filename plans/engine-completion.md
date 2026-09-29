@@ -220,3 +220,20 @@ Push hold and live G5 approval gate remain unchanged.
   continuation cleanup and M1 production wiring proceed independently. Sol owns
   the compiler boundary; Luna owns the two bounded runtime/facade parcels.
 - Pushes and live G5 remain gated as above.
+
+### Entry-free products structural gate
+
+Integrated sidecar `4d2f6950f` from compiler `6d4e14a76`. An independent decoder
+review found no blocker. Required `just fixtures-check` passed at compiler
+`49df9da92` (sidecar plus the dev-shell infrastructure fix): 692 Suite tests
+passed, zero failed; 261 target corpus and seven embedded artifacts accepted.
+Command ran through the admitted user service `tidepool-compiler-fixtures-0929`
+and exited zero. Retained log:
+`/srv/swarm/checkouts/tidepool-completion-compiler/target/engine-completion-fixtures.log`;
+structured result: `target/prepared-corpus/latest-success.json` in that checkout.
+The shared build slice peak was 5,461,962,752 bytes, including an overlapping
+helper build; this is not an isolated fixture memory measurement.
+
+This validates entry-free product serialization and existing corpus behavior.
+Independent module cache hits, precompile evidence, hydration, native demand,
+and declaration joins remain open.
