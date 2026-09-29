@@ -9,14 +9,13 @@
 //! its own `unsafe impl`) is what makes handing the same `Arc` to a machine
 //! on another thread sound.
 //!
-//! The key is content equality on the linked program itself: a
-//! [`LinkedProgram`] already carries its target and full resolved-import
-//! shape, and it derives `Eq`. There is no canonical hash for this linked
-//! shape, so lookup compares live keys structurally. The registry owns no
-//! image: installed machines, parcels, and active compiles hold the strong
-//! references. Each lookup or insert removes entries whose image has died,
-//! including their linked-program keys.
+//! The key is the linked program's structural `Hash` and `Eq`: it carries
+//! target and resolved-import shape, and `HashMap` checks complete equality
+//! even when hashes collide. The registry owns no image: installed machines,
+//! parcels, and active compiles hold strong references. Access removes a dead
+//! key immediately; an amortized sweep reclaims dead keys in other buckets.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
@@ -28,12 +27,31 @@ use super::CompiledProgram;
 /// clone the `Arc` around; the registry itself owns a lock, not a checkout.
 #[derive(Default)]
 pub struct ImageRegistry {
-    entries: Mutex<Vec<(LinkedProgram, Weak<CompiledProgram>)>>,
+    entries: Mutex<Entries>,
     /// Lifetime lookups that found an existing image. Never decremented.
     hits: AtomicU64,
     /// Lifetime lookups that found nothing (the caller then compiles and
     /// [`Self::insert`]s). Never decremented.
     misses: AtomicU64,
+}
+
+#[derive(Default)]
+struct Entries {
+    images: HashMap<LinkedProgram, Weak<CompiledProgram>>,
+    since_sweep: usize,
+}
+
+impl Entries {
+    /// A full scan after at least `len` indexed operations makes dead-key
+    /// collection amortized constant work per operation. Exact-key dead
+    /// entries are removed immediately, including between sweeps.
+    fn tick(&mut self) {
+        self.since_sweep += 1;
+        if self.since_sweep >= self.images.len().max(1) {
+            self.images.retain(|_, image| image.strong_count() != 0);
+            self.since_sweep = 0;
+        }
+    }
 }
 
 impl ImageRegistry {
@@ -46,14 +64,11 @@ impl ImageRegistry {
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|(_, image)| image.strong_count() != 0);
-        let found = entries.iter().find_map(|(existing, image)| {
-            if existing == key {
-                image.upgrade()
-            } else {
-                None
-            }
-        });
+        let found = entries.images.get(key).and_then(Weak::upgrade);
+        if found.is_none() {
+            entries.images.remove(key);
+        }
+        entries.tick();
         if found.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -71,17 +86,12 @@ impl ImageRegistry {
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|(_, image)| image.strong_count() != 0);
-        if let Some(existing) = entries.iter().find_map(|(existing, candidate)| {
-            if existing == &key {
-                candidate.upgrade()
-            } else {
-                None
-            }
-        }) {
+        if let Some(existing) = entries.images.get(&key).and_then(Weak::upgrade) {
+            entries.tick();
             return existing;
         }
-        entries.push((key, Arc::downgrade(&image)));
+        entries.images.insert(key, Arc::downgrade(&image));
+        entries.tick();
         image
     }
 
@@ -102,10 +112,20 @@ impl ImageRegistry {
 mod tests {
     use super::super::{PreparedMachine, PreparedMachineOptions, RunOptions};
     use super::*;
-    use tidepool_repr::execution_schema::{link_program, testing, MachineImports};
+    use tidepool_repr::execution_schema::{
+        link_program, testing, Atom, ExprFrame, MachineImports, ScalarLiteral,
+    };
 
     fn program() -> LinkedProgram {
-        let wire = testing::wire_program();
+        program_returning(42)
+    }
+
+    fn program_returning(value: i64) -> LinkedProgram {
+        let mut wire = testing::wire_program();
+        wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })]);
         let prepared = testing::prepare(wire).expect("fixture prepares");
         link_program(prepared, &MachineImports::default()).expect("fixture links")
     }
@@ -173,14 +193,14 @@ mod tests {
             },
         )
         .expect("machine installs image");
-        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+        assert_eq!(registry.entries.lock().unwrap().images.len(), 1);
         assert!(weak.upgrade().is_some(), "machine owns the live image");
 
         drop(machine);
         assert!(weak.upgrade().is_none(), "the registry owns no image");
         assert!(registry.lookup(&key).is_none());
         assert!(
-            registry.entries.lock().unwrap().is_empty(),
+            registry.entries.lock().unwrap().images.is_empty(),
             "dead key pruned"
         );
     }
@@ -195,8 +215,23 @@ mod tests {
         let replacement = compiled();
         let inserted = registry.insert(key.clone(), Arc::clone(&replacement));
         assert!(Arc::ptr_eq(&inserted, &replacement));
-        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+        assert_eq!(registry.entries.lock().unwrap().images.len(), 1);
         let hit = registry.lookup(&key).expect("replacement remains live");
         assert!(Arc::ptr_eq(&hit, &replacement));
+    }
+
+    #[test]
+    fn indexed_lookups_eventually_prune_an_unrelated_dead_key() {
+        let registry = ImageRegistry::new();
+        let live_key = program();
+        let dead_key = program_returning(43);
+        let live = registry.insert(live_key.clone(), compiled());
+        let dead = Arc::new(CompiledProgram::compile(&dead_key).expect("other fixture compiles"));
+        let dead = registry.insert(dead_key, dead);
+        drop(dead);
+        assert_eq!(registry.entries.lock().unwrap().images.len(), 2);
+        assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
+        assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
+        assert_eq!(registry.entries.lock().unwrap().images.len(), 1);
     }
 }
