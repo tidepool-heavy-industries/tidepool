@@ -755,6 +755,10 @@ fn failed_checkpoint_cleanup_response(
     }
 }
 
+fn checkpoint_capture_delivered<T>(resumed: &Result<T, ResidentActorWorkbenchError>) -> bool {
+    resumed.is_ok() || matches!(resumed, Err(ResidentActorWorkbenchError::Delivered(_)))
+}
+
 fn workbench_failure_after_operations(
     completed: &[WorkbenchItemReceipt],
     failed_index: usize,
@@ -1035,8 +1039,8 @@ pub struct ResidentKernelBehavior<H, O> {
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     fork_publication: ForkPublication,
-    active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
-    active_reservation_owner: Option<RequestReservationOwner>,
+    active_workbench_execution: Option<ActiveWorkbenchExecution>,
+    active_route_reservation_owner: Option<RequestReservationOwner>,
     settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
     pending_fork_publications: Vec<PendingForkPublication>,
     /// This actor's last summary-family status roster, for the `changed`
@@ -1045,6 +1049,17 @@ pub struct ResidentKernelBehavior<H, O> {
     /// `taskSource` of the current request's session input, read from its
     /// rendered preview when the request was presented.
     assignment_base: Option<String>,
+}
+
+/// State admitted for one workbench call. The actor still drives one call at
+/// a time; keeping its source context, cancellation control and reservation
+/// authority together gives each subsequent effect the same exact owner.
+struct ActiveWorkbenchExecution {
+    id: WorkbenchExecutionId,
+    context: ActorSessionContext,
+    control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
+    installed_tools: Option<crate::InstalledToolLease>,
+    admitted_source: crate::CheckpointSourceLayer,
 }
 
 // Even a raw operator notebook with no provider boundary publishes at the
@@ -1213,8 +1228,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             workbench_executions: Arc::default(),
             active_route: None,
             fork_publication: ForkPublication::Resident,
-            active_workbench_control: None,
-            active_reservation_owner: None,
+            active_workbench_execution: None,
+            active_route_reservation_owner: None,
             settled_fork_boundaries: Vec::new(),
             pending_fork_publications: Vec::new(),
             roster_snapshot: Mutex::new(None),
@@ -1223,6 +1238,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
         self.descriptor.session_context(actor)
+    }
+
+    fn active_reservation_owner(&self) -> Option<RequestReservationOwner> {
+        self.active_workbench_execution
+            .as_ref()
+            .map(|execution| RequestReservationOwner::Workbench(execution.id.clone()))
+            .or_else(|| self.active_route_reservation_owner.clone())
     }
 
     fn failure(error: impl std::fmt::Display) -> KernelBehaviorError {
@@ -3021,8 +3043,9 @@ where
                 // evaluation to cancel, but still share the actor-owned timer
                 // and retirement path.
                 let control = self
-                    .active_workbench_control
-                    .clone()
+                    .active_workbench_execution
+                    .as_ref()
+                    .and_then(|execution| execution.control.clone())
                     .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
                 let timer = tokio::time::sleep(duration);
@@ -3696,15 +3719,28 @@ where
                             .transpose()
                             .map(|layer| layer.unwrap_or_default())
                     };
-                    let before =
-                        freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                    // Workbench admission already froze the revision paths.
+                    // The run source owner retains immutable revisions for the
+                    // run; a later reload cannot change this capture's source.
+                    let admitted_source = self
+                        .active_workbench_execution
+                        .as_ref()
+                        .map(|execution| execution.admitted_source.clone());
+                    let before = admitted_source.clone().map_or_else(
+                        || freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed),
+                        Ok,
+                    )?;
                     let scope = self
                         .environment
                         .runner
                         .capture_context_scope(context.clone())
                         .await
                         .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
-                    let after = freeze_source();
+                    let after = if admitted_source.is_some() {
+                        Ok(before.clone())
+                    } else {
+                        freeze_source()
+                    };
                     if !matches!(after, Ok(ref layer) if layer.identities == before.identities) {
                         self.environment
                             .runner
@@ -3726,10 +3762,31 @@ where
                     ))
                 }
                 .await;
-                self.environment
+                let token = result.as_ref().ok().cloned();
+                let resumed = self
+                    .environment
                     .runner
                     .resume_value(context.clone(), continuation, result)
-                    .await
+                    .await;
+                if let Some(token) = token {
+                    let delivered = checkpoint_capture_delivered(&resumed);
+                    let retired = self
+                        .environment
+                        .fork_groups
+                        .settle_checkpoint(&token, context.placement.session, delivered)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "checkpoint settlement failed: {error:?}"
+                            ))
+                        })?;
+                    if let Some(scope) = retired {
+                        self.environment
+                            .runner
+                            .retire_fork_scopes(context.clone(), vec![scope])
+                            .await?;
+                    }
+                }
+                resumed
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint {
                 continuation,
@@ -4293,7 +4350,7 @@ where
                     reservation.target,
                     reservation.label,
                     reservation.notify_owner,
-                    self.active_reservation_owner.clone(),
+                    self.active_reservation_owner(),
                 );
                 self.environment
                     .runner
@@ -8293,6 +8350,19 @@ where
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
             let checkpoint_boundary = request.fork_boundary().cloned();
+            let admitted_source = installed_tools
+                .as_ref()
+                .map_or_else(
+                    || self.freeze_installed_source(context.actor),
+                    |lease| Ok(lease.source().clone()),
+                )
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: format!("cannot admit exact source layer: {error}"),
+                })?;
+            if !current_builtin {
+                context = context.with_issued_source(&admitted_source);
+            }
             if let Some(execution) = &execution {
                 // Persist the fence in the forest-retained journal before effects
                 // can run; actor termination cannot turn uncertainty into replay.
@@ -8300,14 +8370,19 @@ where
                     .lock()
                     .begin(execution, request.clone(), invocation);
             }
-            self.active_workbench_control = control.clone();
-            let reservation_owner =
-                RequestReservationOwner::Workbench(execution.clone().unwrap_or_else(|| {
-                    WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
-                }));
-            let previous_reservation_owner = self
-                .active_reservation_owner
-                .replace(reservation_owner.clone());
+            let local_execution_id = execution.clone().unwrap_or_else(|| {
+                WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
+            });
+            let reservation_owner = RequestReservationOwner::Workbench(local_execution_id.clone());
+            let previous_workbench =
+                self.active_workbench_execution
+                    .replace(ActiveWorkbenchExecution {
+                        id: local_execution_id,
+                        context: context.clone(),
+                        control: control.clone(),
+                        installed_tools,
+                        admitted_source,
+                    });
             self.fork_publication = ForkPublication::Workbench(request.fork_boundary().cloned());
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
@@ -8324,10 +8399,16 @@ where
                 call_actor as u64,
                 call_incarnation as u64,
             );
+            let admitted = self
+                .active_workbench_execution
+                .as_ref()
+                .expect("workbench admission retained its execution");
+            let admitted_context = admitted.context.clone();
+            let admitted_tools = admitted.installed_tools.clone();
             let result = call_scope
-                .run(self.execute_workbench(kernel, &context, request, installed_tools))
+                .run(self.execute_workbench(kernel, &admitted_context, request, admitted_tools))
                 .await;
-            self.active_reservation_owner = previous_reservation_owner;
+            self.active_workbench_execution = previous_workbench;
             let call_outcome = match &result {
                 Ok(
                     KernelStep::Continue(response)
@@ -8340,7 +8421,6 @@ where
             };
             call_scope.finish(&call_outcome);
             self.fork_publication = ForkPublication::Resident;
-            self.active_workbench_control = None;
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation
@@ -8516,7 +8596,7 @@ where
             self.active_route = Some((watch, Vec::new()));
             let reservation_owner = RequestReservationOwner::Route(watch);
             let previous_reservation_owner = self
-                .active_reservation_owner
+                .active_route_reservation_owner
                 .replace(reservation_owner.clone());
             // This internal completion identity gates only selected-context children.
             // It never authorizes or describes a provider-context fork.
@@ -8633,7 +8713,7 @@ where
                     }
                 }
             }
-            self.active_reservation_owner = previous_reservation_owner;
+            self.active_route_reservation_owner = previous_reservation_owner;
             let (_, notifications) = self
                 .environment
                 .requests
@@ -10091,10 +10171,22 @@ pub(crate) async fn publish_request_notifications(
 #[cfg(test)]
 mod tests {
     use super::{
-        disposition_for_non_command_failure, failed_checkpoint_cleanup_response, lookup_response,
-        settlement_refusal, workbench_failure_after_operations, workbench_response,
-        ChildExitObservations,
+        checkpoint_capture_delivered, disposition_for_non_command_failure,
+        failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
+        workbench_failure_after_operations, workbench_response, ChildExitObservations,
     };
+
+    #[test]
+    fn checkpoint_answer_remains_delivered_when_resumed_computation_fails() {
+        let after_delivery: Result<(), crate::ResidentActorWorkbenchError> = Err(
+            crate::ResidentActorWorkbenchError::Delivered(ResidentError::ForeignCustody),
+        );
+        let before_delivery: Result<(), crate::ResidentActorWorkbenchError> = Err(
+            crate::ResidentActorWorkbenchError::Resident(ResidentError::ForeignCustody),
+        );
+        assert!(checkpoint_capture_delivered(&after_delivery));
+        assert!(!checkpoint_capture_delivered(&before_delivery));
+    }
     use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{

@@ -576,6 +576,42 @@ impl ForkGroupRegistry {
         retired
     }
 
+    /// Settle the one checkpoint whose token was delivered at an effect
+    /// boundary. A later failure of the enclosing workbench only fails tokens
+    /// still Pending; it cannot revoke this independently completed capture.
+    pub fn settle_checkpoint(
+        &self,
+        token: &str,
+        session: SessionId,
+        delivered: bool,
+    ) -> Result<Option<ScopeId>, CheckpointRefusal> {
+        let state = self.state.lock();
+        let lease = state
+            .checkpoints
+            .get(token)
+            .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
+        if lease.session != session {
+            return Err(CheckpointRefusal::WrongSession);
+        }
+        let phase = *lease.phase.borrow();
+        match phase {
+            CheckpointPhase::Pending => {
+                lease.phase.send_replace(if delivered {
+                    CheckpointPhase::Published
+                } else {
+                    CheckpointPhase::Failed
+                });
+                Ok((!delivered).then_some(lease.scope))
+            }
+            CheckpointPhase::Published if delivered => Ok(None),
+            CheckpointPhase::Failed if !delivered => Ok(None),
+            CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => {
+                Err(CheckpointRefusal::ReleasedCheckpoint)
+            }
+            _ => Err(CheckpointRefusal::CaptureFailed),
+        }
+    }
+
     pub fn fail_issuer_checkpoints(&self, issuer: ActorRef) {
         let state = self.state.lock();
         for lease in state.checkpoints.values() {
@@ -1533,6 +1569,52 @@ mod tests {
             restarted.checkpoint(&token, SessionId(7)),
             Err(CheckpointRefusal::ProcessRestartUnsupported)
         ));
+    }
+
+    #[tokio::test]
+    async fn delivered_checkpoint_survives_later_failure_of_its_workbench_boundary() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "call".into(),
+        };
+        let capture = |name: &str, scope: ScopeId| {
+            groups.capture_checkpoint(
+                name.into(),
+                issuer,
+                crate::EffectiveRole::root(),
+                None,
+                None,
+                crate::CheckpointSourceLayer::default(),
+                SessionId(7),
+                scope,
+                boundary.clone(),
+            )
+        };
+        let delivered = capture("completed item", ScopeId(3));
+        let incomplete = capture("failed item", ScopeId(4));
+        let lease = groups.checkpoint(&delivered, SessionId(7)).unwrap();
+        assert_eq!(
+            groups.settle_checkpoint(&delivered, SessionId(7), true),
+            Ok(None)
+        );
+        lease.wait_published().await.unwrap();
+        assert_eq!(
+            groups.settle_checkpoints(issuer, &boundary, false),
+            vec![(SessionId(7), ScopeId(4))]
+        );
+        assert!(groups.checkpoint(&delivered, SessionId(7)).is_ok());
+        assert!(groups.retains_session(SessionId(7)));
+        assert_eq!(
+            groups.checkpoint(&incomplete, SessionId(7)).err(),
+            Some(CheckpointRefusal::CaptureFailed)
+        );
+        assert_eq!(
+            groups.release_checkpoint(&delivered, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        assert!(!groups.retains_session(SessionId(7)));
     }
 
     #[tokio::test]
