@@ -8208,15 +8208,9 @@ where
                                 WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
                             }.into(),
                         });
-                        if let Some(control) = &control {
-                            control.settle(result.clone());
-                        }
                         return result.map(KernelStep::Continue);
                     }
                     Ok(Some(reply)) => {
-                        if let Some(control) = &control {
-                            control.settle(reply.clone());
-                        }
                         return reply.map(KernelStep::Continue);
                     }
                     Ok(None) => {}
@@ -8384,19 +8378,6 @@ where
                     cancellation,
                     invocation,
                 );
-            }
-            let terminal_reply = match &result {
-                Ok(
-                    KernelStep::Continue(response)
-                    | KernelStep::ContinueLater(response)
-                    | KernelStep::Stop {
-                        output: response, ..
-                    },
-                ) => Ok(response.clone()),
-                Err(error) => Err(error.clone()),
-            };
-            if let Some(control) = control {
-                control.settle(terminal_reply);
             }
             result
         })

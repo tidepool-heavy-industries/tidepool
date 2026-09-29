@@ -167,9 +167,18 @@ impl WorkbenchExecutionControl {
             .ok();
     }
 
+    /// The actor publishes the first terminal reply; transport failure may
+    /// fill the slot only when no actor-owned reply arrived.
     pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
-        self.settlement.send_replace(Some(reply));
-        self.changed.notify_waiters();
+        if self.settlement.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(reply);
+            true
+        }) {
+            self.changed.notify_waiters();
+        }
     }
 
     pub(crate) fn request_cancellation(&self) -> bool {
@@ -220,7 +229,7 @@ impl WorkbenchExecutionControl {
         }
     }
 
-    fn terminal_reply(&self) -> Option<crate::KernelWorkbenchReply> {
+    pub(crate) fn terminal_reply(&self) -> Option<crate::KernelWorkbenchReply> {
         self.settlement.borrow().clone()
     }
 
@@ -403,6 +412,37 @@ pub trait ResidentToolEndpoint: Send + Sync {
 /// dispatching to, if any, alongside the control handle used to steer it.
 type ActiveWorkbenchSlot =
     Arc<parking_lot::Mutex<Option<(WorkbenchExecutionId, Arc<WorkbenchExecutionControl>)>>>;
+
+struct ActiveWorkbenchPublication {
+    slot: ActiveWorkbenchSlot,
+    control: Arc<WorkbenchExecutionControl>,
+}
+
+impl ActiveWorkbenchPublication {
+    fn publish(
+        slot: &ActiveWorkbenchSlot,
+        execution: WorkbenchExecutionId,
+        control: &Arc<WorkbenchExecutionControl>,
+    ) -> Self {
+        *slot.lock() = Some((execution, Arc::clone(control)));
+        Self {
+            slot: Arc::clone(slot),
+            control: Arc::clone(control),
+        }
+    }
+}
+
+impl Drop for ActiveWorkbenchPublication {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|(_, control)| Arc::ptr_eq(control, &self.control))
+        {
+            *slot = None;
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ResidentToolClient {
@@ -667,7 +707,8 @@ impl ResidentToolClient {
                 "workbench cell dispatched to its actor"
             );
         }
-        *self.active_workbench.lock() = Some((execution, Arc::clone(&control)));
+        let _active =
+            ActiveWorkbenchPublication::publish(&self.active_workbench, execution, &control);
         self.dispatch_registered_workbench(request, control).await
     }
 
@@ -689,16 +730,20 @@ impl ResidentToolClient {
         {
             let error = crate::KernelInvocationFailure::ActorExited(self.actor.identity());
             control.settle(Err(error.clone()));
-            self.active_workbench.lock().take();
             return Err(ResidentToolError::Invocation(error));
         }
-        let reply = receive.await.map_err(|_| {
-            ResidentToolError::Unavailable(
-                "the actor stopped before settling the workbench invocation".into(),
-            )
-        })?;
-        control.settle(reply.clone());
-        self.active_workbench.lock().take();
+        let reply = match receive.await {
+            Ok(reply) => reply,
+            Err(_) => {
+                control.mark_unconfirmed();
+                control.settle(Err(crate::KernelInvocationFailure::ActorExited(
+                    self.actor.identity(),
+                )));
+                return Err(ResidentToolError::Unavailable(
+                    "the actor stopped before settling the workbench invocation".into(),
+                ));
+            }
+        };
         let response = reply.map_err(ResidentToolError::Invocation)?;
         serde_json::to_value(response).map_err(ResidentToolError::Encoding)
     }
@@ -974,17 +1019,30 @@ mod tests {
             !actor.hosted_cell_computing(),
             "a sleeping cell is interruptible"
         );
+        control.settle(terminal_reply());
         reply.send(terminal_reply()).unwrap();
         running.await.unwrap().unwrap();
         assert!(!actor.hosted_cell_computing());
+        assert!(client.active_workbench.lock().is_none());
 
         // An execution whose reply is lost is cleared too.
-        let torn_down = dispatch(client.clone(), invocation);
+        let torn_down = dispatch(client.clone(), invocation.clone());
         let (_control, reply) = received.recv().await.unwrap();
         assert!(actor.hosted_cell_computing());
         drop(reply);
         assert!(torn_down.await.unwrap().is_err());
         assert!(!actor.hosted_cell_computing());
+        assert!(client.active_workbench.lock().is_none());
+
+        // Dropping the caller leaves the actor's accepted work in flight, but
+        // removes this client's transient active-call publication.
+        let abandoned = dispatch(client.clone(), invocation);
+        let (_control, reply) = received.recv().await.unwrap();
+        abandoned.abort();
+        let _ = abandoned.await;
+        assert!(!actor.hosted_cell_computing());
+        assert!(client.active_workbench.lock().is_none());
+        drop(reply);
 
         address.stop(None);
         task.await.unwrap();

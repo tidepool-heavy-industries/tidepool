@@ -820,16 +820,16 @@ impl<B> Drop for LocalActorState<B> {
             return;
         };
         let detail = "actor stopped while its owned workbench task was still running; execution and cleanup are unconfirmed";
-        if let Some(control) = pending.control {
+        if let Some(control) = pending.control.as_ref() {
             control.mark_unconfirmed();
         }
-        pending
-            .reply
-            .send(Err(KernelInvocationFailure::Failed {
+        settle_pending_workbench(
+            pending,
+            Err(KernelInvocationFailure::Failed {
                 actor: self.context.identity,
                 detail: detail.into(),
-            }))
-            .ok();
+            }),
+        );
         retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
     }
 }
@@ -1361,12 +1361,14 @@ where
             },
             KernelMessage::Tool { invocation, reply } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                        }))
-                        .ok();
+                    let rejection = Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    });
+                    if let Some(control) = control {
+                        control.settle(rejection.clone());
+                    }
+                    reply.send(rejection).ok();
                     return Ok(());
                 }
 
@@ -1643,13 +1645,13 @@ async fn complete_workbench<B: KernelBehavior>(
             Ok(Ok(step)) => {
                 state.behavior.0 = Some(behavior);
                 settle_step(myself, state, step, |output| {
-                    pending.reply.send(Ok(output)).ok();
+                    settle_pending_workbench(pending, Ok(output));
                 })
                 .await;
             }
             Ok(Err(error)) => {
                 state.behavior.0 = Some(behavior);
-                pending.reply.send(Err(error)).ok();
+                settle_pending_workbench(pending, Err(error));
             }
             Err(_) => {
                 fail_unconfirmed_workbench(
@@ -1719,15 +1721,21 @@ fn fail_unconfirmed_workbench<B: KernelBehavior>(
         actor: state.context.identity,
         detail: detail.clone(),
     };
-    if let Some(control) = pending.control {
+    if let Some(control) = pending.control.as_ref() {
         control.mark_unconfirmed();
-        control.settle(Err(failure.clone()));
     }
-    pending.reply.send(Err(failure)).ok();
+    settle_pending_workbench(pending, Err(failure));
     state.hosted_admission = HostedAdmission::Closing;
     state.mailbox_admission.close();
     retain_unconfirmed_exit(&state.terminal, state.context.identity, &detail);
     myself.stop(Some(detail));
+}
+
+fn settle_pending_workbench<B>(pending: PendingWorkbench<B>, reply: crate::KernelWorkbenchReply) {
+    if let Some(control) = pending.control {
+        control.settle(reply.clone());
+    }
+    pending.reply.send(reply).ok();
 }
 
 fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail: &str) {
@@ -2698,7 +2706,12 @@ mod tests {
             crate::WorkbenchCancellationOutcome::Unconfirmed { execution: actual }
                 if actual == execution
         ));
-        let second = send_workbench(&actor);
+        let rejected_control = crate::WorkbenchExecutionControl::untracked();
+        let second = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()"),
+            Some(Arc::clone(&rejected_control)),
+        );
         actor
             .seal_hosted_work()
             .await
@@ -2709,6 +2722,10 @@ mod tests {
         assert!(matches!(
             second.await.expect("second reply"),
             Err(KernelInvocationFailure::Rejected { .. })
+        ));
+        assert!(matches!(
+            rejected_control.terminal_reply(),
+            Some(Err(KernelInvocationFailure::Rejected { .. }))
         ));
         assert_eq!(
             &*fixture.calls.lock(),
@@ -2747,6 +2764,40 @@ mod tests {
         );
         release.notify_one();
         assert!(second.await.expect("second reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn abandoned_workbench_waiter_still_settles_retained_control() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let receiver = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()"),
+            Some(Arc::clone(&control)),
+        );
+        drop(receiver);
+        let settled = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(reply) = control.terminal_reply() {
+                    break reply;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor settled retained control");
+        assert!(settled.is_ok());
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
@@ -2888,7 +2939,12 @@ mod tests {
         let (actor, task) = spawn_local_actor(None, fixture.behavior)
             .await
             .expect("spawn");
-        let reply = send_workbench(&actor);
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()"),
+            Some(Arc::clone(&control)),
+        );
         entered.notified().await;
         actor.address().stop(None);
         task.await.expect("actor task");
@@ -2900,6 +2956,10 @@ mod tests {
         assert!(matches!(
             reply.await.expect("workbench reply"),
             Err(KernelInvocationFailure::Failed { .. })
+        ));
+        assert!(matches!(
+            control.terminal_reply(),
+            Some(Err(KernelInvocationFailure::Failed { .. }))
         ));
         assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
         release.notify_one();
@@ -2917,6 +2977,10 @@ mod tests {
             &*fixture.calls.lock(),
             &["workbench-start", "workbench-end"]
         );
+        assert!(matches!(
+            control.terminal_reply(),
+            Some(Err(KernelInvocationFailure::Failed { .. }))
+        ));
     }
 
     #[tokio::test]
