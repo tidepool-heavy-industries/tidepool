@@ -1088,6 +1088,44 @@ mod tests {
     }
 
     #[test]
+    fn collection_after_final_program_retirement_keeps_machine_reusable() {
+        let image = static_group();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        machine
+            .install_shared_batch(vec![BatchProgram {
+                image: Arc::clone(&image),
+                imports: vec![],
+            }])
+            .unwrap();
+        assert_eq!(
+            machine
+                .collect_major(machine.quiesce().unwrap())
+                .unwrap()
+                .programs
+                .len(),
+            1
+        );
+        assert_eq!(machine.machine.stack_map_link_count(), 0);
+        assert!(machine
+            .collect_major(machine.quiesce().unwrap())
+            .unwrap()
+            .programs
+            .is_empty());
+        assert_eq!(machine.machine.stack_map_link_count(), 0);
+        let second = machine
+            .install_shared_batch(vec![BatchProgram {
+                image,
+                imports: vec![],
+            }])
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(machine.residency().programs, 1);
+    }
+
+    #[test]
     fn batch_installs_independent_mutable_cafs() {
         let image = caf_group();
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {

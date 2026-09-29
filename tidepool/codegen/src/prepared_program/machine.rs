@@ -2973,6 +2973,27 @@ fn collect_on(
     old_space: &OldSpace,
     reserve: usize,
 ) -> Result<(), ExecutionError> {
+    // A machine remains reusable after its final program retires. Host-driven
+    // collection has no generated frames, but the GC frame walker still needs
+    // a registry to prove that fact. Keep one empty registry linked only for
+    // this collection; never leave a pointer to a stack local in the ledger.
+    struct EmptyRegistryScope<'a> {
+        machine: &'a MachineState,
+        linked: bool,
+    }
+    impl Drop for EmptyRegistryScope<'_> {
+        fn drop(&mut self) {
+            if self.linked {
+                self.machine.clear_stack_map_registry();
+            }
+        }
+    }
+    let empty_registry = crate::stack_map::StackMapRegistry::new();
+    let linked = machine.stack_map_chain().is_none();
+    if linked {
+        machine.set_stack_map_registry(&empty_registry);
+    }
+    let _registry_scope = EmptyRegistryScope { machine, linked };
     let _scope = OldSpaceScope::new(machine, old_space)?;
     let raw = unsafe { prepared_gc_trigger(vmctx, reserve) };
     let status = CallStatus::from_raw(i64::from(raw))
